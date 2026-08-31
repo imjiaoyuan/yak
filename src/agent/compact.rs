@@ -1,0 +1,260 @@
+//! Context compaction: estimate tokens (last usage + chars/4 tail), cut at a
+//! turn boundary keeping a recent window, and summarize the dropped prefix
+//! with one tool-free LLM call (the reference's single-strategy approach).
+
+use crate::core::http::Event;
+use crate::providers::Msg;
+use crate::providers::PromptInput;
+
+#[derive(Clone)]
+pub struct CompactConfig {
+    pub context_window: u64,
+    pub reserve_tokens: u64,
+    pub keep_recent_tokens: u64,
+}
+
+impl Default for CompactConfig {
+    fn default() -> CompactConfig {
+        CompactConfig {
+            context_window: 128_000,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+        }
+    }
+}
+
+/// Rough token cost of one message (chars/4 plus a small per-message overhead).
+fn msg_tokens(msg: &Msg) -> u64 {
+    let chars: usize = match msg {
+        Msg::User { text, .. } | Msg::Summary { text } => text.chars().count(),
+        Msg::Assistant { text, tool_calls } => {
+            text.chars().count()
+                + tool_calls
+                    .iter()
+                    .map(|c| c.name.chars().count() + c.arguments.to_string().chars().count() + 32)
+                    .sum::<usize>()
+        }
+        Msg::ToolResult { content, .. } => content.chars().count() + 32,
+    };
+    (chars as u64) / 4 + 16
+}
+
+/// Estimate the context size: the last reported usage covers the first
+/// `covered` messages; everything after is estimated at chars/4.
+pub fn estimate_tokens(history: &[Msg], usage_marker: Option<(usize, (u64, u64))>) -> u64 {
+    match usage_marker {
+        Some((covered, (input, output))) => {
+            let trailing: u64 = history[covered.min(history.len())..]
+                .iter()
+                .map(msg_tokens)
+                .sum();
+            input.saturating_add(output).saturating_add(trailing)
+        }
+        None => history.iter().map(msg_tokens).sum(),
+    }
+}
+
+pub fn should_compact(estimate: u64, cfg: &CompactConfig) -> bool {
+    estimate + cfg.reserve_tokens >= cfg.context_window
+}
+
+/// Find the cut point: the latest turn boundary whose kept tail still holds
+/// at least `keep_recent_tokens` (the minimal cut preserving the window).
+/// Boundaries are User, Summary and Assistant messages — an assistant stays
+/// glued to the tool results that follow it, and a cut never lands ON a
+/// ToolResult (that would orphan it from its assistant). Returns None when
+/// nothing can be dropped.
+pub fn find_cut(history: &[Msg], keep_recent: u64) -> Option<usize> {
+    let n = history.len();
+    let mut suffix = vec![0u64; n + 1];
+    for i in (0..n).rev() {
+        suffix[i] = suffix[i + 1] + msg_tokens(&history[i]);
+    }
+    for i in (0..n).rev() {
+        let boundary = matches!(
+            history[i],
+            Msg::User { .. } | Msg::Summary { .. } | Msg::Assistant { .. }
+        );
+        if boundary && suffix[i] >= keep_recent && i > 0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+const SUMMARIZER_SYSTEM: &str = "You compress coding-agent conversations into a dense summary. \
+                                 Keep every fact needed to continue the work. Do not add commentary.";
+
+const TEMPLATE: &str = "Summarize this conversation for continuation. Use exactly these sections:\n\
+                        ## Goal\n## Constraints\n## Progress\n## Key Decisions\n## Next Steps\n\
+                        ## Critical Context\n\nThen append:\n<read-files>\n<modified-files>\n\
+                        listing the file paths that were read and modified.";
+
+/// Serialize a message prefix for the summarizer, truncating each entry.
+fn serialize_prefix(prefix: &[Msg]) -> String {
+    let mut out = String::new();
+    for msg in prefix {
+        let entry = match msg {
+            Msg::User { text, .. } => format!("user: {text}"),
+            Msg::Summary { text } => format!("prior summary: {text}"),
+            Msg::Assistant { text, tool_calls } => {
+                let calls: Vec<String> = tool_calls
+                    .iter()
+                    .map(|c| format!("{}({})", c.name, c.arguments))
+                    .collect();
+                let mut s = format!("assistant: {text}");
+                if !calls.is_empty() {
+                    s.push_str(&format!("\n  tool calls: {}", calls.join("; ")));
+                }
+                s
+            }
+            Msg::ToolResult {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                let flag = if *is_error { " (error)" } else { "" };
+                format!("tool result {name}{flag}: {content}")
+            }
+        };
+        let mut line = entry;
+        if line.len() > 2000 {
+            line.truncate(crate::core::text::floor_boundary(&line, 2000));
+            line.push('…');
+        }
+        out.push_str(&line);
+        out.push_str("\n\n");
+    }
+    out
+}
+
+/// Run the summarization call: streaming, no tools.
+pub fn summarize(
+    model: &crate::providers::ResolvedModel,
+    prefix: &[Msg],
+) -> Result<String, String> {
+    let prompt = format!(
+        "{TEMPLATE}\n\n<conversation>\n{}</conversation>",
+        serialize_prefix(prefix)
+    );
+    let input = PromptInput {
+        system: Some(SUMMARIZER_SYSTEM),
+        history: &[],
+        prompt: &prompt,
+        attachments: &[],
+        tools: &[],
+        reasoning: None,
+    };
+    let mut text = String::new();
+    model.stream(&input, true, &mut |event| {
+        if let Event::Delta(t) = event {
+            text.push_str(&t);
+        }
+    })?;
+    Ok(text.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn user(s: &str) -> Msg {
+        Msg::user(s)
+    }
+
+    #[test]
+    fn cut_lands_on_a_boundary_never_a_tool_result() {
+        let call = |id: &str| super::super::ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+        };
+        // a single-task history: [user, asst+call, result, user, asst]
+        let history = vec![
+            user(&"x".repeat(400)),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![call("1")],
+            },
+            Msg::tool_result("1", "bash", "a\nb\nc"),
+            user(&"y".repeat(400)),
+            Msg::assistant("z".repeat(400)),
+        ];
+        let cut = find_cut(&history, 1).unwrap();
+        // minimal cut keeps the tail from the last assistant (index 4)
+        assert_eq!(cut, 4);
+
+        // keep window forces the cut before an assistant whose big result
+        // must travel with it: cutting at the ToolResult is forbidden
+        let history = vec![
+            user(&"x".repeat(400)),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![call("1")],
+            },
+            Msg::tool_result("1", "bash", "r".repeat(4000)),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![call("2")],
+            },
+            Msg::tool_result("2", "bash", "r".repeat(4000)),
+        ];
+        // keep everything from the second assistant onward (~1100 tokens)
+        let cut = find_cut(&history, 1000).unwrap();
+        assert_eq!(cut, 3);
+        assert!(matches!(history[cut], Msg::Assistant { .. }));
+        // its result at index 4 stays in the kept tail
+        assert!(matches!(history[cut + 1], Msg::ToolResult { .. }));
+    }
+
+    #[test]
+    fn cut_returns_none_without_a_droppable_prefix() {
+        // only boundary is index 0 — nothing to cut
+        assert_eq!(find_cut(&[user("hi")], 1), None);
+        // an assistant is a boundary, so cutting to it is valid
+        let history = vec![user("hi"), Msg::assistant("ho")];
+        assert_eq!(find_cut(&history, 1), Some(1));
+    }
+
+    #[test]
+    fn estimate_uses_marker_plus_tail() {
+        let history = vec![user(&"a".repeat(4000)), user(&"b".repeat(400))];
+        // marker covers 1 message with 100+50 tokens
+        let est = estimate_tokens(&history, Some((1, (100, 50))));
+        assert!(est >= 150);
+        let all = estimate_tokens(&history, None);
+        assert!(all > est);
+    }
+
+    #[test]
+    fn threshold_triggers() {
+        let cfg = CompactConfig {
+            context_window: 1000,
+            reserve_tokens: 100,
+            keep_recent_tokens: 1,
+        };
+        assert!(!should_compact(500, &cfg));
+        assert!(should_compact(901, &cfg));
+        assert!(should_compact(10_000, &cfg));
+    }
+
+    #[test]
+    fn serialization_truncates_and_marks_errors() {
+        let prefix = vec![
+            user("hello"),
+            Msg::ToolResult {
+                call_id: "9".into(),
+                name: "bash".into(),
+                content: "e".repeat(3000),
+                is_error: true,
+            },
+        ];
+        let s = serialize_prefix(&prefix);
+        assert!(s.contains("user: hello"));
+        assert!(s.contains("tool result bash (error):"));
+        assert!(s.contains('…'));
+        assert!(s.len() < 6000);
+    }
+}

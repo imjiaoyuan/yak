@@ -1,0 +1,246 @@
+//! The built-in provider catalog, mirroring the reference's provider registry: one row
+//! per known API-key provider with its canonical id, endpoint and env var.
+//! `llm models add` builds its wizard from it. OAuth-only and
+//! cloud-signature (Bedrock, Vertex) endpoints are not
+//! catalogued.
+
+/// One catalogued provider.
+pub struct Entry {
+    pub id: &'static str,
+    /// our adapter kind: openai-compat | anthropic | image | tts
+    pub kind: &'static str,
+    pub base_url: &'static str,
+    /// the env var the ecosystem shares for the API key
+    pub env: &'static str,
+}
+
+const fn e(
+    id: &'static str,
+    kind: &'static str,
+    base_url: &'static str,
+    env: &'static str,
+) -> Entry {
+    Entry {
+        id,
+        kind,
+        base_url,
+        env,
+    }
+}
+
+pub const ALL: &[Entry] = &[
+    // anthropic-protocol vendors
+    e(
+        "anthropic",
+        "anthropic",
+        "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY",
+    ),
+    e(
+        "ant-ling",
+        "anthropic",
+        "https://api.ant-ling.com/v1",
+        "ANT_LING_API_KEY",
+    ),
+    e(
+        "minimax",
+        "anthropic",
+        "https://api.minimax.io/anthropic",
+        "MINIMAX_API_KEY",
+    ),
+    e(
+        "minimax-cn",
+        "anthropic",
+        "https://api.minimaxi.com/anthropic",
+        "MINIMAX_CN_API_KEY",
+    ),
+    // openai-protocol vendors
+    e(
+        "openai",
+        "openai-compat",
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+    ),
+    // the media halves of the same endpoint: image generation and TTS ride
+    // --out instead of the chat stream, so they are their own kinds
+    e(
+        "openai-image",
+        "image",
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+    ),
+    e(
+        "openai-tts",
+        "tts",
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+    ),
+    e(
+        "deepseek",
+        "openai-compat",
+        "https://api.deepseek.com",
+        "DEEPSEEK_API_KEY",
+    ),
+    // google's native api is generative-ai; we speak its openai bridge
+    e(
+        "google",
+        "openai-compat",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+    ),
+    e(
+        "groq",
+        "openai-compat",
+        "https://api.groq.com/openai/v1",
+        "GROQ_API_KEY",
+    ),
+    e(
+        "mistral",
+        "openai-compat",
+        "https://api.mistral.ai",
+        "MISTRAL_API_KEY",
+    ),
+    e(
+        "cerebras",
+        "openai-compat",
+        "https://api.cerebras.ai/v1",
+        "CEREBRAS_API_KEY",
+    ),
+    e(
+        "nvidia",
+        "openai-compat",
+        "https://integrate.api.nvidia.com/v1",
+        "NVIDIA_API_KEY",
+    ),
+    e(
+        "huggingface",
+        "openai-compat",
+        "https://router.huggingface.co/v1",
+        "HF_TOKEN",
+    ),
+    e(
+        "together",
+        "openai-compat",
+        "https://api.together.ai/v1",
+        "TOGETHER_API_KEY",
+    ),
+    e(
+        "baseten",
+        "openai-compat",
+        "https://inference.baseten.co/v1",
+        "BASETEN_API_KEY",
+    ),
+    e(
+        "fireworks",
+        "openai-compat",
+        "https://api.fireworks.ai/inference",
+        "FIREWORKS_API_KEY",
+    ),
+    e("xai", "openai-compat", "https://api.x.ai/v1", "XAI_API_KEY"),
+    e(
+        "openrouter",
+        "openai-compat",
+        "https://openrouter.ai/api/v1",
+        "OPENROUTER_API_KEY",
+    ),
+    e(
+        "moonshotai",
+        "openai-compat",
+        "https://api.moonshot.ai/v1",
+        "MOONSHOT_API_KEY",
+    ),
+    e(
+        "moonshotai-cn",
+        "openai-compat",
+        "https://api.moonshot.cn/v1",
+        "MOONSHOT_API_KEY",
+    ),
+    e(
+        "kimi-coding",
+        "openai-compat",
+        "https://api.kimi.com/coding",
+        "KIMI_API_KEY",
+    ),
+    e(
+        "zai",
+        "openai-compat",
+        "https://api.z.ai/aterminal coding/paas/v4",
+        "ZAI_API_KEY",
+    ),
+    e(
+        "zai-coding-cn",
+        "openai-compat",
+        "https://open.bigmodel.cn/aterminal coding/paas/v4",
+        "ZAI_CODING_CN_API_KEY",
+    ),
+    e(
+        "qwen-token-plan",
+        "openai-compat",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "QWEN_TOKEN_PLAN_API_KEY",
+    ),
+    e(
+        "qwen-token-plan-individual",
+        "openai-compat",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "QWEN_TOKEN_PLAN_API_KEY",
+    ),
+    e(
+        "qwen-token-plan-cn",
+        "openai-compat",
+        "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "QWEN_TOKEN_PLAN_CN_API_KEY",
+    ),
+    e(
+        "xiaomi",
+        "openai-compat",
+        "https://api.xiaomimimo.com/v1",
+        "XIAOMI_API_KEY",
+    ),
+    e(
+        "xiaomi-token-plan-cn",
+        "openai-compat",
+        "https://token-plan-cn.xiaomimimo.com/v1",
+        "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+    ),
+    e(
+        "xiaomi-token-plan-ams",
+        "openai-compat",
+        "https://token-plan-ams.xiaomimimo.com/v1",
+        "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+    ),
+    e(
+        "xiaomi-token-plan-sgp",
+        "openai-compat",
+        "https://token-plan-sgp.xiaomimimo.com/v1",
+        "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+    ),
+    e(
+        "vercel-ai-gateway",
+        "openai-compat",
+        "https://ai-gateway.vercel.sh",
+        "AI_GATEWAY_API_KEY",
+    ),
+    // kept additions beyond the shared registry
+    e(
+        "siliconflow",
+        "openai-compat",
+        "https://api.siliconflow.cn/v1",
+        "SILICONFLOW_API_KEY",
+    ),
+    e(
+        "zhipu",
+        "openai-compat",
+        "https://open.bigmodel.cn/aa hosted provider/v4",
+        "ZHIPU_API_KEY",
+    ),
+    // local runtimes
+    e("ollama", "openai-compat", "http://localhost:11434/v1", ""),
+    e("lm-studio", "openai-compat", "http://localhost:1234/v1", ""),
+    e("llama.cpp", "openai-compat", "http://localhost:8080/v1", ""),
+    e("vllm", "openai-compat", "http://localhost:8000/v1", ""),
+];
+
+pub fn by_id(id: &str) -> Option<&'static Entry> {
+    ALL.iter().find(|e| e.id == id)
+}

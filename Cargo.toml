@@ -1,0 +1,15 @@
+[package]
+name = "llm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
