@@ -48,12 +48,14 @@ try {
     if ($expected -ne $actual) { Write-Error "checksum mismatch — try again" }
 
     Expand-Archive "$tmp\$Archive" -DestinationPath $tmp -Force
-    $NewVer = & "$tmp\llm.exe" --version
+    # `--version` prints `llm, version X.Y.Z`; keep just the version so the
+    # `updating old -> new` line is clean (a no-match returns the raw output).
+    $NewVer = (& "$tmp\llm.exe" --version) -replace '^llm, version (.*)$', '$1'
 
     # update semantics: same version stays put unless LLM_FORCE=1
     if (Test-Path "$InstallDir\llm.exe") {
         $OldVer = $null
-        try { $OldVer = & "$InstallDir\llm.exe" --version } catch {}
+        try { $OldVer = (& "$InstallDir\llm.exe" --version) -replace '^llm, version (.*)$', '$1' } catch {}
         if ($OldVer -and $OldVer -eq $NewVer -and -not $Force) {
             Write-Host "==> already $NewVer at $InstallDir\llm.exe (up to date; LLM_FORCE=1 reinstalls)"
             return
