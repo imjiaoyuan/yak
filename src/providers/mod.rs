@@ -118,6 +118,11 @@ pub fn stream_events(
             stream_error = Some(msg);
             return;
         }
+        // OpenAI-compatible streams end with a literal `data: [DONE]`
+        // sentinel, not JSON — swallow it instead of warning on every turn.
+        if data.trim() == "[DONE]" {
+            return;
+        }
         match serde_json::from_str::<Value>(data) {
             Ok(chunk) => on_value(event_type, &chunk),
             Err(e) => eprintln!(
@@ -221,6 +226,53 @@ impl ResolvedModel {
     /// Model display id: provider/model.
     pub fn qualified_id(&self) -> String {
         format!("{}/{}", self.provider_name, self.model_id)
+    }
+
+    /// Whether this model is likely to accept image input. We have no
+    /// per-model capability registry, so this is a heuristic: broad
+    /// vision-capable families are recognized, unknown models default to
+    /// accepting images, and a short curated text-only list is excluded so
+    /// the provider is not given an image it will reject.
+    pub fn supports_images(&self) -> bool {
+        let id = format!("{} {}", self.provider_name, self.model_id).to_lowercase();
+        const VISION: &[&str] = &[
+            "claude",
+            "gpt-4o",
+            "gpt-5",
+            "gemini",
+            "qwen-vl",
+            "qwen2.5-vl",
+            "qwen3-vl",
+            "glm-4v",
+            "glm-4.5v",
+            "pixtral",
+            "llava",
+            "vision",
+            "vlm",
+            "omni",
+            "minimax",
+            "kimi",
+            "moonshot",
+        ];
+        if VISION.iter().any(|k| id.contains(k)) {
+            return true;
+        }
+        const TEXT_ONLY: &[&str] = &[
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "gpt-3.5",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "lamma-3.1",
+            "llama-3.3",
+            "qwen2.5-",
+            "glm-4.5-",
+            "glm-4.6",
+            "mistral-small",
+            "mistral-medium",
+            "mistral-large",
+        ];
+        !TEXT_ONLY.iter().any(|k| id.contains(k))
     }
 
     /// Stream a prompt, feeding events to `on_event`. Returns when done.

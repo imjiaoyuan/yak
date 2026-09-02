@@ -669,15 +669,20 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
         let _ = out.flush();
         printed + 1
     };
-    let erase = |out: &mut std::io::Stderr, printed: usize| {
-        // back above the menu, clear down, restore the cursor
-        let _ = write!(out, "\x1b[{printed}A\r\x1b[J\x1b[?25h");
+    let erase = |out: &mut std::io::Stderr, printed: usize, restore_cursor: bool| {
+        // back above the menu, clear down; the cursor is only shown again on
+        // exit so it never flickers/jumps between menu redraws
+        let _ = write!(out, "\x1b[{printed}A\r\x1b[J");
+        if restore_cursor {
+            let _ = write!(out, "\x1b[?25h");
+        }
         let _ = out.flush();
     };
 
-    let mut printed = draw(&mut out, &matched, sel, top, "");
-    let _ = write!(out, "\x1b[?25l"); // hide the cursor while the menu is up
+    // hide the cursor for the whole menu, before the first paint
+    let _ = write!(out, "\x1b[?25l");
     let _ = out.flush();
+    let mut printed = draw(&mut out, &matched, sel, top, "");
     loop {
         let b = match term.next_byte() {
             RawByte::Key(b) => b,
@@ -688,7 +693,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 if matched.is_empty() {
                     continue;
                 }
-                erase(&mut out, printed);
+                erase(&mut out, printed, true);
                 if echo {
                     let _ = writeln!(out, "\x1b[2m{title}\x1b[0m {}", items[matched[sel]]);
                 }
@@ -704,7 +709,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 query_bytes.pop();
             }
             0x03 | 0x04 => {
-                erase(&mut out, printed);
+                erase(&mut out, printed, true);
                 return None;
             }
             0x1b => {
@@ -712,7 +717,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                     Some(Esc::Up) => -1i64,
                     Some(Esc::Down) => 1,
                     _ => {
-                        erase(&mut out, printed);
+                        erase(&mut out, printed, true);
                         return None;
                     }
                 };
@@ -727,7 +732,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 } else if sel >= top + visible {
                     top = sel + 1 - visible;
                 }
-                erase(&mut out, printed);
+                erase(&mut out, printed, false);
                 printed = draw(
                     &mut out,
                     &matched,
@@ -745,7 +750,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
         apply_filter(&query, &mut matched);
         sel = sel.min(matched.len().saturating_sub(1));
         top = top.min(sel);
-        erase(&mut out, printed);
+        erase(&mut out, printed, false);
         printed = draw(&mut out, &matched, sel, top, &query);
     }
 }
