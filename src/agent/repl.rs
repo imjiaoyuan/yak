@@ -24,6 +24,7 @@ pub fn repl(
     } else {
         print_banner(&session, &agents);
     }
+    render_history(&session.seed);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
     loop {
@@ -244,7 +245,7 @@ fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> Stri
         "\x1b[2mkeys      enter submit · alt+enter or trailing \\ = newline · tab complete",
     );
     h.push_str("\n           ↑/↓ history · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /help /new /init /mcp /edit /exit · !cmd runs shell");
+    h.push_str("\ncommands   /help /clear /init /mcp /edit /exit · !cmd runs shell");
     // only the switch away from the current mode is worth showing
     let switches: Vec<&str> = [
         ("/ask", approval::Mode::AlwaysAsk),
@@ -294,8 +295,8 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/new", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status", "/mcp",
-    "/edit", "/exit",
+    "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status", "/mcp",
+    "/edit", "/resume", "/fork", "/name", "/undo", "/exit",
 ];
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
@@ -315,13 +316,72 @@ fn print_banner(session: &Session, agents: &[crate::agent::task::AgentDef]) {
     eprint!("\x1b[2m{}\x1b[0m", info_rows(session, agents, " "));
 }
 
-const INIT_TASK: &str = "Inspect this repository: read the key files, directory structure and build \
-                         system, then create or update CLAUDE.md at the repository root. It should \
-                         cover: build/test/run commands, a short architecture overview, and project \
-                         conventions. Keep it concise and factual. Match the repository's own \
-                         documentation conventions (a plain-text repo gets plain text, an existing \
-                         CLAUDE.md keeps its shape and language); write it in the language the \
-                         repository's docs already use.";
+/// Replay the loaded conversation on resume, so the user actually sees what
+/// was there before the prompt (bounded to the most recent stretch).
+fn render_history(seed: &[crate::providers::Msg]) {
+    use crate::providers::Msg;
+    const CAP: usize = 40; // messages shown on resume; older history is noted
+    if seed.is_empty() {
+        return;
+    }
+    let skip = seed.len().saturating_sub(CAP);
+    if skip > 0 {
+        eprintln!("\x1b[2m── {skip} earlier message(s) omitted ──\x1b[0m");
+    }
+    for m in &seed[skip..] {
+        match m {
+            Msg::User { text, .. } => {
+                for line in text.split('\n') {
+                    eprintln!("\x1b[1m>\x1b[0m {line}");
+                }
+            }
+            Msg::Assistant { text, tool_calls } => {
+                if !text.is_empty() {
+                    for line in text.lines() {
+                        eprintln!("  {line}");
+                    }
+                }
+                for c in tool_calls {
+                    eprintln!(
+                        "\x1b[2m  [tool: {}]\x1b[0m {}",
+                        c.name,
+                        crate::core::text::truncate_chars(&c.arguments.to_string(), 80)
+                    );
+                }
+            }
+            Msg::ToolResult {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                let first = content.lines().next().unwrap_or("");
+                let flag = if *is_error { " ✗" } else { "" };
+                eprintln!(
+                    "\x1b[2m  [result{flag} · {name}]\x1b[0m {}",
+                    crate::core::text::truncate_chars(first, 100)
+                );
+            }
+            Msg::Summary { text } => {
+                eprintln!(
+                    "\x1b[2m  <summary>\x1b[0m {}",
+                    crate::core::text::truncate_chars(text, 120)
+                );
+            }
+        }
+    }
+}
+
+const INIT_TASK: &str = "Create or update AGENTS.md at the repository root, quickly — the \
+                         AGENTS.md is this project's agent convention file (write CLAUDE.md only \
+                         if the repo already has one and no AGENTS.md). Do one bounded scan and \
+                         stop — do NOT read source files or work through a checklist. Run at \
+                         most: `ls` the repo root, then read up to three of README* / AGENTS.md / \
+                         CLAUDE.md / Cargo.toml / package.json / pyproject.toml / Makefile / \
+                         go.mod (the ones that exist). Write it in the repository's existing doc \
+                         language and shape. Keep it to a few short sections: build/test/run \
+                         commands, a one-line architecture note, and conventions. Do not try to \
+                         verify every claim; be brief and factual.";
 
 fn completions(buf: &str, skill_names: &[String], mode: approval::Mode) -> Vec<String> {
     if let Some(arg) = buf.strip_prefix("/skill:") {
@@ -368,10 +428,12 @@ fn repl_command(
     };
     match cmd {
         "/help" => {
-            eprintln!("\x1b[2m  /new          fresh session       /skills  list skills");
+            eprintln!("\x1b[2m  /clear        fresh session       /skills  list skills");
             eprintln!("  /skill:name   run one             /memory  global memory");
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
-            eprintln!("  /init         write a CLAUDE.md   /mcp     mcp server status");
+            eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
+            eprintln!("  /resume       reopen a session     /fork   fork this session");
+            eprintln!("  /name         rename this session  /undo   drop the last round");
             eprintln!("  /edit         compose in $EDITOR /exit    quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!("  models live in `llm models` (set agent defaults there)\x1b[0m");
@@ -389,7 +451,7 @@ fn repl_command(
             };
             eprintln!("\x1b[2mapproval → {}{note}\x1b[0m", mode.label());
         }
-        "/new" => {
+        "/clear" => {
             session.seed.clear();
             session.conversation_id = None;
             session.tokens = (0, 0);
@@ -403,6 +465,23 @@ fn repl_command(
                 &settings.disabled_skills,
             );
             print_banner(session, &agents);
+        }
+        "/undo" => {
+            let last_user = session
+                .seed
+                .iter()
+                .rposition(|m| matches!(m, crate::providers::Msg::User { .. }));
+            let Some(idx) = last_user else {
+                eprintln!("\x1b[2mnothing to undo\x1b[0m");
+                return false;
+            };
+            session.seed.truncate(idx);
+            if let (Some(db), Some(cid)) = (&session.db, &session.conversation_id)
+                && let Err(e) = crate::core::logstore::undo_thread(db, cid)
+            {
+                eprintln!("Warning: {e}");
+            }
+            eprintln!("\x1b[2mundo — dropped the last round\x1b[0m");
         }
         "/status" => {
             let used = crate::agent::compact::estimate_tokens(&session.seed, None);

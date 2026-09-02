@@ -258,7 +258,7 @@ fn transcript(history: &[Msg]) -> String {
 
 const EXTRACT_SYSTEM: &str = "You extract durable personal facts from a coding-agent session. \
 Only facts useful in FUTURE sessions on OTHER tasks: user preferences, environment details, \
-long-term decisions. Never project-specific details (those belong in CLAUDE.md). Reply with \
+long-term decisions. Never project-specific details (those belong in the project's AGENTS.md). Reply with \
 ONLY a JSON object: {\"facts\": [{\"text\": \"...\"}]}, an empty list if nothing qualifies.";
 
 const CONSOLIDATE_SYSTEM: &str = "You consolidate a list of memory entries: merge duplicates, \

@@ -32,12 +32,9 @@ pub enum AgentUpdate {
     },
     /// a live output line from the running tool (bash stdout)
     ToolLog(String),
-    /// the model is streaming a tool call's arguments in; rendered as a
-    /// spinner label so a long write/edit shows progress while it arrives
-    ToolReceiving {
-        name: String,
-        bytes: usize,
-    },
+    /// the model is streaming a tool call's arguments in; the spinner shows
+    /// a plain "running" status while it arrives
+    ToolReceiving,
     ToolEnd {
         name: String,
         summary: String,
@@ -192,8 +189,24 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
+        // tell the model how much context remains so it stays concise and does
+        // not sprinkle redundant history into later turns (the reference get_context_remaining)
+        let mut system = opts.system.map(|s| s.to_string());
+        let used = compact::estimate_tokens(&history, None);
+        let window = opts
+            .compact
+            .as_ref()
+            .map(|c| c.context_window)
+            .unwrap_or(128_000);
+        if let Some(s) = &mut system {
+            s.push_str(&format!(
+                "\n\n<context>~{} / ~{} tokens used (~{}%). Be concise; do not re-explain \
+                 what earlier context already covered.</context>",
+                used, window, (used * 100).checked_div(window).unwrap_or(0)
+            ));
+        }
         let input = PromptInput {
-            system: opts.system,
+            system: system.as_deref(),
             history: &history,
             prompt: pending_prompt,
             attachments: pending_attachments,
@@ -223,11 +236,8 @@ pub fn run_agent(
                 acc.push(index, id.as_deref(), name.as_deref(), &fragment);
                 // live size of the argument streaming in: a big write looks
                 // dead otherwise, then dumps its whole diff at once
-                if let Some(name) = acc.name(index) {
-                    on_update(AgentUpdate::ToolReceiving {
-                        name: name.to_string(),
-                        bytes: acc.len(index),
-                    });
+                if acc.name(index).is_some() {
+                    on_update(AgentUpdate::ToolReceiving);
                 }
             }
             crate::core::http::Event::Done { usage: u, stop: s } => {
@@ -292,6 +302,7 @@ pub fn run_agent(
                               Re-issue it with a shorter response."
                         .to_string(),
                     is_error: true,
+                    attachments: Vec::new(),
                 });
             }
             continue;
@@ -307,6 +318,7 @@ pub fn run_agent(
                     name: call.name.clone(),
                     content: "interrupted by user".to_string(),
                     is_error: true,
+                    attachments: Vec::new(),
                 });
                 continue;
             }
@@ -332,6 +344,7 @@ pub fn run_agent(
                 name: call.name.clone(),
                 content: out.content,
                 is_error: out.is_error,
+                attachments: out.attachments,
             });
         }
         if interrupted {
@@ -350,7 +363,9 @@ pub fn run_agent(
 /// Terminal preview of a tool result: the first three non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
 fn summarize(content: &str) -> String {
-    const SHOWN: usize = 3;
+    /// lines shown in the user-facing tool-result preview (matches the reference's
+    /// collapsed default); the model still receives the full output
+    const SHOWN: usize = 10;
     let mut lines: Vec<String> = Vec::new();
     let mut more = 0usize;
     for l in content.lines().filter(|l| !l.trim().is_empty()) {
@@ -470,8 +485,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn summarize_shows_three_lines_plus_count() {
-        assert_eq!(summarize("a\nb\nc\nd\ne\n"), "a\nb\nc … +2 lines");
+    fn summarize_shows_ten_lines_plus_count() {
+        assert_eq!(summarize("a\nb\nc\nd\ne\n"), "a\nb\nc\nd\ne");
+        assert_eq!(
+            summarize("a\n".repeat(12).as_str()),
+            "a\na\na\na\na\na\na\na\na\na … +2 lines"
+        );
         assert_eq!(summarize("only"), "only");
         assert_eq!(summarize(""), "");
         assert_eq!(summarize("\n\n1\n2\n"), "1\n2");
