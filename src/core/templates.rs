@@ -1,6 +1,6 @@
 //! Prompt templates: YAML files under the user dir, original-llm style —
-//! loading, `$var` substitution, application and saving. The `llm templates`
-//! CLI lives in `commands/templates.rs`.
+//! loading, `$var` substitution and application. Internal engine behind
+//! custom commands; there is no `llm templates` CLI.
 
 use std::collections::BTreeMap;
 

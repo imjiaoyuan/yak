@@ -42,12 +42,30 @@ pub enum Event {
         id: Option<String>,
         fragment: String,
     },
-    /// stream finished; carries token usage (input, output) if reported
-    /// and why the model stopped
+    /// stream finished; carries token usage if reported and why the model
+    /// stopped
     Done {
-        usage: Option<(u64, u64)>,
+        usage: Option<Usage>,
         stop: StopReason,
     },
+}
+
+/// Token usage one model round reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    /// input tokens served from the provider's prompt cache, when reported:
+    /// DeepSeek `prompt_cache_hit_tokens`, OpenAI `prompt_tokens_details.
+    /// cached_tokens`, Anthropic `cache_read_input_tokens`
+    pub cached: u64,
+}
+
+impl Usage {
+    /// Cached share of the input in whole percent (0 when unknown).
+    pub fn cache_percent(self) -> u64 {
+        (self.cached * 100).checked_div(self.input).unwrap_or(0)
+    }
 }
 
 /// Why a model response ended. `ToolUse` is the signal an agent loop acts on;

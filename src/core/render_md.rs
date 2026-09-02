@@ -56,149 +56,99 @@ impl MdStream {
     }
 }
 
-/// Live block streaming: the answer sits in a fixed left-margin block and is
-/// hard-wrapped at `wrap` cells so every visual row carries the margin. Words
-/// are buffered until their trailing space/newline so lines never break mid-
-/// word (no `R ust`), and rows are committed as they fill — nothing is erased
-/// or redrawn, so output streams in one direction with no flicker.
+/// Live block streaming: the content area carries a left indent — each of
+/// the model's own lines opens with the margin — and the right edge is left
+/// entirely to the terminal: no width is measured, no break is inserted,
+/// characters flow out verbatim and the terminal's soft-wrap adapts them.
+/// Continuation rows therefore start wherever the terminal puts them
+/// (column 0); the `wrap` machinery below only runs under the test-only
+/// `wrap_at`.
 pub struct BlockStream {
     margin: String,
-    /// left margin width, also used to derive the live hard-wrap width
-    indent: usize,
-    /// hard-wrap width; refreshed from the terminal each push unless `fixed`
+    /// hard-wrap width for the test-only wrapping path; live streams run
+    /// unmeasured (wrap == 0)
     wrap: usize,
-    /// false = re-measure `wrap` from the live terminal width (resize-safe)
-    fixed: bool,
     row_cells: usize,
     at_start: bool,
     emitted: bool,
-    /// the current word, held until its trailing delimiter
-    word: String,
-    /// a space between words, emitted only when the next word fits this row
-    pending_space: bool,
 }
 
 impl BlockStream {
     pub fn indented(spaces: usize) -> BlockStream {
         BlockStream {
             margin: " ".repeat(spaces),
-            indent: spaces,
-            wrap: 20,
-            fixed: false,
+            wrap: 0,
             row_cells: 0,
             at_start: true,
             emitted: false,
-            word: String::new(),
-            pending_space: false,
         }
     }
 
-    /// Hard-wrap at a fixed width (tests only; live streaming uses [`Self::live`]).
+    /// Hard-wrap at a fixed width (tests only; live streams are unmeasured).
     #[cfg(test)]
     pub fn wrap_at(&mut self, width: usize) {
         self.wrap = width;
-        self.fixed = true;
     }
 
-    /// Track the live terminal width instead of freezing it, so a resize
-    /// mid-stream reflows rather than soft-wrapping into the margin.
+    /// Unmeasured streaming: left indent only, the terminal's soft-wrap
+    /// does everything else.
     pub fn live(&mut self) {
-        self.fixed = false;
-        self.refresh_width();
-    }
-
-    fn refresh_width(&mut self) {
-        self.wrap = crate::term::columns().saturating_sub(self.indent).max(20);
+        self.wrap = 0;
     }
 
     pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
-        if !self.fixed {
-            self.refresh_width();
-        }
         for ch in text.chars() {
-            // CJK / fullwidth chars have no space-separated words and can be
-            // broken at any character, so stream them immediately (a Chinese
-            // sentence would otherwise be buffered as one huge "word" and
-            // stall until a space/punctuation). Latin words stay buffered so
-            // they never split mid-word.
-            if char_width(ch) >= 2 {
-                self.flush_word(rendered);
-                self.emit_breakable(ch, char_width(ch), rendered);
-                continue;
-            }
             match ch {
                 '\n' => {
-                    self.pending_space = false; // trailing space at line end dropped
-                    self.flush_word(rendered);
                     rendered.push('\n');
                     self.at_start = true;
                     self.row_cells = 0;
                     self.emitted = true;
                 }
-                ' ' => {
-                    self.flush_word(rendered);
-                    self.pending_space = true;
-                    self.emitted = true;
+                ' ' if self.wrap > 0 => {
+                    // a space only counts while a row is open and it fits in
+                    // it; one that would overflow is consumed by the wrap
+                    if self.at_start {
+                        continue;
+                    }
+                    if self.row_cells + 1 > self.wrap {
+                        rendered.push('\n');
+                        rendered.push_str(&self.margin);
+                        self.row_cells = 0;
+                        self.at_start = true;
+                    } else {
+                        rendered.push(' ');
+                        self.row_cells += 1;
+                        self.emitted = true;
+                    }
                 }
                 _ => {
-                    self.word.push(ch);
+                    let w = char_width(ch);
+                    if w == 0 {
+                        // zero-width (combining marks, ZWJ): attach in place
+                        rendered.push(ch);
+                        continue;
+                    }
+                    if self.wrap > 0 && self.row_cells > 0 && self.row_cells + w > self.wrap {
+                        rendered.push('\n');
+                        rendered.push_str(&self.margin);
+                        self.row_cells = 0;
+                    }
+                    if self.at_start {
+                        rendered.push_str(&self.margin);
+                        self.at_start = false;
+                    }
+                    rendered.push(ch);
+                    self.row_cells += w;
                     self.emitted = true;
                 }
             }
         }
     }
 
-    fn flush_word(&mut self, rendered: &mut String) {
-        if self.word.is_empty() {
-            return;
-        }
-        let word = std::mem::take(&mut self.word);
-        let wc = cell_width(&word);
-        let mut lead = usize::from(self.pending_space);
-        self.pending_space = false;
-        if self.wrap > 0 && self.row_cells > 0 && self.row_cells + lead + wc > self.wrap {
-            rendered.push('\n');
-            rendered.push_str(&self.margin);
-            self.row_cells = 0;
-            lead = 0; // a row break drops the pending space
-        }
-        if self.at_start {
-            rendered.push_str(&self.margin);
-            self.at_start = false;
-        }
-        if lead == 1 {
-            rendered.push(' ');
-            self.row_cells += 1;
-        }
-        rendered.push_str(&word);
-        self.row_cells += wc;
-    }
-
-    /// Emit a breakable (CJK/fullwidth) character: wrap to a fresh row first
-    /// when this one would overflow, since these units may break at any cell.
-    fn emit_breakable(&mut self, ch: char, w: usize, rendered: &mut String) {
-        if self.wrap > 0 && self.row_cells > 0 && self.row_cells + w > self.wrap {
-            rendered.push('\n');
-            rendered.push_str(&self.margin);
-            self.row_cells = 0;
-        }
-        if self.at_start {
-            rendered.push_str(&self.margin);
-            self.at_start = false;
-        }
-        rendered.push(ch);
-        self.row_cells += w;
-        self.emitted = true;
-    }
-
-    /// Idempotent: flush the trailing word and terminate a dangling row so the
-    /// footer / chrome starts on its own line; returns whether a newline was
-    /// added.
+    /// Idempotent: terminate a dangling row so the footer / chrome starts on
+    /// its own line; returns whether a newline was added.
     pub fn finish(&mut self, rendered: &mut String) -> bool {
-        if !self.fixed {
-            self.refresh_width();
-        }
-        self.flush_word(rendered);
         if self.emitted && !self.at_start {
             rendered.push('\n');
             self.at_start = true;
@@ -857,27 +807,61 @@ mod tests {
     }
 
     #[test]
-    fn block_stream_never_splits_words_and_indents_every_row() {
+    fn block_stream_prints_chars_immediately_and_indents_every_row() {
         let mut s = BlockStream::indented(2);
         s.wrap_at(10);
         let mut out = String::new();
-        s.push_delta("The Rust toolkit is awesome", &mut out);
+        s.push_delta("The Rust t", &mut out);
+        // the partial row prints as it arrives, not after a newline
+        assert_eq!(out, "  The Rust t");
+        s.push_delta("oolkit is awesome", &mut out);
         assert!(s.finish(&mut out));
-        // words stay whole (no "Ru st"), every wrapped row has the margin
-        assert_eq!(out, "  The Rust\n  toolkit is\n  awesome\n");
+        // wrap lands mid-word at the cell boundary; every row carries the margin
+        assert_eq!(out, "  The Rust t\n  oolkit is \n  awesome\n");
     }
 
     #[test]
-    fn block_stream_streams_words_as_they_arrive() {
+    fn block_stream_prints_partial_words_without_waiting_for_a_delimiter() {
         let mut s = BlockStream::indented(2);
         s.wrap_at(20);
         let mut out = String::new();
         s.push_delta("one two", &mut out);
-        // words are shown as their trailing space arrives; the final (dangling)
-        // word is held until finish so it never breaks mid-word
-        assert_eq!(out, "  one");
+        // no delimiter ever arrived: everything is already on screen
+        assert_eq!(out, "  one two");
         assert!(s.finish(&mut out));
         assert_eq!(out, "  one two\n");
+    }
+
+    #[test]
+    fn block_stream_settle_then_continue_opens_a_fresh_row() {
+        // the retraction fix: a dangling partial row is terminated (settle)
+        // before a spinner frame can erase it; the stream then continues on
+        // its own row with the margin intact
+        let mut s = BlockStream::indented(2);
+        s.wrap_at(20);
+        let mut out = String::new();
+        s.push_delta("前端只把", &mut out);
+        assert_eq!(out, "  前端只把");
+        assert!(s.finish(&mut out));
+        s.push_delta("app.js 里的", &mut out);
+        assert_eq!(out, "  前端只把\n  app.js 里的");
+        assert!(s.finish(&mut out));
+    }
+
+    #[test]
+    fn live_mode_keeps_margin_on_every_model_line() {
+        // live streams hard-wrap at the measured terminal width; the test
+        // text stays under the 20-cell floor so no wrap can hit regardless
+        // of the environment's terminal, and each of the model's own lines
+        // carries the margin
+        let mut s = BlockStream::indented(2);
+        s.live();
+        let mut out = String::new();
+        s.push_delta("short answer", &mut out);
+        assert_eq!(out, "  short answer");
+        s.push_delta(".\nnext", &mut out);
+        assert_eq!(out, "  short answer.\n  next");
+        assert!(s.finish(&mut out));
     }
 
     #[test]

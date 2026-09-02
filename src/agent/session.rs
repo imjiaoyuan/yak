@@ -43,6 +43,8 @@ pub struct Session {
     pub mcp: std::sync::Arc<crate::agent::mcp::McpRegistry>,
     /// cumulative input/output tokens across the session (for the status line)
     pub tokens: (u64, u64),
+    /// cumulative input tokens served from the provider prompt cache
+    pub tokens_cached: u64,
 }
 
 impl Session {
@@ -106,6 +108,7 @@ impl Session {
         const LOG_HEAD: usize = 5;
         let mut total_in = 0u64;
         let mut total_out = 0u64;
+        let mut total_cached = 0u64;
         let mut on_update = |u: AgentUpdate| {
             match u {
                 AgentUpdate::Delta(text) => {
@@ -237,13 +240,14 @@ impl Session {
                 AgentUpdate::TurnEnd {
                     usage, elapsed_ms, ..
                 } => {
-                    if let Some((i, o)) = usage {
-                        total_in += i;
-                        total_out += o;
+                    if let Some(u) = usage {
+                        total_in += u.input;
+                        total_out += u.output;
+                        total_cached += u.cached;
                     }
                     if json_mode {
                         crate::agent::emit_json(
-                            &serde_json::json!({"type": "turn_end", "usage": usage.map(|(i, o)| serde_json::json!([i, o])), "elapsed_ms": elapsed_ms}),
+                            &serde_json::json!({"type": "turn_end", "usage": usage.map(|u| serde_json::json!([u.input, u.output, u.cached])), "elapsed_ms": elapsed_ms}),
                         );
                     } else {
                         view.borrow_mut().turn_end(usage);
@@ -307,6 +311,7 @@ impl Session {
         crate::core::http::clear_interrupt();
         self.tokens.0 += total_in;
         self.tokens.1 += total_out;
+        self.tokens_cached += total_cached;
         match result {
             Ok(mut outcome) => {
                 // one footer per completed task: totals across rounds and
@@ -402,7 +407,7 @@ impl Session {
                 model: &self.model.qualified_id(),
                 options: &turn_options,
                 schema: None,
-                usage: outcome.usage,
+                usage: outcome.usage.map(|u| (u.input, u.output)),
                 duration_ms: start.elapsed().as_millis() as i64,
             },
         );

@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::{Attachment, Msg, PromptInput, ResolvedModel};
-use crate::core::http::{Event, HttpRequest, StopReason};
+use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 
 /// Push the buffered run of tool results as one user turn (Anthropic groups
 /// consecutive tool_result blocks into a single message).
@@ -183,7 +183,7 @@ fn map_stop(reason: &str) -> StopReason {
 pub(crate) fn feed_event(
     event_type: &str,
     chunk: &Value,
-    usage: &mut Option<(u64, u64)>,
+    usage: &mut Option<Usage>,
     stop: &mut StopReason,
     on_event: &mut dyn FnMut(Event),
 ) {
@@ -225,7 +225,11 @@ pub(crate) fn feed_event(
                     .as_u64()
                     .or(u["completion_tokens"].as_u64()),
             ) {
-                *usage = Some((p, c));
+                *usage = Some(Usage {
+                    input: p,
+                    output: c,
+                    cached: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                });
             }
             if let Some(reason) = chunk["delta"]["stop_reason"].as_str() {
                 *stop = map_stop(reason);
@@ -236,12 +240,18 @@ pub(crate) fn feed_event(
 }
 
 /// Emit events for a complete (non-streaming) response. Returns usage.
-pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<(u64, u64)> {
+pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<Usage> {
     let usage = match (
         value["usage"]["input_tokens"].as_u64(),
         value["usage"]["output_tokens"].as_u64(),
     ) {
-        (Some(p), Some(c)) => Some((p, c)),
+        (Some(p), Some(c)) => Some(Usage {
+            input: p,
+            output: c,
+            cached: value["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        }),
         _ => None,
     };
     for (i, block) in value["content"]
@@ -301,7 +311,7 @@ pub fn run(
     };
 
     if stream {
-        let mut usage: Option<(u64, u64)> = None;
+        let mut usage: Option<Usage> = None;
         let mut stop = StopReason::default();
         super::stream_events(&req, |event_type, chunk| {
             feed_event(event_type, chunk, &mut usage, &mut stop, &mut |e| {
@@ -535,7 +545,14 @@ mod tests {
         );
 
         assert_eq!(stop, StopReason::ToolUse);
-        assert_eq!(usage, Some((7, 8)));
+        assert_eq!(
+            usage,
+            Some(Usage {
+                input: 7,
+                output: 8,
+                cached: 0
+            })
+        );
         let calls = acc.finish();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "toolu_1");
@@ -565,7 +582,14 @@ mod tests {
             Event::Done { stop, .. } => stop_seen = Some(stop),
             _ => {}
         });
-        assert_eq!(usage, Some((1, 2)));
+        assert_eq!(
+            usage,
+            Some(Usage {
+                input: 1,
+                output: 2,
+                cached: 0
+            })
+        );
         assert_eq!(stop_seen, Some(StopReason::ToolUse));
         assert_eq!(acc.finish()[0].arguments, json!({"command": "ls"}));
     }

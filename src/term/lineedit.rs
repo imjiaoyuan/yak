@@ -613,10 +613,10 @@ impl RawTermExt for RawTerm {
     }
 }
 
-/// Interactive menu: ↑/↓ (or j/k) move, enter selects, digits jump, esc/
-/// ctrl-c/q cancel. The list is deleted from the screen once a choice is
-/// made and replaced by a one-line recap. Returns the chosen index, or
-/// None when cancelled.
+/// Interactive menu: ↑/↓ move, enter selects, typing filters (space-
+/// separated terms AND-match), esc/ctrl-c cancels. The list is deleted
+/// from the screen once a choice is made and replaced by a one-line recap.
+/// Returns the chosen index, or None when cancelled.
 /// Upper bound on visible picker rows even on huge terminals.
 const PICK_MAX_ROWS: usize = 12;
 
@@ -863,6 +863,13 @@ impl KeyWatcher {
                             buf.clear();
                         }
                         0x7f | 0x08 => {
+                            // pop one full char (skip UTF-8 continuation
+                            // bytes, like the picker's filter does)
+                            while let Some(&last) = buf.last()
+                                && last & 0xC0 == 0x80
+                            {
+                                buf.pop();
+                            }
                             buf.pop();
                         }
                         c if c >= 0x20 => buf.push(c),

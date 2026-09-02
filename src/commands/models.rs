@@ -539,7 +539,9 @@ fn add(argv: &[String]) -> i32 {
     eprintln!("Fetching models from {} ...", entry.base_url);
     let models = crate::commands::login::try_fetch_models(entry.kind, entry.base_url, &fetch_key);
     if models.is_empty() {
-        eprintln!("could not fetch models — provider saved without models (llm scan refreshes)");
+        eprintln!(
+            "could not fetch models — provider saved without models (re-run `llm models add` to retry)"
+        );
     }
     let mut cfg = config::load();
     if cfg.providers.contains_key(&name) {
@@ -683,7 +685,9 @@ fn list(argv: &[String]) -> i32 {
                     .all(|q| provider.to_lowercase().contains(&q.to_lowercase())))
                 && std::io::stdout().is_terminal()
             {
-                println!("\x1b[90m{provider}/ · no models listed · `llm scan` refreshes\x1b[0m");
+                println!(
+                    "\x1b[90m{provider}/ · no models listed · `llm models add` fetches them\x1b[0m"
+                );
             }
             continue;
         }

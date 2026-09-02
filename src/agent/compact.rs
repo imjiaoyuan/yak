@@ -2,7 +2,7 @@
 //! turn boundary keeping a recent window, and summarize the dropped prefix
 //! with one tool-free LLM call (the reference's single-strategy approach).
 
-use crate::core::http::Event;
+use crate::core::http::{Event, Usage};
 use crate::providers::Msg;
 use crate::providers::PromptInput;
 
@@ -59,14 +59,14 @@ fn msg_tokens(msg: &Msg) -> u64 {
 
 /// Estimate the context size: the last reported usage covers the first
 /// `covered` messages; everything after is estimated at chars/4.
-pub fn estimate_tokens(history: &[Msg], usage_marker: Option<(usize, (u64, u64))>) -> u64 {
+pub fn estimate_tokens(history: &[Msg], usage_marker: Option<(usize, Usage)>) -> u64 {
     match usage_marker {
-        Some((covered, (input, output))) => {
+        Some((covered, u)) => {
             let trailing: u64 = history[covered.min(history.len())..]
                 .iter()
                 .map(msg_tokens)
                 .sum();
-            input.saturating_add(output).saturating_add(trailing)
+            u.input.saturating_add(u.output).saturating_add(trailing)
         }
         None => history.iter().map(msg_tokens).sum(),
     }
@@ -251,7 +251,17 @@ mod tests {
     fn estimate_uses_marker_plus_tail() {
         let history = vec![user(&"a".repeat(4000)), user(&"b".repeat(400))];
         // marker covers 1 message with 100+50 tokens
-        let est = estimate_tokens(&history, Some((1, (100, 50))));
+        let est = estimate_tokens(
+            &history,
+            Some((
+                1,
+                Usage {
+                    input: 100,
+                    output: 50,
+                    cached: 0,
+                },
+            )),
+        );
         assert!(est >= 150);
         let all = estimate_tokens(&history, None);
         assert!(all > est);

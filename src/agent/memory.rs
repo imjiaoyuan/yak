@@ -26,8 +26,8 @@ pub fn section() -> Option<String> {
     section_at(&memory_path())
 }
 
-/// Append the global memory section to a chat system prompt; used both at
-/// startup and on `/new`, so every fresh conversation sees the same memory.
+/// Append the global memory section to a chat system prompt; used at
+/// startup, so every conversation sees the same memory.
 pub fn inject_system(system: Option<String>) -> Option<String> {
     inject_section(system, section())
 }

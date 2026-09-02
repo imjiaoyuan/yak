@@ -581,7 +581,7 @@ fn log_turn(
                 o
             },
             schema,
-            usage: renderer.usage,
+            usage: renderer.usage.map(|u| (u.input, u.output)),
             duration_ms: start.elapsed().as_millis() as i64,
         },
     );

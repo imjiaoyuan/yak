@@ -8,7 +8,6 @@ pub fn floor_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-/// Smallest byte index >= `idx` that is a char boundary.
 /// [A-Za-z0-9_-]{1,max}: the name class shared by the plugin surfaces
 /// (script tools, commands-dir lookups); callers layer their extra rules.
 pub fn valid_plugin_name(name: &str, max: usize) -> bool {

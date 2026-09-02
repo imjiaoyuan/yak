@@ -15,7 +15,7 @@ pub mod system_prompt;
 pub mod task;
 pub mod tools;
 
-use crate::core::http::StopReason;
+use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};
 
 /// Progress events surfaced by the loop; `llm agent` renders these as text
@@ -41,7 +41,7 @@ pub enum AgentUpdate {
         is_error: bool,
     },
     TurnEnd {
-        usage: Option<(u64, u64)>,
+        usage: Option<Usage>,
         elapsed_ms: u128,
     },
     /// history prefix was replaced by a compaction summary
@@ -88,7 +88,7 @@ pub struct AgentOutcome {
     pub history: Vec<Msg>,
     /// final assistant text ("" if the run ended mid-tools)
     pub final_text: String,
-    pub usage: Option<(u64, u64)>,
+    pub usage: Option<Usage>,
     /// the user interrupted the run (ctrl-c); partial history is kept
     pub interrupted: bool,
 }
@@ -189,26 +189,12 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
-        // tell the model how much context remains so it stays concise and does
-        // not sprinkle redundant history into later turns (the reference get_context_remaining)
-        let mut system = opts.system.map(|s| s.to_string());
-        let used = compact::estimate_tokens(&history, None);
-        let window = opts
-            .compact
-            .as_ref()
-            .map(|c| c.context_window)
-            .unwrap_or(128_000);
-        if let Some(s) = &mut system {
-            s.push_str(&format!(
-                "\n\n<context>~{} / ~{} tokens used (~{}%). Be concise; do not re-explain \
-                 what earlier context already covered.</context>",
-                used,
-                window,
-                (used * 100).checked_div(window).unwrap_or(0)
-            ));
-        }
+        // the system prompt stays byte-identical every round: it is the head
+        // of the request, and providers cache by input prefix (DeepSeek
+        // context caching, Anthropic prompt caching), so any per-turn suffix
+        // here re-bills the whole history at cache-miss price
         let input = PromptInput {
-            system: system.as_deref(),
+            system: opts.system,
             history: &history,
             prompt: pending_prompt,
             attachments: pending_attachments,

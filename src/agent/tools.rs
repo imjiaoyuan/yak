@@ -12,7 +12,9 @@ pub(crate) const MAX_LINES: usize = 2000;
 pub(crate) const MAX_BYTES: usize = 50 * 1024;
 pub(crate) const GREP_LINE_LIMIT: usize = 500;
 /// The read tool serves one window at a time; bash/grep keep MAX_LINES.
-pub(crate) const READ_MAX_LINES: usize = 500;
+/// the reference's value: 2000 lines under the same 50KB cap — one call covers a whole
+/// typical source file, so the model spends fewer round trips paging.
+pub(crate) const READ_MAX_LINES: usize = 2000;
 /// Files larger than this are skipped by grep (reading them whole would
 /// spike memory; the model can target them with bash instead).
 const GREP_MAX_FILE: u64 = 32 * 1024 * 1024;
@@ -273,7 +275,9 @@ impl Tool for ReadTool {
         }
         let byte_cut = kept < numbered.len();
         let last = w.start + kept - 1;
-        if !w.eof {
+        if !w.eof || byte_cut {
+            // one note for both stop reasons: lines remain unseen either way,
+            // and the model needs the resume offset in both
             out.push_str(&format!(
                 "\n[Showing lines {}-{} of {}. Use offset={} to continue.]\n",
                 w.start,
@@ -281,8 +285,6 @@ impl Tool for ReadTool {
                 w.total.describe(),
                 last + 1
             ));
-        } else if byte_cut {
-            out.push_str("\n[output truncated]\n");
         }
         let name = path
             .file_name()
@@ -324,11 +326,7 @@ impl Tool for WriteTool {
     }
     fn preview(&self, args: &Value) -> String {
         let bytes = args["content"].as_str().map(|c| c.len()).unwrap_or(0);
-        format!(
-            "write {} ({} bytes)",
-            args["path"].as_str().unwrap_or("?"),
-            bytes
-        )
+        format!("{} ({} bytes)", args["path"].as_str().unwrap_or("?"), bytes)
     }
     fn diff(&self, args: &Value, cwd: &Path) -> Option<String> {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
@@ -383,8 +381,9 @@ impl Tool for EditTool {
         Tier::Write
     }
     fn description(&self) -> &str {
-        "Apply exact-match text edits to a file. Each oldText must appear exactly once in the \
-         original; all edits match the original text, not each other's results."
+        "Apply text edits to a file. Each oldText must match exactly once in the original; \
+         a whitespace-flexible pass (trailing spaces, CRLF, smart quotes) rescues a miss. \
+         All edits match the original text, not each other's results."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -417,15 +416,15 @@ impl Tool for EditTool {
     }
     fn diff(&self, args: &Value, cwd: &Path) -> Option<String> {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
-        let original = std::fs::read_to_string(path).ok()?;
+        let original = std::fs::read_to_string(&path).ok()?;
         let edits = args["edits"].as_array()?;
-        // locate each oldText like execute() will; the first match is
-        // enough for a preview
+        // locate each oldText like execute() will; an unlocatable edit
+        // simply yields no preview (execute reports the error)
         let mut spans: Vec<(usize, usize, &str)> = Vec::new();
         for e in edits {
             let (old, new) = (e["oldText"].as_str()?, e["newText"].as_str()?);
-            let start = original.find(old)?;
-            spans.push((start, start + old.len(), new));
+            let (start, end) = locate_edit(&original, old, &path).ok()?;
+            spans.push((start, end, new));
         }
         spans.sort_by_key(|(s, _, _)| *s);
         Some(change_hunks(&original, &spans, 2, DIFF_MAX_LINES))
@@ -450,22 +449,11 @@ impl Tool for EditTool {
             if old.is_empty() {
                 return ToolOutput::err("oldText must not be empty");
             }
-            let first = match original.find(old) {
-                Some(i) => i,
-                None => {
-                    return ToolOutput::err(format!(
-                        "oldText not found in {}:\n{old}",
-                        path.display()
-                    ));
-                }
+            let (start, end) = match locate_edit(&original, old, &path) {
+                Ok(span) => span,
+                Err(e) => return ToolOutput::err(e),
             };
-            if original[first + old.len()..].contains(old) {
-                return ToolOutput::err(format!(
-                    "oldText matches more than once in {} (include surrounding lines to disambiguate):\n{old}",
-                    path.display()
-                ));
-            }
-            spans.push((first, first + old.len(), new));
+            spans.push((start, end, new));
         }
         // apply back-to-front so earlier byte offsets stay valid
         spans.sort_by_key(|(s, _, _)| *s);
@@ -487,6 +475,99 @@ impl Tool for EditTool {
             Err(e) => ToolOutput::err(format!("write failed: {e}")),
         }
     }
+}
+
+/// Locate one edit's oldText in the original: an exact match first, then a
+/// whitespace-flexible pass (the reference's fuzzy matching — per-line trailing
+/// whitespace dropped, CRLF treated as LF, lookalike punctuation folded).
+/// Unique matches only; the errors tell the model how to self-correct.
+fn locate_edit(original: &str, old: &str, path: &Path) -> Result<(usize, usize), String> {
+    if let Some(i) = original.find(old) {
+        if original[i + old.len()..].contains(old) {
+            return Err(format!(
+                "oldText matches more than once in {} (include surrounding lines to disambiguate):\n{old}",
+                path.display()
+            ));
+        }
+        return Ok((i, i + old.len()));
+    }
+    let spans = fuzzy_spans(original, old);
+    match spans.len() {
+        1 => Ok(spans[0]),
+        0 => Err(format!(
+            "oldText not found in {} (it must match the file exactly, including whitespace and newlines):\n{old}",
+            path.display()
+        )),
+        n => Err(format!(
+            "oldText matches {n} times in {} after whitespace-flexible matching (include surrounding lines to disambiguate):\n{old}",
+            path.display()
+        )),
+    }
+}
+
+/// Fold the lookalike punctuation models routinely mistype onto ASCII.
+fn fuzzy_char(ch: char) -> char {
+    match ch {
+        '\u{2018}' | '\u{2019}' => '\'',
+        '\u{201C}' | '\u{201D}' => '"',
+        '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{3000}' => ' ',
+        other => other,
+    }
+}
+
+/// A whitespace-flexible view of a text for edit matching: per-line trailing
+/// whitespace dropped, `\r` dropped, lookalikes folded. Returns the folded
+/// text plus, per byte of it, the original byte range that byte's char came
+/// from — so a match maps back onto the original span exactly: a match
+/// ending on a normal char stops at that char's original end, while one
+/// ending on a line joiner consumes the original line break and any dropped
+/// trailing whitespace before it.
+fn fuzzy_text(orig: &str) -> (String, Vec<(usize, usize)>) {
+    let mut text = String::with_capacity(orig.len());
+    let mut map: Vec<(usize, usize)> = Vec::with_capacity(orig.len() + 1);
+    let mut off = 0usize;
+    // original offset just past the previous line's kept content
+    let mut prev_kept_end = 0usize;
+    for (li, line) in orig.split('\n').enumerate() {
+        let kept = &line[..line.trim_end().len()];
+        if li > 0 {
+            // the joiner covers the previous line's dropped tail plus '\n'
+            text.push('\n');
+            for _ in 0..'\n'.len_utf8() {
+                map.push((prev_kept_end, off));
+            }
+        }
+        for (i, ch) in kept.char_indices() {
+            let c = fuzzy_char(ch);
+            let s = off + i;
+            text.push(c);
+            for _ in 0..c.len_utf8() {
+                map.push((s, s + ch.len_utf8()));
+            }
+        }
+        prev_kept_end = off + kept.len();
+        off += line.len() + 1; // past this line and its '\n'
+    }
+    (text, map)
+}
+
+/// All original-coordinate spans where `old` matches after normalization.
+fn fuzzy_spans(orig: &str, old: &str) -> Vec<(usize, usize)> {
+    let (hay, map) = fuzzy_text(orig);
+    let (needle, _) = fuzzy_text(old);
+    let mut spans = Vec::new();
+    if needle.is_empty() {
+        return spans;
+    }
+    let mut from = 0usize;
+    while let Some(pos) = hay[from..].find(&needle) {
+        let s = from + pos;
+        let e = s + needle.len();
+        spans.push((map[s].0, map[e - 1].1));
+        from = e;
+    }
+    spans
 }
 
 /// A unified-diff style preview of exact-match edits: one linear walk over
@@ -1278,6 +1359,89 @@ mod tests {
     }
 
     #[test]
+    fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
+        let dir = std::env::temp_dir().join(format!("llm-editfz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // trailing spaces on both lines, CRLF endings: the model's oldText
+        // (clean, LF-only) still applies
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "let x = 1;   \r\nfn a() {}  \r\n// end\r\n").unwrap();
+        let out = EditTool.execute(
+            &json!({"path": file.display().to_string(), "edits": [
+                {"oldText": "let x = 1;\nfn a() {}", "newText": "let x = 2;\nfn a() {}"}
+            ]}),
+            Path::new("."),
+            &mut |_| {},
+        );
+        assert!(!out.is_error, "{}", out.content);
+        // the matched lines' trailing junk stays outside the replaced span
+        // (minimal diff: only the matched content is replaced)
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "let x = 2;\nfn a() {}  \r\n// end\r\n"
+        );
+        // trailing whitespace on the oldText itself is trimmed on the needle
+        // side too
+        std::fs::write(&file, "fn a() {}\nfn b() {}\n").unwrap();
+        let out = EditTool.execute(
+            &json!({"path": file.display().to_string(), "edits": [
+                {"oldText": "fn b() {}  ", "newText": "fn b() { todo!() }"}
+            ]}),
+            Path::new("."),
+            &mut |_| {},
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "fn a() {}\nfn b() { todo!() }\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_fuzzy_matching_folds_smart_punctuation() {
+        let dir = std::env::temp_dir().join(format!("llm-editfq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("q.txt");
+        std::fs::write(&file, "msg = “hello” — ok\n").unwrap();
+        // the model retypes the line with ASCII quotes and a hyphen
+        let out = EditTool.execute(
+            &json!({"path": file.display().to_string(), "edits": [
+                {"oldText": "msg = \"hello\" - ok", "newText": "msg = 'hi'"}
+            ]}),
+            Path::new("."),
+            &mut |_| {},
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "msg = 'hi'\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_fuzzy_duplicate_matches_still_error() {
+        let dir = std::env::temp_dir().join(format!("llm-editfd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("d.txt");
+        // "x \ny" exists twice after normalization, and never exactly
+        std::fs::write(&file, "x \ny\nz\nx \ny\n").unwrap();
+        let out = EditTool.execute(
+            &json!({"path": file.display().to_string(), "edits": [
+                {"oldText": "x\ny", "newText": "w"}
+            ]}),
+            Path::new("."),
+            &mut |_| {},
+        );
+        assert!(out.is_error);
+        assert!(out.content.contains("2 times"), "{}", out.content);
+        assert!(
+            out.content.contains("whitespace-flexible"),
+            "{}",
+            out.content
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn edit_requires_unique_matches_and_no_overlap() {
         let dir = std::env::temp_dir().join(format!("llm-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1471,13 +1635,13 @@ mod tests {
     fn read_tool_caps_at_read_max_lines() {
         let dir = std::env::temp_dir().join(format!("llm-readcap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let body: Vec<String> = (1..=1200).map(|i| format!("row-{i}")).collect();
+        let body: Vec<String> = (1..=2600).map(|i| format!("row-{i}")).collect();
         std::fs::write(dir.join("big.txt"), body.join("\n")).unwrap();
         let out = read_execute(&dir, json!({"path": "big.txt"}));
         assert!(out.content.contains("1: row-1"), "{}", out.content);
-        assert!(out.content.contains("500: row-500"), "{}", out.content);
-        assert!(!out.content.contains("501: row-501"));
-        assert!(out.content.contains("Use offset=501"));
+        assert!(out.content.contains("2000: row-2000"), "{}", out.content);
+        assert!(!out.content.contains("2001: row-2001"));
+        assert!(out.content.contains("Use offset=2001"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -3,6 +3,8 @@
 
 use std::io::{IsTerminal, Write};
 
+use crate::core::http::Usage;
+
 /// Streamed-output flush cadence: writing+flushing per delta costs two
 /// syscalls per token on char-by-char streams; one frame per ~16ms is
 /// imperceptible next to network latency and bounds the syscalls. Chrome
@@ -16,14 +18,19 @@ pub struct Renderer {
     pub output: String,
     /// accumulated reasoning output
     pub reasoning: String,
-    pub usage: Option<(u64, u64)>,
+    pub usage: Option<Usage>,
     /// suppress streaming output to stdout (--json / -x modes buffer instead)
     quiet: bool,
-    /// live block streaming (terminal modes opt in via terminal_md): the answer
-    /// is hard-wrapped inside a fixed left-margin block, one word at a time
+    /// live block streaming (terminal modes opt in via terminal_md): the
+    /// answer flows verbatim inside a left-margin block, the terminal's own
+    /// soft-wrap doing any further line breaking
     md: Option<crate::core::render_md::BlockStream>,
     /// bytes not yet written (frame batching)
     pending: String,
+    /// a partial row is on screen without its terminating newline — the state
+    /// a spinner frame's `\r\x1b[2K` would retract, so the spinner must not
+    /// (re)start while it holds (TaskView::relabel guards on this)
+    dangling: bool,
     last_flush: std::time::Instant,
 }
 
@@ -36,6 +43,7 @@ impl Renderer {
             quiet: false,
             md: None,
             pending: String::new(),
+            dangling: false,
             // start "already due" so the very first delta flushes immediately
             // instead of waiting one interval before anything appears
             last_flush: std::time::Instant::now()
@@ -50,8 +58,9 @@ impl Renderer {
     }
 
     /// Terminal live-stream mode, TTY-gated: pipes and quiet mode keep raw
-    /// output. The answer is laid out in a left-indented block, hard-wrapped
-    /// at the terminal width so every visual row carries the margin.
+    /// output. The answer streams verbatim with a left margin on each of the
+    /// model's own lines; further line breaking is the terminal's soft-wrap,
+    /// never a host-inserted break.
     pub fn terminal_md(&mut self, indent: usize) -> bool {
         if self.quiet || !std::io::stdout().is_terminal() {
             return false;
@@ -80,32 +89,25 @@ impl Renderer {
         }
     }
 
-    /// Streaming cadence: write only complete visual rows (content up to the
-    /// last newline), holding the trailing partial row until it completes or
-    /// `finish_stream` settles it. A concurrent `\r\x1b[2K` redraw (spinner /
-    /// tool counter / queued notice) therefore can never land on a
-    /// half-written answer row and erase it — the retraction seen earlier.
+    /// Streaming cadence: write everything that has arrived, the trailing
+    /// partial row included — characters appear as they land, not row by row.
+    /// A partial row left on screen (`dangling`) means the spinner must not
+    /// (re)start: its `\r\x1b[2K` frame would retract those characters.
     fn flush_pending(&mut self) {
-        if !self.pending.is_empty()
-            && let Some(nl) = self.pending.rfind('\n')
-        {
-            let complete: String = self.pending.drain(..=nl).collect();
-            print!("{complete}");
+        if !self.pending.is_empty() {
+            let out = std::mem::take(&mut self.pending);
+            print!("{out}");
+            self.dangling = !out.ends_with('\n');
         }
         let _ = std::io::stdout().flush();
         self.last_flush = std::time::Instant::now();
     }
 
-    /// Settle the stream: flush everything including a dangling partial row
-    /// (used at tool / task boundaries so chrome never starts mid-line and no
-    /// trailing text is lost).
-    fn flush_all(&mut self) {
-        if !self.pending.is_empty() {
-            print!("{}", self.pending);
-            self.pending.clear();
-        }
-        let _ = std::io::stdout().flush();
-        self.last_flush = std::time::Instant::now();
+    /// Whether a partial row sits on screen without its terminating newline —
+    /// the state a spinner frame's `\r\x1b[2K` would retract, so the spinner
+    /// must not (re)start while it holds.
+    pub fn has_dangling(&self) -> bool {
+        self.dangling
     }
 
     /// Accumulate reasoning without printing it.
@@ -121,7 +123,7 @@ impl Renderer {
                 self.pending.push_str(&chunk);
             }
         }
-        self.flush_all();
+        self.flush_pending();
     }
 
     /// newline after stream if anything was printed
@@ -189,6 +191,7 @@ pub struct TaskView {
     thinking_trace_shown: bool,
     total_in: u64,
     total_out: u64,
+    total_cached: u64,
 }
 
 impl TaskView {
@@ -209,6 +212,7 @@ impl TaskView {
             thinking_trace_shown: false,
             total_in: 0,
             total_out: 0,
+            total_cached: 0,
         }
     }
 
@@ -239,7 +243,11 @@ impl TaskView {
             ticker.set_phase(label);
             return;
         }
-        if self.live {
+        // never start a spinner over a dangling answer row: the frame's
+        // `\r\x1b[2K` would retract live text, and settling (a newline)
+        // would break the stream mid-word — the streaming text itself
+        // already shows liveness
+        if self.live && !self.renderer.has_dangling() {
             self.ticker = Some(crate::term::ticker::Ticker::start(label));
         }
     }
@@ -284,6 +292,9 @@ impl TaskView {
     }
 
     /// Reasoning is never streamed: buffer it and relabel the spinner once.
+    /// Interleaved reasoning bursts must not touch the visible answer: no
+    /// newline, no spinner start while a partial row is live (`relabel`
+    /// guards the start; the label swap on a running ticker is row-safe).
     pub fn reasoning_delta(&mut self, text: &str) {
         self.renderer.push_reasoning_buffered(text);
         if !self.thinking_announced {
@@ -301,7 +312,10 @@ impl TaskView {
         self.close_thinking();
     }
 
-    /// Live label while a tool call's arguments stream in (hot-swap).
+    /// Live label while a tool call's arguments stream in (hot-swap). The
+    /// answer may have left a partial row on screen when the model switched
+    /// from text to tool arguments: no spinner may start over it (the tool
+    /// chrome that follows settles the row through `pause` first).
     pub fn receiving(&mut self, label: &str) {
         self.relabel(label);
     }
@@ -331,10 +345,11 @@ impl TaskView {
 
     /// A model round ended: accumulate usage, close the trace, terminate a
     /// partial markdown line so the next chrome row starts on its own line.
-    pub fn turn_end(&mut self, usage: Option<(u64, u64)>) {
-        if let Some((i, o)) = usage {
-            self.total_in += i;
-            self.total_out += o;
+    pub fn turn_end(&mut self, usage: Option<Usage>) {
+        if let Some(u) = usage {
+            self.total_in += u.input;
+            self.total_out += u.output;
+            self.total_cached += u.cached;
         }
         self.close_thinking();
         self.thinking_announced = false; // next round may announce again
@@ -345,11 +360,12 @@ impl TaskView {
     }
 
     /// Usage from a plain Done event (prompt/chat single round).
-    pub fn done(&mut self, usage: Option<(u64, u64)>) {
+    pub fn done(&mut self, usage: Option<Usage>) {
         self.renderer.usage = usage;
-        if let Some((i, o)) = usage {
-            self.total_in += i;
-            self.total_out += o;
+        if let Some(u) = usage {
+            self.total_in += u.input;
+            self.total_out += u.output;
+            self.total_cached += u.cached;
         }
     }
 
@@ -361,7 +377,9 @@ impl TaskView {
         self.renderer.finish_stream();
     }
 
-    /// The `secs · ↑in ↓out` line, right before the prompt returns.
+    /// The `secs · ↑in ↓out` line, right before the prompt returns. When the
+    /// provider reports cache hits, the cached share of the input rides along
+    /// so prefix-cache health is visible at a glance.
     pub fn footer(&mut self, secs: f64) {
         self.stop_ticker();
         if self.streamed_any {
@@ -369,8 +387,16 @@ impl TaskView {
         }
         let pad = " ".repeat(self.indent);
         if self.total_in > 0 || self.total_out > 0 {
+            let cache = if self.total_cached > 0 {
+                format!(
+                    " · cache {}%",
+                    self.total_cached * 100 / self.total_in.max(1)
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "\x1b[90m{pad}{secs:.1}s · ↑{} ↓{}\x1b[0m",
+                "\x1b[90m{pad}{secs:.1}s · ↑{} ↓{}{cache}\x1b[0m",
                 humanize_tokens(self.total_in),
                 humanize_tokens(self.total_out)
             );
@@ -385,5 +411,23 @@ impl TaskView {
         self.close_thinking();
         self.renderer.finish();
         self.footer(secs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_tracks_dangling_rows() {
+        // a flushed partial row dangles until something terminates it; the
+        // spinner-start guard keys off this so its frame can never retract
+        // live answer text
+        let mut r = Renderer::new();
+        r.push_delta("abc"); // flushes at once (first interval is pre-due)
+        assert!(r.has_dangling());
+        r.push_delta("d\n");
+        r.finish_stream();
+        assert!(!r.has_dangling());
     }
 }

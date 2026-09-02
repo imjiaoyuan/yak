@@ -536,7 +536,10 @@ fn reader_loop(
                     Ok(value) => dispatch_message(&value, pending, writer, tail),
                     Err(_) => push_tail(
                         tail,
-                        format!("unparsable line: {}", &trimmed[..trimmed.len().min(200)]),
+                        format!(
+                            "unparsable line: {}",
+                            &trimmed[..crate::core::text::floor_boundary(trimmed, 200)]
+                        ),
                     ),
                 }
             }

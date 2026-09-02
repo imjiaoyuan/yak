@@ -321,7 +321,9 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
     });
 
     let query = args.opt(&["query"]).map(|q| q.to_string());
-    let search = query.is_some() && !args.flag(&["latest"]);
+    // a query always joins and filters; --latest only switches the ordering,
+    // it must not silently drop the search
+    let search = query.is_some();
 
     let mut rows = crate::core::logstore::collect_rows(
         &db,

@@ -1,5 +1,5 @@
-//! gitignore matching engine and gitignore-aware file walking, shared by
-//! `llm pack` and the agent's grep/glob tools.
+//! gitignore matching engine and gitignore-aware file walking, used by
+//! the agent's grep/glob tools.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

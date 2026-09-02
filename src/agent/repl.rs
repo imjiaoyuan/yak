@@ -296,7 +296,7 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 
 const SLASH_COMMANDS: &[&str] = &[
     "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
-    "/mcp", "/edit", "/resume", "/fork", "/name", "/undo", "/exit",
+    "/mcp", "/edit", "/undo", "/exit",
 ];
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
@@ -432,14 +432,15 @@ fn repl_command(
             eprintln!("  /skill:name   run one             /memory  global memory");
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
             eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
-            eprintln!("  /resume       reopen a session     /fork   fork this session");
-            eprintln!("  /name         rename this session  /undo   drop the last round");
-            eprintln!("  /edit         compose in $EDITOR /exit    quit");
+            eprintln!("  /undo         drop the last round   /edit   compose in $EDITOR");
+            eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!("  models live in `llm models` (set agent defaults there)\x1b[0m");
         }
         "/ask" | "/yolo" => {
-            let mode = if text == "/ask" {
+            // match on the command word: an argument ("/ask always confirm
+            // with me") must not flip the branch to yolo
+            let mode = if cmd == "/ask" {
                 approval::Mode::AlwaysAsk
             } else {
                 approval::Mode::Yolo
@@ -455,6 +456,7 @@ fn repl_command(
             session.seed.clear();
             session.conversation_id = None;
             session.tokens = (0, 0);
+            session.tokens_cached = 0;
             eprint!("\x1b[2J\x1b[H");
             let _ = std::io::stderr().flush();
             let agents =
@@ -506,9 +508,22 @@ fn repl_command(
                 session.seed.len()
             );
             eprintln!(
-                "  \x1b[2mtokens  \x1b[0m↑{} ↓{} · approval {} · tools {} · thinking {}",
+                "  \x1b[2mtokens  \x1b[0m↑{} ↓{}{} · approval {} · tools {} · thinking {}",
                 humanize_tokens(session.tokens.0),
                 humanize_tokens(session.tokens.1),
+                if session.tokens_cached > 0 {
+                    format!(
+                        " · cache {}%",
+                        crate::core::http::Usage {
+                            input: session.tokens.0,
+                            output: 0,
+                            cached: session.tokens_cached
+                        }
+                        .cache_percent()
+                    )
+                } else {
+                    String::new()
+                },
                 session.approval.mode.label(),
                 session.tools.len(),
                 session.thinking.as_deref().unwrap_or("(model default)")

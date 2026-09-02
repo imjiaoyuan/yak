@@ -937,7 +937,6 @@ pub fn thread_last_prompt(db: &Db, thread_id: &str) -> String {
     thread_first_prompt(db, thread_id)
 }
 
-/// Most recent thread/conversation id across both identifier spaces.
 /// Fork a thread: a new thread id pointing at the same message-chain tip.
 /// The original keeps its tip, so the two sessions diverge from here without
 /// touching each other (the chain itself is immutable and content-addressed).

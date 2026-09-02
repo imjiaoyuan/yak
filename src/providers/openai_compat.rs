@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::{Attachment, Msg, PromptInput, ResolvedModel};
-use crate::core::http::{Event, HttpRequest, StopReason};
+use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 
 /// One content-part block for an attachment, by mime: images ride
 /// `image_url` data URIs, PDFs `file` blocks, wav/mp3 `input_audio`.
@@ -204,7 +204,7 @@ fn map_stop(reason: &str) -> StopReason {
 /// Feed one streaming data-chunk (already parsed) through the request state.
 pub(crate) fn feed_chunk(
     chunk: &Value,
-    usage: &mut Option<(u64, u64)>,
+    usage: &mut Option<Usage>,
     stop: &mut StopReason,
     on_event: &mut dyn FnMut(Event),
 ) {
@@ -212,7 +212,14 @@ pub(crate) fn feed_chunk(
         chunk["usage"]["prompt_tokens"].as_u64(),
         chunk["usage"]["completion_tokens"].as_u64(),
     ) {
-        *usage = Some((p, c));
+        *usage = Some(Usage {
+            input: p,
+            output: c,
+            cached: chunk["usage"]["prompt_cache_hit_tokens"]
+                .as_u64()
+                .or(chunk["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64())
+                .unwrap_or(0),
+        });
     }
     let Some(choice) = chunk["choices"].get(0) else {
         return;
@@ -251,12 +258,19 @@ pub(crate) fn feed_chunk(
 }
 
 /// Emit events for a complete (non-streaming) response. Returns usage.
-pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<(u64, u64)> {
+pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<Usage> {
     let usage = match (
         value["usage"]["prompt_tokens"].as_u64(),
         value["usage"]["completion_tokens"].as_u64(),
     ) {
-        (Some(p), Some(c)) => Some((p, c)),
+        (Some(p), Some(c)) => Some(Usage {
+            input: p,
+            output: c,
+            cached: value["usage"]["prompt_cache_hit_tokens"]
+                .as_u64()
+                .or(value["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64())
+                .unwrap_or(0),
+        }),
         _ => None,
     };
     let message = value["choices"].get(0).cloned().unwrap_or(Value::Null);
@@ -307,7 +321,7 @@ pub fn run(
     };
 
     if stream {
-        let mut usage: Option<(u64, u64)> = None;
+        let mut usage: Option<Usage> = None;
         let mut stop = StopReason::default();
         super::stream_events(&req, |_event_type, chunk| {
             feed_chunk(chunk, &mut usage, &mut stop, &mut |e| on_event(e));
@@ -607,7 +621,14 @@ mod tests {
 
         assert_eq!(text, "");
         assert_eq!(stop, StopReason::ToolUse);
-        assert_eq!(usage, Some((10, 5)));
+        assert_eq!(
+            usage,
+            Some(Usage {
+                input: 10,
+                output: 5,
+                cached: 0
+            })
+        );
         let calls = acc.finish();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_9");
@@ -638,10 +659,55 @@ mod tests {
             Event::Done { stop, .. } => stop_seen = Some(stop),
             _ => {}
         });
-        assert_eq!(usage, Some((3, 4)));
+        assert_eq!(
+            usage,
+            Some(Usage {
+                input: 3,
+                output: 4,
+                cached: 0
+            })
+        );
         assert_eq!(stop_seen, Some(StopReason::ToolUse));
         let calls = acc.finish();
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[0].arguments, json!({"command":"ls"}));
+    }
+
+    #[test]
+    fn cache_hit_tokens_parse_from_deepseek_and_openai_shapes() {
+        // DeepSeek reports the cache hit at the top level of usage
+        let mut usage = None;
+        feed_chunk(
+            &json!({"usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                              "prompt_cache_hit_tokens": 90, "prompt_cache_miss_tokens": 10}}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(usage.unwrap().cached, 90);
+        // OpenAI nests it under prompt_tokens_details
+        let mut usage = None;
+        feed_chunk(
+            &json!({"usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                              "prompt_tokens_details": {"cached_tokens": 40}}}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(usage.unwrap().cached, 40);
+    }
+
+    #[test]
+    fn usage_cache_percent_is_safe_at_zero() {
+        assert_eq!(Usage::default().cache_percent(), 0);
+        assert_eq!(
+            Usage {
+                input: 200,
+                output: 0,
+                cached: 150
+            }
+            .cache_percent(),
+            75
+        );
     }
 }

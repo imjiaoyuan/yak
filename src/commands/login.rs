@@ -225,7 +225,7 @@ pub(crate) fn wizard() -> Result<(), String> {
     };
 
     // fetch the model list (best effort); unreachable endpoints leave the
-    // provider model-less until `llm scan` refreshes it
+    // provider model-less until models are added by hand
     let models = fetch_models(&kind, &base_url, &fetch_key);
 
     let selected: Vec<String> = if models.is_empty() {
@@ -299,7 +299,7 @@ pub(crate) fn wizard() -> Result<(), String> {
             }
         }
     }
-    eprintln!("\nTry it:  llm ping {name}   |   llm \"hello\"   |   llm agent \"look around\"");
+    eprintln!("\nTry it:  llm -m {name} \"hello\"   |   llm agent \"look around\"");
     Ok(())
 }
 

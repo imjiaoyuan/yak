@@ -98,8 +98,7 @@ pub fn template(cmd: &CommandMd) -> crate::core::templates::Template {
 }
 
 /// Expand a command into a ready prompt (used by the REPLs): `$input`
-/// substitution like `llm prompt -t`, args appended when the body has no
-/// `$input`.
+/// substitution, args appended when the body has no `$input`.
 pub fn expand(cmd: &CommandMd, input: &str) -> String {
     if input.trim().is_empty() {
         return cmd.body.clone();

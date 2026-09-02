@@ -43,12 +43,16 @@ pub fn build_system_prompt(
     agents: &[crate::agent::task::AgentDef],
     skills: &[crate::agent::skills::SkillDef],
 ) -> Option<String> {
+    let continuation = replace.is_none() && stored.is_some();
     let base = match replace {
         Some(r) => r.to_string(),
         None => match stored {
-            // continuation keeps the original prompt; project context may
-            // have shifted with cwd, so re-derive everything below it
-            Some(s) => s.to_string(),
+            // a continuation keeps the stored assembled prompt verbatim: it
+            // already embeds memory/project/agents/skills from when the
+            // session started, and re-appending them would grow the prompt
+            // by a full copy on every resume (and shift it, busting the
+            // provider prefix cache). Only the trailing cwd line refreshes.
+            Some(s) => strip_cwd_line(s),
             None => {
                 let date = today();
                 format!(
@@ -80,7 +84,7 @@ pub fn build_system_prompt(
                      - Be concise and friendly; mirror the user's language and tone.\n\
                      - Reference files with paths and line numbers, not by dumping their contents.\n\
                      - When the task is done, stop and give the result — do not run more commands to \
-                       \"confirm\".\n\
+                     \"confirm\".\n\
                      \n\
                      Today's date: {date}"
                 )
@@ -88,27 +92,29 @@ pub fn build_system_prompt(
         },
     };
     let mut out = base;
-    if let Some(mem) = crate::agent::memory::section() {
-        out.push_str("\n\n");
-        out.push_str(&mem);
-    }
-    if let Some(ctx) = project_context(cwd) {
-        out.push_str("\n\n");
-        out.push_str(&ctx);
-    }
-    if !agents.is_empty() {
-        out.push_str("\n\nAvailable sub-agents (delegate via the task tool):");
-        for a in agents {
-            if a.description.is_empty() {
-                out.push_str(&format!("\n- {}", a.name));
-            } else {
-                out.push_str(&format!("\n- {}: {}", a.name, a.description));
+    if !continuation {
+        if let Some(mem) = crate::agent::memory::section() {
+            out.push_str("\n\n");
+            out.push_str(&mem);
+        }
+        if let Some(ctx) = project_context(cwd) {
+            out.push_str("\n\n");
+            out.push_str(&ctx);
+        }
+        if !agents.is_empty() {
+            out.push_str("\n\nAvailable sub-agents (delegate via the task tool):");
+            for a in agents {
+                if a.description.is_empty() {
+                    out.push_str(&format!("\n- {}", a.name));
+                } else {
+                    out.push_str(&format!("\n- {}: {}", a.name, a.description));
+                }
             }
         }
-    }
-    if let Some(block) = crate::agent::skills::skills_block(skills) {
-        out.push_str("\n\n");
-        out.push_str(&block);
+        if let Some(block) = crate::agent::skills::skills_block(skills) {
+            out.push_str("\n\n");
+            out.push_str(&block);
+        }
     }
     if let Some(extra) = append {
         out.push_str("\n\n");
@@ -118,10 +124,40 @@ pub fn build_system_prompt(
     Some(out)
 }
 
+/// Drop the trailing cwd line a previously assembled prompt ends with, so a
+/// continuation refreshes it (the session may resume from another directory).
+fn strip_cwd_line(s: &str) -> String {
+    match s.rfind("\n\nCurrent working directory: ") {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    }
+}
+
 fn today() -> String {
     crate::core::db::now_turn_datetime()
         .split('T')
         .next()
         .unwrap_or("")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuation_keeps_stored_prompt_and_refreshes_only_cwd() {
+        let cwd = std::path::Path::new("/tmp/proj");
+        let stored = "base\n\n<project_instructions path=\"/x\">\nnotes\n</project_instructions>\
+                      \n\nCurrent working directory: /old/dir";
+        let out = build_system_prompt(cwd, None, None, Some(stored), &[], &[]).unwrap();
+        assert_eq!(
+            out,
+            "base\n\n<project_instructions path=\"/x\">\nnotes\n</project_instructions>\
+             \n\nCurrent working directory: /tmp/proj"
+        );
+        // resuming the resumed prompt must be a fixed point: no compounding
+        let again = build_system_prompt(cwd, None, None, Some(&out), &[], &[]).unwrap();
+        assert_eq!(again, out);
+    }
 }

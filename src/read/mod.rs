@@ -1,8 +1,8 @@
-//! File reading behind the agent's `read` tool and rag ingest: plain text
-//! only, streamed through a line window (`window`) or read whole under a
-//! budget (`text`). Everything else is refused as binary with a hint at
-//! local tooling (pdftotext, samtools, duckdb, ...) — parsing other formats
-//! is the model's job via the bash tool, not the binary's.
+//! File reading behind the agent's `read` tool: plain text only,
+//! streamed through a line window (`window`). Everything else is refused
+//! as binary with a hint at local tooling (pdftotext, samtools, duckdb,
+//! ...) — parsing other formats is the model's job via the bash tool, not
+//! the binary's.
 
 mod lines;
 
@@ -87,8 +87,6 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
     })
 }
 
-/// Whole-file read for rag ingest: the document's text, cut at `budget`
-/// bytes with `truncated` set when anything was left behind.
 /// NUL byte in the first 8 KiB means binary.
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)

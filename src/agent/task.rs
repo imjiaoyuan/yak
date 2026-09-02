@@ -14,7 +14,10 @@ use crate::yaml;
 /// a child whose definition explicitly lists it.
 pub const DEFAULT_CHILD_TOOLS: &str = "read,grep,glob,ls";
 pub const MAX_DEPTH: u32 = 3;
-pub const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Cap on a sub-agent's collected output feeding the parent's context —
+/// the same 50KB bash/grep results live under (a 256KB result would land
+/// in the parent's context as ~64k tokens in one tool result).
+pub const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 pub const MAX_PARALLEL: usize = 8;
 pub const DEFAULT_CONCURRENCY: usize = 4;
 /// Wall-clock budget per sub-agent before it is killed (the `timeout`
@@ -554,11 +557,17 @@ fn run_child(
     let mut done_text: Option<String> = None;
     let mut error: Option<String> = None;
     let mut timed_out = false;
+    let mut interrupted = false;
+    // sub-agent token spend, surfaced on the done progress line (children
+    // bill the same API account but the parent's usage counter never sees it)
+    let (in_tx, in_rx) = std::sync::mpsc::channel::<(u64, u64, u64)>();
+    let mut child_tokens: (u64, u64, u64) = (0, 0, 0);
     // live progress: one heartbeat line per running child, throttled so a
     // fast talker cannot flood the log
     let mut last_beat = std::time::Instant::now();
     let reader = stdout.map(|stdout| {
         let (tx, rx) = std::sync::mpsc::channel::<ChildEvent>();
+        let usage_tx = in_tx.clone();
         let handle = std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout)
                 .lines()
@@ -573,6 +582,13 @@ fn run_child(
                         .map(|t| ChildEvent::Delta(t.to_string())),
                     Some("done") => {
                         Some(ChildEvent::Done(event["text"].as_str().map(str::to_string)))
+                    }
+                    Some("turn_end") => {
+                        if let Some(u) = event["usage"].as_array() {
+                            let n = |i: usize| u.get(i).and_then(|v| v.as_u64()).unwrap_or(0);
+                            let _ = usage_tx.send((n(0), n(1), n(2)));
+                        }
+                        None
                     }
                     Some("error") => Some(ChildEvent::Error(
                         event["message"].as_str().map(str::to_string),
@@ -606,6 +622,7 @@ fn run_child(
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if crate::core::http::interrupted() {
+                        interrupted = true;
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
@@ -618,12 +635,21 @@ fn run_child(
         }
         drop(rx);
         let _ = handle.join();
+        while let Ok(u) = in_rx.try_recv() {
+            child_tokens.0 += u.0;
+            child_tokens.1 += u.1;
+            child_tokens.2 += u.2;
+        }
     }
-    if timed_out || error.is_some() {
+    if timed_out || error.is_some() || interrupted {
         // stop a child that is still running before waiting on it
         let _ = guard.0.kill();
     }
     let status = guard.0.wait();
+    if interrupted {
+        send_line(progress, format!("{} · interrupted", def.name));
+        return ToolOutput::err("sub-agent interrupted by user".to_string());
+    }
     if timed_out {
         send_line(progress, format!("{} · timed out", def.name));
         return ToolOutput::err(format!(
@@ -635,10 +661,21 @@ fn run_child(
         send_line(progress, format!("{} · failed", def.name));
         return ToolOutput::err(format!("sub-agent failed: {e}"));
     }
-    let final_text = done_text.filter(|t| !t.is_empty()).unwrap_or(text);
+    let mut final_text = done_text.filter(|t| !t.is_empty()).unwrap_or(text);
+    // the done event rides outside the bounded delta stream: cap it too
+    if final_text.len() > MAX_OUTPUT_BYTES {
+        let end = crate::core::text::floor_boundary(&final_text, MAX_OUTPUT_BYTES);
+        final_text = format!("{}\n[output truncated]", &final_text[..end]);
+    }
     send_line(
         progress,
-        format!("{} · done ({})", def.name, kchars(final_text.len())),
+        format!(
+            "{} · done ({} · ↑{} ↓{})",
+            def.name,
+            kchars(final_text.len()),
+            crate::core::render::humanize_tokens(child_tokens.0),
+            crate::core::render::humanize_tokens(child_tokens.1)
+        ),
     );
     let stderr_text = stderr_handle
         .take()

@@ -127,7 +127,7 @@ pub fn stream_events(
             Ok(chunk) => on_value(event_type, &chunk),
             Err(e) => eprintln!(
                 "Warning: dropping unparsable SSE data ({e}): {}",
-                &data[..data.len().min(200)]
+                &data[..crate::core::text::floor_boundary(data, 200)]
             ),
         }
     });

@@ -2,8 +2,6 @@
 
 use std::io::Write;
 
-// doc moved above: redraws `[3s · phase]` on stderr while a task waits.
-
 /// ~16fps spinner: fast enough to feel alive without hammering the terminal.
 pub const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
 

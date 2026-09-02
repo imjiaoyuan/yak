@@ -305,7 +305,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
             .unwrap_or_else(|| "always-ask".to_string())
     };
     let mode = approval::Mode::parse(&mode_str)
-        .ok_or_else(|| format!("invalid --approval-mode '{mode_str}' (always-ask, write, yolo)"))?;
+        .ok_or_else(|| format!("invalid --approval-mode '{mode_str}' (ask or yolo)"))?;
     let mut approval_cfg = ApprovalConfig {
         mode,
         ..Default::default()
@@ -466,6 +466,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         script_tools: script_specs,
         mcp,
         tokens: (0, 0),
+        tokens_cached: 0,
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;
@@ -504,7 +505,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         crate::agent::emit_json(&serde_json::json!({
             "type": "done",
             "text": outcome.final_text,
-            "usage": outcome.usage.map(|(i, o)| serde_json::json!([i, o])),
+            "usage": outcome.usage.map(|u| serde_json::json!([u.input, u.output, u.cached])),
         }));
     }
     if !session.json_mode
