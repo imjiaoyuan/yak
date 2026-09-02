@@ -116,8 +116,19 @@ pub fn build_body(
                 }
             }
             Msg::ToolResult {
-                call_id, content, ..
+                call_id,
+                content,
+                attachments,
+                ..
             } => {
+                let content = if attachments.is_empty() || m.supports_images() {
+                    user_content(content, attachments)?
+                } else {
+                    // a text-only model: never hand it an image it rejects
+                    json!(format!(
+                        "{content}\n[image omitted: current model does not support images]"
+                    ))
+                };
                 messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": content}));
             }
             Msg::Summary { text } => {
@@ -391,6 +402,44 @@ mod tests {
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn tool_result_with_image_attachment_serializes_as_parts() {
+        let history = vec![
+            Msg::assistant("read the image"),
+            Msg::ToolResult {
+                call_id: "c1".into(),
+                name: "read".into(),
+                content: "Read image file [image/png]".into(),
+                is_error: false,
+                attachments: vec![att("image/png", Some("shot.png"))],
+            },
+        ];
+        let body = build_body(&model(), &input(&history, &[]), false).unwrap();
+        // the assistant precedes, so the only tool message is index 1
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn text_only_model_omits_image_and_notes_it() {
+        let mut m = model();
+        m.model_id = "deepseek-chat".into();
+        let history = vec![Msg::ToolResult {
+            call_id: "c1".into(),
+            name: "read".into(),
+            content: "Read image file".into(),
+            is_error: false,
+            attachments: vec![att("image/png", Some("shot.png"))],
+        }];
+        let body = build_body(&m, &input(&history, &[]), false).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Read image file\n[image omitted: current model does not support images]"
+        );
     }
 
     #[test]

@@ -16,10 +16,16 @@ pub(crate) const READ_MAX_LINES: usize = 500;
 /// Files larger than this are skipped by grep (reading them whole would
 /// spike memory; the model can target them with bash instead).
 const GREP_MAX_FILE: u64 = 32 * 1024 * 1024;
+/// Images the read tool will base64 into the model request; beyond this we
+/// have no downscaler, so we refuse rather than balloon the context.
+const IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// attachments (e.g. an image the read tool decoded) fed back to the
+    /// model as vision input on the next round
+    pub attachments: Vec<crate::providers::Attachment>,
 }
 
 impl ToolOutput {
@@ -27,6 +33,7 @@ impl ToolOutput {
         ToolOutput {
             content: content.into(),
             is_error: false,
+            attachments: Vec::new(),
         }
     }
 
@@ -34,6 +41,7 @@ impl ToolOutput {
         ToolOutput {
             content: content.into(),
             is_error: true,
+            attachments: Vec::new(),
         }
     }
 }
@@ -90,6 +98,7 @@ pub fn builtin_tools_configured(
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
+        Box::new(PlanTool),
         Box::new(super::task::TaskTool {
             parent_model: parent_model.map(str::to_string),
             roles: roles.clone(),
@@ -156,8 +165,10 @@ impl Tool for ReadTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Read a text file. Returns lines with line numbers optionally sliced by offset/limit. \
-         Binary formats are refused with a hint at local tooling (pdftotext, samtools, ...)."
+        "Read a file. Text files return lines with line numbers optionally sliced by \
+         offset/limit; image files (png/jpg/gif/webp/bmp) are sent to the model as a vision \
+         attachment. Other binary formats are refused with a hint at local tooling \
+         (pdftotext, samtools, ...)."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -175,6 +186,36 @@ impl Tool for ReadTool {
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
+        if let Some(mime) = image_mime(&path) {
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => return ToolOutput::err(format!("cannot read {} ({e})", path.display())),
+            };
+            // images are sent as base64 to the model: refuse a huge file
+            // rather than balloon the request (we have no image processor
+            // to downscale without adding a dependency)
+            if bytes.len() > IMAGE_MAX_BYTES {
+                return ToolOutput::err(format!(
+                    "{}: image is {} (over the {} limit); downscale it first with e.g. `python -c \"from PIL import Image; im=Image.open('{}'); im.thumbnail((2000,2000)); im.save('{}')\"`",
+                    path.display(),
+                    crate::core::text::human_bytes(bytes.len() as u64),
+                    crate::core::text::human_bytes(IMAGE_MAX_BYTES as u64),
+                    path.display(),
+                    path.display(),
+                ));
+            }
+            let mut out = ToolOutput::ok(format!(
+                "Read image file [{}; {}] — passed to the model as a vision attachment.",
+                mime,
+                crate::core::text::human_bytes(bytes.len() as u64)
+            ));
+            out.attachments.push(crate::providers::Attachment {
+                mime_type: mime,
+                base64_data: crate::b64::encode(&bytes),
+                filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            });
+            return out;
+        }
         let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = args["limit"]
             .as_u64()
@@ -615,7 +656,8 @@ impl Tool for GrepTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Search file contents for a LITERAL substring (no regex — use bash for that). \
+        "Search file contents for a LITERAL substring (no regex — prefer `rg` via the bash tool, \
+         which is faster and supports regex). \
          Respects .gitignore. Returns path:line:text matches."
     }
     fn parameters(&self) -> Value {
@@ -882,6 +924,61 @@ impl Tool for FetchTool {
     }
 }
 
+struct PlanTool;
+
+impl Tool for PlanTool {
+    fn name(&self) -> &str {
+        "update_plan"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    fn description(&self) -> &str {
+        "Update the task plan. Provide an optional explanation and a list of plan items, each \
+         with a step and a status (pending, in_progress, completed). At most one step can be \
+         in_progress at a time. Keep a step-by-step plan for a multi-step task and update it \
+         after each step you finish."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "explanation": {"type": "string", "description": "Optional explanation for this plan update"},
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step": {"type": "string", "description": "Task step text"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["step", "status"]
+                    }
+                }
+            },
+            "required": ["plan"]
+        })
+    }
+    fn preview(&self, args: &Value) -> String {
+        let n = args["plan"].as_array().map(|a| a.len()).unwrap_or(0);
+        format!("{n} step(s)")
+    }
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+        let Some(plan) = args["plan"].as_array() else {
+            return ToolOutput::err("missing 'plan' array");
+        };
+        if plan.is_empty() {
+            return ToolOutput::err("plan must not be empty");
+        }
+        for item in plan {
+            if item["step"].as_str().is_none() || item["status"].as_str().is_none() {
+                return ToolOutput::err("each plan item needs 'step' and 'status'");
+            }
+        }
+        ToolOutput::ok("plan updated")
+    }
+}
+
 /// Strip markup down to readable text without pulling in an HTML parser:
 /// drop script/style blocks, remove tags, decode common entities, collapse
 /// runs of blank lines. Good enough for docs and articles.
@@ -989,6 +1086,27 @@ pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
     } else {
         cwd.join(p)
     }
+}
+
+/// The mime type for a file extension that the read tool can send to a
+/// vision-capable model; `None` for anything else.
+fn image_mime(path: &Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn display_rel(cwd: &Path, path: &Path) -> String {
@@ -1409,6 +1527,22 @@ mod tests {
         let out = read_execute(&dir, json!({"path": "blob.dat"}));
         assert!(out.is_error);
         assert!(out.content.contains("binary format"), "{}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_tool_attaches_image_for_vision_models() {
+        let dir = std::env::temp_dir().join(format!("llm-readimg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // a tiny PNG signature; the read tool routes by extension, so the
+        // exact body is irrelevant to the test
+        std::fs::write(dir.join("pic.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let out = read_execute(&dir, json!({"path": "pic.png"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("vision attachment"), "{}", out.content);
+        assert_eq!(out.attachments.len(), 1);
+        assert_eq!(out.attachments[0].mime_type, "image/png");
+        assert!(!out.attachments[0].base64_data.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -40,6 +40,8 @@ pub enum Msg {
         name: String,
         content: String,
         is_error: bool,
+        /// images/PDFs a vision-capable read produced, riding this result
+        attachments: Vec<Attachment>,
     },
     /// compaction summary replacing the dropped conversation prefix
     Summary { text: String },
@@ -75,6 +77,7 @@ impl Msg {
             name: name.into(),
             content: content.into(),
             is_error: false,
+            attachments: Vec::new(),
         }
     }
 }
@@ -109,11 +112,6 @@ impl ToolCallAccumulator {
             let name = &s.1;
             (!name.is_empty()).then_some(name.as_str())
         })
-    }
-
-    /// Bytes of the argument streamed in so far.
-    pub fn len(&self, index: usize) -> usize {
-        self.slots.get(&index).map(|s| s.2.len()).unwrap_or(0)
     }
 
     pub fn finish(self) -> Vec<ToolCall> {

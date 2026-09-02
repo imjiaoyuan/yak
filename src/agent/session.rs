@@ -163,12 +163,15 @@ impl Session {
                                 crate::agent::tools::print_diff_block(diff);
                             }
                         }
+                        view.borrow_mut().resume_running();
                     }
                 }
-                AgentUpdate::ToolReceiving { name, bytes } => {
+                AgentUpdate::ToolReceiving => {
                     if !json_mode {
-                        let label = format!("{} … {}", name, crate::agent::task::kchars(bytes));
-                        view.borrow_mut().receiving(&label);
+                        // show a plain "running" status; the live argument
+                        // size was confusing and the `$ run <cmd>` chrome
+                        // line already shows the command
+                        view.borrow_mut().receiving("running");
                     }
                 }
                 AgentUpdate::ToolLog(line) => {
@@ -176,10 +179,13 @@ impl Session {
                         streamed.set(true);
                         let n = logged.get() + 1;
                         logged.set(n);
-                        // the spinner keeps running through tool output so a
-                        // quiet stretch still shows elapsed time; each line
-                        // just clears the spinner frame before printing
                         if n <= LOG_HEAD {
+                            // once output starts streaming, drop the spinner:
+                            // its redraw frame would collide with the lines
+                            // being printed on the same row
+                            if n == 1 {
+                                view.borrow_mut().spin_pause();
+                            }
                             eprint!("\r\x1b[2K");
                             let width = crate::term::columns().max(20);
                             let wrapped = crate::core::render_md::wrap_block(&line, width, 2);
@@ -304,9 +310,11 @@ impl Session {
         self.tokens.1 += total_out;
         match result {
             Ok(mut outcome) => {
-                // one footer per task: totals across rounds and wall time,
-                // right before the prompt returns
-                if !json_mode {
+                // one footer per completed task: totals across rounds and
+                // wall time, right before the prompt returns. A user-initiated
+                // interrupt already shows its own "interrupted" line and
+                // should not dump a long-running elapsed/footer after it.
+                if !json_mode && !outcome.interrupted {
                     view.borrow_mut().footer(task_start.elapsed().as_secs_f64());
                 }
                 // the history moves into the seed (no clone of the whole
@@ -461,6 +469,7 @@ pub fn msg_to_message(m: &Msg) -> Message {
             name,
             content,
             is_error,
+            ..
         } => Message {
             role: "tool".into(),
             parts: vec![Part::ToolResult {
@@ -550,6 +559,7 @@ pub fn rebuild_thread(db: &Db, cid: &str) -> (Vec<Msg>, Option<String>) {
                         name: payload["name"].as_str().unwrap_or_default().to_string(),
                         content: p.text.clone().unwrap_or_default(),
                         is_error: payload["is_error"].as_bool().unwrap_or(false),
+                        attachments: Vec::new(),
                     });
                 }
             }

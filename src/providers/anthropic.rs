@@ -100,8 +100,16 @@ pub fn build_body(
                 call_id,
                 content,
                 is_error,
+                attachments,
                 ..
             } => {
+                let content = if attachments.is_empty() || m.supports_images() {
+                    user_content(content, attachments)?
+                } else {
+                    json!(format!(
+                        "{content}\n[image omitted: current model does not support images]"
+                    ))
+                };
                 pending_results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
@@ -424,6 +432,7 @@ mod tests {
                 name: "read".into(),
                 content: "boom".into(),
                 is_error: true,
+                attachments: Vec::new(),
             },
         ];
         let body = build_body(&model(), &input(&history, &[]), true).unwrap();

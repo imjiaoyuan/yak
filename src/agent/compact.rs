@@ -23,20 +23,40 @@ impl Default for CompactConfig {
     }
 }
 
-/// Rough token cost of one message (chars/4 plus a small per-message overhead).
-fn msg_tokens(msg: &Msg) -> u64 {
-    let chars: usize = match msg {
-        Msg::User { text, .. } | Msg::Summary { text } => text.chars().count(),
-        Msg::Assistant { text, tool_calls } => {
-            text.chars().count()
-                + tool_calls
-                    .iter()
-                    .map(|c| c.name.chars().count() + c.arguments.to_string().chars().count() + 32)
-                    .sum::<usize>()
+/// Token cost of text: ASCII ≈ 1 token per 4 chars, CJK/fullwidth ≈ 1 token
+/// per char (a space-free Chinese sentence would otherwise be undercounted
+/// 3-4x, making `/status` and compaction trigger too late).
+fn text_tokens(text: &str) -> u64 {
+    let mut ascii = 0u64;
+    let mut wide = 0u64;
+    for ch in text.chars() {
+        if crate::core::render_md::char_width(ch) >= 2 {
+            wide += 1;
+        } else {
+            ascii += 1;
         }
-        Msg::ToolResult { content, .. } => content.chars().count() + 32,
+    }
+    ascii.div_ceil(4) + wide
+}
+
+/// Rough token cost of one message (text estimate plus a per-message overhead).
+fn msg_tokens(msg: &Msg) -> u64 {
+    let text: &str = match msg {
+        Msg::User { text, .. } | Msg::Summary { text } => text,
+        Msg::Assistant { text, tool_calls } => {
+            let calls: u64 = tool_calls
+                .iter()
+                .map(|c| {
+                    text_tokens(&c.name)
+                        + text_tokens(&c.arguments.to_string())
+                        + 8 // tool-call overhead
+                })
+                .sum();
+            return text_tokens(text) + calls + 16;
+        }
+        Msg::ToolResult { content, .. } => content,
     };
-    (chars as u64) / 4 + 16
+    text_tokens(text) + 16
 }
 
 /// Estimate the context size: the last reported usage covers the first
@@ -165,6 +185,17 @@ mod tests {
     }
 
     #[test]
+    fn cjk_text_is_not_undercounted() {
+        // 16 ASCII -> ~4 tokens; 16 Chinese chars -> ~16 tokens (not ~4),
+        // so a Chinese-heavy conversation triggers compaction at the right time
+        let ascii = text_tokens(&"a".repeat(16));
+        let cjk = text_tokens(&"中".repeat(16));
+        assert_eq!(ascii, 4);
+        assert_eq!(cjk, 16, "CJK must count ~1 token/char, not chars/4");
+        assert!(cjk >= ascii * 3, "CJK must not be undercounted 3-4x");
+    }
+
+    #[test]
     fn cut_lands_on_a_boundary_never_a_tool_result() {
         let call = |id: &str| super::super::ToolCall {
             id: id.into(),
@@ -249,6 +280,7 @@ mod tests {
                 name: "bash".into(),
                 content: "e".repeat(3000),
                 is_error: true,
+                attachments: Vec::new(),
             },
         ];
         let s = serialize_prefix(&prefix);
