@@ -214,14 +214,11 @@ pub fn term_size() -> TermSize {
     };
     let ioctl_ok = unsafe { ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0;
     let ioctl_size = ioctl_ok.then_some((ws.ws_col as usize, ws.ws_row as usize));
-    let (c, r) = match (cols, rows, ioctl_size) {
-        (Some(c), Some(r), _) => (c, r),
-        (Some(c), None, Some((ic, ir))) => (c.max(ic), ir),
-        (None, Some(r), Some((ic, ir))) => (ic, r.max(ir)),
-        (None, None, Some(s)) => s,
-        (Some(c), None, None) => (c, 24),
-        (None, Some(r), None) => (80, r),
-        (None, None, None) => (80, 24),
+    // ioctl window is the live size; env vars are only a fallback (see linux)
+    let (c, r) = if let Some((ic, ir)) = ioctl_size {
+        (ic, ir)
+    } else {
+        (cols.unwrap_or(80), rows.unwrap_or(24))
     };
     TermSize {
         cols: c.max(1),

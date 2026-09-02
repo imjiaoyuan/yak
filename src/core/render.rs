@@ -7,7 +7,9 @@ use std::io::{IsTerminal, Write};
 /// syscalls per token on char-by-char streams; one frame per ~16ms is
 /// imperceptible next to network latency and bounds the syscalls. Chrome
 /// paths flush first (TaskView::pause), so nothing interleaves mid-line.
-const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+/// ~250Hz keep-up: near-instant for local model streams; still amortizes the
+/// per-frame syscalls (one write+flush each frame, no per-character write).
+const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
 
 pub struct Renderer {
     /// accumulated visible output
@@ -17,9 +19,10 @@ pub struct Renderer {
     pub usage: Option<(u64, u64)>,
     /// suppress streaming output to stdout (--json / -x modes buffer instead)
     quiet: bool,
-    /// markdown-aware streaming (terminal modes opt in via terminal_md)
-    md: Option<crate::core::render_md::MdStream>,
-    /// styled bytes not yet written (frame batching)
+    /// live block streaming (terminal modes opt in via terminal_md): the answer
+    /// is hard-wrapped inside a fixed left-margin block, one word at a time
+    md: Option<crate::core::render_md::BlockStream>,
+    /// bytes not yet written (frame batching)
     pending: String,
     last_flush: std::time::Instant,
 }
@@ -33,7 +36,11 @@ impl Renderer {
             quiet: false,
             md: None,
             pending: String::new(),
-            last_flush: std::time::Instant::now(),
+            // start "already due" so the very first delta flushes immediately
+            // instead of waiting one interval before anything appears
+            last_flush: std::time::Instant::now()
+                .checked_sub(FLUSH_INTERVAL)
+                .unwrap_or_else(std::time::Instant::now),
         }
     }
 
@@ -42,21 +49,22 @@ impl Renderer {
         self.quiet = on;
     }
 
-    /// Terminal-markdown mode, TTY-gated: pipes and quiet mode keep raw
-    /// output. Returns whether markdown is active, for callers that make
-    /// layout decisions around it.
+    /// Terminal live-stream mode, TTY-gated: pipes and quiet mode keep raw
+    /// output. The answer is laid out in a left-indented block, hard-wrapped
+    /// at the terminal width so every visual row carries the margin.
     pub fn terminal_md(&mut self, indent: usize) -> bool {
         if self.quiet || !std::io::stdout().is_terminal() {
             return false;
         }
-        let mut md = crate::core::render_md::MdStream::indented(indent);
+        let mut md = crate::core::render_md::BlockStream::indented(indent);
         md.wrap_at(crate::term::columns().saturating_sub(indent).max(20));
         self.md = Some(md);
         true
     }
 
-    /// Append answer text, printing it (styled when md is active) unless
-    /// quiet. Output is written at most once per FLUSH_INTERVAL.
+    /// Append answer text, printing it (hard-wrapped inside the block when
+    /// streaming) unless quiet. Output is written at most once per
+    /// FLUSH_INTERVAL.
     pub fn push_delta(&mut self, text: &str) {
         self.output.push_str(text);
         if self.quiet {
@@ -86,8 +94,8 @@ impl Renderer {
     pub fn push_reasoning_buffered(&mut self, text: &str) {
         self.reasoning.push_str(text);
     }
-    /// Flush a pending partial markdown line. Idempotent and newline-free,
-    /// so multi-round streams can call it between rounds.
+    /// Flush a pending partial line, terminating it first when it is dangling,
+    /// so multi-round streams and tool chrome always start on their own line.
     pub fn finish_stream(&mut self) {
         if let Some(md) = self.md.as_mut() {
             let mut chunk = String::new();
@@ -218,6 +226,13 @@ impl TaskView {
         }
     }
 
+    /// Stop the spinner: once a tool's output starts streaming, the spinner
+    /// frame would collide with the lines being printed on the same row, so
+    /// it is dropped for the remainder of the tool.
+    pub fn spin_pause(&mut self) {
+        self.stop_ticker();
+    }
+
     /// One trace line per task, printed before whatever follows the thinking.
     /// Rounds that end in pure tool calls emit no text deltas, so this is
     /// also where the thinking spinner must be silenced.
@@ -275,8 +290,19 @@ impl TaskView {
 
     /// A tool started: the `$` chrome line follows; spinner restarts labelled.
     pub fn tool_started(&mut self, name: &str) {
+        let _ = name;
         self.pause();
-        self.relabel(&format!("{name} …"));
+        // the spinner is restarted by `resume_running` AFTER the caller has
+        // printed the `$ <verb> <cmd>` chrome line, so the spinner's
+        // in-place frame cannot collide with that line
+    }
+
+    /// Restart the spinner with a plain "running" phase after chrome output
+    /// has been printed (see `tool_started`).
+    pub fn resume_running(&mut self) {
+        if self.live && self.ticker.is_none() {
+            self.ticker = Some(crate::term::ticker::Ticker::start("running"));
+        }
     }
 
     /// The tool chrome is done; spin again while the next model round is
@@ -312,7 +338,8 @@ impl TaskView {
     /// Cleanup without the footer (provider error, interrupt).
     pub fn abort(&mut self) {
         self.stop_ticker();
-        self.close_thinking();
+        // do-not print the "thinking ... end" trace on an abnormal stop:
+        // a force-interrupt must not read as thinking having finished
         self.renderer.finish_stream();
     }
 

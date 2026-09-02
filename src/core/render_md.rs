@@ -10,13 +10,6 @@
 pub struct MdStream {
     buf: String,
     state: BlockState,
-    /// how much of the current line's raw prefix is already on screen
-    /// (character-level streaming), as byte length and cell width counters —
-    /// erased in place when the line completes. Counters, not a copy of the
-    /// prefix: per-delta cloning made char-by-char streaming quadratic in
-    /// line length.
-    shown_len: usize,
-    shown_cells: usize,
 }
 
 impl MdStream {
@@ -25,8 +18,6 @@ impl MdStream {
     pub fn indented(spaces: usize) -> MdStream {
         MdStream {
             buf: String::new(),
-            shown_len: 0,
-            shown_cells: 0,
             state: BlockState {
                 margin: " ".repeat(spaces),
                 ..Default::default()
@@ -45,54 +36,147 @@ impl MdStream {
         while let Some(nl) = self.buf.find('\n') {
             let line = self.buf[..nl].to_string();
             self.buf.drain(..nl + 1);
-            self.erase_shown(rendered);
             render_line(&line, &mut self.state, rendered);
         }
-        if !self.buf.is_empty() {
-            // print the unseen suffix of the current line the moment it
-            // arrives, raw; styling snaps in when the line completes and is
-            // redrawn in place
-            if self.shown_len == 0 {
-                rendered.push_str(&self.state.margin);
-            }
-            let added = &self.buf[self.shown_len..];
-            self.shown_cells += cell_width(added);
-            self.shown_len = self.buf.len();
-            rendered.push_str(added);
-        }
     }
 
-    /// Erase the raw partial line: move up to its first visual row and
-    /// clear to the end of the screen (stream output is the newest thing
-    /// on screen, so nothing below is lost).
-    fn erase_shown(&mut self, out: &mut String) {
-        if self.shown_len == 0 {
-            return;
-        }
-        let cells = self.state.margin.len() + self.shown_cells;
-        let rows = if self.state.wrap > 0 {
-            cells.div_ceil(self.state.wrap).clamp(1, 64)
-        } else {
-            1
-        };
-        if rows > 1 {
-            out.push_str(&format!("\x1b[{}A", rows - 1));
-        }
-        out.push_str("\r\x1b[J");
-        self.shown_len = 0;
-        self.shown_cells = 0;
-    }
-
-    /// Flush a trailing partial line, terminating it with a newline.
+    /// Flush a trailing partial line, terminating it with a newline. The
+    /// stream never paints partials: it emits whole lines as they finish, so
+    /// output is "write once" with no in-place erase/redraw flicker.
     /// Idempotent; returns false when nothing was pending.
     pub fn finish(&mut self, rendered: &mut String) -> bool {
         if self.buf.is_empty() {
             return false;
         }
-        self.erase_shown(rendered);
         let line = std::mem::take(&mut self.buf);
         render_line(&line, &mut self.state, rendered);
         true
+    }
+}
+
+/// Live block streaming: the answer sits in a fixed left-margin block and is
+/// hard-wrapped at `wrap` cells so every visual row carries the margin. Words
+/// are buffered until their trailing space/newline so lines never break mid-
+/// word (no `R ust`), and rows are committed as they fill — nothing is erased
+/// or redrawn, so output streams in one direction with no flicker.
+pub struct BlockStream {
+    margin: String,
+    wrap: usize,
+    row_cells: usize,
+    at_start: bool,
+    emitted: bool,
+    /// the current word, held until its trailing delimiter
+    word: String,
+    /// a space between words, emitted only when the next word fits this row
+    pending_space: bool,
+}
+
+impl BlockStream {
+    pub fn indented(spaces: usize) -> BlockStream {
+        BlockStream {
+            margin: " ".repeat(spaces),
+            wrap: 0,
+            row_cells: 0,
+            at_start: true,
+            emitted: false,
+            word: String::new(),
+            pending_space: false,
+        }
+    }
+
+    pub fn wrap_at(&mut self, width: usize) {
+        self.wrap = width;
+    }
+
+    pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
+        for ch in text.chars() {
+            // CJK / fullwidth chars have no space-separated words and can be
+            // broken at any character, so stream them immediately (a Chinese
+            // sentence would otherwise be buffered as one huge "word" and
+            // stall until a space/punctuation). Latin words stay buffered so
+            // they never split mid-word.
+            if char_width(ch) >= 2 {
+                self.flush_word(rendered);
+                self.emit_breakable(ch, char_width(ch), rendered);
+                continue;
+            }
+            match ch {
+                '\n' => {
+                    self.pending_space = false; // trailing space at line end dropped
+                    self.flush_word(rendered);
+                    rendered.push('\n');
+                    self.at_start = true;
+                    self.row_cells = 0;
+                    self.emitted = true;
+                }
+                ' ' => {
+                    self.flush_word(rendered);
+                    self.pending_space = true;
+                    self.emitted = true;
+                }
+                _ => {
+                    self.word.push(ch);
+                    self.emitted = true;
+                }
+            }
+        }
+    }
+
+    fn flush_word(&mut self, rendered: &mut String) {
+        if self.word.is_empty() {
+            return;
+        }
+        let word = std::mem::take(&mut self.word);
+        let wc = cell_width(&word);
+        let mut lead = usize::from(self.pending_space);
+        self.pending_space = false;
+        if self.wrap > 0 && self.row_cells > 0 && self.row_cells + lead + wc > self.wrap {
+            rendered.push('\n');
+            rendered.push_str(&self.margin);
+            self.row_cells = 0;
+            lead = 0; // a row break drops the pending space
+        }
+        if self.at_start {
+            rendered.push_str(&self.margin);
+            self.at_start = false;
+        }
+        if lead == 1 {
+            rendered.push(' ');
+            self.row_cells += 1;
+        }
+        rendered.push_str(&word);
+        self.row_cells += wc;
+    }
+
+    /// Emit a breakable (CJK/fullwidth) character: wrap to a fresh row first
+    /// when this one would overflow, since these units may break at any cell.
+    fn emit_breakable(&mut self, ch: char, w: usize, rendered: &mut String) {
+        if self.wrap > 0 && self.row_cells > 0 && self.row_cells + w > self.wrap {
+            rendered.push('\n');
+            rendered.push_str(&self.margin);
+            self.row_cells = 0;
+        }
+        if self.at_start {
+            rendered.push_str(&self.margin);
+            self.at_start = false;
+        }
+        rendered.push(ch);
+        self.row_cells += w;
+        self.emitted = true;
+    }
+
+    /// Idempotent: flush the trailing word and terminate a dangling row so the
+    /// footer / chrome starts on its own line; returns whether a newline was
+    /// added.
+    pub fn finish(&mut self, rendered: &mut String) -> bool {
+        self.flush_word(rendered);
+        if self.emitted && !self.at_start {
+            rendered.push('\n');
+            self.at_start = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -169,7 +253,12 @@ fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
     }
 
     if let Some(content) = t.strip_prefix('>').map(str::trim_start) {
-        emit_line(st, &format!("\x1b[2m▎ {content}\x1b[0m"), out);
+        // blockquotes render with a `>` marker and green text
+        emit_line(
+            st,
+            &format!("\x1b[32m> \x1b[0m\x1b[2m{content}\x1b[0m"),
+            out,
+        );
         st.started = true;
         st.prev_blank = false;
         return;
@@ -188,7 +277,7 @@ fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
         let marker = if ordered {
             t[..marker_len].to_string()
         } else {
-            "•".to_string()
+            "-".to_string()
         };
         let content = render_inline(t[marker_len..].trim_start());
         emit_line(st, &format!("{lead}{marker} {content}"), out);
@@ -404,7 +493,8 @@ fn render_inline(s: &str) -> String {
                 if let Some(rel) = s[i + run..].find(&"`".repeat(run)) {
                     let content = &s[i + run..i + run + rel];
                     if !content.is_empty() {
-                        out.push_str("\x1b[1m");
+                        // inline code renders in a warm color
+                        out.push_str("\x1b[33m");
                         out.push_str(content);
                         out.push_str("\x1b[0m");
                         i += run + rel + run;
@@ -427,8 +517,8 @@ fn render_inline(s: &str) -> String {
                         && !content.contains('*')
                     {
                         match run {
-                            3 => out.push_str("\x1b[1m\x1b[3m"),
-                            2 => out.push_str("\x1b[1m"),
+                            3 => out.push_str("\x1b[1m\x1b[3m\x1b[36m"),
+                            2 => out.push_str("\x1b[1m\x1b[36m"),
                             _ => out.push_str("\x1b[3m"),
                         }
                         out.push_str(content);
@@ -483,6 +573,9 @@ mod tests {
     const B: &str = "\x1b[1m"; // bold
     const I: &str = "\x1b[3m"; // italic
     const D: &str = "\x1b[2m"; // dim
+    const G: &str = "\x1b[32m"; // green
+    const C: &str = "\x1b[36m"; // cyan (bold/standout)
+    const Y: &str = "\x1b[33m"; // yellow (inline code)
     const R: &str = "\x1b[0m"; // reset
 
     #[test]
@@ -501,7 +594,7 @@ mod tests {
     fn inline_emphasis_and_code() {
         assert_eq!(
             render("这是 **加粗** 与 *斜体* 与 `代码`\n"),
-            format!("这是 {B}加粗{R} 与 {I}斜体{R} 与 {B}代码{R}\n")
+            format!("这是 {B}{C}加粗{R} 与 {I}斜体{R} 与 {Y}代码{R}\n")
         );
     }
 
@@ -509,7 +602,7 @@ mod tests {
     fn double_backtick_code_span_renders_clean() {
         assert_eq!(
             render("改 ``dedup_bam2/p1`` 目录\n"),
-            format!("改 {B}dedup_bam2/p1{R} 目录\n")
+            format!("改 {Y}dedup_bam2/p1{R} 目录\n")
         );
         // an unmatched single tick stays literal
         assert_eq!(render("孤立 ` 反引号\n"), "孤立 ` 反引号\n");
@@ -519,7 +612,7 @@ mod tests {
     fn triple_bold_italic_and_underscore_literal() {
         assert_eq!(
             render("***粗斜*** _snake_case_\n"),
-            format!("{B}{I}粗斜{R} _snake_case_\n")
+            format!("{B}{I}{C}粗斜{R} _snake_case_\n")
         );
     }
 
@@ -535,7 +628,7 @@ mod tests {
     fn unordered_lists_two_levels_cap() {
         assert_eq!(
             render("- 一级\n  - 二级\n    - 三级\n"),
-            "• 一级\n  • 二级\n  • 三级\n"
+            "- 一级\n  - 二级\n  - 三级\n"
         );
     }
 
@@ -546,7 +639,7 @@ mod tests {
 
     #[test]
     fn blockquote_dim_with_bar() {
-        assert_eq!(render("> 引用内容\n"), format!("{D}▎ 引用内容{R}\n"));
+        assert_eq!(render("> 引用内容\n"), format!("{G}> {R}{D}引用内容{R}\n"));
     }
 
     #[test]
@@ -597,32 +690,15 @@ mod tests {
         );
     }
 
-    /// Strip the transient character-stream artifacts: everything from the
-    /// start of a raw partial line through its in-place erase, leaving only
-    /// the settled rendered lines.
-    fn settle(s: &str) -> String {
-        let marker = "\r\u{1b}[J";
-        let parts: Vec<&str> = s.split(marker).collect();
-        let mut out = String::new();
-        for (i, seg) in parts.iter().enumerate() {
-            if i + 1 == parts.len() {
-                out.push_str(seg); // nothing follows: no transient to drop
-            } else if let Some(nl) = seg.rfind('\n') {
-                out.push_str(&seg[..nl + 1]); // drop the erased tail
-            }
-        }
-        out
-    }
-
     #[test]
     fn unterminated_fence_flushes_content() {
         let mut md = MdStream::indented(0);
         let mut out = String::new();
         md.push_delta("```\nab", &mut out);
         md.push_delta("c", &mut out);
-        assert!(out.contains("ab")); // streamed, not buffered
+        assert!(out.is_empty()); // the partial line is buffered until newline
         assert!(md.finish(&mut out));
-        assert_eq!(settle(&out), format!("{D}abc{R}\n"));
+        assert_eq!(out, format!("{D}abc{R}\n"));
     }
 
     #[test]
@@ -633,10 +709,10 @@ mod tests {
             md.push_delta(d, &mut out);
         }
         md.finish(&mut out);
-        // characters were visible as they arrived, then the line settled
-        assert!(out.contains("**bo") && out.contains("第二"));
-        assert_eq!(settle(&out), render("**bold** done\n第二行\n"));
-        // single-shot feed through the same stream must agree
+        // whole lines are emitted as they finish; the final partial is
+        // flushed by finish. No erase/redraw escapes are ever written.
+        assert_eq!(out, render("**bold** done\n第二行\n"));
+        assert!(!out.contains("\x1b[J") && !out.contains("\x1b[1A"));
     }
 
     #[test]
@@ -644,9 +720,9 @@ mod tests {
         let mut md = MdStream::indented(0);
         let mut out = String::new();
         md.push_delta("尾部", &mut out);
-        assert!(out.contains("尾部")); // streamed, not buffered
+        assert!(out.is_empty()); // partial buffered; no flicker
         assert!(md.finish(&mut out));
-        assert_eq!(settle(&out), "尾部\n");
+        assert_eq!(out, "尾部\n");
         assert!(!md.finish(&mut out));
     }
 
@@ -656,7 +732,7 @@ mod tests {
         let mut out = String::new();
         md.push_delta("hi\n\n- a\n", &mut out);
         md.finish(&mut out);
-        assert_eq!(out, "  hi\n  • a\n");
+        assert_eq!(out, "  hi\n  - a\n");
     }
 
     #[test]
@@ -711,6 +787,9 @@ mod tests {
         let out = render_once("# hi\n\nbody", 2);
         assert!(out.starts_with("  \x1b[1m"), "got {out:?}");
         assert!(out.ends_with('\n'), "got {out:?}");
+        // a one-shot render must never carry in-place erase escapes
+        assert!(!out.contains("\x1b[J"), "got {out:?}");
+        assert!(!out.contains("\x1b[1A"), "got {out:?}");
         assert_eq!(render_once("", 0), "");
     }
 
@@ -721,4 +800,44 @@ mod tests {
         assert!(!md.finish(&mut out));
         assert_eq!(out, "");
     }
+
+    #[test]
+    fn block_stream_never_splits_words_and_indents_every_row() {
+        let mut s = BlockStream::indented(2);
+        s.wrap_at(10);
+        let mut out = String::new();
+        s.push_delta("The Rust toolkit is awesome", &mut out);
+        assert!(s.finish(&mut out));
+        // words stay whole (no "Ru st"), every wrapped row has the margin
+        assert_eq!(out, "  The Rust\n  toolkit is\n  awesome\n");
+    }
+
+    #[test]
+    fn block_stream_streams_words_as_they_arrive() {
+        let mut s = BlockStream::indented(2);
+        s.wrap_at(20);
+        let mut out = String::new();
+        s.push_delta("one two", &mut out);
+        // words are shown as their trailing space arrives; the final (dangling)
+        // word is held until finish so it never breaks mid-word
+        assert_eq!(out, "  one");
+        assert!(s.finish(&mut out));
+        assert_eq!(out, "  one two\n");
+    }
+
+    #[test]
+    fn block_stream_streams_cjk_immediately_and_wraps_at_any_char() {
+        let mut s = BlockStream::indented(2);
+        s.wrap_at(6);
+        let mut out = String::new();
+        // Chinese has no spaces: chars must appear immediately (not buffered
+        // into one huge "word") and may wrap at any character
+        s.push_delta("中中中", &mut out);
+        assert_eq!(out, "  中中中");
+        s.push_delta("中中\n", &mut out);
+        // 4 fit (4*2=8 > 6, so after 3 chars we wrap): margin on every row
+        assert_eq!(out, "  中中中\n  中中\n");
+        assert!(!s.finish(&mut out));
+    }
+
 }

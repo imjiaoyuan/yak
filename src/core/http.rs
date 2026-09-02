@@ -74,7 +74,12 @@ pub struct HttpError {
 
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HTTP {}: {}", self.status, self.message)
+        if self.status == 0 {
+            // status 0 is a transport/TLS failure, not an HTTP response
+            write!(f, "connection error: {}", self.message)
+        } else {
+            write!(f, "HTTP {}: {}", self.status, self.message)
+        }
     }
 }
 
