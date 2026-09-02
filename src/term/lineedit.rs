@@ -511,38 +511,55 @@ fn common_prefix(candidates: &[String]) -> String {
     prefix
 }
 
-/// One raw keypress for approval prompts: y or enter (= yes, the default),
-/// a (= always), n (= no), ctrl-c/ctrl-d/esc (= deny). The prompt banner has
+/// Two-step approval input: type `y`/`n`/`a` to pick an option (echoed live),
+/// then press Enter to confirm; a bare Enter keeps the default yes.
+/// Esc/ctrl-c/ctrl-d cancels (Deny) immediately. The prompt banner has
 /// already been printed by the caller. Returns None when raw mode is
 /// unavailable (the caller fails closed).
 pub fn read_approval_key() -> Option<ApprovalKey> {
     let mut term = RawTerm::acquire_console(1, 0)?;
+    // raw mode disables echo: echo each accepted letter as it is typed so the
+    // user sees their selection, but do not commit until Enter (or a cancel).
+    let mut choice: Option<ApprovalKey> = None;
     let key = loop {
         let b = match term.next_byte() {
             RawByte::Key(b) => b,
             RawByte::Timeout => continue,
         };
         match b {
-            b'y' | b'Y' | b'\r' | b'\n' => break ApprovalKey::Yes,
-            b'a' | b'A' => break ApprovalKey::Always,
-            b'n' | b'N' => break ApprovalKey::No,
+            b'y' | b'Y' => {
+                choice = Some(ApprovalKey::Yes);
+                eprint!("y");
+                let _ = std::io::stderr().flush();
+            }
+            b'n' | b'N' => {
+                choice = Some(ApprovalKey::No);
+                eprint!("n");
+                let _ = std::io::stderr().flush();
+            }
+            b'a' | b'A' => {
+                choice = Some(ApprovalKey::Always);
+                eprint!("a");
+                let _ = std::io::stderr().flush();
+            }
+            b'\r' | b'\n' => break choice.unwrap_or(ApprovalKey::Yes),
             0x03 | 0x04 | 0x1b => break ApprovalKey::Deny,
             _ => {}
         }
     };
-    // raw mode disables echo, so the pressed key never reaches the screen;
-    // print the resolved answer so the user sees what they chose (y→yes,
-    // a→always, n→no, ctrl-c/ctrl-d/esc→deny), then close the prompt line.
-    let shown = match key {
-        ApprovalKey::Yes => "y",
-        ApprovalKey::Always => "a",
-        ApprovalKey::No => "n",
-        ApprovalKey::Deny => "^",
-    };
-    eprintln!("{shown}");
+    // Close the prompt line: a typed letter is already echoed (just newline);
+    // a bare Enter shows the default yes; a cancel shows the caret.
+    match key {
+        ApprovalKey::Deny => eprint!("^"),
+        ApprovalKey::Yes if choice.is_none() => eprint!("y"),
+        _ => {}
+    }
+    eprintln!();
+    let _ = std::io::stderr().flush();
     Some(key)
 }
 
+#[derive(Clone, Copy)]
 pub enum ApprovalKey {
     Yes,
     No,
