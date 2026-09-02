@@ -340,6 +340,9 @@ impl Pipes {
                 tail_cap(&mut self.stdout, PIPE_TAIL_CAP);
                 self.stdout.extend_from_slice(&chunk);
                 self.residue.extend_from_slice(&chunk);
+                // a child flooding output without a newline must not grow the
+                // partial-line buffer without bound
+                tail_cap(&mut self.residue, PIPE_TAIL_CAP);
                 while let Some(nl) = self.residue.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = self.residue.drain(..=nl).collect();
                     let text = String::from_utf8_lossy(&line);

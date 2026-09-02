@@ -818,7 +818,7 @@ pub fn thread_tip(db: &Db, thread_id: &str) -> Option<String> {
     }
 }
 
-/// A conversation summary for session browsing (`llm agent /resume`).
+/// A conversation summary for session browsing (the `llm logs` picker).
 #[derive(Clone)]
 pub struct ThreadSummary {
     pub id: String,
@@ -854,7 +854,8 @@ pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
 
 /// Full message chain of a thread (roles + parts), oldest first — the
 /// wire-level source for `llm agent` continuation.
-/// First prompt of a thread (the preview shown in the /resume picker).
+/// First prompt of a thread (the preview shown in the logs conversation
+/// picker).
 /// Walks the first turn's message chain to the nearest user message — the
 /// same shape as turn_search's prompt rule, but live, so sessions logged
 /// before that rule existed still preview correctly.

@@ -1,5 +1,5 @@
-//! `llm logs` — view past conversations, merged across the content-addressed
-//! store (threads/turns) and the legacy responses table.
+//! `llm logs` — view past conversations from the content-addressed
+//! threads/turns store.
 
 use std::io::IsTerminal;
 
@@ -406,7 +406,7 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
 }
 
 /// Compact index view (the default): one line per turn under a dim
-/// conversation header, mirroring the agent `/resume` list.
+/// conversation header.
 fn compact_output(
     rows: &[serde_json::Value],
     modes: &std::collections::HashMap<String, String>,
@@ -715,19 +715,11 @@ fn status() -> i32 {
     println!("Number of threads logged:\t{}", counts.threads);
     println!("Number of turns logged:\t\t{}", counts.turns);
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    println!("Database file size: \t\t{}", human_size(size));
+    println!(
+        "Database file size: \t\t{}",
+        crate::core::text::human_bytes(size)
+    );
     0
-}
-
-fn human_size(bytes: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < units.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    format!("{size:.2}{}", units[unit])
 }
 
 fn backup(rest: &[String]) -> i32 {
@@ -745,7 +737,11 @@ fn backup(rest: &[String]) -> i32 {
     match db.backup_to(&path) {
         Ok(_) => {
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            println!("Backed up {} to {}", human_size(size), path);
+            println!(
+                "Backed up {} to {}",
+                crate::core::text::human_bytes(size),
+                path
+            );
             0
         }
         Err(e) => {

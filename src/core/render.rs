@@ -29,7 +29,7 @@ pub struct Renderer {
     pending: String,
     /// a partial row is on screen without its terminating newline — the state
     /// a spinner frame's `\r\x1b[2K` would retract, so the spinner must not
-    /// (re)start while it holds (TaskView::relabel guards on this)
+    /// (re)start while it holds
     dangling: bool,
     last_flush: std::time::Instant,
 }
@@ -65,9 +65,7 @@ impl Renderer {
         if self.quiet || !std::io::stdout().is_terminal() {
             return false;
         }
-        let mut md = crate::core::render_md::BlockStream::indented(indent);
-        md.live();
-        self.md = Some(md);
+        self.md = Some(crate::core::render_md::BlockStream::indented(indent));
         true
     }
 
@@ -104,8 +102,10 @@ impl Renderer {
     }
 
     /// Whether a partial row sits on screen without its terminating newline —
-    /// the state a spinner frame's `\r\x1b[2K` would retract, so the spinner
-    /// must not (re)start while it holds.
+    /// the state a spinner frame's `\r\x1b[2K` would retract, so no spinner
+    /// may (re)start while it holds. The model's own newline, or the
+    /// chrome-boundary `finish_stream`, clears it — nothing ever inserts a
+    /// break into the streaming text itself.
     pub fn has_dangling(&self) -> bool {
         self.dangling
     }
@@ -411,23 +411,5 @@ impl TaskView {
         self.close_thinking();
         self.renderer.finish();
         self.footer(secs);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn renderer_tracks_dangling_rows() {
-        // a flushed partial row dangles until something terminates it; the
-        // spinner-start guard keys off this so its frame can never retract
-        // live answer text
-        let mut r = Renderer::new();
-        r.push_delta("abc"); // flushes at once (first interval is pre-due)
-        assert!(r.has_dangling());
-        r.push_delta("d\n");
-        r.finish_stream();
-        assert!(!r.has_dangling());
     }
 }

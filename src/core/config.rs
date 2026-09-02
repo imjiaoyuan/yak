@@ -1,7 +1,6 @@
 //! user_dir resolution and the files kept there: config.json (providers with
 //! inline api keys, the "models" settings family and hand-added tables like
-//! "agent"), aliases.json, the logs-off marker — plus one-time migrations
-//! from the old layouts.
+//! "agent"), aliases.json, and the logs-off marker.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -161,7 +160,7 @@ pub fn load() -> Config {
 }
 
 /// One silently-degrading read of a top-level config table (the plugin
-/// tables `tools`/`mcpServers`/`hooks`): a missing file, unparsable JSON or
+/// tables `tools`/`mcpServers`): a missing file, unparsable JSON or
 /// a missing key all yield None — optional tables are never fatal.
 pub fn table(key: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     let raw = fs::read_to_string(config_path()).ok()?;
@@ -442,8 +441,6 @@ pub fn add_model(provider: &str, model_id: &str) {
 }
 
 // logging gate — marker file, exactly like the original
-
-// legacy migration from the pre-alignment layout (~/.config/llm)
 
 pub fn ensure_dir_exists(path: &std::path::Path) {
     if let Some(parent) = path.parent() {

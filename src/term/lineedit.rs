@@ -543,7 +543,26 @@ pub fn read_approval_key() -> Option<ApprovalKey> {
                 let _ = std::io::stderr().flush();
             }
             b'\r' | b'\n' => break choice.unwrap_or(ApprovalKey::Yes),
-            0x03 | 0x04 | 0x1b => break ApprovalKey::Deny,
+            0x03 => {
+                // ctrl-c cancels the whole task, not just this call: raise
+                // the interrupt flag the agent loop and streams poll
+                crate::core::http::request_interrupt();
+                break ApprovalKey::Deny;
+            }
+            0x1b => {
+                // a lone ESC cancels like ctrl-c, but arrow keys and other
+                // escape sequences also start with ESC — wait one poll slice
+                // to tell them apart and swallow sequence bodies whole
+                match term.next_byte() {
+                    RawByte::Timeout => {
+                        crate::core::http::request_interrupt();
+                        break ApprovalKey::Deny;
+                    }
+                    // the sequence's tail bytes land in the catch-all below
+                    RawByte::Key(_) => continue,
+                }
+            }
+            0x04 => break ApprovalKey::Deny,
             _ => {}
         }
     };

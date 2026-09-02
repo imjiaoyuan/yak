@@ -56,19 +56,14 @@ impl MdStream {
     }
 }
 
-/// Live block streaming: the content area carries a left indent — each of
-/// the model's own lines opens with the margin — and the right edge is left
-/// entirely to the terminal: no width is measured, no break is inserted,
-/// characters flow out verbatim and the terminal's soft-wrap adapts them.
-/// Continuation rows therefore start wherever the terminal puts them
-/// (column 0); the `wrap` machinery below only runs under the test-only
-/// `wrap_at`.
+/// Live verbatim streaming: the model's text is written exactly as it
+/// arrives — characters, spacing and order untouched — and the terminal's
+/// own soft-wrap owns the right edge (the terminal is the authority on its
+/// widths, so nothing here measures or breaks). The only host addition is a
+/// left margin printed at the start of each of the model's own lines.
+/// Nothing is erased or redrawn, so the stream runs one direction.
 pub struct BlockStream {
     margin: String,
-    /// hard-wrap width for the test-only wrapping path; live streams run
-    /// unmeasured (wrap == 0)
-    wrap: usize,
-    row_cells: usize,
     at_start: bool,
     emitted: bool,
 }
@@ -77,72 +72,25 @@ impl BlockStream {
     pub fn indented(spaces: usize) -> BlockStream {
         BlockStream {
             margin: " ".repeat(spaces),
-            wrap: 0,
-            row_cells: 0,
             at_start: true,
             emitted: false,
         }
     }
 
-    /// Hard-wrap at a fixed width (tests only; live streams are unmeasured).
-    #[cfg(test)]
-    pub fn wrap_at(&mut self, width: usize) {
-        self.wrap = width;
-    }
-
-    /// Unmeasured streaming: left indent only, the terminal's soft-wrap
-    /// does everything else.
-    pub fn live(&mut self) {
-        self.wrap = 0;
-    }
-
     pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
         for ch in text.chars() {
-            match ch {
-                '\n' => {
-                    rendered.push('\n');
-                    self.at_start = true;
-                    self.row_cells = 0;
-                    self.emitted = true;
-                }
-                ' ' if self.wrap > 0 => {
-                    // a space only counts while a row is open and it fits in
-                    // it; one that would overflow is consumed by the wrap
-                    if self.at_start {
-                        continue;
-                    }
-                    if self.row_cells + 1 > self.wrap {
-                        rendered.push('\n');
-                        rendered.push_str(&self.margin);
-                        self.row_cells = 0;
-                        self.at_start = true;
-                    } else {
-                        rendered.push(' ');
-                        self.row_cells += 1;
-                        self.emitted = true;
-                    }
-                }
-                _ => {
-                    let w = char_width(ch);
-                    if w == 0 {
-                        // zero-width (combining marks, ZWJ): attach in place
-                        rendered.push(ch);
-                        continue;
-                    }
-                    if self.wrap > 0 && self.row_cells > 0 && self.row_cells + w > self.wrap {
-                        rendered.push('\n');
-                        rendered.push_str(&self.margin);
-                        self.row_cells = 0;
-                    }
-                    if self.at_start {
-                        rendered.push_str(&self.margin);
-                        self.at_start = false;
-                    }
-                    rendered.push(ch);
-                    self.row_cells += w;
-                    self.emitted = true;
-                }
+            if ch == '\n' {
+                rendered.push('\n');
+                self.at_start = true;
+                self.emitted = true;
+                continue;
             }
+            if self.at_start {
+                rendered.push_str(&self.margin);
+                self.at_start = false;
+            }
+            rendered.push(ch);
+            self.emitted = true;
         }
     }
 
@@ -807,23 +755,22 @@ mod tests {
     }
 
     #[test]
-    fn block_stream_prints_chars_immediately_and_indents_every_row() {
+    fn block_stream_prints_verbatim_with_margin_on_own_lines() {
         let mut s = BlockStream::indented(2);
-        s.wrap_at(10);
         let mut out = String::new();
         s.push_delta("The Rust t", &mut out);
         // the partial row prints as it arrives, not after a newline
         assert_eq!(out, "  The Rust t");
-        s.push_delta("oolkit is awesome", &mut out);
+        s.push_delta("oolkit is awesome\nsecond line", &mut out);
+        // no host-inserted break: only the model's newline; the terminal's
+        // soft-wrap owns the right edge
+        assert_eq!(out, "  The Rust toolkit is awesome\n  second line");
         assert!(s.finish(&mut out));
-        // wrap lands mid-word at the cell boundary; every row carries the margin
-        assert_eq!(out, "  The Rust t\n  oolkit is \n  awesome\n");
     }
 
     #[test]
     fn block_stream_prints_partial_words_without_waiting_for_a_delimiter() {
         let mut s = BlockStream::indented(2);
-        s.wrap_at(20);
         let mut out = String::new();
         s.push_delta("one two", &mut out);
         // no delimiter ever arrived: everything is already on screen
@@ -833,12 +780,11 @@ mod tests {
     }
 
     #[test]
-    fn block_stream_settle_then_continue_opens_a_fresh_row() {
-        // the retraction fix: a dangling partial row is terminated (settle)
-        // before a spinner frame can erase it; the stream then continues on
-        // its own row with the margin intact
+    fn block_stream_finish_then_continue_opens_a_fresh_row() {
+        // chrome boundaries terminate a dangling row (so nothing that redraws
+        // the current row can retract it); the stream then continues on its
+        // own row with the margin intact
         let mut s = BlockStream::indented(2);
-        s.wrap_at(20);
         let mut out = String::new();
         s.push_delta("前端只把", &mut out);
         assert_eq!(out, "  前端只把");
@@ -849,34 +795,14 @@ mod tests {
     }
 
     #[test]
-    fn live_mode_keeps_margin_on_every_model_line() {
-        // live streams hard-wrap at the measured terminal width; the test
-        // text stays under the 20-cell floor so no wrap can hit regardless
-        // of the environment's terminal, and each of the model's own lines
-        // carries the margin
+    fn block_stream_spaces_and_blank_lines_stay_verbatim() {
         let mut s = BlockStream::indented(2);
-        s.live();
         let mut out = String::new();
-        s.push_delta("short answer", &mut out);
-        assert_eq!(out, "  short answer");
-        s.push_delta(".\nnext", &mut out);
-        assert_eq!(out, "  short answer.\n  next");
+        // leading spaces of a line ride after the margin; blank lines stay
+        // empty (no margin on them)
+        s.push_delta("  indented\n\nnext", &mut out);
+        assert_eq!(out, "    indented\n\n  next");
         assert!(s.finish(&mut out));
-    }
-
-    #[test]
-    fn block_stream_streams_cjk_immediately_and_wraps_at_any_char() {
-        let mut s = BlockStream::indented(2);
-        s.wrap_at(6);
-        let mut out = String::new();
-        // Chinese has no spaces: chars must appear immediately (not buffered
-        // into one huge "word") and may wrap at any character
-        s.push_delta("中中中", &mut out);
-        assert_eq!(out, "  中中中");
-        s.push_delta("中中\n", &mut out);
-        // 4 fit (4*2=8 > 6, so after 3 chars we wrap): margin on every row
-        assert_eq!(out, "  中中中\n  中中\n");
-        assert!(!s.finish(&mut out));
     }
 
     #[test]
@@ -905,19 +831,5 @@ mod tests {
         assert_eq!(cell_width("a\x1b[2Kb"), 2);
         assert_eq!(cell_width("\x1b[31m中\x1b[0m"), 2);
         assert_eq!(cell_width("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"), 4);
-    }
-
-    #[test]
-    fn block_stream_wraps_wide_glyph_without_overrunning_the_row() {
-        // Old code counted emoji as 1 cell, so "ab😀c" fit "one row" it
-        // didn't and the margin on the next visual row landed misaligned.
-        let mut s = BlockStream::indented(2);
-        s.wrap_at(4);
-        let mut out = String::new();
-        s.push_delta("ab😀", &mut out);
-        assert_eq!(out, "  ab😀"); // a+b+emoji = exactly 4 cells
-        s.push_delta("c\n", &mut out);
-        assert_eq!(out, "  ab😀\n  c\n"); // c overflows -> fresh margin row
-        assert!(!s.finish(&mut out));
     }
 }
