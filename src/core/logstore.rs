@@ -822,7 +822,6 @@ pub fn thread_tip(db: &Db, thread_id: &str) -> Option<String> {
 #[derive(Clone)]
 pub struct ThreadSummary {
     pub id: String,
-    pub model: String,
     pub turns: usize,
     pub last: String,
 }
@@ -830,7 +829,7 @@ pub struct ThreadSummary {
 /// Most recently touched threads, newest first.
 pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
     let mut stmt = match db.conn().prepare(
-        "SELECT thread_id, coalesce(model, ''), COUNT(*), coalesce(MAX(datetime_utc), '')
+        "SELECT thread_id, COUNT(*), coalesce(MAX(datetime_utc), '')
          FROM turns WHERE thread_id IS NOT NULL
          GROUP BY thread_id ORDER BY MAX(datetime_utc) DESC LIMIT ?1",
     ) {
@@ -843,9 +842,8 @@ pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(ThreadSummary {
             id: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            model: r.get::<_, String>(1)?,
-            turns: r.get::<_, i64>(2)? as usize,
-            last: r.get::<_, String>(3)?,
+            turns: r.get::<_, i64>(1)? as usize,
+            last: r.get::<_, String>(2)?,
         })
     });
     match rows {
@@ -914,6 +912,31 @@ pub fn thread_first_prompt(db: &Db, thread_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Last user question of a thread — the picker preview should show the most
+/// recent thing the user asked, not the first prompt.
+pub fn thread_last_prompt(db: &Db, thread_id: &str) -> String {
+    // the most recent turn whose first user message has text, newest first
+    let indexed: Option<String> = match db.conn().query_row(
+        "SELECT ts.prompt FROM turns t
+          JOIN turn_search ts ON ts.turn_id = t.id
+         WHERE t.thread_id = ?1 AND ts.prompt != ''
+         ORDER BY t.datetime_utc DESC LIMIT 1",
+        params![thread_id],
+        |r| r.get(0),
+    ) {
+        Ok(p) => Some(p),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            eprintln!("Warning: cannot read the last prompt of {thread_id}: {e}");
+            None
+        }
+    };
+    if let Some(prompt) = indexed {
+        return prompt;
+    }
+    thread_first_prompt(db, thread_id)
+}
+
 /// Most recent thread/conversation id across both identifier spaces.
 /// Fork a thread: a new thread id pointing at the same message-chain tip.
 /// The original keeps its tip, so the two sessions diverge from here without
@@ -946,6 +969,32 @@ pub fn fork_thread(db: &Db, source: &str) -> Option<String> {
         return None;
     }
     Some(new_id)
+}
+
+/// Undo the most recent turn: rewind the thread's tip to the chain tip that
+/// round started from (each `turns` row records `parent_message_hash` —
+/// the tip before the round) so the last round is no longer reachable.
+pub fn undo_thread(db: &Db, thread_id: &str) -> Result<(), String> {
+    let parent: Option<String> = match db.conn().query_row(
+        "SELECT parent_message_hash FROM turns WHERE thread_id = ?1
+          ORDER BY datetime_utc DESC LIMIT 1",
+        params![thread_id],
+        |r| r.get(0),
+    ) {
+        Ok(p) => p,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Err("no turns to undo".to_string()),
+        Err(e) => return Err(format!("cannot read turns of {thread_id}: {e}")),
+    };
+    let Some(parent) = parent else {
+        return Err("no turn boundary to rewind to".to_string());
+    };
+    db.conn()
+        .execute(
+            "UPDATE threads SET tip_message_hash = ?2 WHERE id = ?1",
+            params![thread_id, parent],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("cannot undo {thread_id}: {e}"))
 }
 
 pub fn latest_conversation_id(db: &Db) -> Option<String> {

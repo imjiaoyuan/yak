@@ -145,17 +145,15 @@ fn interactive(db: &Db, only: Option<&str>) -> i32 {
         .iter()
         .map(|t| {
             let mode = modes[&t.id].as_str();
-            let preview: String = crate::core::logstore::thread_first_prompt(db, &t.id)
+            let preview: String = crate::core::logstore::thread_last_prompt(db, &t.id)
                 .chars()
-                .take(36)
+                .take(40)
                 .collect::<String>()
                 .replace('\n', " ");
-            let turns = if t.turns == 1 { "turn" } else { "turns" };
             format!(
-                "{mode:<6} {} · \"{}\" · {} · {} {turns}",
+                "{mode:<6} {} · \"{}\" · {}",
                 &t.id[..t.id.len().min(6)],
                 preview,
-                t.model,
                 crate::core::db::short_time(&now, &t.last)
             )
         })
@@ -200,9 +198,40 @@ fn show_conversation_full(db: &Db, cid: &str) -> i32 {
     );
     rows.reverse();
     let annotated = crate::core::logstore::annotate(db, rows, false);
-    let args = parse(&[], LIST_SPECS).expect("empty argv parses");
-    markdown_output(&annotated, &args, true);
+    render_browse_conversation(&annotated);
     0
+}
+
+/// A clean conversation view for interactive `llm logs`: just the user prompt
+/// and the assistant response per turn, indented in the answer block, no
+/// internal system/reasoning/options noise (those stay in `--full`).
+fn render_browse_conversation(rows: &[serde_json::Value]) {
+    if let Some(first) = rows.first() {
+        println!(
+            "conversation: {} · {}",
+            first["conversation_id"].as_str().unwrap_or(""),
+            first["model"].as_str().unwrap_or("")
+        );
+    }
+    for row in rows {
+        let datetime = row["datetime_utc"].as_str().unwrap_or("");
+        println!("\x1b[2m{} \x1b[0m", datetime);
+        let prompt = row["prompt"].as_str().unwrap_or("");
+        if !prompt.is_empty() {
+            for line in prompt.lines() {
+                println!("\x1b[1m>\x1b[0m {line}");
+            }
+        }
+        let response = row["response"].as_str().unwrap_or("");
+        if !response.is_empty() {
+            let shown = crate::core::render_md::render_once(response, 2);
+            print!("{shown}");
+            if !shown.ends_with('\n') {
+                println!();
+            }
+        }
+        println!();
+    }
 }
 
 fn open_db(args: &ParsedArgs) -> Result<Db, String> {
