@@ -393,8 +393,18 @@ pub fn get_default_model() -> Option<String> {
     mode_default("prompt").map(|(m, _)| m)
 }
 
-pub fn set_default_model(model_id: &str) -> std::io::Result<()> {
-    edit_mode_default(|root| set_mode_default_model_in(root, "prompt", model_id))
+/// Set the same default model for every mode (prompt, agent, chat) — used
+/// when the first provider's first model is chosen on a fresh install, so
+/// `llm`, `llm agent` and `llm chat` all start working without a second
+/// command.
+pub fn set_default_model_all(model_id: &str) -> std::io::Result<()> {
+    edit_mode_default(|root| set_default_model_all_in(root, model_id))
+}
+
+fn set_default_model_all_in(value: &mut serde_json::Value, model_id: &str) {
+    for mode in ["prompt", "agent", "chat"] {
+        set_mode_default_model_in(value, mode, model_id);
+    }
 }
 
 /// Per-model default options, stored as the `models.options` table.
@@ -531,6 +541,16 @@ mod mode_default_tests {
         set_mode_default_thinking_in(&mut v, "chat", None);
         assert!(v["models"]["chat"].get("thinking").is_none());
         assert_eq!(v["models"]["chat"]["model"], json!("a/b"));
+    }
+
+    #[test]
+    fn test_set_default_model_all_covers_every_mode() {
+        let mut v = json!({"models": {"agent": {"model": "old/a"}}});
+        set_default_model_all_in(&mut v, "new/m");
+        for mode in ["prompt", "agent", "chat"] {
+            assert_eq!(v["models"][mode]["model"], json!("new/m"));
+        }
+        assert_eq!(v["models"].get("options").is_none(), true);
     }
 
     #[test]

@@ -75,6 +75,22 @@ pub const ALL: &[Entry] = &[
         "https://api.openai.com/v1",
         "OPENAI_API_KEY",
     ),
+    // OpenCode's Go (and Zen) subscription gateway: one key, two wire
+    // formats. Most models ride the OpenAI /chat/completions path; a few
+    // (MiniMax and friends) speak the Anthropic /v1/messages shape, so the
+    // same endpoint is catalogued under both kinds.
+    e(
+        "opencode-go",
+        "openai-compat",
+        "https://opencode.ai/zen/go/v1",
+        "OPENCODE_API_KEY",
+    ),
+    e(
+        "opencode-go-anthropic",
+        "anthropic",
+        "https://opencode.ai/zen/go",
+        "OPENCODE_API_KEY",
+    ),
     e(
         "deepseek",
         "openai-compat",

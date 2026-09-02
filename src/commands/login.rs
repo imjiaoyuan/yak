@@ -202,8 +202,8 @@ pub(crate) fn wizard() -> Result<(), String> {
                     .copied()
             });
         let hint = match detected {
-            Some(var) => format!("API key (empty = use ${{{var}}})"),
-            None => "API key".to_string(),
+            Some(var) => format!("API key (empty = use ${{{var}}}): "),
+            None => "API key: ".to_string(),
         };
         let typed = crate::term::read_hidden(&hint)
             .unwrap_or_default()
@@ -293,7 +293,7 @@ pub(crate) fn wizard() -> Result<(), String> {
             }
         };
         if let Some(m) = chosen {
-            match config::set_default_model(&format!("{name}/{m}")) {
+            match config::set_default_model_all(&format!("{name}/{m}")) {
                 Ok(()) => eprintln!("\x1b[2mdefault model: {name}/{m}\x1b[0m"),
                 Err(e) => eprintln!("Warning: failed to save default model: {e}"),
             }

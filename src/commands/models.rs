@@ -570,7 +570,7 @@ fn add(argv: &[String]) -> i32 {
                     .and_then(|p| p.models.first().cloned())
             {
                 let qualified = format!("{name}/{first}");
-                if config::try_set_mode_default_model("prompt", &qualified).is_ok() {
+                if config::set_default_model_all(&qualified).is_ok() {
                     eprintln!("\x1b[2mdefault model: {qualified}\x1b[0m");
                 }
             }
