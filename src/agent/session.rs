@@ -255,10 +255,9 @@ impl Session {
                             &serde_json::json!({"type": "compacted", "removed": removed}),
                         );
                     } else {
+                        // settle the streaming partial line; auto-compaction is
+                        // silent on the terminal (only json_mode reports it)
                         view.borrow_mut().pause();
-                        eprintln!(
-                            "\x1b[2m[context compacted: {removed} messages summarized]\x1b[0m"
-                        );
                     }
                 }
             }

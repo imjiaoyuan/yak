@@ -18,7 +18,16 @@ const DEFAULT_TIMEOUT: u64 = 60;
 /// Built-in tool names; script tools must not shadow these. Tied to the
 /// actual registry by a test.
 const BUILTIN_TOOL_NAMES: &[&str] = &[
-    "read", "write", "edit", "bash", "grep", "glob", "ls", "webfetch", "update_plan", "task",
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "grep",
+    "glob",
+    "ls",
+    "webfetch",
+    "update_plan",
+    "task",
 ];
 
 #[derive(Clone, Debug)]

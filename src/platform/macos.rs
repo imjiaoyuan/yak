@@ -196,28 +196,40 @@ pub fn term_size() -> TermSize {
         ws_xpixel: u16,
         ws_ypixel: u16,
     }
-    let cols = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-    let rows = std::env::var("LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
     unsafe extern "C" {
         fn ioctl(fd: i32, request: u64, ...) -> i32;
     }
     const TIOCGWINSZ: u64 = 0x4008_7468;
-    let mut ws = Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+    let winsize = |fd: i32| -> Option<(usize, usize)> {
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let ok = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0;
+        ok.then_some((ws.ws_col as usize, ws.ws_row as usize))
     };
-    let ioctl_ok = unsafe { ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0;
-    let ioctl_size = ioctl_ok.then_some((ws.ws_col as usize, ws.ws_row as usize));
-    // ioctl window is the live size; env vars are only a fallback (see linux)
-    let (c, r) = if let Some((ic, ir)) = ioctl_size {
-        (ic, ir)
+    let size = winsize(1).or_else(|| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()
+            .and_then(|f| {
+                use std::os::unix::io::AsRawFd;
+                winsize(f.as_raw_fd())
+            })
+    });
+    let (c, r) = if let Some((c, r)) = size {
+        (c, r)
     } else {
+        let cols = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let rows = std::env::var("LINES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
         (cols.unwrap_or(80), rows.unwrap_or(24))
     };
     TermSize {

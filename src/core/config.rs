@@ -550,7 +550,7 @@ mod mode_default_tests {
         for mode in ["prompt", "agent", "chat"] {
             assert_eq!(v["models"][mode]["model"], json!("new/m"));
         }
-        assert_eq!(v["models"].get("options").is_none(), true);
+        assert!(v["models"].get("options").is_none());
     }
 
     #[test]

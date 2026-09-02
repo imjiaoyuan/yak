@@ -227,6 +227,9 @@ impl Tool for ReadTool {
             Err(crate::read::Error::Io(e)) => {
                 return ToolOutput::err(format!("cannot read {} ({e})", path.display()));
             }
+            Err(crate::read::Error::Interrupted) => {
+                return ToolOutput::err("read interrupted");
+            }
             Err(crate::read::Error::Binary { ext }) => {
                 let hint = crate::read::binary_hint(&ext)
                     .map(|h| format!(": try `{h}`"))

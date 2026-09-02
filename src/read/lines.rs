@@ -31,6 +31,14 @@ pub(super) fn window_reader(
     let mut lines: Vec<String> = Vec::new();
     let mut count = 0usize;
     loop {
+        // honor ctrl-c mid-read: a huge windowed file must not keep chewing
+        // lines after the user asked to stop (see ReadTool interrupt path)
+        if crate::core::http::interrupted() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "interrupted by user",
+            ));
+        }
         let Some(raw) = read_line(r)? else {
             return Ok(WindowResult {
                 total: LineCount::Exact(count),

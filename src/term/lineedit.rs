@@ -530,7 +530,16 @@ pub fn read_approval_key() -> Option<ApprovalKey> {
             _ => {}
         }
     };
-    eprintln!();
+    // raw mode disables echo, so the pressed key never reaches the screen;
+    // print the resolved answer so the user sees what they chose (y→yes,
+    // a→always, n→no, ctrl-c/ctrl-d/esc→deny), then close the prompt line.
+    let shown = match key {
+        ApprovalKey::Yes => "y",
+        ApprovalKey::Always => "a",
+        ApprovalKey::No => "n",
+        ApprovalKey::Deny => "^",
+    };
+    eprintln!("{shown}");
     Some(key)
 }
 

@@ -295,8 +295,8 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status", "/mcp",
-    "/edit", "/resume", "/fork", "/name", "/undo", "/exit",
+    "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
+    "/mcp", "/edit", "/resume", "/fork", "/name", "/undo", "/exit",
 ];
 
 /// Startup banner: bold identity line, then dim label-aligned rows.

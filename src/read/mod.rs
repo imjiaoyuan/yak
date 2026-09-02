@@ -40,6 +40,8 @@ impl LineCount {
 #[derive(Debug)]
 pub enum Error {
     Io(String),
+    /// the scan was aborted by a cooperative interrupt (ctrl-c) mid-read.
+    Interrupted,
     /// a format we do not parse; the caller renders a bash hint.
     Binary {
         ext: String,
@@ -69,7 +71,13 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
     if is_binary(reader.fill_buf().map_err(io_err)?) {
         return Err(Error::Binary { ext });
     }
-    let w = lines::window_reader(&mut reader, offset.max(1), limit.max(1)).map_err(io_err)?;
+    let w = lines::window_reader(&mut reader, offset.max(1), limit.max(1)).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            Error::Interrupted
+        } else {
+            io_err(e)
+        }
+    })?;
     Ok(Window {
         lines: w.lines,
         total: w.total,

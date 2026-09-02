@@ -202,7 +202,9 @@ pub fn run_agent(
             s.push_str(&format!(
                 "\n\n<context>~{} / ~{} tokens used (~{}%). Be concise; do not re-explain \
                  what earlier context already covered.</context>",
-                used, window, (used * 100).checked_div(window).unwrap_or(0)
+                used,
+                window,
+                (used * 100).checked_div(window).unwrap_or(0)
             ));
         }
         let input = PromptInput {

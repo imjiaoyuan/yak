@@ -57,7 +57,7 @@ impl Renderer {
             return false;
         }
         let mut md = crate::core::render_md::BlockStream::indented(indent);
-        md.wrap_at(crate::term::columns().saturating_sub(indent).max(20));
+        md.live();
         self.md = Some(md);
         true
     }
@@ -80,8 +80,26 @@ impl Renderer {
         }
     }
 
-    /// Write and flush everything buffered.
+    /// Streaming cadence: write only complete visual rows (content up to the
+    /// last newline), holding the trailing partial row until it completes or
+    /// `finish_stream` settles it. A concurrent `\r\x1b[2K` redraw (spinner /
+    /// tool counter / queued notice) therefore can never land on a
+    /// half-written answer row and erase it — the retraction seen earlier.
     fn flush_pending(&mut self) {
+        if !self.pending.is_empty()
+            && let Some(nl) = self.pending.rfind('\n')
+        {
+            let complete: String = self.pending.drain(..=nl).collect();
+            print!("{complete}");
+        }
+        let _ = std::io::stdout().flush();
+        self.last_flush = std::time::Instant::now();
+    }
+
+    /// Settle the stream: flush everything including a dangling partial row
+    /// (used at tool / task boundaries so chrome never starts mid-line and no
+    /// trailing text is lost).
+    fn flush_all(&mut self) {
         if !self.pending.is_empty() {
             print!("{}", self.pending);
             self.pending.clear();
@@ -103,7 +121,7 @@ impl Renderer {
                 self.pending.push_str(&chunk);
             }
         }
-        self.flush_pending();
+        self.flush_all();
     }
 
     /// newline after stream if anything was printed

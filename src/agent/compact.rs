@@ -47,9 +47,7 @@ fn msg_tokens(msg: &Msg) -> u64 {
             let calls: u64 = tool_calls
                 .iter()
                 .map(|c| {
-                    text_tokens(&c.name)
-                        + text_tokens(&c.arguments.to_string())
-                        + 8 // tool-call overhead
+                    text_tokens(&c.name) + text_tokens(&c.arguments.to_string()) + 8 // tool-call overhead
                 })
                 .sum();
             return text_tokens(text) + calls + 16;

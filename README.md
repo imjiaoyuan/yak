@@ -1,6 +1,6 @@
 # llm
 
-A single-binary, terminal-first AI hub in Rust. One executable covers the whole loop: one-shot prompts, a conversational mode, an agent with tools and sub-agents, custom subcommands, a searchable conversation store, and multimodal input and output (images in, image/TTS out). Everything is synchronous, the whole dependency set is four crates, all state lives under one user directory, and both the chat and agent REPLs share the same line editor, pickers, spinner and key bindings.
+A single-binary, terminal-first AI hub in Rust. One executable covers the whole loop: one-shot prompts, a conversational mode, an agent with tools and sub-agents, custom subcommands, a searchable conversation store, and multimodal input and output (images in, image/TTS out). Everything is synchronous, the whole dependency set is five crates, all state lives under one user directory, and both the chat and agent REPLs share the same line editor, pickers, spinner and key bindings.
 
 ## Install
 

@@ -165,31 +165,43 @@ pub fn term_size() -> TermSize {
         ws_xpixel: u16,
         ws_ypixel: u16,
     }
-    let cols = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-    let rows = std::env::var("LINES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
     unsafe extern "C" {
         fn ioctl(fd: i32, request: u64, ...) -> i32;
     }
     const TIOCGWINSZ: u64 = 0x5413;
-    let mut ws = Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+    let winsize = |fd: i32| -> Option<(usize, usize)> {
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let ok = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0;
+        ok.then_some((ws.ws_col as usize, ws.ws_row as usize))
     };
-    let ioctl_ok = unsafe { ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0;
-    let ioctl_size = ioctl_ok.then_some((ws.ws_col as usize, ws.ws_row as usize));
-    // the ioctl window is the live size (a stale $COLUMNS from a resized
-    // shell would otherwise make us hard-wrap past the real edge, clipping
-    // long lines on the right); env vars are only a fallback when ioctl
-    // cannot answer (redirected output, etc.)
-    let (c, r) = if let Some((ic, ir)) = ioctl_size {
-        (ic, ir)
+    // Prefer the live window from stdout; fall back to the controlling
+    // terminal when stdout is redirected, so a stale $COLUMNS can't make us
+    // hard-wrap past the real edge and soft-wrap the left margin.
+    let size = winsize(1).or_else(|| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()
+            .and_then(|f| {
+                use std::os::unix::io::AsRawFd;
+                winsize(f.as_raw_fd())
+            })
+    });
+    let (c, r) = if let Some((c, r)) = size {
+        (c, r)
     } else {
+        let cols = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let rows = std::env::var("LINES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
         (cols.unwrap_or(80), rows.unwrap_or(24))
     };
     TermSize {

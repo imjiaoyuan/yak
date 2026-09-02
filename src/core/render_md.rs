@@ -3,6 +3,8 @@
 //! model output. Tables pass through verbatim; malformed syntax degrades to
 //! the original text rather than erroring.
 
+use unicode_width::UnicodeWidthChar;
+
 /// Streaming wrapper: feed deltas, whole lines are rendered as they
 /// complete into the caller's chunk buffer (printed by the caller);
 /// `finish` flushes a trailing partial line (with newline) and reports
@@ -61,7 +63,12 @@ impl MdStream {
 /// or redrawn, so output streams in one direction with no flicker.
 pub struct BlockStream {
     margin: String,
+    /// left margin width, also used to derive the live hard-wrap width
+    indent: usize,
+    /// hard-wrap width; refreshed from the terminal each push unless `fixed`
     wrap: usize,
+    /// false = re-measure `wrap` from the live terminal width (resize-safe)
+    fixed: bool,
     row_cells: usize,
     at_start: bool,
     emitted: bool,
@@ -75,7 +82,9 @@ impl BlockStream {
     pub fn indented(spaces: usize) -> BlockStream {
         BlockStream {
             margin: " ".repeat(spaces),
-            wrap: 0,
+            indent: spaces,
+            wrap: 20,
+            fixed: false,
             row_cells: 0,
             at_start: true,
             emitted: false,
@@ -84,11 +93,28 @@ impl BlockStream {
         }
     }
 
+    /// Hard-wrap at a fixed width (tests only; live streaming uses [`Self::live`]).
+    #[cfg(test)]
     pub fn wrap_at(&mut self, width: usize) {
         self.wrap = width;
+        self.fixed = true;
+    }
+
+    /// Track the live terminal width instead of freezing it, so a resize
+    /// mid-stream reflows rather than soft-wrapping into the margin.
+    pub fn live(&mut self) {
+        self.fixed = false;
+        self.refresh_width();
+    }
+
+    fn refresh_width(&mut self) {
+        self.wrap = crate::term::columns().saturating_sub(self.indent).max(20);
     }
 
     pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
+        if !self.fixed {
+            self.refresh_width();
+        }
         for ch in text.chars() {
             // CJK / fullwidth chars have no space-separated words and can be
             // broken at any character, so stream them immediately (a Chinese
@@ -169,6 +195,9 @@ impl BlockStream {
     /// footer / chrome starts on its own line; returns whether a newline was
     /// added.
     pub fn finish(&mut self, rendered: &mut String) -> bool {
+        if !self.fixed {
+            self.refresh_width();
+        }
         self.flush_word(rendered);
         if self.emitted && !self.at_start {
             rendered.push('\n');
@@ -427,7 +456,7 @@ pub(crate) fn cell_width(s: &str) -> usize {
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == 0x1b {
-            i += s[i..].find('m').map_or(bytes.len() - i, |p| p + 1);
+            i = escape_end(bytes, i);
             continue;
         }
         let c = s[i..].chars().next().unwrap();
@@ -437,24 +466,50 @@ pub(crate) fn cell_width(s: &str) -> usize {
     w
 }
 
-/// 2 for CJK and other fullwidth ranges, 1 otherwise.
+/// Byte offset just past the escape sequence starting at `i` (`ESC`). Handles
+/// CSI (`ESC [`…final), OSC (`ESC ]`…BEL/ST), and the short two-byte forms, so
+/// a stray sequence can never make us skip real content or count a control
+/// byte as a cell.
+fn escape_end(bytes: &[u8], i: usize) -> usize {
+    let n = bytes.len();
+    match bytes.get(i + 1) {
+        Some(b'[') => {
+            let mut j = i + 2;
+            while j < n {
+                if (0x40..=0x7E).contains(&bytes[j]) {
+                    return j + 1;
+                }
+                j += 1;
+            }
+            n
+        }
+        Some(b']') => {
+            let mut j = i + 2;
+            while j < n {
+                match bytes[j] {
+                    0x07 => return j + 1,
+                    0x1b if bytes.get(j + 1) == Some(&b'\\') => return j + 2,
+                    _ => j += 1,
+                }
+            }
+            n
+        }
+        Some(_) => i + 2,
+        None => n,
+    }
+}
+
+/// Terminal cell width: delegated to [`unicode-width`], with the one emulator correction for U+FF9E/U+FF9F
+/// halfwidth voiced sound marks, which [`unicode-width`] reports as 0 but
+/// real terminals render as 1 cell. Getting this right keeps hard-wrap widths
+/// aligned with the terminal's real column count, so rows don't soft-wrap
+/// into the left margin or "swallow" the last glyph.
 pub(crate) fn char_width(c: char) -> usize {
-    let u = c as u32;
-    let wide = matches!(u,
-        0x1100..=0x115F
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE4F
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
-        | 0x20000..=0x2FFFD
-        | 0x30000..=0x3FFFD);
-    if wide { 2 } else { 1 }
+    if matches!(c, '\u{FF9E}' | '\u{FF9F}') {
+        1
+    } else {
+        UnicodeWidthChar::width(c).unwrap_or(0)
+    }
 }
 
 fn is_hr(t: &str) -> bool {
@@ -840,4 +895,45 @@ mod tests {
         assert!(!s.finish(&mut out));
     }
 
+    #[test]
+    fn char_width_handles_zero_width_wide_and_emoji() {
+        // zero-width: combining accent, ZWJ, variation selector
+        assert_eq!(char_width('\u{0301}'), 0);
+        assert_eq!(char_width('\u{200D}'), 0);
+        assert_eq!(char_width('\u{FE0F}'), 0);
+        // wide/fullwidth
+        assert_eq!(char_width('中'), 2);
+        assert_eq!(char_width('Ａ'), 2);
+        // emoji pictographs are 2 cells, not 1 (this is what made rows drift)
+        assert_eq!(char_width('\u{1F600}'), 2); // 😀
+        assert_eq!(char_width('\u{1F3AF}'), 2); // 🎯
+        // narrow / halfwidth sound marks
+        assert_eq!(char_width('a'), 1);
+        assert_eq!(char_width('\u{FF9E}'), 1);
+        assert_eq!(char_width('\u{00B7}'), 1); // ·, ambiguous
+    }
+
+    #[test]
+    fn cell_width_skips_every_escape_kind_without_losing_content() {
+        // CSI whose final byte is not 'm' (cursor-up), OSC 8 hyperlink, plain
+        // SGR, and a clear-line CSI — none may consume a following cell.
+        assert_eq!(cell_width("\x1b[1Aab"), 2);
+        assert_eq!(cell_width("a\x1b[2Kb"), 2);
+        assert_eq!(cell_width("\x1b[31m中\x1b[0m"), 2);
+        assert_eq!(cell_width("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"), 4);
+    }
+
+    #[test]
+    fn block_stream_wraps_wide_glyph_without_overrunning_the_row() {
+        // Old code counted emoji as 1 cell, so "ab😀c" fit "one row" it
+        // didn't and the margin on the next visual row landed misaligned.
+        let mut s = BlockStream::indented(2);
+        s.wrap_at(4);
+        let mut out = String::new();
+        s.push_delta("ab😀", &mut out);
+        assert_eq!(out, "  ab😀"); // a+b+emoji = exactly 4 cells
+        s.push_delta("c\n", &mut out);
+        assert_eq!(out, "  ab😀\n  c\n"); // c overflows -> fresh margin row
+        assert!(!s.finish(&mut out));
+    }
 }
