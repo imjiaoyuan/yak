@@ -209,25 +209,6 @@ fn restore_default_sigint() {
     crate::term::restore_sigint_handler();
 }
 
-/// Compose a prompt in $EDITOR; returns None when the editor fails or
-/// closes with an empty buffer.
-fn editor_prompt() -> Option<String> {
-    let path = std::env::temp_dir().join(format!("llm-{}.md", crate::core::db::ulid()));
-    std::fs::write(&path, "").ok()?;
-    let editor =
-        std::env::var("EDITOR").unwrap_or_else(|_| crate::platform::default_editor().to_string());
-    let status = std::process::Command::new(&editor)
-        .arg(&path)
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    Some(content)
-}
-
 /// Home-directory abbreviation for the status line.
 fn abbrev_home(path: &str) -> String {
     if let Some(home) = std::env::var_os("HOME") {
@@ -245,7 +226,7 @@ fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> Stri
         "\x1b[2mkeys      enter submit · alt+enter or trailing \\ = newline · tab complete",
     );
     h.push_str("\n           ↑/↓ history · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /help /clear /init /mcp /edit /exit · !cmd runs shell");
+    h.push_str("\ncommands   /help /clear /init /mcp /exit · !cmd runs shell");
     // only the switch away from the current mode is worth showing
     let switches: Vec<&str> = [
         ("/ask", approval::Mode::AlwaysAsk),
@@ -296,7 +277,7 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 
 const SLASH_COMMANDS: &[&str] = &[
     "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
-    "/mcp", "/edit", "/undo", "/exit",
+    "/mcp", "/undo", "/exit",
 ];
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
@@ -432,7 +413,7 @@ fn repl_command(
             eprintln!("  /skill:name   run one             /memory  global memory");
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
             eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
-            eprintln!("  /undo         drop the last round   /edit   compose in $EDITOR");
+            eprintln!("  /undo         drop the last round");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!("  models live in `llm models` (set agent defaults there)\x1b[0m");
@@ -671,16 +652,6 @@ fn repl_command(
         "/init" => {
             if let Err(e) = session.run_task(INIT_TASK, Vec::new()) {
                 eprintln!("Error: {e}");
-            }
-        }
-        "/edit" => {
-            // compose in $EDITOR, submit as one task
-            match editor_prompt() {
-                Some(text) if !text.trim().is_empty() => {
-                    run_task_logged(session, text.trim(), &mut Vec::new());
-                }
-                Some(_) => {}
-                None => eprintln!("\x1b[2meditor closed without a prompt\x1b[0m"),
             }
         }
         "/exit" | "/quit" => return true,

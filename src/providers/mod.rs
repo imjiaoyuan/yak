@@ -92,6 +92,17 @@ pub fn auth_header(kind: &str, key: &str) -> (String, String) {
     }
 }
 
+/// Prompt-cache hit tokens from an openai-compat usage object, in whatever
+/// shape the gateway reports: DeepSeek `prompt_cache_hit_tokens`, OpenAI
+/// `prompt_tokens_details.cached_tokens`, OpenRouter top-level `cached_tokens`.
+pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
+    usage["prompt_cache_hit_tokens"]
+        .as_u64()
+        .or(usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+        .or(usage["cached_tokens"].as_u64())
+        .unwrap_or(0)
+}
+
 /// A text attachment's decoded body. Attachments carry base64; text blocks
 /// need the plaintext, and anything not valid UTF-8 is refused loudly.
 pub(crate) fn decoded_text(a: &Attachment) -> Result<String, String> {

@@ -40,6 +40,29 @@ fn attachment_block(a: &Attachment) -> Result<Value, String> {
     }
 }
 
+/// Mark the last content block of the final message as a prompt-cache
+/// breakpoint: every later round resends this exact prefix, so the next
+/// request reads the whole conversation back instead of re-billing it.
+/// Caching is opt-in on the Messages API; without a marker nothing caches.
+fn mark_conversation_tip(messages: &mut [Value]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    let content = &mut last["content"];
+    if content.is_string() {
+        let text = content.as_str().unwrap_or("").to_string();
+        *content = json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"}
+        }]);
+    } else if let Some(blocks) = content.as_array_mut()
+        && let Some(block) = blocks.last_mut()
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
+}
+
 /// A user message body: plain text, or content blocks when attachments ride.
 fn user_content(text: &str, attachments: &[Attachment]) -> Result<Value, String> {
     if attachments.is_empty() {
@@ -133,6 +156,13 @@ pub fn build_body(
             "content": user_content(input.prompt, input.attachments)?
         }));
     }
+    // breakpoint on the conversation tip (multi-turn pattern: the marker
+    // rides forward one turn each request; earlier markers stay valid).
+    // First-round-only requests skip it: a one-shot prompt is never resent,
+    // so marking it would buy a cache write nothing ever reads
+    if !input.history.is_empty() {
+        mark_conversation_tip(&mut messages);
+    }
 
     let mut body = json!({
         "model": m.model_id,
@@ -141,17 +171,28 @@ pub fn build_body(
         "stream": stream,
     });
     if let Some(system) = input.system {
-        body["system"] = json!(system);
+        // a breakpoint on the last system block caches tools+system together
+        body["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"}
+        }]);
     }
     if !input.tools.is_empty() {
-        body["tools"] = Value::Array(
-            input.tools
-                .iter()
-                .map(|t| {
-                    json!({"name": t.name, "description": t.description, "input_schema": t.parameters})
-                })
-                .collect(),
-        );
+        let mut tools: Vec<Value> = input
+            .tools
+            .iter()
+            .map(|t| {
+                json!({"name": t.name, "description": t.description, "input_schema": t.parameters})
+            })
+            .collect();
+        // no system prompt to pin: the breakpoint falls to the last tool
+        if input.system.is_none()
+            && let Some(last) = tools.last_mut()
+        {
+            last["cache_control"] = json!({"type": "ephemeral"});
+        }
+        body["tools"] = Value::Array(tools);
     }
     for (k, v) in &m.options {
         let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
@@ -176,6 +217,20 @@ fn map_stop(reason: &str) -> StopReason {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::Length,
         _ => StopReason::Stop,
+    }
+}
+
+/// Usage with Anthropic's cache fields folded in: `input_tokens` excludes
+/// the cache read and write, but `Usage.input` means the whole prompt (the
+/// openai-compat `prompt_tokens` semantics), so token counts and the
+/// `cache N%` footer stay comparable across provider kinds.
+fn usage_with_cache(u: &Value, input: u64, output: u64) -> Usage {
+    let read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    let write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    Usage {
+        input: input + read + write,
+        output,
+        cached: read,
     }
 }
 
@@ -225,11 +280,7 @@ pub(crate) fn feed_event(
                     .as_u64()
                     .or(u["completion_tokens"].as_u64()),
             ) {
-                *usage = Some(Usage {
-                    input: p,
-                    output: c,
-                    cached: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
-                });
+                *usage = Some(usage_with_cache(u, p, c));
             }
             if let Some(reason) = chunk["delta"]["stop_reason"].as_str() {
                 *stop = map_stop(reason);
@@ -245,13 +296,7 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
         value["usage"]["input_tokens"].as_u64(),
         value["usage"]["output_tokens"].as_u64(),
     ) {
-        (Some(p), Some(c)) => Some(Usage {
-            input: p,
-            output: c,
-            cached: value["usage"]["cache_read_input_tokens"]
-                .as_u64()
-                .unwrap_or(0),
-        }),
+        (Some(p), Some(c)) => Some(usage_with_cache(&value["usage"], p, c)),
         _ => None,
     };
     for (i, block) in value["content"]
@@ -495,6 +540,115 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert!(body.get("tools").unwrap().as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn system_breakpoint_pins_tools_and_system() {
+        let tools = vec![ToolDef {
+            name: "ls".into(),
+            description: "list files".into(),
+            parameters: json!({"type": "object"}),
+        }];
+        let history = [Msg::user("hi")];
+        let mut i = input(&history, &tools);
+        i.system = Some("be brief");
+        let body = build_body(&model(), &i, false).unwrap();
+        let blocks = body["system"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "be brief");
+        // the marker caches tools+system together; tools carry none of their own
+        assert_eq!(blocks[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert!(body["tools"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn no_system_moves_the_breakpoint_to_the_last_tool() {
+        let tools = vec![
+            ToolDef {
+                name: "ls".into(),
+                description: "list files".into(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDef {
+                name: "read".into(),
+                description: "read a file".into(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+        let body = build_body(&model(), &input(&[Msg::user("hi")], &tools), false).unwrap();
+        assert!(body.get("system").is_none());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn conversation_tip_carries_the_breakpoint() {
+        let history = vec![Msg::user("hi")];
+        let body = build_body(&model(), &input(&history, &[]), false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        // earlier turns stay plain unmarked strings
+        assert_eq!(msgs[0]["content"], json!("hi"));
+        let tip = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(tip.len(), 1);
+        assert_eq!(tip[0]["type"], "text");
+        assert_eq!(tip[0]["text"], "go");
+        assert_eq!(tip[0]["cache_control"], json!({"type": "ephemeral"}));
+    }
+
+    #[test]
+    fn tool_result_tip_carries_the_breakpoint() {
+        let history = vec![
+            Msg::user("run"),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    arguments: json!({"command": "ls"}),
+                }],
+            },
+            Msg::tool_result("t1", "bash", "out"),
+        ];
+        let mut i = input(&history, &[]);
+        i.prompt = ""; // continue after tool results
+        let body = build_body(&model(), &i, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        let tip = msgs.last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(tip.len(), 1);
+        assert_eq!(tip[0]["type"], "tool_result");
+        assert_eq!(tip[0]["cache_control"], json!({"type": "ephemeral"}));
+    }
+
+    #[test]
+    fn first_round_prompt_stays_unmarked() {
+        // no history: a one-shot prompt is never resent, so a breakpoint on
+        // it would pay the cache-write premium for a read that never comes
+        let body = build_body(&model(), &input(&[], &[]), false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], json!("go"));
+    }
+
+    #[test]
+    fn usage_folds_cache_tokens_into_input() {
+        let value = json!({
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 500,
+                "cache_creation_input_tokens": 40
+            },
+            "content": []
+        });
+        let usage = feed_complete(&value, &mut |_| {}).unwrap();
+        assert_eq!(usage.input, 640);
+        assert_eq!(usage.cached, 500);
+        assert_eq!(usage.output, 20);
+        // the whole-prompt denominator keeps the share at or below 100%
+        assert_eq!(usage.cache_percent(), 78);
     }
 
     #[test]

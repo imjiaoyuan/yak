@@ -57,7 +57,8 @@ pub struct Usage {
     pub output: u64,
     /// input tokens served from the provider's prompt cache, when reported:
     /// DeepSeek `prompt_cache_hit_tokens`, OpenAI `prompt_tokens_details.
-    /// cached_tokens`, Anthropic `cache_read_input_tokens`
+    /// cached_tokens`, OpenRouter `cached_tokens`, Anthropic
+    /// `cache_read_input_tokens` (whose read+write also fold into `input`)
     pub cached: u64,
 }
 

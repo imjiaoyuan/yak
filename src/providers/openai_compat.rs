@@ -215,10 +215,7 @@ pub(crate) fn feed_chunk(
         *usage = Some(Usage {
             input: p,
             output: c,
-            cached: chunk["usage"]["prompt_cache_hit_tokens"]
-                .as_u64()
-                .or(chunk["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64())
-                .unwrap_or(0),
+            cached: super::cache_hit_tokens(&chunk["usage"]),
         });
     }
     let Some(choice) = chunk["choices"].get(0) else {
@@ -266,10 +263,7 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
         (Some(p), Some(c)) => Some(Usage {
             input: p,
             output: c,
-            cached: value["usage"]["prompt_cache_hit_tokens"]
-                .as_u64()
-                .or(value["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64())
-                .unwrap_or(0),
+            cached: super::cache_hit_tokens(&value["usage"]),
         }),
         _ => None,
     };
@@ -695,6 +689,16 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(usage.unwrap().cached, 40);
+        // OpenRouter reports it as a bare top-level cached_tokens
+        let mut usage = None;
+        feed_chunk(
+            &json!({"usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                              "cached_tokens": 60}}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(usage.unwrap().cached, 60);
     }
 
     #[test]
