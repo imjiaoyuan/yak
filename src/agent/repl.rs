@@ -16,6 +16,17 @@ pub fn repl(
     let mut settings = crate::agent::settings::load();
     let mut editor = crate::term::lineedit::LineEditor::new();
 
+    // two-way undo: write/edit targets snapshot before their first touch,
+    // `/undo` restores the files together with the conversation round (the
+    // tree is keyed by a fresh ulid and dies with the session)
+    session.checkpoints = Some(std::sync::Arc::new(std::sync::Mutex::new(
+        crate::agent::checkpoint::CheckpointState::new(
+            crate::core::config::user_dir()
+                .join("checkpoints")
+                .join(crate::core::db::ulid()),
+        ),
+    )));
+
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
 
@@ -436,6 +447,11 @@ fn repl_command(
         "/clear" => {
             session.seed.clear();
             session.conversation_id = None;
+            if let Some(ck) = &session.checkpoints
+                && let Ok(mut c) = ck.lock()
+            {
+                c.clear();
+            }
             session.tokens = (0, 0);
             session.tokens_cached = 0;
             eprint!("\x1b[2J\x1b[H");
@@ -450,13 +466,31 @@ fn repl_command(
             print_banner(session, &agents);
         }
         "/undo" => {
+            // files first: the round's first-touch snapshots restore, then
+            // the conversation rewinds to where that round began
+            let round = session
+                .checkpoints
+                .as_ref()
+                .and_then(|ck| ck.lock().ok().and_then(|mut c| c.undo()));
             let last_user = session
                 .seed
                 .iter()
                 .rposition(|m| matches!(m, crate::providers::Msg::User { .. }));
-            let Some(idx) = last_user else {
-                eprintln!("\x1b[2mnothing to undo\x1b[0m");
-                return false;
+            let idx = match (round, last_user) {
+                (Some((len, files)), _) => {
+                    if files > 0 {
+                        eprintln!(
+                            "\x1b[2mrestored {files} file{}\x1b[0m",
+                            if files == 1 { "" } else { "s" }
+                        );
+                    }
+                    len
+                }
+                (None, Some(idx)) => idx,
+                (None, None) => {
+                    eprintln!("\x1b[2mnothing to undo\x1b[0m");
+                    return false;
+                }
             };
             session.seed.truncate(idx);
             if let (Some(db), Some(cid)) = (&session.db, &session.conversation_id)

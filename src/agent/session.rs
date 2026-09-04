@@ -45,6 +45,21 @@ pub struct Session {
     pub tokens: (u64, u64),
     /// cumulative input tokens served from the provider prompt cache
     pub tokens_cached: u64,
+    /// first-touch write/edit snapshots for two-way `/undo`; enabled by the
+    /// interactive REPL, None in one-shot and child-agent runs
+    pub checkpoints:
+        Option<std::sync::Arc<std::sync::Mutex<crate::agent::checkpoint::CheckpointState>>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // snapshots live and die with the interactive session
+        if let Some(ck) = &self.checkpoints
+            && let Ok(mut ck) = ck.lock()
+        {
+            ck.clear();
+        }
+    }
 }
 
 impl Session {
@@ -86,6 +101,7 @@ impl Session {
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
+            checkpoints: self.checkpoints.clone(),
         };
         let json_mode = self.json_mode;
         let model_id = self.model.model_id.clone();
@@ -291,6 +307,11 @@ impl Session {
                 .unwrap_or_default()
         };
         let seed_len = self.seed.len();
+        if let Some(ck) = &self.checkpoints
+            && let Ok(mut ck) = ck.lock()
+        {
+            ck.begin_round(seed_len);
+        }
         let result = run_agent(
             &self.model,
             &self.tools,
@@ -309,6 +330,13 @@ impl Session {
         view.borrow_mut().abort();
         // the interrupt flag must not leak into the next prompt or task
         crate::core::http::clear_interrupt();
+        // close the checkpoint round on every exit path so the undo stack
+        // stays aligned with the conversation rounds
+        if let Some(ck) = &self.checkpoints
+            && let Ok(mut ck) = ck.lock()
+        {
+            ck.end_round();
+        }
         self.tokens.0 += total_in;
         self.tokens.1 += total_out;
         self.tokens_cached += total_cached;

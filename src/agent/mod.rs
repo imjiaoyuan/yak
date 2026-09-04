@@ -3,6 +3,7 @@
 //! `ToolCall`) lives in `providers` — see `providers/mod.rs`.
 
 pub mod approval;
+pub mod checkpoint;
 pub mod compact;
 pub mod mcp;
 pub mod memory;
@@ -79,6 +80,9 @@ pub struct AgentOptions<'a> {
     pub compact: Option<compact::CompactConfig>,
     /// reasoning effort level; None sends no parameter
     pub reasoning: Option<String>,
+    /// first-touch file snapshots for two-way `/undo` (interactive
+    /// sessions); None disables checkpointing
+    pub checkpoints: Option<std::sync::Arc<std::sync::Mutex<checkpoint::CheckpointState>>>,
 }
 
 pub struct AgentOutcome {
@@ -318,6 +322,15 @@ pub fn run_agent(
                         preview: cleared.preview,
                         diff: cleared.diff,
                     });
+                    // two-way undo: snapshot a write/edit target before its
+                    // first touch of the round (the approval already ran)
+                    if matches!(call.name.as_str(), "write" | "edit")
+                        && let Some(ck) = &opts.checkpoints
+                        && let Some(path) = call.arguments["path"].as_str()
+                        && let Ok(mut ck) = ck.lock()
+                    {
+                        ck.snapshot(&tools::resolve_path(&opts.cwd, path));
+                    }
                     let mut log = |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
                     cleared.tool.execute(&call.arguments, &opts.cwd, &mut log)
                 }

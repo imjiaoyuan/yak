@@ -467,6 +467,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         mcp,
         tokens: (0, 0),
         tokens_cached: 0,
+        checkpoints: None,
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;
