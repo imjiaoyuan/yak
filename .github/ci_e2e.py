@@ -173,7 +173,9 @@ def run(cmd, env, cwd=None, stdin=None):
 
 
 def main():
-    binary = sys.argv[1]
+    # absolute: some scenarios run with cwd=work, and a relative binary
+    # path would resolve against the child's cwd on posix and vanish
+    binary = os.path.abspath(sys.argv[1])
     srv = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
