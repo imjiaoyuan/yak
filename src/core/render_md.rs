@@ -57,24 +57,55 @@ impl MdStream {
 }
 
 /// Live verbatim streaming: the model's text is written exactly as it
-/// arrives — characters, spacing and order untouched — and the terminal's
-/// own soft-wrap owns the right edge (the terminal is the authority on its
-/// widths, so nothing here measures or breaks). The only host addition is a
-/// left margin printed at the start of each of the model's own lines.
-/// Nothing is erased or redrawn, so the stream runs one direction.
+/// arrives — characters, spacing and order untouched. The host owns the
+/// right edge: rows hard-wrap at `wrap` terminal cells (unicode-width,
+/// CJK-aware) so a continuation row carries the margin instead of the
+/// terminal's soft-wrap dropping it to column 0; a space within the last
+/// few cells breaks there, sparing most word middles. With `wrap` 0 nothing
+/// is measured and the terminal's soft-wrap applies. Nothing is erased or
+/// redrawn, so the stream runs one direction.
 pub struct BlockStream {
     margin: String,
+    /// margin width in cells (spaces, so its length)
+    margin_cells: usize,
     at_start: bool,
     emitted: bool,
+    /// row budget in terminal cells, margin excluded; 0 = never wrap
+    wrap: usize,
+    /// re-read the terminal width at every line start (resize-safe)
+    dynamic: bool,
+    /// cells printed on the current row
+    cells: usize,
 }
+
+/// A space this close to the right edge is taken as the break point: the
+/// next word would straddle the edge anyway.
+const WRAP_EARLY: usize = 3;
 
 impl BlockStream {
     pub fn indented(spaces: usize) -> BlockStream {
         BlockStream {
             margin: " ".repeat(spaces),
+            margin_cells: spaces,
             at_start: true,
             emitted: false,
+            wrap: 0,
+            dynamic: false,
+            cells: 0,
         }
+    }
+
+    /// Terminal mode: wrap at the live terminal width, re-read at every
+    /// line start so a resize applies from the next row on.
+    pub fn wrap_terminal(&mut self) {
+        self.dynamic = true;
+        self.refresh_width();
+    }
+
+    fn refresh_width(&mut self) {
+        self.wrap = crate::term::columns()
+            .saturating_sub(self.margin_cells)
+            .max(20);
     }
 
     pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
@@ -83,13 +114,48 @@ impl BlockStream {
                 rendered.push('\n');
                 self.at_start = true;
                 self.emitted = true;
+                self.cells = 0;
+                if self.dynamic {
+                    self.refresh_width();
+                }
                 continue;
+            }
+            // a tab advances to the next 8-column stop from the row's
+            // absolute column (margin included); counting it 0 would let a
+            // row we think fits overflow the terminal and soft-wrap to
+            // column 0, losing the margin
+            let mut w = if ch == '\t' {
+                8 - ((self.margin_cells + self.cells) % 8)
+            } else {
+                char_width(ch)
+            };
+            if self.wrap > 0 {
+                if ch == ' ' && self.cells + 1 > self.wrap.saturating_sub(WRAP_EARLY) {
+                    // early break at the space: it is consumed, not printed
+                    rendered.push('\n');
+                    rendered.push_str(&self.margin);
+                    self.at_start = false;
+                    self.emitted = true;
+                    self.cells = 0;
+                    continue;
+                }
+                if self.cells + w > self.wrap && self.cells > 0 {
+                    rendered.push('\n');
+                    rendered.push_str(&self.margin);
+                    self.cells = 0;
+                    // a tab's advance depends on where it lands: recompute
+                    // from the fresh row start
+                    if ch == '\t' {
+                        w = 8 - (self.margin_cells % 8);
+                    }
+                }
             }
             if self.at_start {
                 rendered.push_str(&self.margin);
                 self.at_start = false;
             }
             rendered.push(ch);
+            self.cells += w;
             self.emitted = true;
         }
     }
@@ -792,6 +858,75 @@ mod tests {
         s.push_delta("app.js 里的", &mut out);
         assert_eq!(out, "  前端只把\n  app.js 里的");
         assert!(s.finish(&mut out));
+    }
+
+    #[test]
+    fn block_stream_wrap_keeps_margin_on_continuations() {
+        let mut s = BlockStream::indented(2);
+        s.wrap = 10;
+        let mut out = String::new();
+        s.push_delta("aaaa bbbb cccc dddd\n", &mut out);
+        assert_eq!(out, "  aaaa bbbb\n  cccc dddd\n");
+    }
+
+    #[test]
+    fn block_stream_breaks_early_at_an_edge_space() {
+        let mut s = BlockStream::indented(2);
+        s.wrap = 10;
+        let mut out = String::new();
+        s.push_delta("aaaa bb cccccccccc", &mut out);
+        // the space after "bb" sits inside the early window: it becomes the
+        // break and is consumed rather than printed at the row's end
+        assert_eq!(out, "  aaaa bb\n  cccccccccc");
+    }
+
+    #[test]
+    fn block_stream_wide_char_never_straddles_the_wrap() {
+        let mut s = BlockStream::indented(2);
+        s.wrap = 4;
+        let mut out = String::new();
+        s.push_delta("中中中中\n", &mut out);
+        assert_eq!(out, "  中中\n  中中\n");
+    }
+
+    #[test]
+    fn block_stream_overlong_token_char_breaks() {
+        let mut s = BlockStream::indented(2);
+        s.wrap = 6;
+        let mut out = String::new();
+        s.push_delta("GroupShuffleSplit\n", &mut out);
+        // no space to prefer: the break lands exactly at the width
+        assert_eq!(out, "  GroupS\n  huffle\n  Split\n");
+    }
+
+    #[test]
+    fn block_stream_tabs_count_real_cells() {
+        // wrap 8, margin 2: "a" sits at absolute col 2, the first tab jumps
+        // to col 8 (6 cells); the next tab would land at col 16, past the
+        // budget, so the row breaks and that tab opens the next row
+        let mut s = BlockStream::indented(2);
+        s.wrap = 8;
+        let mut out = String::new();
+        s.push_delta("a\t\tbb\n", &mut out);
+        assert_eq!(out, "  a\t\n  \tbb\n");
+        // a tab that fits changes nothing about the row count
+        let mut s = BlockStream::indented(2);
+        s.wrap = 10;
+        let mut out = String::new();
+        s.push_delta("aaaa\tbb\n", &mut out);
+        assert_eq!(out, "  aaaa\tbb\n");
+    }
+
+    #[test]
+    fn block_stream_terminal_mode_reads_live_columns() {
+        let mut s = BlockStream::indented(2);
+        s.wrap_terminal();
+        // wiring: terminal mode derives the budget from the live width and
+        // refreshes it at every line start (resize takes the next row)
+        assert_eq!(s.wrap, crate::term::columns().saturating_sub(2).max(20));
+        let mut out = String::new();
+        s.push_delta("\nx", &mut out);
+        assert_eq!(s.wrap, crate::term::columns().saturating_sub(2).max(20));
     }
 
     #[test]

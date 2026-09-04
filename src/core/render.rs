@@ -22,8 +22,8 @@ pub struct Renderer {
     /// suppress streaming output to stdout (--json / -x modes buffer instead)
     quiet: bool,
     /// live block streaming (terminal modes opt in via terminal_md): the
-    /// answer flows verbatim inside a left-margin block, the terminal's own
-    /// soft-wrap doing any further line breaking
+    /// answer flows verbatim inside a left-margin block, hard-wrapped at
+    /// the terminal width so continuation rows keep the margin
     md: Option<crate::core::render_md::BlockStream>,
     /// bytes not yet written (frame batching)
     pending: String,
@@ -59,13 +59,16 @@ impl Renderer {
 
     /// Terminal live-stream mode, TTY-gated: pipes and quiet mode keep raw
     /// output. The answer streams verbatim with a left margin on each of the
-    /// model's own lines; further line breaking is the terminal's soft-wrap,
-    /// never a host-inserted break.
+    /// model's own lines; rows hard-wrap at the terminal width so wrapped
+    /// continuation rows carry the margin too (the width is re-read at every
+    /// line start, so a resize applies from the next row on).
     pub fn terminal_md(&mut self, indent: usize) -> bool {
         if self.quiet || !std::io::stdout().is_terminal() {
             return false;
         }
-        self.md = Some(crate::core::render_md::BlockStream::indented(indent));
+        let mut md = crate::core::render_md::BlockStream::indented(indent);
+        md.wrap_terminal();
+        self.md = Some(md);
         true
     }
 
@@ -103,9 +106,8 @@ impl Renderer {
 
     /// Whether a partial row sits on screen without its terminating newline —
     /// the state a spinner frame's `\r\x1b[2K` would retract, so no spinner
-    /// may (re)start while it holds. The model's own newline, or the
-    /// chrome-boundary `finish_stream`, clears it — nothing ever inserts a
-    /// break into the streaming text itself.
+    /// may (re)start while it holds. The model's own newline, a wrap at the
+    /// right edge, or the chrome-boundary `finish_stream` clears it.
     pub fn has_dangling(&self) -> bool {
         self.dangling
     }
