@@ -291,6 +291,28 @@ const SLASH_COMMANDS: &[&str] = &[
     "/mcp", "/undo", "/exit",
 ];
 
+/// A near miss of a known slash command ("/clea"), mirroring main.rs's
+/// command_hint thresholds so a typo hints instead of burning a model call.
+fn slash_hint(word: &str) -> Option<String> {
+    let word = word.strip_prefix('/')?;
+    if word.chars().count() < 3 {
+        return None;
+    }
+    SLASH_COMMANDS
+        .iter()
+        .filter_map(|name| {
+            let name = name.strip_prefix('/')?;
+            if name.starts_with(word) {
+                return Some((name, 0));
+            }
+            let d = crate::core::text::edit_distance(word, name);
+            let max = if name.len() <= 5 { 1 } else { 2 };
+            (d > 0 && d <= max).then_some((name, d))
+        })
+        .min_by_key(|(name, d)| (*d, *name))
+        .map(|(name, _)| format!("/{name}"))
+}
+
 /// Startup banner: bold identity line, then dim label-aligned rows.
 fn print_banner(session: &Session, agents: &[crate::agent::task::AgentDef]) {
     let thinking = session
@@ -705,14 +727,32 @@ fn repl_command(
                 run_task_logged(session, &prompt, &mut Vec::new());
                 return false;
             }
-            if other.len() > 1 && other[1..].contains('/') {
-                // a path-looking word ("/home/me/shot.jpg 看看?") is task
-                // text, not a command typo
-                run_task_logged(session, text, &mut Vec::new());
+            // not a builtin and not a commands-dir command: plain task text
+            // (covers path-looking words like "/home/me/shot.jpg 看看?").
+            // A near miss of a known command only hints — no model call.
+            if let Some(name) = slash_hint(other) {
+                eprintln!("\x1b[2mdid you mean {name}? (nothing was sent)\x1b[0m");
                 return false;
             }
-            eprintln!("unknown command {other} (try /help)")
+            run_task_logged(session, text, &mut Vec::new());
+            return false;
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slash_hint_catches_prefixes_and_near_misses() {
+        assert_eq!(slash_hint("/cle"), Some("/clear".to_string()));
+        assert_eq!(slash_hint("/statu"), Some("/status".to_string()));
+        assert_eq!(slash_hint("/hlep"), Some("/help".to_string()));
+        // an ordinary word or path-looking text is no typo of a command
+        assert_eq!(slash_hint("/etc/passwd"), None);
+        assert_eq!(slash_hint("/summarize this file"), None);
+        assert_eq!(slash_hint("/x"), None);
+    }
 }

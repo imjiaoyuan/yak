@@ -978,9 +978,10 @@ impl InputLine {
         buf: &str,
         cursor: usize,
     ) -> (usize, usize, usize) {
-        // slash commands echo bold, matching the `>` prompt
+        // slash commands and `!` shell lines echo bold, distinguishing them
+        // from ordinary task text
         let style = |s: &str| {
-            if buf.starts_with('/') {
+            if buf.starts_with('/') || buf.starts_with('!') {
                 format!("\x1b[1m{s}\x1b[0m")
             } else {
                 s.to_string()
