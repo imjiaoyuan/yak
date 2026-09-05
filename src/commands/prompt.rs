@@ -293,19 +293,11 @@ fn execute(
     let api_key = args
         .opt(&["key"])
         .map(|s| s.to_string())
-        .or_else(|| config.api_key(&name, provider));
+        .or_else(|| config.api_key(provider));
     let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
-    // template options first, then per-model defaults for keys not set, CLI -o last
+    // per-model saved options first, CLI -o last
     let qualified = model.qualified_id();
-    let mut options: Vec<(String, String)> = template
-        .as_ref()
-        .map(|t| {
-            t.options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut options: Vec<(String, String)> = Vec::new();
     let saved_options = config::load_model_options();
     for (k, v) in saved_options
         .get(&qualified)
@@ -343,7 +335,7 @@ fn execute(
     } else if let Some(schema_input) = args.opt(&["schema"]) {
         Some(crate::core::schemas::resolve_schema(schema_input)?)
     } else {
-        template.as_ref().and_then(|t| t.schema_object.clone())
+        None
     };
     if let Some(schema) = &schema {
         if model.kind != "openai-compat" {
@@ -449,11 +441,7 @@ fn execute(
     }
 
     // extract flags force non-streaming, like the original
-    let user_extract = args.flag(&["extract"]) || args.flag(&["extract-last"]);
-    let extract_mode = user_extract
-        || template
-            .as_ref()
-            .is_some_and(|t| t.extract || t.extract_last);
+    let extract_mode = args.flag(&["extract"]) || args.flag(&["extract-last"]);
     let stream = !args.flag(&["no-stream"]) && !extract_mode && !args.flag(&["json"]);
     let hide_reasoning = args.flag(&["hide-reasoning"]);
     let quiet = args.flag(&["json"]) || extract_mode;
@@ -504,8 +492,7 @@ fn execute(
         Ok(()) => {
             if extract_mode {
                 // original semantics: no fenced block → the full text
-                let last = args.flag(&["extract-last"])
-                    || template.as_ref().is_some_and(|t| t.extract_last);
+                let last = args.flag(&["extract-last"]);
                 let block = extract_fenced(&renderer.output, last)
                     .unwrap_or_else(|| renderer.output.clone());
                 print!("{block}");

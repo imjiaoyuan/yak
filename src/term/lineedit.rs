@@ -1173,7 +1173,7 @@ impl RawTermExt for RawTerm {
             (b'D', 0) => Some(Esc::Left),
             (b'H', 0) => Some(Esc::Home),
             (b'F', 0) => Some(Esc::End),
-            (b'C' | b'D' | b'H' | b'F', m) => Some(Esc::Mod(final_byte, m.clamp(1, 16) as u8)),
+            (b'C' | b'D', m) => Some(Esc::Mod(final_byte, m.clamp(1, 16) as u8)),
             (b'u', _) => Some(Esc::Key(n1.max(1), n2.clamp(1, 16) as u8)),
             (b'~', 0) => match n1 {
                 3 => Some(Esc::Delete),

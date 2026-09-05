@@ -148,7 +148,7 @@ pub(crate) fn parse_pattern(line: &str) -> Option<Pattern> {
 
 /// gitignore semantics: last matching pattern across scopes wins; deeper
 /// scopes (and later lines) come after shallower ones.
-pub(crate) fn is_ignored(scopes: &[Rc<IgnoreScope>], rel: &str, is_dir: bool) -> bool {
+fn is_ignored(scopes: &[Rc<IgnoreScope>], rel: &str, is_dir: bool) -> bool {
     let mut result = false;
     let segs: Vec<&str> = rel.split('/').collect();
     for scope in scopes {
@@ -180,7 +180,7 @@ pub(crate) fn pattern_matches_path(pattern: &Pattern, rel: &str, is_dir: bool) -
 }
 
 /// Segment-wise glob: `**` spans segments, `*`/`?`/`[...]` stay within one.
-pub(crate) fn glob_match(pat: &[String], path: &[&str]) -> bool {
+fn glob_match(pat: &[String], path: &[&str]) -> bool {
     if pat.is_empty() {
         return path.is_empty();
     }

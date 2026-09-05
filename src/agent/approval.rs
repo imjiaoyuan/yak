@@ -101,18 +101,11 @@ pub fn resolve(name: &str, tier: Tier, escapes_cwd: bool, cfg: &ApprovalConfig) 
     if cfg.mode == Mode::Yolo {
         return Decision::Auto;
     }
-    match (cfg.mode, tier, escapes_cwd) {
-        (Mode::AlwaysAsk, Tier::Read, false) => Decision::Auto,
-        (Mode::AlwaysAsk, Tier::Read, true) => {
-            Decision::Ask("reading outside the working directory".to_string())
-        }
-        (Mode::AlwaysAsk, Tier::Write, _) => {
-            Decision::Ask("modifying files requires approval".to_string())
-        }
-        (Mode::AlwaysAsk, Tier::Exec, _) => {
-            Decision::Ask("running commands requires approval".to_string())
-        }
-        (Mode::Yolo, _, _) => Decision::Auto,
+    match (tier, escapes_cwd) {
+        (Tier::Read, false) => Decision::Auto,
+        (Tier::Read, true) => Decision::Ask("reading outside the working directory".to_string()),
+        (Tier::Write, _) => Decision::Ask("modifying files requires approval".to_string()),
+        (Tier::Exec, _) => Decision::Ask("running commands requires approval".to_string()),
     }
 }
 

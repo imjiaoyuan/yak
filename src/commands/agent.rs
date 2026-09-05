@@ -279,7 +279,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     let api_key = args
         .opt(&["key"])
         .map(|s| s.to_string())
-        .or_else(|| cfg.api_key(&name, provider));
+        .or_else(|| cfg.api_key(provider));
     let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
     let mut options: Vec<(String, String)> = {
         let saved = config::load_model_options();

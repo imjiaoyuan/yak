@@ -158,8 +158,7 @@ impl Session {
                             &serde_json::json!({"type": "tool_start", "name": name, "preview": preview, "diff": diff}),
                         );
                     } else {
-                        view.borrow_mut()
-                            .tool_started(crate::agent::tools::display_verb(&name));
+                        view.borrow_mut().tool_started();
                         streamed.set(false);
                         logged.set(0);
                         // the approval prompt already echoed this exact call

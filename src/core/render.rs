@@ -323,8 +323,7 @@ impl TaskView {
     }
 
     /// A tool started: the `$` chrome line follows; spinner restarts labelled.
-    pub fn tool_started(&mut self, name: &str) {
-        let _ = name;
+    pub fn tool_started(&mut self) {
         self.pause();
         // the spinner is restarted by `resume_running` AFTER the caller has
         // printed the `$ <verb> <cmd>` chrome line, so the spinner's

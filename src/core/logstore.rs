@@ -180,7 +180,7 @@ pub fn make_schema_id(schema: &Value) -> (String, String) {
     (id, compact)
 }
 
-fn _ensure_message(
+fn ensure_message(
     conn: &Connection,
     message: &Message,
     parent: Option<&str>,
@@ -293,7 +293,7 @@ fn ensure_chain(
 ) -> Result<Option<String>, rusqlite::Error> {
     let mut tip = parent.map(|s| s.to_string());
     for message in messages {
-        tip = Some(_ensure_message(conn, message, tip.as_deref())?);
+        tip = Some(ensure_message(conn, message, tip.as_deref())?);
     }
     Ok(tip)
 }
@@ -310,7 +310,7 @@ fn conversation_name(text: &str) -> String {
 
 // the turn-level write path
 
-pub struct TurnToLog<'a> {
+struct TurnToLog<'a> {
     /// existing thread/conversation id, if continuing
     pub thread_id: Option<&'a str>,
     /// hash of the stored message this turn appends to — for continuations
@@ -387,7 +387,7 @@ pub fn log_completed_turn(db: &Db, t: &CompletedTurn) -> String {
     )
 }
 
-pub fn log_turn(db: &Db, turn: &TurnToLog) -> String {
+fn log_turn(db: &Db, turn: &TurnToLog) -> String {
     let turn_id = ulid();
     let tx = match db.conn().unchecked_transaction() {
         Ok(tx) => tx,
@@ -609,7 +609,7 @@ select turns.id,
 
 /// The chain from `tip` back to its root in ONE query (recursive CTE),
 /// newest first, each entry carrying the message role.
-pub fn chain_with_roles(conn: &Connection, tip: &str) -> Vec<(String, Option<String>)> {
+fn chain_with_roles(conn: &Connection, tip: &str) -> Vec<(String, Option<String>)> {
     let mut stmt = match conn.prepare(
         "WITH RECURSIVE chain(hash, parent_hash, role) AS (
              SELECT m.hash, m.parent_hash, m.role FROM messages m WHERE m.hash = ?1
@@ -652,7 +652,7 @@ pub struct ReadPart {
 
 /// One stored message by hash: its role plus parts, in position order.
 /// A single joined query (role + parts together).
-pub fn message_parts(conn: &Connection, hash: &str) -> Option<(String, Vec<ReadPart>)> {
+fn message_parts(conn: &Connection, hash: &str) -> Option<(String, Vec<ReadPart>)> {
     let mut stmt = conn
         .prepare(
             "SELECT m.role, p.type, p.text, p.payload FROM messages m
@@ -855,7 +855,7 @@ pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
 /// Walks the first turn's message chain to the nearest user message — the
 /// same shape as turn_search's prompt rule, but live, so sessions logged
 /// before that rule existed still preview correctly.
-pub fn thread_first_prompt(db: &Db, thread_id: &str) -> String {
+fn thread_first_prompt(db: &Db, thread_id: &str) -> String {
     // the indexed turn_search row first (the write path maintains it with
     // the same rule); the live chain walk below is the fallback for
     // sessions logged before that rule existed
@@ -1057,7 +1057,7 @@ pub fn newest_turn_options(db: &Db, thread_id: &str) -> Option<Value> {
     })
 }
 
-pub fn conversation_exists(db: &Db, id: &str) -> bool {
+fn conversation_exists(db: &Db, id: &str) -> bool {
     match db.conn().query_row(
         "SELECT count(*) FROM threads WHERE id = ?1",
         params![id],
@@ -1424,7 +1424,7 @@ fn new_store_row(r: &rusqlite::Row<'_>) -> Value {
 }
 
 /// Stored schema content by id, shared by schema resolution and row annotation.
-pub fn schema_content(db: &Db, id: &str) -> Option<String> {
+fn schema_content(db: &Db, id: &str) -> Option<String> {
     db.conn()
         .query_row(
             "SELECT content FROM schemas WHERE id = ?1",

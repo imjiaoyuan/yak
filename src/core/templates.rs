@@ -9,17 +9,12 @@ pub struct Template {
     pub model: Option<String>,
     pub prompt: Option<String>,
     pub system: Option<String>,
-    pub defaults: BTreeMap<String, String>,
-    pub extract: bool,
-    pub extract_last: bool,
-    pub options: BTreeMap<String, String>,
-    pub schema_object: Option<serde_json::Value>,
     pub attachments: Vec<String>,
     pub attachment_types: Vec<(String, String)>,
 }
 
 /// Collect `$var` / `${var}` names used in a template body.
-pub fn template_vars(text: &str) -> Vec<String> {
+fn template_vars(text: &str) -> Vec<String> {
     let mut vars = Vec::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -126,7 +121,7 @@ pub fn apply(
     input: &str,
     params: &BTreeMap<String, String>,
 ) -> Result<(Option<String>, Option<String>), String> {
-    let mut all: BTreeMap<String, String> = t.defaults.clone();
+    let mut all: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in params {
         all.insert(k.clone(), v.clone());
     }

@@ -166,7 +166,7 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     };
     // step 2: the provider's configured models merged with its live list
     eprintln!("\x1b[2mfetching models from {pname} …\x1b[0m");
-    let key = cfg.api_key(&pname, provider).unwrap_or_default();
+    let key = cfg.api_key(provider).unwrap_or_default();
     let live = crate::commands::login::try_fetch_models(&provider.kind, &provider.base_url, &key);
     let mut ids: Vec<String> = provider.models.clone();
     for mid in live {
@@ -464,7 +464,7 @@ fn key(argv: &[String]) -> i32 {
     }
     // one argument, no flag: print the resolved (env-expanded) key
     let p = cfg.providers.get(&name).expect("checked above");
-    match cfg.api_key(&name, p) {
+    match cfg.api_key(p) {
         Some(k) => {
             println!("{k}");
             0

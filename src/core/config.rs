@@ -469,7 +469,7 @@ impl Config {
 
     /// API key for a provider: its config.json api_key field, with ${VAR}
     /// references expanded.
-    pub fn api_key(&self, _provider: &str, p: &Provider) -> Option<String> {
+    pub fn api_key(&self, p: &Provider) -> Option<String> {
         let raw = p.api_key.clone()?;
         let expanded = expand_env(&raw);
         if expanded.is_empty() {

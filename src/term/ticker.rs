@@ -3,7 +3,7 @@
 use std::io::Write;
 
 /// ~16fps spinner: fast enough to feel alive without hammering the terminal.
-pub const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
+const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// Redraws `[3s · phase]` on stderr while stopped=false, only while nothing
 /// else prints (model wait, tool execution); stop() erases the line.

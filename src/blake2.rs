@@ -36,7 +36,7 @@ pub struct Blake2b {
 }
 
 impl Blake2b {
-    pub fn new(digest_len: usize) -> Blake2b {
+    fn new(digest_len: usize) -> Blake2b {
         let mut h = IV;
         // parameter block: digest_len, key_len=0, fanout=1, depth=1
         h[0] ^= 0x0101_0000 ^ digest_len as u64;
@@ -49,7 +49,7 @@ impl Blake2b {
         }
     }
 
-    pub fn update(&mut self, mut data: &[u8]) {
+    fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
             if self.buflen == 128 {
                 // buffer full and more data arrived: compress as a non-final block
@@ -65,7 +65,7 @@ impl Blake2b {
         }
     }
 
-    pub fn finalize(mut self) -> Vec<u8> {
+    fn finalize(mut self) -> Vec<u8> {
         self.t += self.buflen as u128;
         for b in self.buf[self.buflen..].iter_mut() {
             *b = 0;
