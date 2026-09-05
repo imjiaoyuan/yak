@@ -63,7 +63,6 @@ pub fn run(argv: &[String]) -> i32 {
     // section. Bare `llm logs` on a terminal is interactive (like
     // `llm models`); piped or flagged input keeps the plain list and
     // `llm logs list` always prints.
-    use std::io::IsTerminal;
     let mode_filter: Option<String> = argv
         .first()
         .filter(|a| LOG_MODES.contains(&a.as_str()))

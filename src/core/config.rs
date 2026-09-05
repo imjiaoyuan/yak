@@ -1,6 +1,6 @@
 //! user_dir resolution and the files kept there: config.json (providers with
 //! inline api keys, the "models" settings family and hand-added tables like
-//! "agent"), aliases.json, and the logs-off marker.
+//! "agent") and the logs-off marker.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -382,8 +382,6 @@ fn set_options_in(
     );
 }
 
-// aliases.json — flat map, indent=4, created as "{}\n".
-
 // model settings — every mode's default
 // per-model option table, all under config.json's "models" object
 
@@ -440,7 +438,7 @@ pub fn add_model(provider: &str, model_id: &str) {
     }
 }
 
-// logging gate — marker file, exactly like the original
+// logging gate — the config.json `logging` bool; a legacy marker file still counts as off
 
 pub fn ensure_dir_exists(path: &std::path::Path) {
     if let Some(parent) = path.parent() {

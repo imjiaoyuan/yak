@@ -1143,7 +1143,6 @@ fn html_to_text(html: &str) -> String {
     clean.trim().to_string()
 }
 
-/// Resolve a tool path argument against cwd with `~` expansion.
 /// Display verb for the `$` chrome line: tool ids read as actions.
 pub fn display_verb(name: &str) -> &str {
     match name {
@@ -1153,6 +1152,7 @@ pub fn display_verb(name: &str) -> &str {
     }
 }
 
+/// Resolve a tool path argument against cwd with `~` expansion.
 pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
     let expanded = if let Some(rest) = arg.strip_prefix("~/") {
         // windows homes live in USERPROFILE; HOME covers the unix world

@@ -401,7 +401,7 @@ fn unset(argv: &[String]) -> i32 {
     }
 }
 
-// key — provider API keys (absorbs the old `llm keys` command)
+// key — provider API keys
 
 fn key(argv: &[String]) -> i32 {
     let args = match parse(argv, KEY_SPECS) {
@@ -491,8 +491,8 @@ fn set_provider_key(name: &str, value: &str) -> i32 {
     }
 }
 
-// add / remove — the provider lifecycle (login/logout are the interactive
-// aliases)
+// add / remove — the provider lifecycle; bare invocation on a terminal
+// opens the wizard
 
 fn add(argv: &[String]) -> i32 {
     let args = match parse(argv, SIMPLE_SPECS) {

@@ -344,7 +344,6 @@ fn execute(
         model.schema = Some(schema.clone());
     }
 
-    // system: explicit -s > template system > conversation's first system;
     // system: explicit -s > template system > conversation's first system
     let system = args
         .opt(&["system"])

@@ -517,9 +517,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Interactive mode: a terminal REPL. Each line is one agent task on a
-/// shared session; slash commands control the session, !cmd runs a shell
-/// line directly. Input gets history, cursor editing and tab completion.
+/// Open the session DB unless --no-session; -d picks a custom path.
 fn open_db(args: &ParsedArgs) -> Result<Option<Db>, String> {
     if args.flag(&["no-session"]) {
         return Ok(None);

@@ -6,7 +6,7 @@ use std::io::{IsTerminal, Write};
 use crate::core::http::Usage;
 
 /// Streamed-output flush cadence: writing+flushing per delta costs two
-/// syscalls per token on char-by-char streams; one frame per ~16ms is
+/// syscalls per token on char-by-char streams; one frame per interval is
 /// imperceptible next to network latency and bounds the syscalls. Chrome
 /// paths flush first (TaskView::pause), so nothing interleaves mid-line.
 /// ~250Hz keep-up: near-instant for local model streams; still amortizes the
@@ -116,8 +116,9 @@ impl Renderer {
     pub fn push_reasoning_buffered(&mut self, text: &str) {
         self.reasoning.push_str(text);
     }
-    /// Flush a pending partial line, terminating it first when it is dangling,
-    /// so multi-round streams and tool chrome always start on their own line.
+    /// Flush a pending partial line — terminating it first when dangling in
+    /// terminal-markdown mode — so later rounds and chrome start on their own
+    /// line (plain pipes flush verbatim, without the terminator).
     pub fn finish_stream(&mut self) {
         if let Some(md) = self.md.as_mut() {
             let mut chunk = String::new();

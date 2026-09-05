@@ -1,6 +1,6 @@
 //! logs.db: the full final schema of the reference implementation
-//! (migrations m001–m027 applied), the legacy read helpers, ULID ids and
-//! the two timestamp formats the store relies on.
+//! (migrations m001–m027 applied), ULID ids and the two timestamp formats
+//! the store relies on; the read paths live in logstore.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

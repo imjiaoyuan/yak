@@ -330,9 +330,6 @@ struct TurnToLog<'a> {
     pub duration_ms: Option<i64>,
 }
 
-/// Record a completed exchange. Returns the turn id. The whole write runs in
-/// one transaction; a failure rolls back, is reported on stderr, and the turn
-/// id is still returned so callers keep their shape.
 /// A finished exchange ready to persist: the caller supplies the input
 /// messages it sent (without the system message); `log_completed_turn`
 /// resolves the stored chain tip, prepends the system message when the
@@ -641,9 +638,9 @@ fn chain_with_roles(conn: &Connection, tip: &str) -> Vec<(String, Option<String>
     }
 }
 
-/// Rebuild a stored message: role + parts with text (or text_ref resolved
-/// via the fragments table), attachment summaries, and the raw part payload
-/// (agent tool parts reconstruct their structured fields from it).
+/// Rebuild a stored message: role + parts with text (legacy text_ref rows
+/// resolve through the fragments table), attachment summaries, and the raw
+/// part payload (agent tool parts reconstruct their structured fields).
 pub struct ReadPart {
     pub part_type: String,
     pub text: Option<String>,
@@ -790,7 +787,8 @@ fn resolve_text_ref(conn: &Connection, payload: &str) -> Option<String> {
     Some(out)
 }
 
-/// The message hash a thread currently points at.
+/// Full message chain of a thread (roles + parts), oldest first — the
+/// wire-level source for `llm agent` continuation.
 pub fn thread_chain(db: &Db, thread_id: &str) -> Vec<(String, Vec<ReadPart>)> {
     match thread_tip(db, thread_id) {
         Some(tip) => chain_parts(db.conn(), &tip),
@@ -849,7 +847,6 @@ pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
 }
 
 /// Full message chain of a thread (roles + parts), oldest first — the
-/// wire-level source for `llm agent` continuation.
 /// First prompt of a thread (the preview shown in the logs conversation
 /// picker).
 /// Walks the first turn's message chain to the nearest user message — the
@@ -1448,8 +1445,8 @@ pub fn store_counts(db: &Db) -> StoreCounts {
     }
 }
 
-/// Fill in the fields that need extra queries: schema json, fragments,
-/// attachments, system/reasoning for new-store rows.
+/// Fill in the fields that need extra queries: schema json, attachments,
+/// system/reasoning for new-store rows.
 pub fn annotate(db: &Db, rows: Vec<Value>, truncate: bool) -> Vec<Value> {
     let mut out = Vec::with_capacity(rows.len());
     for mut row in rows {

@@ -361,7 +361,7 @@ pub fn run_agent(
     })
 }
 
-/// Terminal preview of a tool result: the first three non-empty lines, each
+/// Terminal preview of a tool result: the first ten non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
 fn summarize(content: &str) -> String {
     /// lines shown in the user-facing tool-result preview (matches the reference's

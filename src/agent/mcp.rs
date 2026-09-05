@@ -63,10 +63,7 @@ pub fn load() -> Vec<ServerSpec> {
     parse_table(&table)
 }
 
-/// Read the `mcpServers` table. `preserve_order` makes the mounting order
-/// deterministic. The ambient environment is inherited and explicit `env`
-/// entries (after `${VAR}` expansion) override it — a deliberate deviation
-/// from the allowlist approach, documented in README.
+/// Read the `mcpServers` table from a raw JSON config blob (test entry).
 #[cfg(test)]
 pub fn parse(raw: &str) -> Vec<ServerSpec> {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
@@ -78,6 +75,11 @@ pub fn parse(raw: &str) -> Vec<ServerSpec> {
     parse_table(table)
 }
 
+/// Read the `mcpServers` table: map iteration order is the config file's
+/// written order (serde_json's preserve-order feature), so mounting is
+/// deterministic. The ambient environment is inherited and explicit `env`
+/// entries (after `${VAR}` expansion) override it — a deliberate deviation
+/// from the allowlist approach, documented in README.
 fn parse_table(table: &serde_json::Map<String, Value>) -> Vec<ServerSpec> {
     let mut out = Vec::new();
     for (name, def) in table {

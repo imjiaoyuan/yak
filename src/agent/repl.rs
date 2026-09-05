@@ -445,6 +445,7 @@ fn repl_command(
             eprintln!("\x1b[2m  /clear        fresh session       /skills  list skills");
             eprintln!("  /skill:name   run one             /memory  global memory");
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
+            eprintln!("  /ask          approvals always on /compact condense history");
             eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
             eprintln!("  /undo         drop the last round");
             eprintln!("  /exit         quit");

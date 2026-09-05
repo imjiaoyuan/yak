@@ -37,9 +37,9 @@ pub struct Session {
     /// script tools from the config `tools` table; re-mounted by
     /// [`Session::rebuild_tools`] on every registry rebuild
     pub script_tools: Vec<crate::agent::script_tool::ScriptToolSpec>,
-    /// live MCP clients; held in an Arc so registry rebuilds on model switch
-    /// or `/resume` never orphan the child processes (they die with the
-    /// Session, RAII kill on drop); an empty registry when none are configured
+    /// live MCP clients; held in an Arc so the registry outlives rebuilds
+    /// without orphaning the child processes (they die with the Session,
+    /// RAII kill on drop); an empty registry when none are configured
     pub mcp: std::sync::Arc<crate::agent::mcp::McpRegistry>,
     /// cumulative input/output tokens across the session (for the status line)
     pub tokens: (u64, u64),
@@ -69,8 +69,8 @@ impl Session {
     }
 
     /// Rebuild the tool registry: built-ins plus the session's plugin tools
-    /// (script tools and mounted MCP tools). Model switches route through
-    /// here so plugin tools survive every rebuild; chat mode mounts none.
+    /// (script tools and mounted MCP tools); called once at startup, and
+    /// chat mode mounts none.
     pub fn rebuild_tools(&mut self, roles: &std::collections::BTreeMap<String, String>) {
         if self.chat_mode {
             self.tools = Vec::new();
@@ -398,8 +398,8 @@ impl Session {
         if ends_plain {
             new_messages.pop();
         }
-        // cwd rides in turn options as provenance so /resume can scope the
-        // picker by project directory (same pattern as rag's kb provenance)
+        // cwd rides in turn options as provenance so `llm logs` can show
+        // and filter conversations by project directory
         let mut turn_options = self.model.options.clone();
         turn_options.push(("cwd".to_string(), self.cwd.display().to_string()));
         turn_options.push(("mode".to_string(), self.mode_label().to_string()));

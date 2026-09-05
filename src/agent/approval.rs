@@ -25,7 +25,7 @@ pub enum Mode {
     /// reads inside the working directory auto, everything else prompts
     #[default]
     AlwaysAsk,
-    /// everything auto (critical-pattern notices are suppressed too)
+    /// everything auto; the danger table still forces a one-shot prompt
     Yolo,
 }
 
