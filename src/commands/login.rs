@@ -91,6 +91,9 @@ pub(crate) fn logout_picker() -> Result<(), String> {
         "\x1b[2mremoved provider '{name}' (and its key) from {}\x1b[0m",
         config::config_path().display()
     );
+    for mode in config::clear_mode_defaults_for(&name) {
+        eprintln!("\x1b[2mcleared {mode} default (pointed at {name})\x1b[0m");
+    }
     Ok(())
 }
 
@@ -195,11 +198,13 @@ pub(crate) fn wizard() -> Result<(), String> {
             .and_then(|p| p.env_keys.iter().find(|k| std::env::var_os(k).is_some()))
             .copied()
             .or_else(|| {
-                // custom flow: check the obvious names
-                ["OPENAI_COMPAT_API_KEY"]
-                    .iter()
-                    .find(|k| std::env::var_os(k).is_some())
-                    .copied()
+                // custom flow: check the obvious names for the chosen kind
+                let vars: &[&str] = if kind == "anthropic" {
+                    &["ANTHROPIC_API_KEY"]
+                } else {
+                    &["OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"]
+                };
+                vars.iter().find(|k| std::env::var_os(k).is_some()).copied()
             });
         let hint = match detected {
             Some(var) => format!("API key (empty = use ${{{var}}}): "),

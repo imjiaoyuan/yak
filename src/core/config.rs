@@ -29,7 +29,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Provider {
     pub kind: String,
     pub base_url: String,
@@ -286,6 +286,38 @@ pub fn try_set_mode_default_model(mode: &str, model: &str) -> std::io::Result<()
 /// Write (or remove, on None) `models.<mode>.thinking`.
 pub fn try_set_mode_default_thinking(mode: &str, thinking: Option<&str>) -> std::io::Result<()> {
     edit_mode_default(|root| set_mode_default_thinking_in(root, mode, thinking))
+}
+
+/// Drop every mode default that points at `provider` (used when the
+/// provider is removed): returns the cleared modes. Without this the
+/// dangling entry also blocks the first-provider auto-default.
+pub fn clear_mode_defaults_for(provider: &str) -> Vec<String> {
+    let mut cleared = Vec::new();
+    let _ = edit_mode_default(|root| {
+        cleared = clear_mode_defaults_in(root, provider);
+    });
+    cleared
+}
+
+fn clear_mode_defaults_in(value: &mut serde_json::Value, provider: &str) -> Vec<String> {
+    let prefix = format!("{provider}/");
+    let mut cleared = Vec::new();
+    if let Some(models) = value.as_object_mut().and_then(|m| m.get_mut("models"))
+        && let Some(map) = models.as_object_mut()
+    {
+        for mode in ["prompt", "agent", "chat"] {
+            let points_there = map
+                .get(mode)
+                .and_then(|e| e.get("model"))
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.starts_with(&prefix));
+            if points_there {
+                map.remove(mode);
+                cleared.push(mode.to_string());
+            }
+        }
+    }
+    cleared
 }
 
 /// Remove a mode's whole entry (`llm models unset`).
@@ -563,5 +595,23 @@ mod mode_default_tests {
     #[test]
     fn test_options_from_absent_is_none() {
         assert_eq!(options_from(&json!({})), None);
+    }
+
+    #[test]
+    fn clearing_mode_defaults_only_touches_the_removed_provider() {
+        let mut root = serde_json::json!({
+            "models": {
+                "prompt": {"model": "foo/bar"},
+                "agent": {"model": "foo/baz", "thinking": "high"},
+                "chat": {"model": "other/qux"}
+            }
+        });
+        let cleared = clear_mode_defaults_in(&mut root, "foo");
+        assert_eq!(cleared, ["prompt", "agent"]);
+        // the untouched mode survives intact
+        assert_eq!(root["models"]["chat"]["model"], "other/qux");
+        // a provider whose name is a prefix of another stays put
+        let mut root = serde_json::json!({"models": {"prompt": {"model": "foobar/x"}}});
+        assert!(clear_mode_defaults_in(&mut root, "foo").is_empty());
     }
 }

@@ -484,15 +484,39 @@ fn add(argv: &[String]) -> i32 {
     let fetch_key = api_key.clone().unwrap_or_default();
     eprintln!("Fetching models from {} ...", entry.base_url);
     let models = crate::commands::login::try_fetch_models(entry.kind, entry.base_url, &fetch_key);
+    let mut cfg = config::load();
+    if let Some(existing) = cfg.providers.get(&name) {
+        // an entry left model-less by a failed fetch is a retry target:
+        // refresh its list instead of bouncing the user through remove
+        if !existing.models.is_empty() {
+            eprintln!("Error: provider '{name}' already exists (llm models remove {name} first)");
+            return 1;
+        }
+        if models.is_empty() {
+            eprintln!("Error: provider '{name}' still lists no models — nothing to refresh");
+            return 1;
+        }
+        let provider = Provider {
+            models,
+            ..existing.clone()
+        };
+        cfg.providers.insert(name.clone(), provider);
+        return match config::save(&cfg) {
+            Ok(()) => {
+                let count = cfg.providers[&name].models.len();
+                eprintln!("refreshed models for '{name}' ({count} models)");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        };
+    }
     if models.is_empty() {
         eprintln!(
-            "could not fetch models — provider saved without models (re-run `llm models add` to retry)"
+            "could not fetch models — provider saved without models (re-run `llm models add {name}` to retry)"
         );
-    }
-    let mut cfg = config::load();
-    if cfg.providers.contains_key(&name) {
-        eprintln!("Error: provider '{name}' already exists (llm models remove {name} first)");
-        return 1;
     }
     cfg.providers.insert(
         name.clone(),
@@ -531,6 +555,14 @@ fn add(argv: &[String]) -> i32 {
     }
 }
 
+/// After a provider goes away, drop the mode defaults that pointed at it —
+/// otherwise they dangle and also block the first-provider auto-default.
+fn note_cleared_defaults(provider: &str) {
+    for mode in config::clear_mode_defaults_for(provider) {
+        eprintln!("\x1b[2mcleared {mode} default (pointed at {provider})\x1b[0m");
+    }
+}
+
 fn remove(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
         render_help(
@@ -566,6 +598,7 @@ fn remove(argv: &[String]) -> i32 {
                 "removed provider '{name}' (and its key) from {}",
                 config::config_path().display()
             );
+            note_cleared_defaults(name);
             0
         }
         Err(e) => {
@@ -745,6 +778,17 @@ fn options(argv: &[String]) -> i32 {
         }
     };
     let mut model_options = config::load_model_options();
+    // the options table is keyed by qualified id: resolve alias/bare names
+    // so a hand-typed "deepseek-chat" lands where `llm prompt` reads it
+    let qualified_model = |args: &crate::core::args::ParsedArgs| -> String {
+        let Some(query) = args.first_positional() else {
+            return String::new();
+        };
+        let cfg = config::load();
+        cfg.resolve_model(query)
+            .map(|(n, _, m)| format!("{n}/{m}"))
+            .unwrap_or_else(|| query.to_string())
+    };
     match sub {
         "list" => {
             if model_options.is_empty() {
@@ -760,11 +804,12 @@ fn options(argv: &[String]) -> i32 {
             0
         }
         "show" => {
-            let Some(model) = args.first_positional() else {
+            let Some(_) = args.first_positional() else {
                 eprintln!("Error: Missing argument 'MODEL'.");
                 return 2;
             };
-            match model_options.get(model) {
+            let model = qualified_model(&args);
+            match model_options.get(&model) {
                 Some(opts) => {
                     for (k, v) in opts {
                         println!("{k}: {v}");
@@ -783,7 +828,7 @@ fn options(argv: &[String]) -> i32 {
                 return 2;
             }
             let (model, key, value) = (
-                &args.positionals[0],
+                &qualified_model(&args),
                 &args.positionals[1],
                 &args.positionals[2],
             );
@@ -803,25 +848,27 @@ fn options(argv: &[String]) -> i32 {
             }
         }
         "clear" => {
-            let Some(model) = args.first_positional() else {
+            let Some(_) = args.first_positional() else {
                 eprintln!("Error: Missing argument 'MODEL'.");
                 return 2;
             };
-            let Some(opts) = model_options.get_mut(model) else {
+            let model = qualified_model(&args);
+            let Some(opts) = model_options.get_mut(&model) else {
                 eprintln!("Error: No options found for model '{model}'");
                 return 1;
             };
             if let Some(key) = args.positionals.get(1) {
-                if opts.remove(key).is_some() {
-                    eprintln!("Cleared option '{key}' for model {model}");
+                match opts.remove(key) {
+                    Some(_) => eprintln!("Cleared option '{key}' for model {model}"),
+                    None => eprintln!("no option '{key}' set for model {model}"),
                 }
                 if opts.is_empty() {
-                    model_options.remove(model);
+                    model_options.remove(&model);
                 }
             } else {
                 let keys: Vec<String> = opts.keys().cloned().collect();
                 eprintln!("Cleared {} options for model {model}", keys.join(", "));
-                model_options.remove(model);
+                model_options.remove(&model);
             }
             match config::save_model_options(&model_options) {
                 Ok(()) => 0,

@@ -382,6 +382,22 @@ def main():
         f"tts rc={sp.returncode} err={sp.stderr[-300:]}"
     assert open(os.path.join(med, "speech.mp3"), "rb").read() == b"fake-speech-bytes"
 
+    # options take bare model names: the table is keyed qualified
+    o = run([binary, "models", "options", "set", "m-b", "temperature", "0.3"], env,
+            stdin=subprocess.DEVNULL)
+    assert o.returncode == 0, f"options set rc={o.returncode} err={o.stderr[-300:]}"
+    lst = run([binary, "models", "options", "list"], env, stdin=subprocess.DEVNULL)
+    assert "mock/m-b" in lst.stdout, f"options key not qualified: {lst.stdout!r}"
+
+    # removing a provider clears the mode defaults that pointed at it
+    w = run([binary, "models", "remove", "mock-write"], env, stdin=subprocess.DEVNULL)
+    assert w.returncode == 0 and "cleared" not in w.stderr,         f"unreferenced remove must clear nothing: {w.stderr!r}"
+    r = run([binary, "models", "remove", "mock"], env, stdin=subprocess.DEVNULL)
+    assert r.returncode == 0 and "cleared prompt default" in r.stderr \
+        and "cleared agent default" in r.stderr, f"remove clearing: {r.stderr!r}"
+    g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
+    assert "(unset)" in g.stdout, f"defaults survived removal: {g.stdout!r}"
+
     # the typo guard keeps precedence over command/prompt fallback
     t = run([binary, "lgos", "x"], env, stdin=subprocess.DEVNULL)
     assert t.returncode == 2 and "closest match" in t.stderr, f"typo guard: {t.returncode} {t.stderr!r}"
