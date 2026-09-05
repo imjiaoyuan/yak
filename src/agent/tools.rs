@@ -145,6 +145,20 @@ pub fn validate(schema: &Value, args: &Value) -> Result<(), String> {
 }
 
 /// Keep the last `max_lines` lines / `max_bytes` bytes.
+/// The `$ <verb> <preview>` chrome line with its green preview, wrapped to
+/// the terminal, plus the optional diff block. Shared by the approval
+/// prompt and the session's ToolStart echo so the two render identically.
+pub(crate) fn print_action_line(verb: &str, preview: &str, diff: Option<&str>) {
+    let width = crate::term::columns().max(20);
+    let vis = 2 + verb.chars().count() + 1;
+    let wrapped = crate::core::render_md::wrap_plain(preview, width.saturating_sub(vis), 2);
+    // same shape as the tool activity line: bold $, the command in green
+    eprintln!("\x1b[1m$\x1b[0m {verb} \x1b[1m\x1b[32m{wrapped}\x1b[0m");
+    if let Some(diff) = diff {
+        print_diff_block(diff);
+    }
+}
+
 pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = lines[lines.len().saturating_sub(max_lines)..].join("\n");
@@ -155,6 +169,37 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
         truncated = true;
     }
     (out, truncated)
+}
+
+/// Tail-truncate and mark, the shared ending for process-shaped tool output.
+pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes);
+    if truncated {
+        out.push_str("\n[output truncated]\n");
+    }
+    out
+}
+
+/// Finish a spawned-command result: merge stderr under stdout, note the
+/// exit code, truncate and mark. Shared by the bash and script tools.
+pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32) -> ToolOutput {
+    let mut out = String::from_utf8_lossy(&stdout).into_owned();
+    let err_text = String::from_utf8_lossy(&stderr);
+    if !err_text.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&err_text);
+    }
+    if code != 0 {
+        out.push_str(&format!("\nCommand exited with code {code}"));
+    }
+    let out = truncate_marked(&out, MAX_LINES, MAX_BYTES);
+    if code == 0 {
+        ToolOutput::ok(out)
+    } else {
+        ToolOutput::err(out)
+    }
 }
 
 struct ReadTool;
@@ -704,29 +749,7 @@ impl Tool for BashTool {
         if outcome.timed_out {
             return ToolOutput::err(format!("command timed out after {timeout}s: {command}"));
         }
-        let stdout = outcome.stdout;
-        let stderr = outcome.stderr;
-        let mut out = String::from_utf8_lossy(&stdout).into_owned();
-        let err_text = String::from_utf8_lossy(&stderr);
-        if !err_text.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&err_text);
-        }
-        let code = outcome.code;
-        if code != 0 {
-            out.push_str(&format!("\nCommand exited with code {code}"));
-        }
-        let (mut out, truncated) = truncate_tail(&out, MAX_LINES, MAX_BYTES);
-        if truncated {
-            out.push_str("\n[output truncated]\n");
-        }
-        if code == 0 {
-            ToolOutput::ok(out)
-        } else {
-            ToolOutput::err(out)
-        }
+        finish_process_output(outcome.stdout, outcome.stderr, outcome.code)
     }
 }
 
@@ -835,12 +858,7 @@ impl Tool for GrepTool {
                 "\n[{skipped} file(s) over {GREP_MAX_FILE} bytes skipped; use bash]\n"
             ));
         }
-        let (out, truncated) = truncate_tail(&out, MAX_LINES, MAX_BYTES);
-        let mut out = out;
-        if truncated {
-            out.push_str("\n[output truncated]\n");
-        }
-        ToolOutput::ok(out)
+        ToolOutput::ok(truncate_marked(&out, MAX_LINES, MAX_BYTES))
     }
 }
 

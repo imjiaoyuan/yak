@@ -50,6 +50,40 @@ pub fn parse_kv(items: &[String]) -> Result<Vec<(String, String)>, String> {
 /// Damerau-Levenshtein distance (optimal string alignment) over unicode
 /// scalars: substitution, insertion, deletion and transposition each cost
 /// one edit, matching how command typos actually happen.
+/// The shortest prefix of `text` (which starts at `{` or `[`) that closes
+/// the opening bracket, honoring strings and escapes. None if never
+/// balanced — the shared primitive for pulling one JSON value out of a
+/// model reply that may wrap it in prose or fences.
+pub fn balanced_json_region(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&text[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();

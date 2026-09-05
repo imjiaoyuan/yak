@@ -35,6 +35,32 @@ const HISTORY_FILE_KEEP: usize = 1600;
 const PASTE_LINES_LIMIT: usize = 10;
 const PASTE_CHARS_LIMIT: usize = 1000;
 
+/// History/navigation state for one read: where in history the buffer is
+/// (`history_len` = the live nav.draft), the stashed nav.draft for the way back past
+/// the newest entry, and the sticky column for vertical motion.
+struct Nav {
+    history_index: usize,
+    draft: Option<String>,
+    preferred: Option<usize>,
+}
+
+impl Nav {
+    fn live(history_len: usize) -> Nav {
+        Nav {
+            history_index: history_len,
+            draft: None,
+            preferred: None,
+        }
+    }
+
+    /// Leave history browsing (any buffer mutation does) and forget the column.
+    fn reset(&mut self, history_len: usize) {
+        self.history_index = history_len;
+        self.draft = None;
+        self.preferred = None;
+    }
+}
+
 pub struct LineEditor {
     history: Vec<String>,
 }
@@ -69,18 +95,13 @@ impl LineEditor {
 
         let mut buf = String::new();
         let mut cursor = 0usize; // byte offset into buf
-        let mut history_index = self.history.len();
-        // the working line, stashed when history recall starts and restored
-        // when navigation comes back past the newest entry
-        let mut draft: Option<String> = None;
+        let mut nav = Nav::live(self.history.len());
         // single-entry kill buffer: ctrl+k/u/w and alt+d/backspace write,
         // ctrl+y pastes it back (it survives submit and clear)
         let mut kill = String::new();
         // (token, payload): large pastes keep their text here and only the
         // token rides in the buffer, expanded at submit
         let mut pastes: Vec<(String, String)> = Vec::new();
-        // sticky char column for vertical cursor motion
-        let mut preferred: Option<usize> = None;
 
         loop {
             let b = loop {
@@ -120,13 +141,11 @@ impl LineEditor {
                 b'\n' => {
                     buf.insert(cursor, '\n');
                     cursor += 1;
-                    history_index = self.history.len();
-                    draft = None;
-                    preferred = None;
+                    nav.reset(self.history.len());
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x07 => {
-                    // ctrl+g: round-trip the draft through $VISUAL/$EDITOR
+                    // ctrl+g: round-trip the nav.draft through $VISUAL/$EDITOR
                     line.settle(&mut out, prompt, &buf);
                     let _ = writeln!(
                         out,
@@ -156,9 +175,7 @@ impl LineEditor {
                             let text = text.strip_suffix('\n').unwrap_or(text);
                             buf = text.to_string();
                             cursor = buf.len();
-                            history_index = self.history.len();
-                            draft = None;
-                            preferred = None;
+                            nav.reset(self.history.len());
                         }
                         let _ = std::fs::remove_file(&path);
                     }
@@ -192,9 +209,7 @@ impl LineEditor {
                                 let text = path.display().to_string();
                                 buf.insert_str(cursor, &text);
                                 cursor += text.len();
-                                history_index = self.history.len();
-                                draft = None;
-                                preferred = None;
+                                nav.reset(self.history.len());
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
                         }
@@ -240,8 +255,8 @@ impl LineEditor {
                     } else {
                         continue;
                     }
-                    history_index = self.history.len();
-                    draft = None;
+                    nav.history_index = self.history.len();
+                    nav.draft = None;
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x01 => {
@@ -253,7 +268,7 @@ impl LineEditor {
                     } else {
                         start.saturating_sub(1)
                     };
-                    preferred = None;
+                    nav.preferred = None;
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x05 => {
@@ -264,7 +279,7 @@ impl LineEditor {
                     } else {
                         (end + 1).min(buf.len())
                     };
-                    preferred = None;
+                    nav.preferred = None;
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x0b => {
@@ -273,9 +288,7 @@ impl LineEditor {
                     if end > cursor {
                         kill = buf[cursor..end].to_string();
                         buf.replace_range(cursor..end, "");
-                        history_index = self.history.len();
-                        draft = None;
-                        preferred = None;
+                        nav.reset(self.history.len());
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
@@ -286,18 +299,14 @@ impl LineEditor {
                         kill = buf[start..cursor].to_string();
                         buf.replace_range(start..cursor, "");
                         cursor = start;
-                        history_index = self.history.len();
-                        draft = None;
-                        preferred = None;
+                        nav.reset(self.history.len());
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
                 0x17 => {
                     // ctrl-w: kill the word before the cursor
                     kill_word_back(&mut buf, &mut cursor, &mut kill);
-                    history_index = self.history.len();
-                    draft = None;
-                    preferred = None;
+                    nav.reset(self.history.len());
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x19 => {
@@ -305,9 +314,7 @@ impl LineEditor {
                     if !kill.is_empty() {
                         buf.insert_str(cursor, &kill);
                         cursor += kill.len();
-                        history_index = self.history.len();
-                        draft = None;
-                        preferred = None;
+                        nav.reset(self.history.len());
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
@@ -330,9 +337,7 @@ impl LineEditor {
                     } else {
                         continue;
                     }
-                    history_index = self.history.len();
-                    draft = None;
-                    preferred = None;
+                    nav.reset(self.history.len());
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
                 b'\t' => {
@@ -358,9 +363,7 @@ impl LineEditor {
                             buf.truncate(word_start);
                             buf.push_str(&completion);
                             cursor = buf.len();
-                            history_index = self.history.len();
-                            draft = None;
-                            preferred = None;
+                            nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
                         None if candidates.len() > 1 => {
@@ -381,9 +384,7 @@ impl LineEditor {
                     Some(Esc::AltEnter) => {
                         buf.insert(cursor, '\n');
                         cursor += 1;
-                        history_index = self.history.len();
-                        draft = None;
-                        preferred = None;
+                        nav.reset(self.history.len());
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Key(cp, m)) => {
@@ -394,30 +395,26 @@ impl LineEditor {
                             // shift/ctrl/alt+enter: all just break the line
                             buf.insert(cursor, '\n');
                             cursor += 1;
-                            history_index = self.history.len();
-                            draft = None;
-                            preferred = None;
+                            nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor);
                         } else if cp == 27 {
                             // plain esc reported as CSI 27u: nothing bound
                         } else if cp == 127 && m >= 3 {
                             kill_word_back(&mut buf, &mut cursor, &mut kill);
-                            history_index = self.history.len();
-                            draft = None;
-                            preferred = None;
+                            nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor);
                         } else if m == 3 {
                             match u8::try_from(cp).ok() {
                                 Some(b'b') => {
                                     // alt+b: back one word
                                     cursor = word_back(&buf, cursor);
-                                    preferred = None;
+                                    nav.preferred = None;
                                     line.draw(&mut out, prompt, &buf, cursor);
                                 }
                                 Some(b'f') => {
                                     // alt+f: forward one word
                                     cursor = word_fwd(&buf, cursor);
-                                    preferred = None;
+                                    nav.preferred = None;
                                     line.draw(&mut out, prompt, &buf, cursor);
                                 }
                                 Some(b'd') => {
@@ -426,9 +423,7 @@ impl LineEditor {
                                     if end > cursor {
                                         kill = buf[cursor..end].to_string();
                                         buf.replace_range(cursor..end, "");
-                                        history_index = self.history.len();
-                                        draft = None;
-                                        preferred = None;
+                                        nav.reset(self.history.len());
                                     }
                                     line.draw(&mut out, prompt, &buf, cursor);
                                 }
@@ -440,9 +435,7 @@ impl LineEditor {
                             if let Some(ch) = char::from_u32(cp) {
                                 buf.insert(cursor, ch);
                                 cursor += ch.len_utf8();
-                                history_index = self.history.len();
-                                draft = None;
-                                preferred = None;
+                                nav.reset(self.history.len());
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
                         }
@@ -455,7 +448,7 @@ impl LineEditor {
                             } else {
                                 word_back(&buf, cursor)
                             };
-                            preferred = None;
+                            nav.preferred = None;
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
                     }
@@ -500,43 +493,41 @@ impl LineEditor {
                                 buf.insert_str(cursor, &chunk);
                                 cursor += chunk.len();
                             }
-                            history_index = self.history.len();
-                            draft = None;
-                            preferred = None;
+                            nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
                     }
                     Some(Esc::PasteEnd) => {}
                     Some(Esc::Up) => {
-                        let browsing = history_index < self.history.len();
-                        if history_index > 0 && recall_on_up(&buf, cursor, browsing) {
-                            if history_index == self.history.len() {
-                                draft = Some(buf.clone()); // the draft survives recall
+                        let browsing = nav.history_index < self.history.len();
+                        if nav.history_index > 0 && recall_on_up(&buf, cursor, browsing) {
+                            if nav.history_index == self.history.len() {
+                                nav.draft = Some(buf.clone()); // the nav.draft survives recall
                             }
-                            history_index -= 1;
-                            buf = self.history[history_index].clone();
+                            nav.history_index -= 1;
+                            buf = self.history[nav.history_index].clone();
                             cursor = buf.len();
-                            preferred = None;
+                            nav.preferred = None;
                         } else {
                             // otherwise the arrow walks the multiline text
-                            let col = *preferred.get_or_insert(char_col(&buf, cursor));
+                            let col = *nav.preferred.get_or_insert(char_col(&buf, cursor));
                             cursor = up_line(&buf, cursor, Some(col));
                         }
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Down) => {
-                        if history_index < self.history.len() {
-                            history_index += 1;
-                            if history_index == self.history.len() {
-                                // back past the newest entry: the draft returns
-                                buf = draft.take().unwrap_or_default();
+                        if nav.history_index < self.history.len() {
+                            nav.history_index += 1;
+                            if nav.history_index == self.history.len() {
+                                // back past the newest entry: the nav.draft returns
+                                buf = nav.draft.take().unwrap_or_default();
                             } else {
-                                buf = self.history[history_index].clone();
+                                buf = self.history[nav.history_index].clone();
                             }
                             cursor = buf.len();
-                            preferred = None;
+                            nav.preferred = None;
                         } else {
-                            let col = *preferred.get_or_insert(char_col(&buf, cursor));
+                            let col = *nav.preferred.get_or_insert(char_col(&buf, cursor));
                             cursor = down_line(&buf, cursor, Some(col));
                         }
                         line.draw(&mut out, prompt, &buf, cursor);
@@ -552,7 +543,7 @@ impl LineEditor {
                             }
                             cursor = cursor.saturating_sub(1);
                         }
-                        preferred = None;
+                        nav.preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Right) => {
@@ -566,17 +557,17 @@ impl LineEditor {
                                 cursor += 1;
                             }
                         }
-                        preferred = None;
+                        nav.preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Home) => {
                         cursor = line_start(&buf, cursor);
-                        preferred = None;
+                        nav.preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::End) => {
                         cursor = line_end(&buf, cursor);
-                        preferred = None;
+                        nav.preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Delete) => {
@@ -586,15 +577,15 @@ impl LineEditor {
                         {
                             pastes.remove(i);
                             buf.replace_range(a..b, "");
-                            history_index = self.history.len();
-                            draft = None;
+                            nav.history_index = self.history.len();
+                            nav.draft = None;
                             line.draw(&mut out, prompt, &buf, cursor);
                         } else {
                             let rest = buf[cursor..].chars().next().map_or(0, |c| c.len_utf8());
                             if rest > 0 {
                                 buf.replace_range(cursor..cursor + rest, "");
-                                history_index = self.history.len();
-                                draft = None;
+                                nav.history_index = self.history.len();
+                                nav.draft = None;
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
                         }
@@ -624,9 +615,7 @@ impl LineEditor {
                     if let Ok(s) = std::str::from_utf8(&bytes) {
                         buf.insert_str(cursor, s);
                         cursor += s.len();
-                        history_index = self.history.len();
-                        draft = None;
-                        preferred = None;
+                        nav.reset(self.history.len());
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
@@ -685,7 +674,7 @@ fn col_offset(line: &str, col: usize) -> usize {
     line.char_indices().nth(col).map_or(line.len(), |(i, _)| i)
 }
 
-/// One logical line up from `cursor`, keeping the preferred char column (the
+/// One logical line up from `cursor`, keeping the nav.preferred char column (the
 /// top line parks at its start, the reference's boundary behavior).
 fn up_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
     let start = line_start(buf, cursor);
@@ -698,7 +687,7 @@ fn up_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
     prev_start + col_offset(&buf[prev_start..prev_end], col)
 }
 
-/// One logical line down from `cursor`, keeping the preferred char column
+/// One logical line down from `cursor`, keeping the nav.preferred char column
 /// (the bottom line parks at the buffer end).
 fn down_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
     let end = line_end(buf, cursor);
@@ -1491,9 +1480,9 @@ mod tests {
         let buf = "ab\ncdef\nghi";
         // from the end of "cdef" (cursor 7) up onto "ab" clamps to its end
         assert_eq!(up_line(buf, 7, None), 2);
-        // a preferred column beyond the target line clamps to its end
+        // a nav.preferred column beyond the target line clamps to its end
         assert_eq!(up_line(buf, 7, Some(9)), 2);
-        // a preferred column short of the line lands mid-line
+        // a nav.preferred column short of the line lands mid-line
         assert_eq!(up_line(buf, buf.len(), Some(1)), 4); // 'd' in "cdef"
         // the top line parks at its start
         assert_eq!(up_line(buf, 2, None), 0);

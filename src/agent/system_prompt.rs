@@ -54,7 +54,7 @@ pub fn build_system_prompt(
             // provider prefix cache). Only the trailing cwd line refreshes.
             Some(s) => strip_cwd_line(s),
             None => {
-                let date = today();
+                let date = crate::core::db::today();
                 format!(
                     "You are llm agent, a terminal coding assistant. Lead with the outcome: act, \
                      verify, then answer concisely. Be efficient — use the fewest commands to get \
@@ -131,14 +131,6 @@ fn strip_cwd_line(s: &str) -> String {
         Some(i) => s[..i].to_string(),
         None => s.to_string(),
     }
-}
-
-fn today() -> String {
-    crate::core::db::now_turn_datetime()
-        .split('T')
-        .next()
-        .unwrap_or("")
-        .to_string()
 }
 
 #[cfg(test)]

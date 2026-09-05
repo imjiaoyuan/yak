@@ -646,6 +646,7 @@ fn result_to_output(result: &Value) -> ToolOutput {
     if truncated {
         out.push_str("\n[output truncated]\n");
     }
+    // (kept as a two-step: the non-text note interleaves with the marker)
     if is_error {
         ToolOutput::err(out)
     } else {

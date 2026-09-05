@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::approval::Tier;
-use super::tools::{MAX_BYTES, MAX_LINES, Tool, ToolOutput, truncate_tail};
+use super::tools::{Tool, ToolOutput};
 use crate::core::config::expand_env;
 
 /// Default per-call timeout in seconds.
@@ -167,27 +167,7 @@ impl Tool for ScriptTool {
                 self.spec.command
             ));
         }
-        let mut out = String::from_utf8_lossy(&outcome.stdout).into_owned();
-        let err_text = String::from_utf8_lossy(&outcome.stderr);
-        if !err_text.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&err_text);
-        }
-        let code = outcome.code;
-        if code != 0 {
-            out.push_str(&format!("\nCommand exited with code {code}"));
-        }
-        let (mut out, truncated) = truncate_tail(&out, MAX_LINES, MAX_BYTES);
-        if truncated {
-            out.push_str("\n[output truncated]\n");
-        }
-        if code == 0 {
-            ToolOutput::ok(out)
-        } else {
-            ToolOutput::err(out)
-        }
+        super::tools::finish_process_output(outcome.stdout, outcome.stderr, outcome.code)
     }
 }
 

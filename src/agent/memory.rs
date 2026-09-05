@@ -125,14 +125,6 @@ pub fn render(doc: &MemoryDoc) -> String {
     out
 }
 
-fn today() -> String {
-    crate::core::db::now_turn_datetime()
-        .split('T')
-        .next()
-        .unwrap_or("")
-        .to_string()
-}
-
 /// Append one line to the manual region (before any auto block).
 pub fn add_manual_line(line: &str) -> Result<(), String> {
     add_manual_line_at(&memory_path(), line)
@@ -185,7 +177,7 @@ pub fn merge_auto(doc: &mut MemoryDoc, facts: Vec<String>) -> Vec<String> {
         if fact.is_empty() || looks_secret(&fact) || is_duplicate(&fact, &doc.auto) {
             continue;
         }
-        let entry = format!("- [{}] {}", today(), fact);
+        let entry = format!("- [{}] {}", crate::core::db::today(), fact);
         doc.auto.push(entry.clone());
         added.push(fact);
         while doc.auto.len() > AUTO_LIMIT {
@@ -199,29 +191,8 @@ pub fn merge_auto(doc: &mut MemoryDoc, facts: Vec<String>) -> Vec<String> {
 /// in prose or fences).
 pub(crate) fn extract_json_object(text: &str) -> Option<serde_json::Value> {
     let start = text.find('{')?;
-    let bytes = text.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    return serde_json::from_str(&text[start..=i]).ok();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    crate::core::text::balanced_json_region(&text[start..])
+        .and_then(|region| serde_json::from_str(region).ok())
 }
 
 /// A compact transcript of the session for extraction: user and assistant

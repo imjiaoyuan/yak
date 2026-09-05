@@ -48,6 +48,15 @@ const APPLIED_MIGRATIONS: &[&str] = &[
     "m027_turns_response_json",
 ];
 
+/// The current UTC date, ISO (`YYYY-MM-DD`).
+pub fn today() -> String {
+    now_turn_datetime()
+        .split('T')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Turns store `response.datetime_utc()` — datetime.isoformat():
 /// "2026-08-16T08:41:02.123456+00:00", microseconds omitted when zero.
 pub fn now_turn_datetime() -> String {

@@ -290,7 +290,6 @@ impl Tool for TaskTool {
             .unwrap_or(DEFAULT_TASK_TIMEOUT)
             .max(1);
         let defs = discover(&crate::core::config::user_dir(), cwd);
-        let lookup = |name: &str| defs.iter().find(|d| d.name == name).cloned();
 
         if let Some(tasks) = args["tasks"].as_array() {
             if tasks.len() > MAX_PARALLEL {
@@ -304,8 +303,9 @@ impl Tool for TaskTool {
                 let Some(name) = t["agent"].as_str() else {
                     return ToolOutput::err("each task needs an agent name");
                 };
-                let Some(def) = lookup(name) else {
-                    return ToolOutput::err(format!("unknown agent '{name}'{}", list_defs(&defs)));
+                let def = match lookup_def(&defs, name) {
+                    Ok(d) => d,
+                    Err(e) => return e,
                 };
                 let schema = schema_for(&def, t);
                 specs.push((def, t["task"].as_str().unwrap_or("").to_string(), schema));
@@ -316,22 +316,15 @@ impl Tool for TaskTool {
                 let jobs: Vec<_> = chunk
                     .iter()
                     .map(|(def, task, schema)| {
-                        let def = def.clone();
-                        let task = task.clone();
-                        let schema = schema.clone();
-                        let model = self.model_for(&def);
-                        move |tx: &std::sync::mpsc::Sender<String>| {
-                            run_child(
-                                &def,
-                                &task,
-                                cwd,
-                                depth,
-                                model.as_deref(),
-                                schema.as_ref(),
-                                timeout,
-                                Some(tx),
-                            )
-                        }
+                        spawn_job(
+                            def,
+                            task,
+                            cwd,
+                            depth,
+                            self.model_for(def),
+                            schema.as_ref(),
+                            timeout,
+                        )
                     })
                     .collect();
                 let outs = run_jobs(jobs, log);
@@ -357,33 +350,29 @@ impl Tool for TaskTool {
                 let Some(name) = step["agent"].as_str() else {
                     return ToolOutput::err("each chain step needs an agent name");
                 };
-                let Some(def) = lookup(name) else {
-                    return ToolOutput::err(format!("unknown agent '{name}'{}", list_defs(&defs)));
+                let def = match lookup_def(&defs, name) {
+                    Ok(d) => d,
+                    Err(e) => return e,
                 };
                 let task = apply_previous(step["task"].as_str().unwrap_or(""), &previous);
-                let model = self.model_for(&def);
                 let schema = schema_for(&def, step);
                 let step_name = def.name.clone();
-                let out = run_jobs(
-                    vec![move |tx: &std::sync::mpsc::Sender<String>| {
-                        run_child(
-                            &def,
-                            &task,
-                            cwd,
-                            depth,
-                            model.as_deref(),
-                            schema.as_ref(),
-                            timeout,
-                            Some(tx),
-                        )
-                    }],
+                let mut out = run_one(
+                    spawn_job(
+                        &def,
+                        &task,
+                        cwd,
+                        depth,
+                        self.model_for(&def),
+                        schema.as_ref(),
+                        timeout,
+                    ),
                     log,
-                )
-                .pop()
-                .expect("one job, one output");
+                );
                 let is_error = out.is_error;
-                previous = out.content.clone();
-                sections.push(format!("## step {}: {}\n{}", i + 1, step_name, out.content));
+                let content = std::mem::take(&mut out.content);
+                previous = content.clone();
+                sections.push(format!("## step {}: {}\n{}", i + 1, step_name, content));
                 if is_error {
                     return ToolOutput::err(sections.join("\n"));
                 }
@@ -395,30 +384,25 @@ impl Tool for TaskTool {
         let Some(name) = args["agent"].as_str() else {
             return ToolOutput::err("provide agent+task, tasks[] or chain[]");
         };
-        let Some(def) = lookup(name) else {
-            return ToolOutput::err(format!("unknown agent '{name}'{}", list_defs(&defs)));
+        let def = match lookup_def(&defs, name) {
+            Ok(d) => d,
+            Err(e) => return e,
         };
-        let model = self.model_for(&def);
         let schema = schema_for(&def, args);
         let task = args["task"].as_str().unwrap_or("").to_string();
         let agent_name = def.name.clone();
-        let out = run_jobs(
-            vec![move |tx: &std::sync::mpsc::Sender<String>| {
-                run_child(
-                    &def,
-                    &task,
-                    cwd,
-                    depth,
-                    model.as_deref(),
-                    schema.as_ref(),
-                    timeout,
-                    Some(tx),
-                )
-            }],
+        let out = run_one(
+            spawn_job(
+                &def,
+                &task,
+                cwd,
+                depth,
+                self.model_for(&def),
+                schema.as_ref(),
+                timeout,
+            ),
             log,
-        )
-        .pop()
-        .expect("one job, one output");
+        );
         render_section_result(&agent_name, out)
     }
 }
@@ -429,6 +413,49 @@ pub(crate) fn short(s: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// Resolve an agent name, or the unknown-agent error naming what exists.
+fn lookup_def(defs: &[AgentDef], name: &str) -> Result<AgentDef, ToolOutput> {
+    defs.iter()
+        .find(|d| d.name == name)
+        .cloned()
+        .ok_or_else(|| ToolOutput::err(format!("unknown agent '{name}'{}", list_defs(defs))))
+}
+
+/// One child spawn packaged as a run_jobs job (owning its inputs).
+fn spawn_job(
+    def: &AgentDef,
+    task: &str,
+    cwd: &Path,
+    depth: u32,
+    model: Option<String>,
+    schema: Option<&Value>,
+    timeout: u64,
+) -> impl FnOnce(&std::sync::mpsc::Sender<String>) -> ToolOutput + Send {
+    let def = def.clone();
+    let task = task.to_string();
+    let schema = schema.cloned();
+    move |tx| {
+        run_child(
+            &def,
+            &task,
+            cwd,
+            depth,
+            model.as_deref(),
+            schema.as_ref(),
+            timeout,
+            Some(tx),
+        )
+    }
+}
+
+/// Run a single job through the shared pool plumbing.
+fn run_one<F: FnOnce(&std::sync::mpsc::Sender<String>) -> ToolOutput + Send>(
+    job: F,
+    log: &mut dyn FnMut(&str),
+) -> ToolOutput {
+    run_jobs(vec![job], log).pop().expect("one job, one output")
 }
 
 fn list_defs(defs: &[AgentDef]) -> String {
@@ -737,42 +764,10 @@ fn extract_json(text: &str) -> Option<Value> {
     }
     for open in ['{', '['] {
         if let Some(start) = trimmed.find(open)
-            && let Some(region) = balanced_json_region(&trimmed[start..])
+            && let Some(region) = crate::core::text::balanced_json_region(&trimmed[start..])
             && let Ok(value) = serde_json::from_str::<Value>(region)
         {
             return Some(value);
-        }
-    }
-    None
-}
-
-/// The shortest prefix of `text` (which starts at `{` or `[`) that closes the
-/// opening bracket, honoring strings and escapes. None if never balanced.
-fn balanced_json_region(text: &str) -> Option<&str> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, c) in text.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&text[..=i]);
-                }
-            }
-            _ => {}
         }
     }
     None
@@ -870,7 +865,7 @@ mod tests {
     #[test]
     fn balanced_region_honors_strings() {
         let text = r#"{"s": "a \" quote ] here", "t": 1} trailing"#;
-        let region = balanced_json_region(text).unwrap();
+        let region = crate::core::text::balanced_json_region(text).unwrap();
         let parsed: Value = serde_json::from_str(region).unwrap();
         assert_eq!(parsed["t"], json!(1));
     }

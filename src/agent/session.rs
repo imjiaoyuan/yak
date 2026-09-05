@@ -168,18 +168,11 @@ impl Session {
                             .is_some_and(|(n, p)| n == &name && p == &preview);
                         approved_echo.borrow_mut().take();
                         if !dup {
-                            let verb = crate::agent::tools::display_verb(&name);
-                            let width = crate::term::columns().max(20);
-                            let vis = 2 + verb.chars().count() + 1;
-                            let wrapped = crate::core::render_md::wrap_plain(
+                            crate::agent::tools::print_action_line(
+                                crate::agent::tools::display_verb(&name),
                                 &preview,
-                                width.saturating_sub(vis),
-                                2,
+                                diff.as_deref(),
                             );
-                            eprintln!("\x1b[1m$\x1b[0m {verb} \x1b[1m\x1b[32m{wrapped}\x1b[0m");
-                            if let Some(diff) = &diff {
-                                crate::agent::tools::print_diff_block(diff);
-                            }
                         }
                         view.borrow_mut().resume_running();
                     }
