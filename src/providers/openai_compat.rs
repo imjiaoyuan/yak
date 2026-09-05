@@ -310,54 +310,20 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::testutil::{att, input, tool_def};
     use crate::providers::{ToolCall, ToolCallAccumulator, ToolDef};
+
+    fn model(kind: &str) -> ResolvedModel {
+        crate::providers::testutil::model(kind)
+    }
     use serde_json::json;
-
-    fn model() -> ResolvedModel {
-        ResolvedModel {
-            provider_name: "test".into(),
-            kind: "openai-compat".into(),
-            base_url: "http://localhost".into(),
-            api_key: None,
-            model_id: "m1".into(),
-            options: Vec::new(),
-            schema: None,
-        }
-    }
-
-    fn input<'a>(history: &'a [Msg], tools: &'a [ToolDef]) -> PromptInput<'a> {
-        PromptInput {
-            system: None,
-            history,
-            prompt: "go",
-            attachments: &[],
-            tools,
-            reasoning: None,
-        }
-    }
-
-    fn tool_def() -> ToolDef {
-        ToolDef {
-            name: "read".into(),
-            description: "read a file".into(),
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
-        }
-    }
-
-    fn att(mime: &str, name: Option<&str>) -> Attachment {
-        Attachment {
-            mime_type: mime.into(),
-            base64_data: "AAAA".into(),
-            filename: name.map(String::from),
-        }
-    }
 
     #[test]
     fn pdf_attachment_rides_a_file_block() {
         let mut i = input(&[], &[]);
         let atts = [att("application/pdf", Some("doc.pdf"))];
         i.attachments = &atts;
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("openai-compat"), &i, false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[1]["type"], "file");
         assert_eq!(content[1]["file"]["filename"], "doc.pdf");
@@ -372,7 +338,7 @@ mod tests {
         let mut i = input(&[], &[]);
         let atts = [att("audio/mpeg", None)];
         i.attachments = &atts;
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("openai-compat"), &i, false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[1]["type"], "input_audio");
         assert_eq!(content[1]["input_audio"]["format"], "mp3");
@@ -384,7 +350,7 @@ mod tests {
             "look",
             vec![att("image/png", Some("shot.png"))],
         )];
-        let body = build_body(&model(), &input(&history, &[]), false).unwrap();
+        let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
@@ -402,7 +368,7 @@ mod tests {
                 attachments: vec![att("image/png", Some("shot.png"))],
             },
         ];
-        let body = build_body(&model(), &input(&history, &[]), false).unwrap();
+        let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
         // the assistant precedes, so the only tool message is index 1
         let content = body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
@@ -412,7 +378,7 @@ mod tests {
 
     #[test]
     fn text_only_model_omits_image_and_notes_it() {
-        let mut m = model();
+        let mut m = model("openai-compat");
         m.model_id = "deepseek-chat".into();
         let history = vec![Msg::ToolResult {
             call_id: "c1".into(),
@@ -433,7 +399,7 @@ mod tests {
         let mut i = input(&[], &[]);
         let atts = [att("application/zip", None)];
         i.attachments = &atts;
-        let err = build_body(&model(), &i, false).unwrap_err();
+        let err = build_body(&model("openai-compat"), &i, false).unwrap_err();
         assert!(err.contains("application/zip"), "{err}");
         assert!(err.contains("image, PDF, text and wav/mp3"), "{err}");
     }
@@ -447,7 +413,7 @@ mod tests {
             filename: Some("notes.md".into()),
         }];
         i.attachments = &atts;
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("openai-compat"), &i, false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "go");
@@ -458,7 +424,7 @@ mod tests {
     #[test]
     fn plain_history_serializes_as_before() {
         let body = build_body(
-            &model(),
+            &model("openai-compat"),
             &input(&[Msg::user("hi"), Msg::assistant("ho")], &[]),
             true,
         )
@@ -483,7 +449,12 @@ mod tests {
             },
             Msg::tool_result("call_1", "ls", "a\nb"),
         ];
-        let body = build_body(&model(), &input(&history, &[tool_def()]), false).unwrap();
+        let body = build_body(
+            &model("openai-compat"),
+            &input(&history, &[tool_def()]),
+            false,
+        )
+        .unwrap();
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"], Value::Null);
@@ -504,10 +475,10 @@ mod tests {
     fn reasoning_effort_sent_when_set() {
         let mut i = input(&[], &[]);
         i.reasoning = Some("high");
-        let body = build_body(&model(), &i, true).unwrap();
+        let body = build_body(&model("openai-compat"), &i, true).unwrap();
         assert_eq!(body["reasoning_effort"], json!("high"));
         // unset → the parameter is absent, byte-compatible with before
-        let body = build_body(&model(), &input(&[], &[]), true).unwrap();
+        let body = build_body(&model("openai-compat"), &input(&[], &[]), true).unwrap();
         assert!(body.get("reasoning_effort").is_none());
     }
 
@@ -521,7 +492,7 @@ mod tests {
                 arguments: json!({}),
             }],
         }];
-        let body = build_body(&model(), &input(&history, &[]), true).unwrap();
+        let body = build_body(&model("openai-compat"), &input(&history, &[]), true).unwrap();
         assert_eq!(body["tools"], json!([]));
     }
 
@@ -537,7 +508,12 @@ mod tests {
                 arguments: json!({}),
             }],
         }];
-        let body = build_body(&model(), &input(&orphan, &[tool_def()]), false).unwrap();
+        let body = build_body(
+            &model("openai-compat"),
+            &input(&orphan, &[tool_def()]),
+            false,
+        )
+        .unwrap();
         let msgs = body["messages"].as_array().unwrap();
         // assistant, its synthetic result, then the "go" prompt
         assert_eq!(msgs.len(), 3);
@@ -556,7 +532,12 @@ mod tests {
             },
             Msg::tool_result("c1", "ls", "a\nb"),
         ];
-        let body = build_body(&model(), &input(&paired, &[tool_def()]), false).unwrap();
+        let body = build_body(
+            &model("openai-compat"),
+            &input(&paired, &[tool_def()]),
+            false,
+        )
+        .unwrap();
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3, "no synthetic injected for a paired call");
         assert_eq!(msgs[1]["content"], "a\nb");

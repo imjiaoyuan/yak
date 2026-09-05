@@ -353,46 +353,20 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::testutil::{att, input, tool_def};
     use crate::providers::{ToolCall, ToolCallAccumulator, ToolDef};
+
+    fn model(kind: &str) -> ResolvedModel {
+        crate::providers::testutil::model(kind)
+    }
     use serde_json::json;
-
-    fn model() -> ResolvedModel {
-        ResolvedModel {
-            provider_name: "test".into(),
-            kind: "anthropic".into(),
-            base_url: "http://localhost".into(),
-            api_key: None,
-            model_id: "m1".into(),
-            options: Vec::new(),
-            schema: None,
-        }
-    }
-
-    fn input<'a>(history: &'a [Msg], tools: &'a [ToolDef]) -> PromptInput<'a> {
-        PromptInput {
-            system: None,
-            history,
-            prompt: "go",
-            attachments: &[],
-            tools,
-            reasoning: None,
-        }
-    }
-
-    fn att(mime: &str, name: Option<&str>) -> Attachment {
-        Attachment {
-            mime_type: mime.into(),
-            base64_data: "AAAA".into(),
-            filename: name.map(String::from),
-        }
-    }
 
     #[test]
     fn pdf_attachment_rides_a_document_block() {
         let mut i = input(&[], &[]);
         let atts = [att("application/pdf", Some("doc.pdf"))];
         i.attachments = &atts;
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[1]["type"], "document");
         assert_eq!(content[1]["source"]["media_type"], "application/pdf");
@@ -404,7 +378,7 @@ mod tests {
         let mut i = input(&[], &[]);
         let atts = [att("audio/mpeg", None)];
         i.attachments = &atts;
-        let err = build_body(&model(), &i, false).unwrap_err();
+        let err = build_body(&model("anthropic"), &i, false).unwrap_err();
         assert!(err.contains("audio/mpeg"), "{err}");
         assert!(err.contains("image, PDF and text"), "{err}");
     }
@@ -419,7 +393,7 @@ mod tests {
             filename: Some("notes.txt".into()),
         }];
         i.attachments = &atts;
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[1]["type"], "document");
         assert_eq!(content[1]["source"]["type"], "text");
@@ -436,7 +410,7 @@ mod tests {
             filename: Some("rows.csv".into()),
         }];
         i.attachments = &atts;
-        let err = build_body(&model(), &i, false).unwrap_err();
+        let err = build_body(&model("anthropic"), &i, false).unwrap_err();
         assert!(err.contains("UTF-8"), "{err}");
     }
 
@@ -468,7 +442,7 @@ mod tests {
                 attachments: Vec::new(),
             },
         ];
-        let body = build_body(&model(), &input(&history, &[]), true).unwrap();
+        let body = build_body(&model("anthropic"), &input(&history, &[]), true).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         // user, assistant(text+2 tool_use), user(2 tool_result), user(prompt)
         assert_eq!(msgs.len(), 4);
@@ -488,7 +462,7 @@ mod tests {
     fn thinking_maps_to_budget_and_raises_max_tokens() {
         let mut i = input(&[], &[]);
         i.reasoning = Some("medium");
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
         assert_eq!(
             body["thinking"],
             json!({"type": "enabled", "budget_tokens": 16384})
@@ -497,13 +471,13 @@ mod tests {
         assert_eq!(body["max_tokens"], json!(16384 + 4096));
 
         // a user-set max_tokens above the budget is left alone
-        let mut m = model();
+        let mut m = model("anthropic");
         m.options = vec![("max_tokens".to_string(), "90000".to_string())];
         let body = build_body(&m, &i, false).unwrap();
         assert_eq!(body["max_tokens"], json!(90000));
 
         // unset → no thinking block at all
-        let body = build_body(&model(), &input(&[], &[]), false).unwrap();
+        let body = build_body(&model("anthropic"), &input(&[], &[]), false).unwrap();
         assert!(body.get("thinking").is_none());
     }
 
@@ -514,7 +488,7 @@ mod tests {
             description: "run a command".into(),
             parameters: json!({"type":"object","properties":{"command":{"type":"string"}}}),
         }];
-        let body = build_body(&model(), &input(&[], &tools), false).unwrap();
+        let body = build_body(&model("anthropic"), &input(&[], &tools), false).unwrap();
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert!(body.get("tools").unwrap().as_array().unwrap().len() == 1);
@@ -530,7 +504,7 @@ mod tests {
         let history = [Msg::user("hi")];
         let mut i = input(&history, &tools);
         i.system = Some("be brief");
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
         let blocks = body["system"].as_array().unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
@@ -554,7 +528,12 @@ mod tests {
                 parameters: json!({"type": "object"}),
             },
         ];
-        let body = build_body(&model(), &input(&[Msg::user("hi")], &tools), false).unwrap();
+        let body = build_body(
+            &model("anthropic"),
+            &input(&[Msg::user("hi")], &tools),
+            false,
+        )
+        .unwrap();
         assert!(body.get("system").is_none());
         assert!(body["tools"][0].get("cache_control").is_none());
         assert_eq!(
@@ -566,7 +545,7 @@ mod tests {
     #[test]
     fn conversation_tip_carries_the_breakpoint() {
         let history = vec![Msg::user("hi")];
-        let body = build_body(&model(), &input(&history, &[]), false).unwrap();
+        let body = build_body(&model("anthropic"), &input(&history, &[]), false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         // earlier turns stay plain unmarked strings
         assert_eq!(msgs[0]["content"], json!("hi"));
@@ -593,7 +572,7 @@ mod tests {
         ];
         let mut i = input(&history, &[]);
         i.prompt = ""; // continue after tool results
-        let body = build_body(&model(), &i, false).unwrap();
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         let tip = msgs.last().unwrap()["content"].as_array().unwrap();
         assert_eq!(tip.len(), 1);
@@ -605,7 +584,7 @@ mod tests {
     fn first_round_prompt_stays_unmarked() {
         // no history: a one-shot prompt is never resent, so a breakpoint on
         // it would pay the cache-write premium for a read that never comes
-        let body = build_body(&model(), &input(&[], &[]), false).unwrap();
+        let body = build_body(&model("anthropic"), &input(&[], &[]), false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["content"], json!("go"));
     }

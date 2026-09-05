@@ -427,3 +427,47 @@ mod tests {
         assert!(!call_answered(&last, "b", 4));
     }
 }
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    use super::*;
+
+    pub(crate) fn model(kind: &str) -> ResolvedModel {
+        ResolvedModel {
+            provider_name: "test".into(),
+            kind: kind.into(),
+            base_url: "http://localhost".into(),
+            api_key: None,
+            model_id: "m1".into(),
+            options: Vec::new(),
+            schema: None,
+        }
+    }
+
+    pub(crate) fn input<'a>(history: &'a [Msg], tools: &'a [ToolDef]) -> PromptInput<'a> {
+        PromptInput {
+            system: None,
+            history,
+            prompt: "go",
+            attachments: &[],
+            tools,
+            reasoning: None,
+        }
+    }
+
+    pub(crate) fn tool_def() -> ToolDef {
+        ToolDef {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }
+    }
+
+    pub(crate) fn att(mime: &str, name: Option<&str>) -> Attachment {
+        Attachment {
+            mime_type: mime.into(),
+            base64_data: "AAAA".into(),
+            filename: name.map(String::from),
+        }
+    }
+}
