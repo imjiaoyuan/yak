@@ -1,6 +1,9 @@
 //! The shared kernel: infrastructure and services used by two or more
 //! commands or domains. Single-domain code lives in its own top-level
-//! module (agent/, providers/, term/) instead.
+//! module (agent/, providers/, term/) instead. One deliberate exception:
+//! `render`/`render_md` are core's terminal-presentation edge and read the
+//! live terminal (widths for re-wrap-on-resize, the spinner ticker) through
+//! `crate::term` — everything else in core stays terminal-agnostic.
 
 pub mod args;
 pub mod attachments;

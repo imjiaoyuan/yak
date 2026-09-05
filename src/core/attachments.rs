@@ -2,7 +2,7 @@
 //! into bytes with a mime type, feeding the wire `Attachment` and the log
 //! store. Shared by prompt, chat and agent.
 
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 
 use crate::core::logstore::StoredAttachment;
 use crate::providers::Attachment;
@@ -44,6 +44,31 @@ impl Loaded {
         let name = name.split('?').next().unwrap_or(name);
         (!name.is_empty()).then(|| name.to_string())
     }
+}
+
+/// Piped stdin joined onto the prompt text (space-prepended) — the shared
+/// head of the prompt and agent commands. No-op when stdin is a terminal or
+/// an `-a -` attachment claims it.
+pub fn read_piped_prompt(
+    args: &crate::core::args::ParsedArgs,
+    prompt: String,
+) -> Result<String, String> {
+    if wants_stdin(args) || std::io::stdin().is_terminal() {
+        return Ok(prompt);
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.is_empty() {
+        return Ok(prompt);
+    }
+    Ok(if prompt.is_empty() {
+        buf
+    } else {
+        format!("{buf} {prompt}")
+    })
 }
 
 /// True when an `-a -` / `--at - MIMETYPE` reference claims stdin, so the

@@ -103,6 +103,8 @@ impl BlockStream {
     }
 
     fn refresh_width(&mut self) {
+        // the deliberate core→term edge: re-read per line so a resize
+        // applies from the next row
         self.wrap = crate::term::columns()
             .saturating_sub(self.margin_cells)
             .max(20);

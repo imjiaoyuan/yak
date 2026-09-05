@@ -1,7 +1,7 @@
 //! `llm agent` — interactive CLI agent (terminal-agent style) plus its one-shot
 //! (`llm agent "task"`) and JSONL (`--mode json`) forms.
 
-use std::io::{IsTerminal, Read};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::agent::approval::{self, ApprovalConfig, Policy};
@@ -169,19 +169,7 @@ fn run_mode(argv: &[String], chat: bool) -> i32 {
 fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     let mut prompt = args.first_positional().unwrap_or("").to_string();
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task
-    if !crate::core::attachments::wants_stdin(args) && !std::io::stdin().is_terminal() {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| e.to_string())?;
-        if !buf.is_empty() {
-            if prompt.is_empty() {
-                prompt = buf;
-            } else {
-                prompt = format!("{buf} {prompt}");
-            }
-        }
-    }
+    prompt = crate::core::attachments::read_piped_prompt(args, prompt)?;
 
     let settings = crate::agent::settings::load();
 

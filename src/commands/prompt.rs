@@ -1,7 +1,5 @@
 //! `llm prompt` — the core one-shot command (also the default command).
 
-use std::io::{IsTerminal, Read};
-
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
 use crate::core::db::Db;
@@ -148,19 +146,7 @@ fn execute(
 
     // stdin piped → joined with a space before the argument, like the
     // original; an `-a -` attachment claims stdin instead
-    if !crate::core::attachments::wants_stdin(args) && !std::io::stdin().is_terminal() {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| e.to_string())?;
-        if !buf.is_empty() {
-            if prompt_text.is_empty() {
-                prompt_text = buf;
-            } else {
-                prompt_text = format!("{buf} {prompt_text}");
-            }
-        }
-    }
+    prompt_text = crate::core::attachments::read_piped_prompt(args, prompt_text)?;
 
     if prompt_text.trim().is_empty() && preset.is_none() {
         eprintln!("Error: no prompt provided (pass an argument or pipe stdin)");

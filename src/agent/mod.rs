@@ -414,10 +414,9 @@ fn gate_call<'a>(
     if let Err(e) = tools::validate(&tool.parameters(), &call.arguments) {
         return Err(format!("invalid arguments: {e}"));
     }
-    let preview = tool.preview(&call.arguments);
-    let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
 
-    // root commands are never run by the agent, in any mode
+    // root commands are never run by the agent, in any mode — before any
+    // preview work, so a hard denial pays nothing
     if tool.name() == "bash"
         && let Some(why) = approval::root_reason(call.arguments["command"].as_str().unwrap_or(""))
     {
@@ -426,26 +425,31 @@ fn gate_call<'a>(
 
     // the danger table (rm and friends) forces a manual prompt in every
     // mode, yolo included — destructive commands never auto-run
-    let mut critical = None;
-    if tool.name() == "bash" {
-        critical = approval::critical_reason(call.arguments["command"].as_str().unwrap_or(""));
-    }
+    let critical = if tool.name() == "bash" {
+        approval::critical_reason(call.arguments["command"].as_str().unwrap_or(""))
+    } else {
+        None
+    };
 
     let escapes = call
         .arguments
         .get("path")
         .and_then(|p| p.as_str())
         .is_some_and(|p| approval::escapes_cwd(cwd, p));
-    let decision = approval::resolve(tool.name(), tool.tier(), escapes, approval);
-    let (ask, reason) = match (&decision, critical) {
-        (approval::Decision::Deny(r), _) => {
-            return Err(format!("denied: {r}"));
-        }
-        (approval::Decision::Auto, Some(why)) => (true, why.to_string()),
-        (approval::Decision::Auto, None) => (false, String::new()),
-        (approval::Decision::Ask(_), Some(why)) => (true, why.to_string()),
-        (approval::Decision::Ask(r), None) => (true, r.clone()),
+    let decision = match approval::resolve(tool.name(), tool.tier(), escapes, approval) {
+        approval::Decision::Deny(r) => return Err(format!("denied: {r}")),
+        other => other,
     };
+    // a danger hit outranks the mode's own reason in the prompt
+    let (ask, reason) = match (&decision, critical) {
+        (_, Some(why)) => (true, why.to_string()),
+        (approval::Decision::Ask(r), None) => (true, r.clone()),
+        (approval::Decision::Auto, None) => (false, String::new()),
+        // denied decisions returned above
+        (approval::Decision::Deny(_), None) => unreachable!("denied decisions return early"),
+    };
+    let preview = tool.preview(&call.arguments);
+    let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
     if ask {
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),

@@ -491,10 +491,11 @@ fn render_section_result(name: &str, out: ToolOutput) -> ToolOutput {
 /// The per-call schema: the task's `outputSchema` overrides the agent
 /// definition's `output_schema` when both are set.
 fn schema_for(def: &AgentDef, call: &Value) -> Option<Value> {
-    call["outputSchema"]
-        .as_object()
-        .map(|_| call["outputSchema"].clone())
-        .or_else(|| def.output_schema.clone())
+    if call["outputSchema"].is_object() {
+        Some(call["outputSchema"].clone())
+    } else {
+        def.output_schema.clone()
+    }
 }
 
 /// Spawn this binary as a headless sub-agent and collect its final text.
