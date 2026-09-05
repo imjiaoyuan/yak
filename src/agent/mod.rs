@@ -424,9 +424,10 @@ fn gate_call<'a>(
         return Err(format!("denied: {why}"));
     }
 
-    // critical bash patterns force a prompt even when the mode would auto-allow
+    // the danger table (rm and friends) forces a manual prompt in every
+    // mode, yolo included — destructive commands never auto-run
     let mut critical = None;
-    if tool.name() == "bash" && approval.mode != approval::Mode::Yolo {
+    if tool.name() == "bash" {
         critical = approval::critical_reason(call.arguments["command"].as_str().unwrap_or(""));
     }
 
@@ -457,9 +458,13 @@ fn gate_call<'a>(
         match answer {
             ApprovalResponse::Allow => {}
             ApprovalResponse::AllowSession => {
-                approval
-                    .tool_policies
-                    .insert(tool.name().to_string(), approval::Policy::Allow);
+                // a danger-gated approval is one-shot: 'a' never whitelists
+                // bash past the danger table
+                if critical.is_none() {
+                    approval
+                        .tool_policies
+                        .insert(tool.name().to_string(), approval::Policy::Allow);
+                }
             }
             ApprovalResponse::Deny => {
                 return Err(format!("denied by user: {preview}"));
@@ -484,6 +489,51 @@ pub(crate) fn emit_json(value: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn danger_commands_ask_in_yolo_and_always_is_one_shot() {
+        let tools = tools::builtin_tools_configured(None, &std::collections::BTreeMap::new());
+        let rm = ToolCall {
+            id: "t1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "rm -rf build"}),
+        };
+        let mut cfg = approval::ApprovalConfig {
+            mode: approval::Mode::Yolo,
+            ..Default::default()
+        };
+        let mut asks = 0;
+        for _ in 0..2 {
+            let cleared = gate_call(
+                &rm,
+                &tools,
+                std::path::Path::new("."),
+                &mut cfg,
+                &mut |_req| {
+                    asks += 1;
+                    ApprovalResponse::AllowSession // the user presses 'a'
+                },
+            );
+            assert!(cleared.is_ok());
+        }
+        // every rm asks again: 'a' never whitelists bash past the danger table
+        assert_eq!(asks, 2);
+        assert!(!cfg.tool_policies.contains_key("bash"));
+        // a benign command in yolo still runs without a prompt
+        let ls = ToolCall {
+            id: "t2".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls -la"}),
+        };
+        let cleared = gate_call(
+            &ls,
+            &tools,
+            std::path::Path::new("."),
+            &mut cfg,
+            &mut |_| panic!("benign yolo command must not ask"),
+        );
+        assert!(cleared.is_ok());
+    }
 
     #[test]
     fn summarize_shows_ten_lines_plus_count() {

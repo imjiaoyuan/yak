@@ -440,7 +440,7 @@ fn repl_command(
             };
             session.approval.mode = mode;
             let note = match mode {
-                approval::Mode::Yolo => " · everything auto-approved",
+                approval::Mode::Yolo => " · everything auto-approved (rm and friends still ask)",
                 approval::Mode::AlwaysAsk => " · only in-directory reads auto",
             };
             eprintln!("\x1b[2mapproval → {}{note}\x1b[0m", mode.label());

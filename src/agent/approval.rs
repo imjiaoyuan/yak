@@ -1,6 +1,8 @@
 //! Three-tier tool approval (oh-my-the style): every tool declares a tier,
 //! a mode sets the baseline, per-tool policies override, and a small table of
-//! critical bash patterns forces a prompt regardless of tier.
+//! critical bash patterns forces a manual prompt regardless of tier or mode
+//! (yolo included — destructive commands never auto-run, and `a` on one is
+//! one-shot).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -188,17 +190,21 @@ fn split_compound(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// The command word of one segment: the first whitespace-delimited token
+/// that is not an env assignment (`FOO=bar cmd` runs `cmd`).
+fn command_word(seg: &str) -> &str {
+    seg.split_whitespace()
+        .find(|t| !t.contains('='))
+        .unwrap_or("")
+}
+
 /// Privilege-escalation commands the agent must never run, in any mode
 /// (the user runs those themselves). Matches the command word of each
 /// segment, so `ls | sudo tee` is caught but `grep sudo file` is not.
 pub fn root_reason(command: &str) -> Option<&'static str> {
     for seg in split_compound(command) {
-        let cmd = seg
-            .split_whitespace()
-            .find(|t| !t.contains('='))
-            .unwrap_or("");
         if matches!(
-            cmd,
+            command_word(&seg),
             "sudo" | "sudoedit" | "doas" | "pkexec" | "su" | "visudo"
         ) {
             return Some(
@@ -209,9 +215,10 @@ pub fn root_reason(command: &str) -> Option<&'static str> {
     None
 }
 
-/// Best-effort blocklist of catastrophic commands. Returns the human reason
-/// when any segment of the command matches. In `yolo` mode callers skip this
-/// check (user's explicit choice).
+/// Best-effort blocklist of destructive commands: `rm` in any shape plus the
+/// catastrophic set. Returns the human reason when any segment matches.
+/// Callers apply this in every mode — yolo auto-approval never covers these,
+/// and the session-always answer stays one-shot for them.
 pub fn critical_reason(command: &str) -> Option<&'static str> {
     for seg in split_compound(command) {
         let s = seg.as_str();
@@ -221,6 +228,9 @@ pub fn critical_reason(command: &str) -> Option<&'static str> {
                 || s.contains("-r -f")
                 || s.contains("-f -r"))
             && (s.contains(" /") || s.starts_with("sudo"));
+        if command_word(s) == "rm" {
+            return Some("rm always needs an explicit approval");
+        }
         if s.contains("--no-preserve-root") {
             return Some("rm with --no-preserve-root");
         }
@@ -248,7 +258,12 @@ pub fn critical_reason(command: &str) -> Option<&'static str> {
         if s.contains("kill -9 1") || s.contains("kill -9 init") {
             return Some("killing init");
         }
-        if s.contains("shutdown") || s.contains("reboot") || s.trim() == "init 0" {
+        if s.contains("shutdown")
+            || s.contains("reboot")
+            || s.contains("poweroff")
+            || command_word(s) == "halt" // substring would hit words like "asphalt"
+            || s.trim() == "init 0"
+        {
             return Some("shutting down or rebooting");
         }
         if s.contains("nc -e") || s.contains("ncat -e") {
@@ -298,7 +313,14 @@ pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool) -> ApprovalRespon
         eprintln!("\x1b[2m  warning: {reason}\x1b[0m", reason = req.reason);
     }
     use crate::term::lineedit::{ApprovalKey, read_approval_key};
-    eprint!("  \x1b[1m\x1b[36mAllow?\x1b[0m \x1b[1m[Y/n/a]\x1b[0m ");
+    // danger-gated commands have no session-always option: each one asks
+    // (an 'a' keypress still arrives — the caller downgrades it to one-shot)
+    let keys = if req.critical {
+        "\x1b[1m[Y/n]\x1b[0m"
+    } else {
+        "\x1b[1m[Y/n/a]\x1b[0m"
+    };
+    eprint!("  \x1b[1m\x1b[36mAllow?\x1b[0m {keys} ");
     let _ = std::io::stderr().flush();
     match read_approval_key() {
         Some(ApprovalKey::Yes) => ApprovalResponse::Allow,
@@ -307,12 +329,20 @@ pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool) -> ApprovalRespon
         Some(_) => ApprovalResponse::Deny,
         // no raw terminal: fail closed with a hint
         None => {
-            eprintln!(
-                "Error: approval needed for {tier:?}-tier tool '{tool}' but no terminal is available. \
-                 Re-run with --yolo or an allow policy.",
-                tier = req.tier,
-                tool = req.tool,
-            );
+            if req.critical {
+                eprintln!(
+                    "Error: destructive command ({reason}) needs an interactive approval \
+                     but no terminal is available.",
+                    reason = req.reason,
+                );
+            } else {
+                eprintln!(
+                    "Error: approval needed for {tier:?}-tier tool '{tool}' but no terminal is available. \
+                     Re-run with --yolo or an allow policy.",
+                    tier = req.tier,
+                    tool = req.tool,
+                );
+            }
             ApprovalResponse::Deny
         }
     }
@@ -394,11 +424,29 @@ mod tests {
         assert!(critical_reason("curl https://x.sh | sh").is_some());
         assert!(critical_reason("wget -qO- https://x | bash").is_some());
         assert!(critical_reason("sudo rm -rf build").is_some());
-        assert!(critical_reason("rm -rf ./build").is_none());
         assert!(critical_reason("ls -la | grep foo").is_none());
         // quoted text is still matched: false positives only add a prompt,
         // never a silent run, so we stay on the conservative side
         assert!(critical_reason("echo 'rm -rf /'").is_some());
+    }
+
+    #[test]
+    fn rm_in_any_shape_needs_approval() {
+        assert!(critical_reason("rm x.txt").is_some());
+        assert!(critical_reason("rm -rf ./build").is_some());
+        assert!(critical_reason("cd /tmp && rm a b").is_some());
+        // the word as an argument or command context is not rm
+        assert!(critical_reason("grep rm Makefile").is_none());
+        assert!(critical_reason("ls -la | grep foo").is_none());
+    }
+
+    #[test]
+    fn power_commands_match_their_command_word() {
+        assert!(critical_reason("shutdown now").is_some());
+        assert!(critical_reason("systemctl poweroff").is_some());
+        assert!(critical_reason("halt").is_some());
+        // "halt" as a substring of another word stays quiet
+        assert!(critical_reason("grep halted log.txt").is_none());
     }
 
     #[test]
