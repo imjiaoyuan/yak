@@ -429,10 +429,22 @@ fn completions(buf: &str, skill_names: &[String], mode: approval::Mode, cwd: &st
 fn shell_completions(rest: &str, cwd: &str) -> Vec<String> {
     let (word, command_position) = shell_word_and_scope(rest);
     if command_position && !word.contains('/') {
-        path_commands(word)
+        let mut out = path_commands(word);
+        // a line-start command replaces the WHOLE word — column 0 — so the
+        // candidates must carry the `!` back or the prefix is swallowed
+        if bang_prefixed(rest) {
+            out = out.into_iter().map(|c| format!("!{c}")).collect();
+        }
+        out
     } else {
         path_files(word, cwd)
     }
+}
+
+/// True when the shell line is just `!<word>`: the completion target is the
+/// first word of the line and candidates need the bang.
+fn bang_prefixed(rest: &str) -> bool {
+    !rest.contains(char::is_whitespace)
 }
 
 /// The word being completed, and whether it sits at a command position.
@@ -842,6 +854,15 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_start_command_candidates_carry_the_bang() {
+        assert!(bang_prefixed("gi"));
+        assert!(bang_prefixed(""));
+        // after a space or a pipe the word is no longer the line start
+        assert!(!bang_prefixed("cat he"));
+        assert!(!bang_prefixed("ls | gr"));
+    }
 
     #[test]
     fn shell_scope_detects_command_positions() {

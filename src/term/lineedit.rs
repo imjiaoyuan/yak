@@ -104,7 +104,7 @@ impl LineEditor {
         let mut pastes: Vec<(String, String)> = Vec::new();
 
         loop {
-            let b = loop {
+            let mut b = loop {
                 // a SIGINT that landed outside raw mode only sets the flag;
                 // the poll timeout is the chance to notice it
                 if crate::core::http::interrupted() {
@@ -117,6 +117,28 @@ impl LineEditor {
                     RawByte::Timeout => {}
                 }
             };
+            // kitty-protocol terminals re-encode plain ctrl+letter keys as
+            // CSI u (`ctrl+c` arrives as CSI 99;5u): fold them back to the
+            // C0 byte so every ctrl binding keeps working. A lone ESC (no
+            // sequence follows) or the kitty CSI 27u form interrupts like
+            // ctrl-c — one press clears the line, two exit.
+            let mut pending_esc: Option<Esc> = None;
+            if b == 0x1b {
+                match term.next_byte() {
+                    RawByte::Timeout => {
+                        line.settle(&mut out, prompt, "");
+                        return LineResult::Interrupt;
+                    }
+                    RawByte::Key(first) => match term.escape_from(first) {
+                        Some(Esc::Key(cp, m))
+                            if (m == 5 || m == 6) && (97u32..=122).contains(&cp) =>
+                        {
+                            b = (cp - 96) as u8;
+                        }
+                        other => pending_esc = other,
+                    },
+                }
+            }
             match b {
                 // enter submits (raw mode clears ICRNL, so enter is always
                 // \r; a raw \n is ctrl+j and inserts a newline below)
@@ -380,7 +402,7 @@ impl LineEditor {
                         None => {}
                     }
                 }
-                0x1b => match term.escape_seq() {
+                0x1b => match pending_esc.take() {
                     Some(Esc::AltEnter) => {
                         buf.insert(cursor, '\n');
                         cursor += 1;
@@ -391,14 +413,16 @@ impl LineEditor {
                         // kitty CSI-u keys: modified enter, alt+letter and
                         // alt+backspace land here (legacy ESC-prefixed alt
                         // keys arrive as (char, 3) through the same shape)
-                        if cp == 13 {
+                        if cp == 27 {
+                            // the kitty-reported plain ESC key
+                            line.settle(&mut out, prompt, "");
+                            return LineResult::Interrupt;
+                        } else if cp == 13 {
                             // shift/ctrl/alt+enter: all just break the line
                             buf.insert(cursor, '\n');
                             cursor += 1;
                             nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor);
-                        } else if cp == 27 {
-                            // plain esc reported as CSI 27u: nothing bound
                         } else if cp == 127 && m >= 3 {
                             kill_word_back(&mut buf, &mut cursor, &mut kill);
                             nav.reset(self.history.len());
@@ -1125,11 +1149,18 @@ trait RawTermExt {
     /// After ESC: parse `[ X` / `[ N ~` sequences, CSI-u keys and
     /// alt-prefixed keys; alt+enter is a newline.
     fn escape_seq(&mut self) -> Option<Esc>;
+    /// Same parse, but the caller already consumed the byte after ESC
+    /// (letting it tell a lone ESC — timeout — from a sequence).
+    fn escape_from(&mut self, first: u8) -> Option<Esc>;
 }
 
 impl RawTermExt for RawTerm {
     fn escape_seq(&mut self) -> Option<Esc> {
         let b = self.next_byte().key()?;
+        self.escape_from(b)
+    }
+
+    fn escape_from(&mut self, b: u8) -> Option<Esc> {
         if b == b'\r' || b == b'\n' {
             return Some(Esc::AltEnter);
         }
