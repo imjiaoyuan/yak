@@ -90,6 +90,10 @@ impl RawTerm {
         const ICANON: u64 = 0x2;
         const ECHO: u64 = 0x8;
         const ISIG: u64 = 0x1;
+        // keep CR/LF untranslated: Enter stays \r, ctrl+j stays \n
+        const ICRNL: u64 = 0x100;
+        const INLCR: u64 = 0x40;
+        const IGNCR: u64 = 0x80;
         const VMIN: usize = 6;
         const VTIME: usize = 5;
 
@@ -103,6 +107,7 @@ impl RawTerm {
         }
         let mut raw = saved;
         raw.c_lflag &= !(ICANON | ECHO | ISIG);
+        raw.c_iflag &= !(ICRNL | INLCR | IGNCR);
         raw.c_cc[VMIN] = vmin;
         raw.c_cc[VTIME] = vtime;
         if unsafe { tcsetattr(fd, 0, &raw) } != 0 {

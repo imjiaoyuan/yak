@@ -66,12 +66,20 @@ impl RawTerm {
         const ICANON: u8 = 0o2;
         const ECHO: u8 = 0o10;
         const ISIG: u8 = 0o1;
+        // c_iflag (first u32, little endian): clear CR/LF translation so Enter
+        // stays \r while ctrl+j arrives as \n — the two must stay distinct
+        // for the line editor's submit-vs-newline split
+        const IGNCR: u8 = 0o200; // bit 7 of the low byte
+        const INLCR: u8 = 0o100; // bit 6
+        const ICRNL_LOW: u8 = 0o1; // ICRNL is 0x100: bit 0 of the high byte
         let mut saved = [0u8; 64];
         if unsafe { tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
             return None;
         }
         let mut raw = saved;
         raw[12] &= !(ICANON | ECHO | ISIG);
+        raw[0] &= !(INLCR | IGNCR);
+        raw[1] &= !ICRNL_LOW;
         raw[22] = vtime;
         raw[23] = vmin;
         if unsafe { tcsetattr(fd, 0, raw.as_ptr()) } != 0 {

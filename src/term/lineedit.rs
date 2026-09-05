@@ -2,13 +2,20 @@
 //! movement and bash-style tab completion, backed by the platform RawTerm
 //! implementation. Falls back to a plain read when the terminal cannot be put
 //! in raw mode.
+//!
+//! The buffer is multiline: ctrl+j (a raw `\n`, distinct from Enter's `\r`
+//! because the platform clears ICRNL), alt+enter, shift/ctrl+enter (via the
+//! kitty keyboard protocol) and bracketed paste all insert real newlines;
+//! only Enter submits. Arrows move through the multiline text and only recall
+//! history from the top line with the cursor parked at its start.
 
 use crate::platform::{RawByte, RawTerm};
 use std::io::Write;
+use std::path::Path;
 
 pub enum LineResult {
     /// a completed line (without the trailing newline); may contain embedded
-    /// newlines from alt+enter or backslash continuation
+    /// newlines from ctrl+j, alt+enter or backslash continuation
     Line(String),
     /// ctrl-d on an empty line
     Eof,
@@ -18,6 +25,15 @@ pub enum LineResult {
 
 const HISTORY_LIMIT: usize = 200;
 const LISTING_LIMIT: usize = 16;
+/// the persisted history file keeps more than the in-memory window; past
+/// this it is rewritten down to a soft cap so trimming doesn't refire on
+/// every submit (the reference's 0.8 watermark shape)
+const HISTORY_FILE_LIMIT: usize = 2000;
+const HISTORY_FILE_KEEP: usize = 1600;
+/// a pasted chunk at or beyond either bound becomes an atomic placeholder
+/// token instead of flooding the buffer
+const PASTE_LINES_LIMIT: usize = 10;
+const PASTE_CHARS_LIMIT: usize = 1000;
 
 pub struct LineEditor {
     history: Vec<String>,
@@ -26,14 +42,14 @@ pub struct LineEditor {
 impl LineEditor {
     pub fn new() -> LineEditor {
         LineEditor {
-            history: Vec::new(),
+            history: load_history(),
         }
     }
 
     /// Read one line with editing. Tab completes bash-style via `completer`:
     /// a single candidate is inserted, several extend to the common prefix
     /// and then list the options. Lines ending in a backslash continue onto
-    /// the next input; alt+enter inserts a newline.
+    /// the next input; ctrl+j / alt+enter / shift+enter insert a newline.
     pub fn read_line(
         &mut self,
         prompt: &str,
@@ -44,7 +60,8 @@ impl LineEditor {
             Some(t) => t,
             None => return plain_read(prompt),
         };
-        let _paste = PasteMode::new();
+        let mut paste_mode = Some(PasteMode::new());
+        let mut kitty = Some(KittyKeys::new());
         let mut out = std::io::stderr();
         let _ = write!(out, "{prompt}");
         let _ = out.flush();
@@ -53,6 +70,18 @@ impl LineEditor {
         let mut buf = String::new();
         let mut cursor = 0usize; // byte offset into buf
         let mut history_index = self.history.len();
+        // the working line, stashed when history recall starts and restored
+        // when navigation comes back past the newest entry
+        let mut draft: Option<String> = None;
+        // single-entry kill buffer: ctrl+k/u/w and alt+d/backspace write,
+        // ctrl+y pastes it back (it survives submit and clear)
+        let mut kill = String::new();
+        // (token, payload): large pastes keep their text here and only the
+        // token rides in the buffer, expanded at submit
+        let mut pastes: Vec<(String, String)> = Vec::new();
+        // sticky char column for vertical cursor motion
+        let mut preferred: Option<usize> = None;
+
         loop {
             let b = loop {
                 // a SIGINT that landed outside raw mode only sets the flag;
@@ -68,11 +97,9 @@ impl LineEditor {
                 }
             };
             match b {
-                // enter submits. Both \r and \n: terminals and ptys with
-                // ICRNL deliver the key as \n, so treating \n as "insert a
-                // newline" would swallow every enter (the ctrl+j idea did
-                // exactly that). alt+enter and paste insert newlines.
-                b'\r' | b'\n' => {
+                // enter submits (raw mode clears ICRNL, so enter is always
+                // \r; a raw \n is ctrl+j and inserts a newline below)
+                b'\r' => {
                     // backslash at end of line: continue reading the same input
                     if buf.ends_with('\\') && !buf.ends_with("\\\\") {
                         buf.pop();
@@ -82,14 +109,67 @@ impl LineEditor {
                         let _ = out.flush();
                         continue;
                     }
-                    if !buf.trim().is_empty() {
-                        self.history.push(buf.clone());
-                        if self.history.len() > HISTORY_LIMIT {
-                            self.history.remove(0);
-                        }
+                    let text = expand_pastes(&buf, &pastes);
+                    if record_history(&mut self.history, &text) {
+                        append_history(&text);
                     }
                     line.settle(&mut out, prompt, &buf);
-                    return LineResult::Line(buf);
+                    return LineResult::Line(text);
+                }
+                // ctrl+j: newline (any terminal; the byte is unambiguous)
+                b'\n' => {
+                    buf.insert(cursor, '\n');
+                    cursor += 1;
+                    history_index = self.history.len();
+                    draft = None;
+                    preferred = None;
+                    line.draw(&mut out, prompt, &buf, cursor);
+                }
+                0x07 => {
+                    // ctrl+g: round-trip the draft through $VISUAL/$EDITOR
+                    line.settle(&mut out, prompt, &buf);
+                    let _ = writeln!(
+                        out,
+                        "\x1b[2m(editing in $EDITOR — save and exit to return)\x1b[0m"
+                    );
+                    // hand the terminal back: guards off, cooked mode on
+                    drop(kitty.take());
+                    drop(paste_mode.take());
+                    drop(term);
+                    let dir = crate::core::config::user_dir().join("tmp");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = dir.join(format!("edit-{}.md", crate::core::db::ulid()));
+                    if std::fs::write(&path, &buf).is_ok() {
+                        let editor = std::env::var("VISUAL")
+                            .or_else(|_| std::env::var("EDITOR"))
+                            .unwrap_or_else(|_| crate::platform::default_editor().to_string());
+                        let mut words = editor.split_whitespace();
+                        let prog = words.next().unwrap_or("vi");
+                        let status = std::process::Command::new(prog)
+                            .args(words)
+                            .arg(&path)
+                            .status();
+                        if matches!(status, Ok(s) if s.success())
+                            && let Ok(text) = std::fs::read_to_string(&path)
+                        {
+                            let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+                            let text = text.strip_suffix('\n').unwrap_or(text);
+                            buf = text.to_string();
+                            cursor = buf.len();
+                            history_index = self.history.len();
+                            draft = None;
+                            preferred = None;
+                        }
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    match RawTerm::acquire(1, 0) {
+                        Some(t) => term = t,
+                        None => return LineResult::Interrupt,
+                    }
+                    paste_mode = Some(PasteMode::new());
+                    kitty = Some(KittyKeys::new());
+                    line.rows = 0; // the region restarts below the editor's output
+                    line.draw(&mut out, prompt, &buf, cursor);
                 }
                 0x16 => {
                     // ctrl+v: pull the clipboard image as a temp-file path
@@ -112,6 +192,9 @@ impl LineEditor {
                                 let text = path.display().to_string();
                                 buf.insert_str(cursor, &text);
                                 cursor += text.len();
+                                history_index = self.history.len();
+                                draft = None;
+                                preferred = None;
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
                         }
@@ -142,33 +225,115 @@ impl LineEditor {
                         line.settle(&mut out, prompt, "");
                         return LineResult::Eof;
                     }
-                    if cursor < buf.len() {
+                    if let Some((i, a, b)) = token_span(&buf, &pastes, cursor)
+                        && a == cursor
+                    {
+                        pastes.remove(i);
+                        buf.replace_range(a..b, "");
+                    } else if cursor < buf.len() {
                         let rest = buf[cursor..]
                             .chars()
                             .next()
                             .map(|c| c.len_utf8())
                             .unwrap_or(1);
                         buf.replace_range(cursor..cursor + rest, "");
+                    } else {
+                        continue;
+                    }
+                    history_index = self.history.len();
+                    draft = None;
+                    line.draw(&mut out, prompt, &buf, cursor);
+                }
+                0x01 => {
+                    // ctrl-a: line start; already there means end of the
+                    // previous line (the reference's cross-line extension)
+                    let start = line_start(&buf, cursor);
+                    cursor = if cursor > start {
+                        start
+                    } else {
+                        start.saturating_sub(1)
+                    };
+                    preferred = None;
+                    line.draw(&mut out, prompt, &buf, cursor);
+                }
+                0x05 => {
+                    // ctrl-e: line end; already there means start of the next
+                    let end = line_end(&buf, cursor);
+                    cursor = if cursor < end {
+                        end
+                    } else {
+                        (end + 1).min(buf.len())
+                    };
+                    preferred = None;
+                    line.draw(&mut out, prompt, &buf, cursor);
+                }
+                0x0b => {
+                    // ctrl+k: kill from the cursor to the line end
+                    let end = line_end(&buf, cursor);
+                    if end > cursor {
+                        kill = buf[cursor..end].to_string();
+                        buf.replace_range(cursor..end, "");
+                        history_index = self.history.len();
+                        draft = None;
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
                 0x15 => {
-                    // ctrl-u clears before the cursor
-                    buf.replace_range(..cursor, "");
-                    cursor = 0;
+                    // ctrl-u: kill from the line start to the cursor
+                    let start = line_start(&buf, cursor);
+                    if cursor > start {
+                        kill = buf[start..cursor].to_string();
+                        buf.replace_range(start..cursor, "");
+                        cursor = start;
+                        history_index = self.history.len();
+                        draft = None;
+                        preferred = None;
+                        line.draw(&mut out, prompt, &buf, cursor);
+                    }
+                }
+                0x17 => {
+                    // ctrl-w: kill the word before the cursor
+                    kill_word_back(&mut buf, &mut cursor, &mut kill);
+                    history_index = self.history.len();
+                    draft = None;
+                    preferred = None;
                     line.draw(&mut out, prompt, &buf, cursor);
                 }
+                0x19 => {
+                    // ctrl+y: yank the kill buffer
+                    if !kill.is_empty() {
+                        buf.insert_str(cursor, &kill);
+                        cursor += kill.len();
+                        history_index = self.history.len();
+                        draft = None;
+                        preferred = None;
+                        line.draw(&mut out, prompt, &buf, cursor);
+                    }
+                }
                 0x7f | 0x08 => {
-                    // backspace: delete the char before the cursor
-                    if cursor > 0 {
+                    // backspace: delete the char before the cursor, a whole
+                    // paste token when inside one
+                    if let Some((i, a, b)) = token_span(&buf, &pastes, cursor)
+                        && a < cursor
+                    {
+                        pastes.remove(i);
+                        buf.replace_range(a..b, "");
+                        cursor = a;
+                    } else if cursor > 0 {
                         let mut start = cursor - 1;
                         while start > 0 && buf.as_bytes()[start] & 0xC0 == 0x80 {
                             start -= 1;
                         }
                         buf.replace_range(start..cursor, "");
                         cursor = start;
-                        line.draw(&mut out, prompt, &buf, cursor);
+                    } else {
+                        continue;
                     }
+                    history_index = self.history.len();
+                    draft = None;
+                    preferred = None;
+                    line.draw(&mut out, prompt, &buf, cursor);
                 }
                 b'\t' => {
                     // bash-style: one candidate completes; several first
@@ -193,6 +358,9 @@ impl LineEditor {
                             buf.truncate(word_start);
                             buf.push_str(&completion);
                             cursor = buf.len();
+                            history_index = self.history.len();
+                            draft = None;
+                            preferred = None;
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
                         None if candidates.len() > 1 => {
@@ -212,10 +380,84 @@ impl LineEditor {
                 0x1b => match term.escape_seq() {
                     Some(Esc::AltEnter) => {
                         buf.insert(cursor, '\n');
-                        cursor = buf.len();
-                        let _ = writeln!(out);
-                        line.rows = 0; // the region restarts on the fresh row
+                        cursor += 1;
+                        history_index = self.history.len();
+                        draft = None;
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
+                    }
+                    Some(Esc::Key(cp, m)) => {
+                        // kitty CSI-u keys: modified enter, alt+letter and
+                        // alt+backspace land here (legacy ESC-prefixed alt
+                        // keys arrive as (char, 3) through the same shape)
+                        if cp == 13 {
+                            // shift/ctrl/alt+enter: all just break the line
+                            buf.insert(cursor, '\n');
+                            cursor += 1;
+                            history_index = self.history.len();
+                            draft = None;
+                            preferred = None;
+                            line.draw(&mut out, prompt, &buf, cursor);
+                        } else if cp == 27 {
+                            // plain esc reported as CSI 27u: nothing bound
+                        } else if cp == 127 && m >= 3 {
+                            kill_word_back(&mut buf, &mut cursor, &mut kill);
+                            history_index = self.history.len();
+                            draft = None;
+                            preferred = None;
+                            line.draw(&mut out, prompt, &buf, cursor);
+                        } else if m == 3 {
+                            match u8::try_from(cp).ok() {
+                                Some(b'b') => {
+                                    // alt+b: back one word
+                                    cursor = word_back(&buf, cursor);
+                                    preferred = None;
+                                    line.draw(&mut out, prompt, &buf, cursor);
+                                }
+                                Some(b'f') => {
+                                    // alt+f: forward one word
+                                    cursor = word_fwd(&buf, cursor);
+                                    preferred = None;
+                                    line.draw(&mut out, prompt, &buf, cursor);
+                                }
+                                Some(b'd') => {
+                                    // alt+d: kill the word after the cursor
+                                    let end = word_fwd(&buf, cursor);
+                                    if end > cursor {
+                                        kill = buf[cursor..end].to_string();
+                                        buf.replace_range(cursor..end, "");
+                                        history_index = self.history.len();
+                                        draft = None;
+                                        preferred = None;
+                                    }
+                                    line.draw(&mut out, prompt, &buf, cursor);
+                                }
+                                _ => {}
+                            }
+                        } else if (m <= 2 || m == 7) && (0x20..0x7f).contains(&cp) {
+                            // AltGr (ctrl+alt) and stray plain CSI-u chars
+                            // insert literally, like the reference's AltGr rule
+                            if let Some(ch) = char::from_u32(cp) {
+                                buf.insert(cursor, ch);
+                                cursor += ch.len_utf8();
+                                history_index = self.history.len();
+                                draft = None;
+                                preferred = None;
+                                line.draw(&mut out, prompt, &buf, cursor);
+                            }
+                        }
+                    }
+                    Some(Esc::Mod(f, m)) => {
+                        // modified arrows (ctrl/alt+left/right): word motion
+                        if m >= 3 && (f == b'C' || f == b'D') {
+                            cursor = if f == b'C' {
+                                word_fwd(&buf, cursor)
+                            } else {
+                                word_back(&buf, cursor)
+                            };
+                            preferred = None;
+                            line.draw(&mut out, prompt, &buf, cursor);
+                        }
                     }
                     Some(Esc::PasteStart) => {
                         // the pasted chunk lands as buffer text: embedded
@@ -247,61 +489,114 @@ impl LineEditor {
                         }
                         let chunk = String::from_utf8_lossy(&bytes).into_owned();
                         if !chunk.is_empty() {
-                            buf.insert_str(cursor, &chunk);
-                            cursor += chunk.len();
+                            if should_placeholder(&chunk) {
+                                // too big to edit comfortably: keep the text
+                                // aside and insert an atomic token instead
+                                let token = paste_token(pastes.len() + 1, &chunk);
+                                pastes.push((token.clone(), chunk));
+                                buf.insert_str(cursor, &token);
+                                cursor += token.len();
+                            } else {
+                                buf.insert_str(cursor, &chunk);
+                                cursor += chunk.len();
+                            }
+                            history_index = self.history.len();
+                            draft = None;
+                            preferred = None;
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
                     }
                     Some(Esc::PasteEnd) => {}
                     Some(Esc::Up) => {
-                        if history_index > 0 {
+                        let browsing = history_index < self.history.len();
+                        if history_index > 0 && recall_on_up(&buf, cursor, browsing) {
+                            if history_index == self.history.len() {
+                                draft = Some(buf.clone()); // the draft survives recall
+                            }
                             history_index -= 1;
                             buf = self.history[history_index].clone();
                             cursor = buf.len();
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            preferred = None;
+                        } else {
+                            // otherwise the arrow walks the multiline text
+                            let col = *preferred.get_or_insert(char_col(&buf, cursor));
+                            cursor = up_line(&buf, cursor, Some(col));
                         }
+                        line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Down) => {
-                        if history_index + 1 < self.history.len() {
+                        if history_index < self.history.len() {
                             history_index += 1;
-                            buf = self.history[history_index].clone();
+                            if history_index == self.history.len() {
+                                // back past the newest entry: the draft returns
+                                buf = draft.take().unwrap_or_default();
+                            } else {
+                                buf = self.history[history_index].clone();
+                            }
+                            cursor = buf.len();
+                            preferred = None;
                         } else {
-                            history_index = self.history.len();
-                            buf.clear();
+                            let col = *preferred.get_or_insert(char_col(&buf, cursor));
+                            cursor = down_line(&buf, cursor, Some(col));
                         }
-                        cursor = buf.len();
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Left) => {
-                        while cursor > 0 && buf.as_bytes()[cursor - 1] & 0xC0 == 0x80 {
-                            cursor -= 1;
+                        if let Some((_, a, b)) = token_span(&buf, &pastes, cursor)
+                            && b == cursor
+                        {
+                            cursor = a; // step over a paste token whole
+                        } else {
+                            while cursor > 0 && buf.as_bytes()[cursor - 1] & 0xC0 == 0x80 {
+                                cursor -= 1;
+                            }
+                            cursor = cursor.saturating_sub(1);
                         }
-                        cursor = cursor.saturating_sub(1);
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Right) => {
-                        if cursor < buf.len() {
+                        if let Some((_, a, b)) = token_span(&buf, &pastes, cursor)
+                            && a == cursor
+                        {
+                            cursor = b;
+                        } else if cursor < buf.len() {
                             cursor += 1;
                             while cursor < buf.len() && buf.as_bytes()[cursor] & 0xC0 == 0x80 {
                                 cursor += 1;
                             }
                         }
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Home) => {
-                        cursor = 0;
+                        cursor = line_start(&buf, cursor);
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::End) => {
-                        cursor = buf.len();
+                        cursor = line_end(&buf, cursor);
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                     Some(Esc::Delete) => {
                         // zero when the cursor sits at the end (nothing to delete)
-                        let rest = buf[cursor..].chars().next().map_or(0, |c| c.len_utf8());
-                        if rest > 0 {
-                            buf.replace_range(cursor..cursor + rest, "");
+                        if let Some((i, a, b)) = token_span(&buf, &pastes, cursor)
+                            && a == cursor
+                        {
+                            pastes.remove(i);
+                            buf.replace_range(a..b, "");
+                            history_index = self.history.len();
+                            draft = None;
                             line.draw(&mut out, prompt, &buf, cursor);
+                        } else {
+                            let rest = buf[cursor..].chars().next().map_or(0, |c| c.len_utf8());
+                            if rest > 0 {
+                                buf.replace_range(cursor..cursor + rest, "");
+                                history_index = self.history.len();
+                                draft = None;
+                                line.draw(&mut out, prompt, &buf, cursor);
+                            }
                         }
                     }
                     None => {}
@@ -329,6 +624,9 @@ impl LineEditor {
                     if let Ok(s) = std::str::from_utf8(&bytes) {
                         buf.insert_str(cursor, s);
                         cursor += s.len();
+                        history_index = self.history.len();
+                        draft = None;
+                        preferred = None;
                         line.draw(&mut out, prompt, &buf, cursor);
                     }
                 }
@@ -356,7 +654,228 @@ enum Esc {
     PasteStart,
     /// bracketed-paste end marker (`ESC[201~`)
     PasteEnd,
+    /// kitty CSI-u key: (codepoint, modifier value where 2=shift, 3=alt,
+    /// 5=ctrl, 7=ctrl+alt). Legacy ESC-prefixed alt keys arrive here too,
+    /// as (char, 3); modified delete as (127, m).
+    Key(u32, u8),
+    /// CSI letter with a modifier (ctrl/alt+arrows): (final byte, modifier
+    /// value), e.g. `ESC[1;5C` = ctrl+right
+    Mod(u8, u8),
 }
+
+// --- pure buffer helpers -----------------------------------------------------
+
+/// Byte offset of the start of the logical line containing `cursor`.
+fn line_start(buf: &str, cursor: usize) -> usize {
+    buf[..cursor].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// Byte offset of the line's end (its newline, or the buffer end).
+fn line_end(buf: &str, cursor: usize) -> usize {
+    buf[cursor..].find('\n').map_or(buf.len(), |i| cursor + i)
+}
+
+/// Char column of `cursor` within its logical line.
+fn char_col(buf: &str, cursor: usize) -> usize {
+    buf[line_start(buf, cursor)..cursor].chars().count()
+}
+
+/// Byte offset `col` chars into `line`, clamped to its end.
+fn col_offset(line: &str, col: usize) -> usize {
+    line.char_indices().nth(col).map_or(line.len(), |(i, _)| i)
+}
+
+/// One logical line up from `cursor`, keeping the preferred char column (the
+/// top line parks at its start, the reference's boundary behavior).
+fn up_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
+    let start = line_start(buf, cursor);
+    if start == 0 {
+        return 0;
+    }
+    let prev_end = start - 1; // the newline byte
+    let prev_start = line_start(buf, prev_end);
+    let col = preferred.unwrap_or_else(|| char_col(buf, cursor));
+    prev_start + col_offset(&buf[prev_start..prev_end], col)
+}
+
+/// One logical line down from `cursor`, keeping the preferred char column
+/// (the bottom line parks at the buffer end).
+fn down_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
+    let end = line_end(buf, cursor);
+    if end == buf.len() {
+        return buf.len();
+    }
+    let next_start = end + 1;
+    let next_end = line_end(buf, next_start);
+    let col = preferred.unwrap_or_else(|| char_col(buf, cursor));
+    next_start + col_offset(&buf[next_start..next_end], col)
+}
+
+/// Back to the start of the word before `cursor` (skipping any whitespace).
+fn word_back(buf: &str, cursor: usize) -> usize {
+    let bytes = buf.as_bytes();
+    let mut i = cursor;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Forward to the end of the word after `cursor` (skipping any whitespace).
+fn word_fwd(buf: &str, cursor: usize) -> usize {
+    let bytes = buf.as_bytes();
+    let mut i = cursor;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Kill (cut) the word before the cursor into the kill buffer.
+fn kill_word_back(buf: &mut String, cursor: &mut usize, kill: &mut String) {
+    let start = word_back(buf, *cursor);
+    if start < *cursor {
+        *kill = buf[start..*cursor].to_string();
+        buf.replace_range(start..*cursor, "");
+        *cursor = start;
+    }
+}
+
+/// rule: up recalls history only while browsing, from an empty
+/// buffer, or with the cursor parked at the very start of the top line;
+/// every other position moves through the multiline text instead.
+fn recall_on_up(buf: &str, cursor: usize, browsing: bool) -> bool {
+    browsing || buf.is_empty() || cursor == 0
+}
+
+/// Push `text` onto the in-memory history (adjacent duplicates and blank
+/// lines skipped); returns whether it was recorded.
+fn record_history(history: &mut Vec<String>, text: &str) -> bool {
+    if text.trim().is_empty() || history.last().is_some_and(|l| l == text) {
+        return false;
+    }
+    history.push(text.to_string());
+    if history.len() > HISTORY_LIMIT {
+        history.remove(0);
+    }
+    true
+}
+
+/// A pasted chunk at/over either bound becomes a placeholder token.
+fn should_placeholder(chunk: &str) -> bool {
+    chunk.matches('\n').count() + 1 > PASTE_LINES_LIMIT || chunk.chars().count() > PASTE_CHARS_LIMIT
+}
+
+/// The atomic token standing in for a large pasted chunk.
+fn paste_token(n: usize, chunk: &str) -> String {
+    let lines = chunk.matches('\n').count() + 1;
+    if lines > 1 {
+        format!("[paste #{n} +{lines} lines]")
+    } else {
+        format!("[paste #{n} {} chars]", chunk.chars().count())
+    }
+}
+
+/// Submit-time expansion: tokens still present give way to their payloads;
+/// deleted tokens (and their text) are simply gone.
+fn expand_pastes(buf: &str, pastes: &[(String, String)]) -> String {
+    let mut out = buf.to_string();
+    for (token, payload) in pastes {
+        if let Some(i) = out.find(token.as_str()) {
+            out.replace_range(i..i + token.len(), payload);
+        }
+    }
+    out
+}
+
+/// Span `(index, start, end)` of the paste token whose text touches `pos`
+/// (either edge or interior); None when no token sits there.
+fn token_span(buf: &str, pastes: &[(String, String)], pos: usize) -> Option<(usize, usize, usize)> {
+    pastes
+        .iter()
+        .position(|(token, _)| match buf.find(token.as_str()) {
+            Some(a) => {
+                let b = a + token.len();
+                a <= pos && pos <= b
+            }
+            None => false,
+        })
+        .map(|i| {
+            let token = &pastes[i].0;
+            let a = buf.find(token.as_str()).unwrap_or(0);
+            (i, a, a + token.len())
+        })
+}
+
+// --- history persistence -----------------------------------------------------
+
+fn history_path() -> std::path::PathBuf {
+    crate::core::config::user_dir().join("history.jsonl")
+}
+
+/// Load the persisted input history (the in-memory window is its tail).
+fn load_history() -> Vec<String> {
+    load_history_from(&history_path())
+}
+
+fn load_history_from(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() > HISTORY_FILE_LIMIT {
+        // rewrite down to the soft cap (raw lines, timestamps intact) so the
+        // trim doesn't refire on every start
+        let kept = &lines[lines.len() - HISTORY_FILE_KEEP..];
+        let mut out = String::new();
+        for l in kept {
+            out.push_str(l);
+            out.push('\n');
+        }
+        let _ = std::fs::write(path, out);
+    }
+    let start = lines.len().saturating_sub(HISTORY_LIMIT);
+    lines[start..]
+        .iter()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        })
+        .collect()
+}
+
+/// Append one submission as a single write (the reference's atomicity trick so
+/// concurrent processes never interleave a line).
+fn append_history(text: &str) {
+    append_history_to(&history_path(), text);
+}
+
+fn append_history_to(path: &Path, text: &str) {
+    let line = serde_json::json!({
+        "ts": crate::core::db::now_turn_datetime(),
+        "text": text,
+    })
+    .to_string();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(path) {
+        let _ = f.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
+// --- rendering ----------------------------------------------------------------
 
 /// Redraw the input row.
 /// The interactive input region (prompt + buffer), terminal-row aware so
@@ -389,6 +908,30 @@ impl Drop for PasteMode {
     fn drop(&mut self) {
         let mut out = std::io::stderr();
         let _ = write!(out, "\x1b[?2004l");
+        let _ = out.flush();
+    }
+}
+
+/// Holds the kitty keyboard protocol's disambiguate flag for one read, so
+/// shift/ctrl+enter arrive as CSI-u keys instead of an indistinguishable
+/// `\r`. Terminals that never heard of the protocol ignore the push — it is
+/// never queried — and every other key keeps its legacy encoding. Scoped to
+/// the editor: the watcher and approval prompts keep plain-ESC semantics.
+struct KittyKeys;
+
+impl KittyKeys {
+    fn new() -> KittyKeys {
+        let mut out = std::io::stderr();
+        let _ = write!(out, "\x1b[>1u");
+        let _ = out.flush();
+        KittyKeys
+    }
+}
+
+impl Drop for KittyKeys {
+    fn drop(&mut self) {
+        let mut out = std::io::stderr();
+        let _ = write!(out, "\x1b[<u"); // pop exactly the flags we pushed
         let _ = out.flush();
     }
 }
@@ -589,7 +1132,8 @@ pub enum ApprovalKey {
 /// Extension trait so the escape-sequence parser stays local to the line
 /// editor while the raw terminal backend lives in `platform`.
 trait RawTermExt {
-    /// After ESC: parse `[ X` / `[ N ~` sequences; alt+enter is a newline.
+    /// After ESC: parse `[ X` / `[ N ~` sequences, CSI-u keys and
+    /// alt-prefixed keys; alt+enter is a newline.
     fn escape_seq(&mut self) -> Option<Esc>;
 }
 
@@ -600,33 +1144,44 @@ impl RawTermExt for RawTerm {
             return Some(Esc::AltEnter);
         }
         if b != b'[' {
-            return None;
+            // ESC + printable/backspace: a legacy alt+key report
+            return ((0x20..=0x7f).contains(&b)).then_some(Esc::Key(u32::from(b), 3));
         }
-        let b = self.next_byte().key()?;
-        match b {
-            b'A' => Some(Esc::Up),
-            b'B' => Some(Esc::Down),
-            b'C' => Some(Esc::Right),
-            b'D' => Some(Esc::Left),
-            b'H' => Some(Esc::Home),
-            b'F' => Some(Esc::End),
-            b'0'..=b'9' => {
-                let mut num: u32 = 0;
-                let mut n = b;
-                while n.is_ascii_digit() {
-                    num = num * 10 + u32::from(n - b'0');
-                    n = self.next_byte().key()?;
-                }
-                if n != b'~' {
-                    return None;
-                }
-                match num {
-                    3 => Some(Esc::Delete),
-                    200 => Some(Esc::PasteStart),
-                    201 => Some(Esc::PasteEnd),
-                    _ => None,
-                }
+        // CSI: [ n1 [ ; n2 ] final — 0 means absent (never a real param here)
+        let mut params = [0u32; 2];
+        let mut cur = 0;
+        let final_byte;
+        loop {
+            let b = self.next_byte().key()?;
+            if b.is_ascii_digit() {
+                params[cur] = params[cur]
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(b - b'0'));
+            } else if b == b';' && cur == 0 {
+                cur = 1;
+            } else {
+                final_byte = b;
+                break;
             }
+        }
+        let [n1, n2] = params;
+        match (final_byte, n2) {
+            (b'A', 0) => Some(Esc::Up),
+            (b'B', 0) => Some(Esc::Down),
+            (b'C', 0) => Some(Esc::Right),
+            (b'D', 0) => Some(Esc::Left),
+            (b'H', 0) => Some(Esc::Home),
+            (b'F', 0) => Some(Esc::End),
+            (b'C' | b'D' | b'H' | b'F', m) => Some(Esc::Mod(final_byte, m.clamp(1, 16) as u8)),
+            (b'u', _) => Some(Esc::Key(n1.max(1), n2.clamp(1, 16) as u8)),
+            (b'~', 0) => match n1 {
+                3 => Some(Esc::Delete),
+                200 => Some(Esc::PasteStart),
+                201 => Some(Esc::PasteEnd),
+                _ => None,
+            },
+            // modified delete (`3;m~`): treat as a modified backspace
+            (b'~', m) if n1 == 3 => Some(Esc::Key(127, m.clamp(1, 16) as u8)),
             _ => None,
         }
     }
@@ -868,6 +1423,8 @@ impl KeyWatcher {
                         // enter: queue the line. No per-character echo — it would
                         // interleave with the streaming answer and tear lines
                         // apart; this dim notice is the confirmation instead.
+                        // (\n is ctrl+j mid-task: harmless to treat as enter,
+                        // the empty buffer queues nothing)
                         b'\r' | b'\n' => {
                             let line = String::from_utf8_lossy(&buf).trim().to_string();
                             if !line.is_empty() {
@@ -931,4 +1488,119 @@ fn plain_read(prompt: &str) -> LineResult {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_only_while_browsing_empty_or_parked_at_start() {
+        assert!(recall_on_up("", 0, false));
+        assert!(recall_on_up("", 0, true));
+        assert!(recall_on_up("abc", 0, false));
+        assert!(!recall_on_up("abc", 1, false));
+        assert!(!recall_on_up("ab\ncd", 2, false)); // start of the second line
+        assert!(recall_on_up("ab\ncd", 3, true)); // already browsing
+    }
+
+    #[test]
+    fn up_line_keeps_the_preferred_column() {
+        let buf = "ab\ncdef\nghi";
+        // from the end of "cdef" (cursor 7) up onto "ab" clamps to its end
+        assert_eq!(up_line(buf, 7, None), 2);
+        // a preferred column beyond the target line clamps to its end
+        assert_eq!(up_line(buf, 7, Some(9)), 2);
+        // a preferred column short of the line lands mid-line
+        assert_eq!(up_line(buf, buf.len(), Some(1)), 4); // 'd' in "cdef"
+        // the top line parks at its start
+        assert_eq!(up_line(buf, 2, None), 0);
+    }
+
+    #[test]
+    fn down_line_clamps_and_parks() {
+        let buf = "abcd\nef\n";
+        // from col 3 of line 0 down onto "ef" (2 chars) clamps to its end
+        assert_eq!(down_line(buf, 3, None), 7);
+        // the last line parks at the buffer end
+        assert_eq!(down_line(buf, 7, None), buf.len());
+    }
+
+    #[test]
+    fn word_motion_skips_whitespace_runs() {
+        let buf = "foo  bar baz";
+        assert_eq!(word_back(buf, buf.len()), 9); // back onto "baz" start
+        assert_eq!(word_back(buf, 9), 5); // then over the gap onto "foo" start
+        assert_eq!(word_back(buf, 3), 0);
+        assert_eq!(word_fwd(buf, 0), 3);
+        assert_eq!(word_fwd(buf, 3), 8); // skips the gap, ends after "bar"
+    }
+
+    #[test]
+    fn line_bounds_track_multiline_cursors() {
+        let buf = "one\ntwo\nthree";
+        assert_eq!(line_start(buf, 5), 4);
+        assert_eq!(line_end(buf, 5), 7);
+        assert_eq!(char_col(buf, 6), 2);
+        assert_eq!(col_offset("two", 9), 3); // clamps past the end
+    }
+
+    #[test]
+    fn big_pastes_placeholder_small_ones_do_not() {
+        assert!(!should_placeholder("short text"));
+        assert!(!should_placeholder(&format!("{}l", "l\n".repeat(9)))); // 10 lines
+        assert!(should_placeholder(&format!("{}x", "l\n".repeat(10)))); // 11
+        assert!(!should_placeholder(&"a".repeat(1000)));
+        assert!(should_placeholder(&"a".repeat(1001)));
+    }
+
+    #[test]
+    fn paste_tokens_expand_and_vanish() {
+        let chunk = "x\n".repeat(20);
+        let token = paste_token(1, &chunk);
+        assert!(token.contains("+21 lines"));
+        let pastes = vec![(token.clone(), chunk)];
+        let buf = format!("before {} after", token);
+        assert_eq!(
+            expand_pastes(&buf, &pastes),
+            format!("before {} after", "x\n".repeat(20))
+        );
+        // a token whose text was deleted leaves nothing behind
+        assert_eq!(expand_pastes("plain", &pastes), "plain");
+        // token text is atomic: its span covers the interior
+        let inside = format!("pre {}", token);
+        let off = inside.find(&token).unwrap() + 2;
+        assert!(token_span(&inside, &pastes, off).is_some());
+        assert!(token_span(&inside, &pastes, 0).is_none());
+    }
+
+    #[test]
+    fn history_records_skip_blanks_and_adjacent_duplicates() {
+        let mut hist: Vec<String> = vec!["old".into()];
+        assert!(record_history(&mut hist, "one"));
+        assert!(!record_history(&mut hist, "one")); // adjacent dup
+        assert!(!record_history(&mut hist, "  "));
+        assert!(record_history(&mut hist, "two"));
+        assert_eq!(hist, ["old", "one", "two"]);
+    }
+
+    #[test]
+    fn history_file_round_trims_and_loads_the_tail() {
+        let dir = std::env::temp_dir().join(format!("llm-hist-{}", crate::core::db::ulid()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.jsonl");
+        append_history_to(&path, "first");
+        append_history_to(&path, "second");
+        assert_eq!(load_history_from(&path), ["first", "second"]);
+        // over the file cap: trimmed to the soft cap, newest kept
+        for i in 0..(HISTORY_FILE_LIMIT + 5) {
+            append_history_to(&path, &format!("e{i}"));
+        }
+        let loaded = load_history_from(&path);
+        assert_eq!(loaded.len(), HISTORY_LIMIT);
+        // 2007 lines on disk -> kept e405..e2004 -> window is the last 200
+        assert_eq!(loaded.first().map(String::as_str), Some("e1805"));
+        assert_eq!(
+            loaded.last().cloned(),
+            Some(format!("e{}", HISTORY_FILE_LIMIT + 4))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
