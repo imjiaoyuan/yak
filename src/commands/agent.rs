@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::agent::approval::{self, ApprovalConfig, Policy};
 use crate::agent::compact::CompactConfig;
-use crate::core::args::{OptSpec, ParsedArgs, parse, render_help};
+use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
 use crate::core::db::Db;
 use crate::core::logstore::{self};
@@ -154,17 +154,9 @@ pub fn run_chat(argv: &[String]) -> i32 {
 }
 
 fn run_mode(argv: &[String], chat: bool) -> i32 {
-    let args = match parse(argv, SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!("{}", if chat { chat_help() } else { help() });
-        return 0;
-    }
+    let (args, code) =
+        crate::core::args::parse_with_help(argv, SPECS, || if chat { chat_help() } else { help() });
+    let Some(args) = args else { return code };
     match execute_mode(&args, chat) {
         Ok(code) => code,
         Err(e) => {
@@ -335,16 +327,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     // reasoning effort: CLI > models.agent thinking; invalid values are a
     // hard error on the CLI and a warning from config
     let thinking: Option<String> = match args.opt(&["thinking"]) {
-        Some("off") => None,
-        Some(level) => {
-            if crate::providers::is_valid_reasoning_level(level) {
-                Some(level.to_string())
-            } else {
-                return Err(format!(
-                    "invalid --thinking '{level}' (off, minimal, low, medium, high, xhigh)"
-                ));
-            }
-        }
+        Some(level) => crate::providers::parse_thinking_level(level)?,
         None => {
             let level = mode_default.as_ref().and_then(|(_, t)| t.as_deref());
             match level {

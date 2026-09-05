@@ -269,6 +269,21 @@ pub struct PromptInput<'a> {
 /// The reasoning-effort levels accepted by --thinking / /thinking.
 pub const REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
+/// One --thinking value: "off" (like absence) maps to None, a valid level
+/// to itself, anything else to the shared error.
+pub fn parse_thinking_level(raw: &str) -> Result<Option<String>, String> {
+    if raw == "off" {
+        return Ok(None);
+    }
+    if is_valid_reasoning_level(raw) {
+        Ok(Some(raw.to_string()))
+    } else {
+        Err(format!(
+            "invalid --thinking '{raw}' (off, minimal, low, medium, high, xhigh)"
+        ))
+    }
+}
+
 pub fn is_valid_reasoning_level(s: &str) -> bool {
     REASONING_LEVELS.contains(&s)
 }

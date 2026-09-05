@@ -3,7 +3,7 @@
 
 use std::io::IsTerminal;
 
-use crate::core::args::{OptSpec, ParsedArgs, parse, render_help, split_subcommand};
+use crate::core::args::{OptSpec, ParsedArgs, render_help, split_subcommand};
 use crate::core::config;
 use crate::core::db::Db;
 use crate::core::logstore::truncate_string;
@@ -234,38 +234,25 @@ fn render_browse_conversation(rows: &[serde_json::Value]) {
 }
 
 fn open_db(args: &ParsedArgs) -> Result<Db, String> {
-    match args.opt(&["database"]) {
-        Some(p) => Db::open_path(std::path::Path::new(p)).map_err(|e| e.to_string()),
-        None => {
-            let path = config::logs_db_path();
-            if !path.exists() {
-                return Err(format!("No log database found at {}", path.display()));
-            }
-            Db::open().map_err(|e| e.to_string())
-        }
+    if args.opt(&["database"]).is_none() && !config::logs_db_path().exists() {
+        return Err(format!(
+            "No log database found at {}",
+            config::logs_db_path().display()
+        ));
     }
+    Db::open_from_arg(args.opt(&["database"]))
 }
 
 fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
-    let args = match parse(argv, LIST_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm logs list [OPTIONS]",
-                "Show recent logged prompts",
-                LIST_SPECS,
-                &[]
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, LIST_SPECS, || {
+        render_help(
+            "llm logs list [OPTIONS]",
+            "Show recent logged prompts",
+            LIST_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     let db = match open_db(&args) {
         Ok(db) => db,
         Err(e) => {

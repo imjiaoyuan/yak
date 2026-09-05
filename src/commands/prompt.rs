@@ -2,7 +2,7 @@
 
 use std::io::{IsTerminal, Read};
 
-use crate::core::args::{OptSpec, ParsedArgs, parse, render_help};
+use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
 use crate::core::db::Db;
 use crate::core::http::Event;
@@ -100,18 +100,7 @@ fn help() -> String {
 /// Parse argv with the prompt specs, handling parse errors and -h.
 /// Returns (args, exit-code-to-use-when-args-is-None).
 fn parse_prompt_args(argv: &[String]) -> (Option<ParsedArgs>, i32) {
-    let args = match parse(argv, SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return (None, 2);
-        }
-    };
-    if args.flag(&["help"]) {
-        print!("{}", help());
-        return (None, 0);
-    }
-    (Some(args), 0)
+    crate::core::args::parse_with_help(argv, SPECS, help)
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -352,17 +341,9 @@ fn execute(
         .or_else(|| conv_system.clone());
     let request_attachments: Vec<crate::providers::Attachment> =
         attachments.iter().map(|a| a.request()).collect();
-    let reasoning_level: Option<String> = match args.opt(&["thinking"]) {
-        None | Some("off") => None,
-        Some(level) => {
-            if crate::providers::is_valid_reasoning_level(level) {
-                Some(level.to_string())
-            } else {
-                return Err(format!(
-                    "invalid --thinking '{level}' (off, minimal, low, medium, high, xhigh)"
-                ));
-            }
-        }
+    let reasoning_level = match args.opt(&["thinking"]) {
+        None => None,
+        Some(level) => crate::providers::parse_thinking_level(level)?,
     };
     let input = PromptInput {
         system: system.as_deref(),

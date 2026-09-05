@@ -84,6 +84,29 @@ pub fn balanced_json_region(text: &str) -> Option<&str> {
     None
 }
 
+/// The closest name for a probably-typo'd word: a prefix of at least 3
+/// chars, or a small edit distance scaled to the candidate's length.
+/// None when the word reads like plain text.
+pub fn closest_name(word: &str, names: &[&str]) -> Option<String> {
+    if word.starts_with('-') || word.chars().count() < 3 {
+        return None;
+    }
+    let word = word.to_lowercase();
+    names
+        .iter()
+        .filter(|name| name.len() > 1)
+        .filter_map(|name| {
+            if name.starts_with(word.as_str()) {
+                return Some((*name, 0));
+            }
+            let d = edit_distance(&word, name);
+            let max = if name.len() <= 5 { 1 } else { 2 };
+            (d > 0 && d <= max).then_some((*name, d))
+        })
+        .min_by_key(|(name, d)| (*d, *name))
+        .map(|(name, _)| name.to_string())
+}
+
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();

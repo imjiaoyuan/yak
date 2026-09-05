@@ -243,25 +243,15 @@ fn print_mode_line(mode: &str) {
 }
 
 fn get(argv: &[String]) -> i32 {
-    let args = match parse(argv, SIMPLE_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models get [MODE]",
-                "Show the current model settings",
-                SIMPLE_SPECS,
-                &[]
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
+        render_help(
+            "llm models get [MODE]",
+            "Show the current model settings",
+            SIMPLE_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     if let Some(name) = args.first_positional() {
         let Some(mode) = canonical_mode(name) else {
             eprintln!("Error: unknown mode '{name}' (prompt, agent, chat)");
@@ -277,25 +267,15 @@ fn get(argv: &[String]) -> i32 {
 }
 
 fn set(argv: &[String]) -> i32 {
-    let args = match parse(argv, SET_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models set [MODE] MODEL",
-                "Configure a mode's model (bare: interactive wizard; no MODE: the prompt default)",
-                SET_SPECS,
-                &[("MODE", "prompt (default), agent or chat")],
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, SET_SPECS, || {
+        render_help(
+            "llm models set [MODE] MODEL",
+            "Configure a mode's model (bare: interactive wizard; no MODE: the prompt default)",
+            SET_SPECS,
+            &[("MODE", "prompt (default), agent or chat")],
+        )
+    });
+    let Some(args) = args else { return code };
     if args.positionals.is_empty() {
         if !std::io::stdin().is_terminal() {
             eprintln!("Error: Usage: llm models set [MODE] MODEL [--thinking LEVEL]");
@@ -316,17 +296,13 @@ fn set(argv: &[String]) -> i32 {
     };
     let model = args.positionals[model_pos].clone();
     let thinking: Option<Option<String>> = match args.opt(&["thinking"]) {
-        Some("off") => Some(None),
-        Some(level) => {
-            if crate::providers::is_valid_reasoning_level(level) {
-                Some(Some(level.to_string()))
-            } else {
-                eprintln!(
-                    "Error: invalid --thinking '{level}' (off, minimal, low, medium, high, xhigh)"
-                );
+        Some(level) => match crate::providers::parse_thinking_level(level) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("Error: {e}");
                 return 2;
             }
-        }
+        },
         None => None,
     };
     let cfg = config::load();
@@ -353,25 +329,15 @@ fn set(argv: &[String]) -> i32 {
 }
 
 fn unset(argv: &[String]) -> i32 {
-    let args = match parse(argv, SIMPLE_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models unset MODE",
-                "Clear a mode's default model",
-                SIMPLE_SPECS,
-                &[],
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
+        render_help(
+            "llm models unset MODE",
+            "Clear a mode's default model",
+            SIMPLE_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     let mode = if let Some(name) = args.first_positional() {
         let Some(mode) = canonical_mode(name) else {
             eprintln!("Error: unknown mode '{name}' (prompt, agent, chat)");
@@ -404,25 +370,15 @@ fn unset(argv: &[String]) -> i32 {
 // key — provider API keys
 
 fn key(argv: &[String]) -> i32 {
-    let args = match parse(argv, KEY_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models key [PROVIDER [VALUE]]",
-                "Show or set a provider's API key",
-                KEY_SPECS,
-                &[],
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, KEY_SPECS, || {
+        render_help(
+            "llm models key [PROVIDER [VALUE]]",
+            "Show or set a provider's API key",
+            KEY_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     let cfg = config::load();
     let Some(name) = args.first_positional().map(String::from) else {
         if cfg.providers.is_empty() {
@@ -495,25 +451,15 @@ fn set_provider_key(name: &str, value: &str) -> i32 {
 // opens the wizard
 
 fn add(argv: &[String]) -> i32 {
-    let args = match parse(argv, SIMPLE_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models add [NAME [KEY]]",
-                "Add a provider (bare: the interactive wizard)",
-                SIMPLE_SPECS,
-                &[],
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
+        render_help(
+            "llm models add [NAME [KEY]]",
+            "Add a provider (bare: the interactive wizard)",
+            SIMPLE_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     if args.positionals.is_empty() {
         if !std::io::stdin().is_terminal() {
             eprintln!("Error: llm models add requires a terminal, or NAME and KEY");
@@ -586,25 +532,15 @@ fn add(argv: &[String]) -> i32 {
 }
 
 fn remove(argv: &[String]) -> i32 {
-    let args = match parse(argv, SIMPLE_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models remove [NAME]",
-                "Remove a provider (bare: the picker)",
-                SIMPLE_SPECS,
-                &[],
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
+        render_help(
+            "llm models remove [NAME]",
+            "Remove a provider (bare: the picker)",
+            SIMPLE_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     if args.positionals.is_empty() {
         if !std::io::stdin().is_terminal() {
             eprintln!("Error: llm models remove requires a terminal, or NAME");
@@ -642,25 +578,15 @@ fn remove(argv: &[String]) -> i32 {
 // list / options — browsing and per-model defaults
 
 fn list(argv: &[String]) -> i32 {
-    let args = match parse(argv, LIST_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if args.flag(&["help"]) {
-        print!(
-            "{}",
-            render_help(
-                "llm models list [OPTIONS]",
-                "List available models",
-                LIST_SPECS,
-                &[]
-            )
-        );
-        return 0;
-    }
+    let (args, code) = crate::core::args::parse_with_help(argv, LIST_SPECS, || {
+        render_help(
+            "llm models list [OPTIONS]",
+            "List available models",
+            LIST_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
     let cfg = config::load();
     let aliases = config::load_aliases();
     let queries = args.multi(&["query"]);

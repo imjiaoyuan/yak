@@ -103,24 +103,8 @@ const SUBCOMMANDS: &[&str] = &[
 /// Suggest a subcommand for a word that is probably a mistyped command: a
 /// prefix of at least 3 chars, or a small edit distance scaled to the
 /// candidate's length. Returns None when the word reads like a prompt.
-fn command_hint(word: &str) -> Option<&'static str> {
-    if word.starts_with('-') || word.chars().count() < 3 {
-        return None;
-    }
-    let word = word.to_lowercase();
-    SUBCOMMANDS
-        .iter()
-        .filter(|name| name.len() > 1)
-        .filter_map(|name| {
-            if name.starts_with(word.as_str()) {
-                return Some((name, 0));
-            }
-            let d = crate::core::text::edit_distance(&word, name);
-            let max = if name.len() <= 5 { 1 } else { 2 };
-            (d > 0 && d <= max).then_some((name, d))
-        })
-        .min_by_key(|(name, d)| (*d, **name))
-        .map(|(name, _)| *name)
+fn command_hint(word: &str) -> Option<String> {
+    crate::core::text::closest_name(word, SUBCOMMANDS)
 }
 
 /// Restore SIG_DFL for SIGPIPE so `llm logs | head` exits cleanly instead of
@@ -143,13 +127,13 @@ mod tests {
 
     #[test]
     fn one_edit_off_hits() {
-        assert_eq!(command_hint("lgos"), Some("logs"));
-        assert_eq!(command_hint("model"), Some("models"));
+        assert_eq!(command_hint("lgos"), Some("logs".to_string()));
+        assert_eq!(command_hint("model"), Some("models".to_string()));
     }
 
     #[test]
     fn three_char_prefix_hits() {
-        assert_eq!(command_hint("mod"), Some("models"));
+        assert_eq!(command_hint("mod"), Some("models".to_string()));
         assert_eq!(command_hint("mo"), None);
     }
 

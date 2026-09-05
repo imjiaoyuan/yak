@@ -295,22 +295,11 @@ const SLASH_COMMANDS: &[&str] = &[
 /// command_hint thresholds so a typo hints instead of burning a model call.
 fn slash_hint(word: &str) -> Option<String> {
     let word = word.strip_prefix('/')?;
-    if word.chars().count() < 3 {
-        return None;
-    }
-    SLASH_COMMANDS
+    let names: Vec<&str> = SLASH_COMMANDS
         .iter()
-        .filter_map(|name| {
-            let name = name.strip_prefix('/')?;
-            if name.starts_with(word) {
-                return Some((name, 0));
-            }
-            let d = crate::core::text::edit_distance(word, name);
-            let max = if name.len() <= 5 { 1 } else { 2 };
-            (d > 0 && d <= max).then_some((name, d))
-        })
-        .min_by_key(|(name, d)| (*d, *name))
-        .map(|(name, _)| format!("/{name}"))
+        .map(|c| c.strip_prefix('/').unwrap_or(c))
+        .collect();
+    crate::core::text::closest_name(word, &names).map(|n| format!("/{n}"))
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.

@@ -192,6 +192,15 @@ impl Db {
         Db::finish_open(conn)
     }
 
+    /// Open by an explicit -d path when given, else the default user-dir
+    /// location (callers add their own gating, e.g. the missing-file error).
+    pub fn open_from_arg(opt: Option<&str>) -> Result<Db, String> {
+        match opt {
+            Some(p) => Db::open_path(std::path::Path::new(p)).map_err(|e| e.to_string()),
+            None => Db::open().map_err(|e| e.to_string()),
+        }
+    }
+
     pub fn open_path(path: &std::path::Path) -> rusqlite::Result<Db> {
         config::ensure_dir_exists(path);
         let conn = Connection::open(path)?;

@@ -122,6 +122,28 @@ macro_rules! two_value_spec {
 /// Both `--long value` / `--long=value` and `-s value` / `-svalue` forms are
 /// accepted. A short option that takes a value can also be bundled with it
 /// directly (e.g. `-mdeepseek-chat`). Flags may be combined (`-nx`).
+/// Parse argv against `specs`, handling the parse error (print + code) and
+/// -h/--help (print + 0). Returns (args, exit-code-to-use-when-args-is-None)
+/// — the shared head of every subcommand body.
+pub fn parse_with_help(
+    argv: &[String],
+    specs: &[OptSpec],
+    help: impl Fn() -> String,
+) -> (Option<ParsedArgs>, i32) {
+    let args = match parse(argv, specs) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return (None, 2);
+        }
+    };
+    if args.flag(&["help"]) {
+        print!("{}", help());
+        return (None, 0);
+    }
+    (Some(args), 0)
+}
+
 pub fn parse(argv: &[String], specs: &[OptSpec]) -> Result<ParsedArgs, String> {
     let mut out = ParsedArgs::default();
     let find = |name: &str| -> Option<&OptSpec> {
