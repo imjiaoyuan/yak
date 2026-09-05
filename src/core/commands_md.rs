@@ -93,7 +93,6 @@ pub fn template(cmd: &CommandMd) -> crate::core::templates::Template {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
-        ..Default::default()
     }
 }
 

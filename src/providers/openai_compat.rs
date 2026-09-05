@@ -53,18 +53,6 @@ fn audio_format(mime: &str) -> Option<&'static str> {
     }
 }
 
-/// A user message body: plain text, or content parts when attachments ride.
-fn user_content(text: &str, attachments: &[Attachment]) -> Result<Value, String> {
-    if attachments.is_empty() {
-        return Ok(json!(text));
-    }
-    let mut content = vec![json!({"type": "text", "text": text})];
-    for a in attachments {
-        content.push(attachment_block(a)?);
-    }
-    Ok(Value::Array(content))
-}
-
 pub fn build_body(
     m: &ResolvedModel,
     input: &PromptInput<'_>,
@@ -80,7 +68,7 @@ pub fn build_body(
     for (i, msg) in input.history.iter().enumerate() {
         match msg {
             Msg::User { text, attachments } => {
-                messages.push(json!({"role": "user", "content": user_content(text, attachments)?}));
+                messages.push(json!({"role": "user", "content": super::user_content(text, attachments, attachment_block)?}));
             }
             Msg::Assistant { text, tool_calls } => {
                 if tool_calls.is_empty() {
@@ -121,14 +109,13 @@ pub fn build_body(
                 attachments,
                 ..
             } => {
-                let content = if attachments.is_empty() || m.supports_images() {
-                    user_content(content, attachments)?
-                } else {
-                    // a text-only model: never hand it an image it rejects
-                    json!(format!(
-                        "{content}\n[image omitted: current model does not support images]"
-                    ))
-                };
+                // a text-only model never sees an image it would reject
+                let content = super::tool_result_content(
+                    m.supports_images(),
+                    content,
+                    attachments,
+                    attachment_block,
+                )?;
                 messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": content}));
             }
             Msg::Summary { text } => {
@@ -143,7 +130,7 @@ pub fn build_body(
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": user_content(input.prompt, input.attachments)?
+            "content": super::user_content(input.prompt, input.attachments, attachment_block)?
         }));
     }
 
@@ -186,10 +173,7 @@ pub fn build_body(
     }
     // apply -o options; json values pass through, others are sent as strings
     // (OpenAI accepts numbers-as-numbers; we try numeric parsing first)
-    for (k, v) in &m.options {
-        let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
-        body[k] = parsed;
-    }
+    super::apply_options(&mut body, &m.options);
     Ok(body)
 }
 
@@ -308,25 +292,19 @@ pub fn run(
     if let Some(key) = &m.api_key {
         headers.push(super::auth_header(&m.kind, key));
     }
-    let req = HttpRequest {
-        url,
-        headers,
-        body: build_body(m, input, stream)?.to_string(),
-    };
-
-    if stream {
-        let mut usage: Option<Usage> = None;
-        let mut stop = StopReason::default();
-        super::stream_events(&req, |_event_type, chunk| {
-            feed_chunk(chunk, &mut usage, &mut stop, &mut |e| on_event(e));
-        })?;
-        on_event(Event::Done { usage, stop });
-        Ok(())
-    } else {
-        let value = super::complete_json(&req)?;
-        feed_complete(&value, on_event);
-        Ok(())
-    }
+    super::dispatch(
+        HttpRequest {
+            url,
+            headers,
+            body: build_body(m, input, stream)?.to_string(),
+        },
+        stream,
+        |_event_type, chunk, usage, stop, on_event| feed_chunk(chunk, usage, stop, on_event),
+        |value, on_event| {
+            feed_complete(value, on_event);
+        },
+        on_event,
+    )
 }
 
 #[cfg(test)]

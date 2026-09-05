@@ -10,10 +10,10 @@ pub use message::{
     Msg, ORPHAN_RESULT, ToolCall, ToolCallAccumulator, ToolDef, call_answered, last_result_index,
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::core::config::Provider;
-use crate::core::http::{self, Event, HttpRequest};
+use crate::core::http::{self, Event, HttpRequest, StopReason, Usage};
 
 // the conversation model: unified messages both provider adapters serialize
 
@@ -101,6 +101,77 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
         .or(usage["prompt_tokens_details"]["cached_tokens"].as_u64())
         .or(usage["cached_tokens"].as_u64())
         .unwrap_or(0)
+}
+
+/// A user message body: plain text, or content parts when attachments
+/// ride. The per-wire block builder is passed in — the two adapters differ
+/// only in `attachment_block`.
+pub(crate) fn user_content(
+    text: &str,
+    attachments: &[Attachment],
+    attachment_block: fn(&Attachment) -> Result<Value, String>,
+) -> Result<Value, String> {
+    if attachments.is_empty() {
+        return Ok(json!(text));
+    }
+    let mut content = vec![json!({"type": "text", "text": text})];
+    for a in attachments {
+        content.push(attachment_block(a)?);
+    }
+    Ok(Value::Array(content))
+}
+
+/// Tool-result content: full parts when the model takes images, otherwise
+/// the text with a note that the image was withheld.
+pub(crate) fn tool_result_content(
+    supports_images: bool,
+    content: &str,
+    attachments: &[Attachment],
+    attachment_block: fn(&Attachment) -> Result<Value, String>,
+) -> Result<Value, String> {
+    if attachments.is_empty() || supports_images {
+        user_content(content, attachments, attachment_block)
+    } else {
+        Ok(json!(format!(
+            "{content}\n[image omitted: current model does not support images]"
+        )))
+    }
+}
+
+/// Merge `-o KEY=VALUE` options into a request body: JSON values pass
+/// through, others ride as strings.
+pub(crate) fn apply_options(body: &mut Value, options: &[(String, String)]) {
+    for (k, v) in options {
+        let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
+        body[k] = parsed;
+    }
+}
+
+/// The shared request dispatch: stream events through `feed`, or complete
+/// once and emit through `complete`. Every adapter's `run` is url, headers,
+/// body and this.
+pub(crate) fn dispatch(
+    req: HttpRequest,
+    stream: bool,
+    feed: impl Fn(&str, &Value, &mut Option<Usage>, &mut StopReason, &mut dyn FnMut(Event)),
+    complete: impl Fn(&Value, &mut dyn FnMut(Event)),
+    on_event: &mut dyn FnMut(Event),
+) -> Result<(), String> {
+    if stream {
+        let mut usage: Option<Usage> = None;
+        let mut stop = StopReason::default();
+        stream_events(&req, |event_type, chunk| {
+            feed(event_type, chunk, &mut usage, &mut stop, &mut |e| {
+                on_event(e)
+            });
+        })?;
+        on_event(Event::Done { usage, stop });
+        Ok(())
+    } else {
+        let value = complete_json(&req)?;
+        complete(&value, on_event);
+        Ok(())
+    }
 }
 
 /// A text attachment's decoded body. Attachments carry base64; text blocks

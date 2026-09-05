@@ -13,24 +13,6 @@ use std::sync::atomic::AtomicBool;
 
 use super::{RawByte, TermSize};
 
-/// Like run_shell, but complete stdout lines stream to the callback live.
-pub fn run_shell_stream(
-    cmd: &str,
-    cwd: &Path,
-    timeout: u64,
-    interrupt: &AtomicBool,
-    on_stdout_line: &mut dyn FnMut(&str),
-) -> super::ShellOutcome {
-    let spec = super::shell_spec();
-    super::run_shell_streaming_with_spec(&spec, cmd, cwd, timeout, interrupt, on_stdout_line)
-}
-
-/// Run a shell command interactively with inherited stdio.
-pub fn run_shell_interactive(cmd: &str, cwd: &Path) -> std::io::Result<std::process::ExitStatus> {
-    let spec = super::shell_spec();
-    super::build_shell_command(&spec, cmd, cwd).status()
-}
-
 const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
 const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
 const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;

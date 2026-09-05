@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -27,8 +29,29 @@ use windows::configure_shell_command;
 pub use linux::*;
 #[cfg(target_os = "macos")]
 pub use macos::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::*;
 #[cfg(target_os = "windows")]
 pub use windows::*;
+
+/// Like run_shell, but complete stdout lines stream to the callback live.
+/// (Lives here because it has no platform content — each backend only picks
+/// the shell spec and process-group details.)
+pub fn run_shell_stream(
+    cmd: &str,
+    cwd: &Path,
+    timeout: u64,
+    interrupt: &AtomicBool,
+    on_stdout_line: &mut dyn FnMut(&str),
+) -> ShellOutcome {
+    let spec = shell_spec();
+    run_shell_streaming_with_spec(&spec, cmd, cwd, timeout, interrupt, on_stdout_line)
+}
+
+/// Run a shell command interactively with inherited stdio.
+pub fn run_shell_interactive(cmd: &str, cwd: &Path) -> std::io::Result<std::process::ExitStatus> {
+    build_shell_command(&shell_spec(), cmd, cwd).status()
+}
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("llm supports Linux, macOS and Windows only");

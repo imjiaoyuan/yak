@@ -63,18 +63,6 @@ fn mark_conversation_tip(messages: &mut [Value]) {
     }
 }
 
-/// A user message body: plain text, or content blocks when attachments ride.
-fn user_content(text: &str, attachments: &[Attachment]) -> Result<Value, String> {
-    if attachments.is_empty() {
-        return Ok(json!(text));
-    }
-    let mut content = vec![json!({"type": "text", "text": text})];
-    for a in attachments {
-        content.push(attachment_block(a)?);
-    }
-    Ok(Value::Array(content))
-}
-
 pub fn build_body(
     m: &ResolvedModel,
     input: &PromptInput<'_>,
@@ -91,7 +79,7 @@ pub fn build_body(
                 flush_results(&mut messages, &mut pending_results);
                 messages.push(json!({
                     "role": "user",
-                    "content": user_content(text, attachments)?
+                    "content": super::user_content(text, attachments, attachment_block)?
                 }));
             }
             Msg::Assistant { text, tool_calls } => {
@@ -126,13 +114,12 @@ pub fn build_body(
                 attachments,
                 ..
             } => {
-                let content = if attachments.is_empty() || m.supports_images() {
-                    user_content(content, attachments)?
-                } else {
-                    json!(format!(
-                        "{content}\n[image omitted: current model does not support images]"
-                    ))
-                };
+                let content = super::tool_result_content(
+                    m.supports_images(),
+                    content,
+                    attachments,
+                    attachment_block,
+                )?;
                 pending_results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
@@ -153,7 +140,7 @@ pub fn build_body(
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": user_content(input.prompt, input.attachments)?
+            "content": super::user_content(input.prompt, input.attachments, attachment_block)?
         }));
     }
     // breakpoint on the conversation tip (multi-turn pattern: the marker
@@ -194,10 +181,7 @@ pub fn build_body(
         }
         body["tools"] = Value::Array(tools);
     }
-    for (k, v) in &m.options {
-        let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
-        body[k] = parsed;
-    }
+    super::apply_options(&mut body, &m.options);
     // effort level → thinking budget; applied after the -o loop so a
     // hand-set max_tokens is respected unless the budget needs more room
     if let Some(level) = input.reasoning
@@ -349,27 +333,21 @@ pub fn run(
     if let Some(key) = &m.api_key {
         headers.push(super::auth_header(&m.kind, key));
     }
-    let req = HttpRequest {
-        url,
-        headers,
-        body: build_body(m, input, stream)?.to_string(),
-    };
-
-    if stream {
-        let mut usage: Option<Usage> = None;
-        let mut stop = StopReason::default();
-        super::stream_events(&req, |event_type, chunk| {
-            feed_event(event_type, chunk, &mut usage, &mut stop, &mut |e| {
-                on_event(e)
-            });
-        })?;
-        on_event(Event::Done { usage, stop });
-        Ok(())
-    } else {
-        let value = super::complete_json(&req)?;
-        feed_complete(&value, on_event);
-        Ok(())
-    }
+    super::dispatch(
+        HttpRequest {
+            url,
+            headers,
+            body: build_body(m, input, stream)?.to_string(),
+        },
+        stream,
+        |event_type, chunk, usage, stop, on_event| {
+            feed_event(event_type, chunk, usage, stop, on_event)
+        },
+        |value, on_event| {
+            feed_complete(value, on_event);
+        },
+        on_event,
+    )
 }
 
 #[cfg(test)]

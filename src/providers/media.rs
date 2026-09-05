@@ -24,10 +24,7 @@ pub fn generate_image(
     if let Some(s) = size {
         body["size"] = json!(s);
     }
-    for (k, v) in &m.options {
-        let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
-        body[k] = parsed;
-    }
+    super::apply_options(&mut body, &m.options);
     let req = HttpRequest {
         url,
         headers,
@@ -72,10 +69,7 @@ pub fn generate_speech(
     if let Some(v) = voice {
         body["voice"] = json!(v);
     }
-    for (k, v) in &m.options {
-        let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
-        body[k] = parsed;
-    }
+    super::apply_options(&mut body, &m.options);
     let req = HttpRequest {
         url,
         headers,
