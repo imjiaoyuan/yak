@@ -1009,7 +1009,7 @@ impl InputLine {
                 col = WRAP_INDENT.len();
                 continue;
             }
-            let w = crate::core::render_md::cell_width(&ch.to_string());
+            let w = crate::core::render_md::char_width(ch);
             if col + w > limit && col > WRAP_INDENT.len() {
                 if at_cursor {
                     (crow, ccol) = (rows.len(), WRAP_INDENT.len());

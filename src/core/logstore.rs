@@ -229,14 +229,10 @@ fn write_part(
             Vec::new(),
         ),
         Part::Attachment(a) => {
+            let id = attachment_row_id(a);
             let mut map = serde_json::Map::new();
-            map.insert("attachment".into(), json!({"id": attachment_row_id(a)}));
-            (
-                "attachment".into(),
-                map,
-                None,
-                vec![(a, attachment_row_id(a))],
-            )
+            map.insert("attachment".into(), json!({ "id": id }));
+            ("attachment".into(), map, None, vec![(a, id)])
         }
         Part::ToolCall {
             id,
@@ -997,12 +993,15 @@ pub fn undo_thread(db: &Db, thread_id: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot undo {thread_id}: {e}"))
 }
 
+/// The thread id of the most recent turn — one definition of "latest" for
+/// `-c ""` continuation and the logs browser alike (the thread created last
+/// can differ from the one chatted with last).
 pub fn latest_conversation_id(db: &Db) -> Option<String> {
-    match db
-        .conn()
-        .query_row("SELECT id FROM threads ORDER BY id DESC LIMIT 1", [], |r| {
-            r.get(0)
-        }) {
+    match db.conn().query_row(
+        "SELECT thread_id FROM turns ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    ) {
         Ok(v) => v,
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => {
@@ -1012,7 +1011,7 @@ pub fn latest_conversation_id(db: &Db) -> Option<String> {
     }
 }
 
-/// Does this thread exist in either store?
+/// Does this thread exist?
 /// Resolve a conversation-id prefix to its full id: an exact match passes
 /// through, an unambiguous prefix completes, anything else is None.
 pub fn resolve_conversation(db: &Db, prefix: &str) -> Option<String> {
@@ -1276,22 +1275,6 @@ pub struct RowFilters<'a> {
     pub id_gte: Option<&'a str>,
     pub count: Option<i64>,
     pub search: bool,
-}
-
-/// Most recent conversation across both stores.
-pub fn latest_conversation(db: &Db) -> Option<String> {
-    match db.conn().query_row(
-        "SELECT thread_id FROM turns ORDER BY id DESC LIMIT 1",
-        [],
-        |r| r.get(0),
-    ) {
-        Ok(v) => v,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => {
-            eprintln!("Warning: cannot find the latest conversation: {e}");
-            None
-        }
-    }
 }
 
 /// Query the turn store, newest-first (or relevance-ranked for -q).

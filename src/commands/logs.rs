@@ -279,7 +279,7 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
     let conversation: Option<String> = if let Some(cid) = args.opt(&["conversation", "cid"]) {
         Some(cid.to_string())
     } else if args.flag(&["current"]) || args.flag(&["response"]) {
-        match crate::core::logstore::latest_conversation(&db) {
+        match crate::core::logstore::latest_conversation_id(&db) {
             Some(id) => Some(id),
             None => {
                 eprintln!("Error: No conversations found");

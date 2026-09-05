@@ -73,19 +73,20 @@ fn dispatch(argv: &[String]) -> i32 {
         "models" => commands::models::run(&argv[1..]),
         // anything else (flags or plain text) → default prompt; a word that
         // reads like a mistyped command gets a hint instead of a surprise
-        // model call
+        // model call. Custom commands win over the hint: an exact name match
+        // (`.llm/commands/log.md`) is not a typo of a builtin
         _ => {
-            if let Some(hint) = command_hint(first) {
+            if let Some(cmd) = core::commands_md::find(first) {
+                // commands-dir subcommand: ~/.llm/commands/<name>.md or the
+                // nearest .llm/commands/<name>.md (project wins)
+                commands::prompt::run_command(&cmd, &argv[1..])
+            } else if let Some(hint) = command_hint(first) {
                 eprintln!(
                     "'llm {first}' is not a command, closest match is '{hint}'\n\
                      run `llm {hint} ...`, or `llm prompt {first}` to send it to the model;\n\
                      `llm --help` lists every command"
                 );
                 2
-            } else if let Some(cmd) = core::commands_md::find(first) {
-                // commands-dir subcommand: ~/.llm/commands/<name>.md or the
-                // nearest .llm/commands/<name>.md (project wins)
-                commands::prompt::run_command(&cmd, &argv[1..])
             } else {
                 commands::prompt::run(argv)
             }
