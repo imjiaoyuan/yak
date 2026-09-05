@@ -52,7 +52,8 @@ pub fn repl(
         let help = repl_help(&session, &agents);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let mode = session.approval.mode;
-        let completer = move |buf: &str| completions(buf, &skill_names, mode);
+        let cwd = session.cwd.display().to_string();
+        let completer = move |buf: &str| completions(buf, &skill_names, mode, &cwd);
         let line = match editor.read_line(prompt, &help, &completer) {
             crate::term::lineedit::LineResult::Line(l) => l,
             crate::term::lineedit::LineResult::Eof => break,
@@ -386,7 +387,10 @@ const INIT_TASK: &str = "Create or update AGENTS.md at the repository root, quic
                          commands, a one-line architecture note, and conventions. Do not try to \
                          verify every claim; be brief and factual.";
 
-fn completions(buf: &str, skill_names: &[String], mode: approval::Mode) -> Vec<String> {
+fn completions(buf: &str, skill_names: &[String], mode: approval::Mode, cwd: &str) -> Vec<String> {
+    if let Some(rest) = buf.strip_prefix('!') {
+        return shell_completions(rest, cwd);
+    }
     if let Some(arg) = buf.strip_prefix("/skill:") {
         return skill_names
             .iter()
@@ -396,11 +400,12 @@ fn completions(buf: &str, skill_names: &[String], mode: approval::Mode) -> Vec<S
             .collect();
     }
     if let Some(arg) = buf.strip_prefix("/memory ") {
+        // the editor replaces the current WORD, so candidates are bare
         let subs = ["add", "update", "clean", "edit"];
         return subs
             .iter()
             .filter(|s| s.starts_with(arg.trim_start()))
-            .map(|s| format!("/memory {s}"))
+            .map(|s| s.to_string())
             .collect();
     }
     if buf.starts_with('/') && !buf.contains(' ') {
@@ -416,6 +421,109 @@ fn completions(buf: &str, skill_names: &[String], mode: approval::Mode) -> Vec<S
             .collect();
     }
     Vec::new()
+}
+
+/// Bash-style completion for a `!` shell line: the word at a command
+/// position (first word, or right after `|`/`&`/`;`) completes executable
+/// names from $PATH, everything else completes paths.
+fn shell_completions(rest: &str, cwd: &str) -> Vec<String> {
+    let (word, command_position) = shell_word_and_scope(rest);
+    if command_position && !word.contains('/') {
+        path_commands(word)
+    } else {
+        path_files(word, cwd)
+    }
+}
+
+/// The word being completed, and whether it sits at a command position.
+fn shell_word_and_scope(rest: &str) -> (&str, bool) {
+    let word = rest
+        .rfind(char::is_whitespace)
+        .map(|i| rest[i + 1..].trim_start())
+        .unwrap_or(rest);
+    let segment = rest
+        .rfind(['|', '&', ';', '\n'])
+        .map(|i| &rest[i + 1..])
+        .unwrap_or(rest);
+    let command_position = !segment.trim_start().contains(char::is_whitespace);
+    (word, command_position)
+}
+
+/// Executables on $PATH whose name starts with `prefix`.
+fn path_commands(prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in std::env::split_paths(&path) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if seen.len() > 500 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(prefix) && is_executable(&entry) {
+                seen.insert(name);
+            }
+        }
+    }
+    seen.into_iter().take(200).collect()
+}
+
+fn is_executable(entry: &std::fs::DirEntry) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        entry
+            .metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        entry
+            .path()
+            .extension()
+            .map(|x| x == "exe" || x == "bat" || x == "cmd")
+            .unwrap_or(false)
+    }
+}
+
+/// Filesystem entries matching the word's directory + prefix, as typed
+/// (relative stays relative, `~` scans the home but echoes back as typed).
+/// Directories complete with a trailing `/` so tabbing keeps walking.
+fn path_files(word: &str, cwd: &str) -> Vec<String> {
+    let (dir, base) = match word.rfind('/') {
+        Some(i) => (&word[..=i], &word[i + 1..]),
+        None => ("", word),
+    };
+    let scan = crate::agent::tools::resolve_path(
+        std::path::Path::new(cwd),
+        if dir.is_empty() { "." } else { dir },
+    );
+    let Ok(entries) = std::fs::read_dir(&scan) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // hidden entries only when the prefix itself is hidden
+            if !name.starts_with(base) || (name.starts_with('.') && !base.starts_with('.')) {
+                return None;
+            }
+            let suffix = if e.path().is_dir() { "/" } else { "" };
+            Some(format!("{dir}{name}{suffix}"))
+        })
+        .collect();
+    out.sort();
+    out.truncate(200);
+    out
 }
 
 /// Handle a /command. Returns true when the REPL should exit.
@@ -734,6 +842,35 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_scope_detects_command_positions() {
+        assert_eq!(shell_word_and_scope("gi"), ("gi", true));
+        assert_eq!(shell_word_and_scope("git che"), ("che", false));
+        // right after a pipe or separator is a command position again
+        assert_eq!(shell_word_and_scope("ls | gr"), ("gr", true));
+        assert_eq!(shell_word_and_scope("cd /tmp; mk"), ("mk", true));
+        assert_eq!(shell_word_and_scope("cat sr"), ("sr", false));
+        // an explicit path is a path even at a command position
+        assert_eq!(shell_word_and_scope("./confi"), ("./confi", true));
+        assert_eq!(shell_word_and_scope(""), ("", true));
+    }
+
+    #[test]
+    fn path_files_complete_as_typed_with_dir_slashes() {
+        let dir = std::env::temp_dir().join(format!("llm-tab-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(dir.join("gamma")).unwrap();
+        std::fs::write(dir.join("alpha.txt"), "a").unwrap();
+        std::fs::write(dir.join(".hid"), "h").unwrap();
+        let cwd = dir.display().to_string();
+        assert_eq!(path_files("al", &cwd), vec!["alpha.txt".to_string()]);
+        assert_eq!(path_files("ga", &cwd), vec!["gamma/".to_string()]);
+        assert_eq!(path_files(".h", &cwd), vec![".hid".to_string()]);
+        assert_eq!(path_files("alpha.txt", &cwd), vec!["alpha.txt".to_string()]);
+        // empty base lists every visible entry (gamma is empty here)
+        assert_eq!(path_files("gamma/", &cwd), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn slash_hint_catches_prefixes_and_near_misses() {
