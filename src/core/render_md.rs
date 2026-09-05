@@ -414,6 +414,22 @@ pub fn render_once(text: &str, indent: usize) -> String {
 }
 
 /// Terminal cell width, ANSI escapes excluded.
+/// Truncate to at most `max` terminal cells (CJK-aware), "…" on cut.
+pub(crate) fn truncate_cells(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut cells = 0usize;
+    for c in text.chars() {
+        let w = char_width(c);
+        if cells + w > max.saturating_sub(1) {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+        cells += w;
+    }
+    out
+}
+
 pub(crate) fn cell_width(s: &str) -> usize {
     let bytes = s.as_bytes();
     let mut w = 0usize;

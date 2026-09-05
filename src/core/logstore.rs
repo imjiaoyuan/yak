@@ -846,7 +846,6 @@ pub fn recent_threads(db: &Db, limit: usize) -> Vec<ThreadSummary> {
     }
 }
 
-/// Full message chain of a thread (roles + parts), oldest first — the
 /// First prompt of a thread (the preview shown in the logs conversation
 /// picker).
 /// Walks the first turn's message chain to the nearest user message — the
@@ -856,22 +855,7 @@ fn thread_first_prompt(db: &Db, thread_id: &str) -> String {
     // the indexed turn_search row first (the write path maintains it with
     // the same rule); the live chain walk below is the fallback for
     // sessions logged before that rule existed
-    let indexed: Option<String> = match db.conn().query_row(
-        "SELECT ts.prompt FROM turns t
-          JOIN turn_search ts ON ts.turn_id = t.id
-         WHERE t.thread_id = ?1 AND ts.prompt != ''
-         ORDER BY t.datetime_utc ASC LIMIT 1",
-        params![thread_id],
-        |r| r.get(0),
-    ) {
-        Ok(p) => Some(p),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => {
-            eprintln!("Warning: cannot read the first prompt of {thread_id}: {e}");
-            None
-        }
-    };
-    if let Some(prompt) = indexed {
+    if let Some(prompt) = indexed_prompt(db, thread_id, false) {
         return prompt;
     }
     db.conn()
@@ -906,29 +890,30 @@ fn thread_first_prompt(db: &Db, thread_id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Last user question of a thread — the picker preview should show the most
-/// recent thing the user asked, not the first prompt.
-pub fn thread_last_prompt(db: &Db, thread_id: &str) -> String {
-    // the most recent turn whose first user message has text, newest first
-    let indexed: Option<String> = match db.conn().query_row(
+/// The indexed prompt of a thread's first (or last) turn with one — the
+/// write path maintains turn_search with the same first-user-message rule.
+fn indexed_prompt(db: &Db, thread_id: &str, newest: bool) -> Option<String> {
+    let order = if newest { "DESC" } else { "ASC" };
+    let sql = format!(
         "SELECT ts.prompt FROM turns t
           JOIN turn_search ts ON ts.turn_id = t.id
          WHERE t.thread_id = ?1 AND ts.prompt != ''
-         ORDER BY t.datetime_utc DESC LIMIT 1",
-        params![thread_id],
-        |r| r.get(0),
-    ) {
+         ORDER BY t.datetime_utc {order} LIMIT 1"
+    );
+    match db.conn().query_row(&sql, params![thread_id], |r| r.get(0)) {
         Ok(p) => Some(p),
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => {
-            eprintln!("Warning: cannot read the last prompt of {thread_id}: {e}");
+            eprintln!("Warning: cannot read a prompt of {thread_id}: {e}");
             None
         }
-    };
-    if let Some(prompt) = indexed {
-        return prompt;
     }
-    thread_first_prompt(db, thread_id)
+}
+
+/// Last user question of a thread — the picker preview should show the most
+/// recent thing the user asked, not the first prompt.
+pub fn thread_last_prompt(db: &Db, thread_id: &str) -> String {
+    indexed_prompt(db, thread_id, true).unwrap_or_else(|| thread_first_prompt(db, thread_id))
 }
 
 /// Fork a thread: a new thread id pointing at the same message-chain tip.
@@ -1338,26 +1323,28 @@ pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
          ORDER BY {rank_sql}, turns.id DESC
          {limit_sql}"
     );
-    if let Ok(mut stmt) = db.conn().prepare(&sql) {
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        match stmt.query_map(refs.as_slice(), |r| {
-            let rank: f64 = r.get(14).unwrap_or(0.0);
-            Ok((rank, new_store_row(r)))
-        }) {
-            Ok(mapped) => {
-                for (rank, row) in mapped.flatten() {
-                    rows.push((rank, row));
+    match db.conn().prepare(&sql) {
+        Ok(mut stmt) => {
+            let refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            match stmt.query_map(refs.as_slice(), |r| {
+                let rank: f64 = r.get(14).unwrap_or(0.0);
+                Ok((rank, new_store_row(r)))
+            }) {
+                Ok(mapped) => {
+                    for (rank, row) in mapped.flatten() {
+                        rows.push((rank, row));
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "Error: Invalid search query: {err} - see the FTS5 query syntax documentation at https://sqlite.org/fts5.html#full_text_query_syntax"
+                    );
+                    std::process::exit(1);
                 }
             }
-            Err(err) => {
-                eprintln!(
-                    "Error: Invalid search query: {err} - see the FTS5 query syntax documentation at https://sqlite.org/fts5.html#full_text_query_syntax"
-                );
-                std::process::exit(1);
-            }
         }
-    } else if let Err(e) = db.conn().prepare(&sql) {
-        eprintln!("Warning: cannot query turns: {e}");
+        Err(e) => eprintln!("Warning: cannot query turns: {e}"),
     }
 
     // newest-first unless relevance search already ordered inside each store

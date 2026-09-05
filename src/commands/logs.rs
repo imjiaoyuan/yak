@@ -471,17 +471,7 @@ fn compact_lines(
     };
     // display-width-aware truncation: CJK glyphs take two cells, so a
     // char-count cap alone lets Chinese prompts run far past the margin
-    let cut = |text: &str, max: usize| {
-        let mut width = 0usize;
-        for (i, c) in text.chars().enumerate() {
-            width += crate::core::render_md::char_width(c);
-            if width > max.saturating_sub(3) {
-                let head: String = text.chars().take(i).collect();
-                return format!("{head}...");
-            }
-        }
-        text.to_string()
-    };
+    let cut = |text: &str, max: usize| crate::core::render_md::truncate_cells(text, max);
     let width = if tty {
         crate::term::columns().max(60)
     } else {
@@ -881,7 +871,7 @@ mod tests {
         let line = out.lines().nth(2).unwrap();
         let cells: usize = line.chars().map(crate::core::render_md::char_width).sum();
         assert!(cells <= 80, "line is {cells} cells: {line:?}");
-        assert!(line.ends_with("..."), "got {line:?}");
+        assert!(line.ends_with('…'), "got {line:?}");
         // short prompts pass through untouched
         let rows = vec![row(
             "01AAAAAAAAAAAAAAAAAAAAAAAA",

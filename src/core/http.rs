@@ -255,6 +255,19 @@ fn jitter01() -> f64 {
     f64::from(nanos % 1000) / 1000.0
 }
 
+/// Decide the next retry delay and announce long waits; None gives up.
+fn next_delay(retry: &mut Retry, e: &HttpError) -> Option<Duration> {
+    let delay = retry.next(e)?;
+    if delay >= Duration::from_secs(2) {
+        eprintln!(
+            "\x1b[2mretrying in {}s ({})\x1b[0m",
+            delay.as_secs_f32().ceil() as u64,
+            e.class().label()
+        );
+    }
+    Some(delay)
+}
+
 /// Sleep in short slices so esc/ctrl-c still interrupts a backoff wait.
 fn sleep_interruptible(d: Duration) {
     let deadline = Instant::now() + d;
@@ -312,16 +325,9 @@ pub fn post_sse(req: &HttpRequest, mut on_data: impl FnMut(&str, &str)) -> Resul
                 if emitted && e.class() == Class::Stream {
                     return Err(e);
                 }
-                let Some(delay) = retry.next(&e) else {
+                let Some(delay) = next_delay(&mut retry, &e) else {
                     return Err(e);
                 };
-                if delay >= Duration::from_secs(2) {
-                    eprintln!(
-                        "\x1b[2mretrying in {}s ({})\x1b[0m",
-                        delay.as_secs_f32().ceil() as u64,
-                        e.class().label()
-                    );
-                }
                 sleep_interruptible(delay);
             }
         }
@@ -405,16 +411,9 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
         }) {
             Ok(body) => return Ok(body),
             Err(e) => {
-                let Some(delay) = retry.next(&e) else {
+                let Some(delay) = next_delay(&mut retry, &e) else {
                     return Err(e);
                 };
-                if delay >= Duration::from_secs(2) {
-                    eprintln!(
-                        "\x1b[2mretrying in {}s ({})\x1b[0m",
-                        delay.as_secs_f32().ceil() as u64,
-                        e.class().label()
-                    );
-                }
                 sleep_interruptible(delay);
             }
         }
@@ -469,6 +468,27 @@ fn parse_retry_after(v: &str) -> Option<u64> {
 
 fn map_error(e: ureq::Error) -> HttpError {
     HttpError::new(0, e.to_string())
+}
+
+/// GET and read the whole body: (bytes, content-type) after a status check.
+pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    let resp = agent()
+        .get(url)
+        .call()
+        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+    if resp.status().as_u16() >= 400 {
+        return Err(format!("Failed to fetch {url}: HTTP {}", resp.status()));
+    }
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|c| c.split(';').next().unwrap_or(c).to_string());
+    let mut buf = Vec::new();
+    let mut reader = resp.into_body().into_reader();
+    std::io::Read::read_to_end(&mut reader, &mut buf)
+        .map_err(|e| format!("Failed to read {url}: {e}"))?;
+    Ok((buf, content_type))
 }
 
 fn get_text_with(agent: &ureq::Agent, url: &str) -> Result<String, String> {

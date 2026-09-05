@@ -90,28 +90,12 @@ pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
         });
     }
     if reference.starts_with("http://") || reference.starts_with("https://") {
-        let agent = crate::core::http::agent();
-        let resp = agent
-            .get(reference)
-            .call()
+        let (buf, header_type) = crate::core::http::get_bytes(reference)
             .map_err(|e| format!("attachment fetch failed: {e}"))?;
-        if resp.status().as_u16() >= 400 {
-            return Err(format!("attachment fetch failed: HTTP {}", resp.status()));
-        }
         let mime_type = mime
             .map(String::from)
-            .or_else(|| {
-                resp.headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|c| c.split(';').next().unwrap_or(c).to_string())
-            })
+            .or(header_type)
             .unwrap_or_else(|| guess_mime(reference).to_string());
-        let mut buf = Vec::new();
-        resp.into_body()
-            .into_reader()
-            .read_to_end(&mut buf)
-            .map_err(|e| e.to_string())?;
         Ok(Loaded {
             path: None,
             url: Some(reference.to_string()),

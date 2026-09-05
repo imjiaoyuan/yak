@@ -99,19 +99,7 @@ fn post_binary(req: &HttpRequest) -> Result<Vec<u8>, String> {
 }
 
 fn download_binary(url: &str) -> Result<Vec<u8>, String> {
-    let agent = crate::core::http::agent();
-    let response = agent.get(url).call().map_err(|e| e.to_string())?;
-    let status = response.status().as_u16();
-    let mut buf = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|e| e.to_string())?;
-    if status >= 400 {
-        return Err(format!("HTTP {status}"));
-    }
-    Ok(buf)
+    crate::core::http::get_bytes(url).map(|(buf, _)| buf)
 }
 
 // --out target planning ------------------------------------------------------

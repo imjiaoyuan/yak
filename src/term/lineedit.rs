@@ -1356,22 +1356,6 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
     }
 }
 
-/// Truncate to at most `max` terminal cells (CJK-aware), "…" on cut.
-fn fit_cells(text: &str, max: usize) -> String {
-    let mut out = String::new();
-    let mut cells = 0usize;
-    for c in text.chars() {
-        let w = crate::core::render_md::char_width(c);
-        if cells + w > max.saturating_sub(1) {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-        cells += w;
-    }
-    out
-}
-
 /// One rendered menu row; selected rows get the bold cursor marker.
 fn row(item: &str, selected: bool) -> String {
     format!("{}\n", row_body(item, selected))
@@ -1380,7 +1364,7 @@ fn row(item: &str, selected: bool) -> String {
 fn row_body(item: &str, selected: bool) -> String {
     // marker + space + item must fit one line or the cursor math breaks
     let width = crate::term::columns().saturating_sub(1);
-    let shown = fit_cells(item, width.saturating_sub(2));
+    let shown = crate::core::render_md::truncate_cells(item, width.saturating_sub(2));
     if selected {
         format!("\x1b[1m❯ {shown}\x1b[0m")
     } else {
