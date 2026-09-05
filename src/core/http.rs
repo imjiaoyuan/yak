@@ -1,9 +1,9 @@
-//! HTTP plumbing: POST with SSE streaming, timeout, retry on 429/5xx.
+//! HTTP plumbing: POST with SSE streaming, idle timeout, classified retries.
 
 use std::io::{BufRead, BufReader};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Cooperative interrupt flag set by the agent REPL's SIGINT handler: an
 /// in-flight stream aborts at the next chunk boundary instead of dying.
@@ -89,16 +89,180 @@ pub struct HttpRequest {
 pub struct HttpError {
     pub status: u16,
     pub message: String,
+    /// the server's Retry-After on 429, in seconds (honored over backoff)
+    pub retry_after: Option<u64>,
+    /// x-request-id / cf-ray, shown in the error for bug reports
+    pub request_id: Option<String>,
+}
+
+impl HttpError {
+    fn new(status: u16, message: impl Into<String>) -> HttpError {
+        HttpError {
+            status,
+            message: message.into(),
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    /// What went wrong, as far as the status and body say. The class decides
+    /// retryability: transport failures and rate limits get another chance,
+    /// auth and bad requests never do (the reference shape taxonomy, lean on
+    /// purpose — the reference-spirited).
+    fn class(&self) -> Class {
+        match self.status {
+            0 => {
+                if self.message == "interrupted" {
+                    Class::Interrupted
+                } else if self.message.starts_with("stream") {
+                    Class::Stream
+                } else {
+                    Class::Connection
+                }
+            }
+            429 => Class::RateLimited,
+            401 | 403 => Class::Auth,
+            400 if context_too_large(&self.message) => Class::ContextTooLarge,
+            s if s >= 500 => Class::Server,
+            _ => Class::InvalidRequest,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    /// transport failure before a response (DNS, TCP, TLS)
+    Connection,
+    /// HTTP 429
+    RateLimited,
+    /// HTTP 5xx
+    Server,
+    /// HTTP 401/403: a key problem retrying cannot fix
+    Auth,
+    /// other 4xx
+    InvalidRequest,
+    /// 400 whose body says the prompt does not fit the model's window
+    ContextTooLarge,
+    /// failure after the stream started (idle timeout, dropped connection)
+    Stream,
+    /// the user pressed esc/ctrl-c
+    Interrupted,
+}
+
+impl Class {
+    fn label(self) -> &'static str {
+        match self {
+            Class::Connection => "connection error",
+            Class::RateLimited => "rate limited",
+            Class::Server => "server error",
+            Class::Auth => "authentication",
+            Class::InvalidRequest => "bad request",
+            Class::ContextTooLarge => "context window exceeded",
+            Class::Stream => "stream failed",
+            Class::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// Bodies across providers that all mean "the prompt does not fit": OpenAI
+/// "maximum context length", Anthropic "prompt is too long", Google "input
+/// length and `max_tokens` exceed context limit".
+fn context_too_large(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("context_length_exceeded")
+        || m.contains("maximum context length")
+        || m.contains("prompt is too long")
+        || m.contains("exceed context limit")
 }
 
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.status == 0 {
-            // status 0 is a transport/TLS failure, not an HTTP response
-            write!(f, "connection error: {}", self.message)
+            // status 0 is a transport/stream failure whose message already
+            // says what broke ("stream: …", "connection refused")
+            write!(f, "{}", self.message)?;
         } else {
-            write!(f, "HTTP {}: {}", self.status, self.message)
+            write!(f, "HTTP {}: {}", self.status, self.message)?;
         }
+        if let Some(id) = &self.request_id {
+            write!(f, " [req {id}]")?;
+        }
+        Ok(())
+    }
+}
+
+/// Per-request retry budget. Connection failures get their own, larger
+/// counter with a longer backoff (the reference's split): a dead network is worth
+/// waiting out, a flaky 5xx is not.
+const REQUEST_MAX_RETRIES: usize = 4;
+const CONNECTION_MAX_RETRIES: usize = 12;
+/// A stream silent for this long is dead, however long the generation.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+struct Retry {
+    attempt: usize,
+}
+
+impl Retry {
+    fn new() -> Retry {
+        Retry { attempt: 0 }
+    }
+
+    /// Whether to try again after `e`, and how long to wait. `None` gives
+    /// up. Stream drops are in the retryable set because `post_sse` refuses
+    /// to resend once any output was handed out — the guard lives there,
+    /// where "emitted" is known.
+    fn next(&mut self, e: &HttpError) -> Option<Duration> {
+        let class = e.class();
+        if !matches!(
+            class,
+            Class::Connection | Class::RateLimited | Class::Server | Class::Stream
+        ) {
+            return None; // auth, bad requests, window overflows and interrupts never retry
+        }
+        let connection = class == Class::Connection;
+        let max = if connection {
+            CONNECTION_MAX_RETRIES
+        } else {
+            REQUEST_MAX_RETRIES
+        };
+        self.attempt += 1;
+        if self.attempt > max {
+            return None;
+        }
+        Some(
+            e.retry_after
+                .map(Duration::from_secs)
+                .unwrap_or_else(|| backoff_with(self.attempt, connection, jitter01())),
+        )
+    }
+}
+
+/// Exponential backoff with ±10% jitter: 1s→30s for response failures,
+/// 5s→60s for connection failures.
+fn backoff_with(attempt: usize, connection: bool, frac: f64) -> Duration {
+    let (base, cap) = if connection { (5.0, 60.0) } else { (1.0, 30.0) };
+    let plain = (base * 2f64.powi(attempt as i32 - 1)).min(cap);
+    Duration::from_secs_f64((plain * (0.9 + 0.2 * frac.clamp(0.0, 1.0))).max(0.05))
+}
+
+fn jitter01() -> f64 {
+    // subsecond nanos are plenty of entropy for a ±10% nudge; no RNG crate
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos % 1000) / 1000.0
+}
+
+/// Sleep in short slices so esc/ctrl-c still interrupts a backoff wait.
+fn sleep_interruptible(d: Duration) {
+    let deadline = Instant::now() + d;
+    while Instant::now() < deadline {
+        if interrupted() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -110,7 +274,7 @@ pub fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(600)))
+            .timeout_global(Some(Duration::from_secs(1800)))
             .build()
             .into()
     })
@@ -129,17 +293,39 @@ pub fn short_agent() -> &'static ureq::Agent {
 }
 
 /// POST and hand each SSE `data:` line (with its `event:` type) to the
-/// caller's parser. Retries once on 429/5xx with backoff.
+/// caller's parser. Retryable failures (transport, 429 with its Retry-After,
+/// 5xx) resend with jittered backoff; a stream that already delivered output
+/// never resends transparently — replaying it would duplicate the answer —
+/// so mid-stream drops surface as errors instead.
 pub fn post_sse(req: &HttpRequest, mut on_data: impl FnMut(&str, &str)) -> Result<(), HttpError> {
     let a = agent();
-    send_sse(a, req, &mut on_data).or_else(|e| {
-        if e.status == 429 || e.status >= 500 {
-            std::thread::sleep(Duration::from_secs(2));
-            send_sse(a, req, &mut on_data)
-        } else {
-            Err(e)
+    let mut retry = Retry::new();
+    let mut emitted = false;
+    loop {
+        let result = send_sse(a, req, &mut |ev, data| {
+            emitted = true;
+            on_data(ev, data);
+        });
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if emitted && e.class() == Class::Stream {
+                    return Err(e);
+                }
+                let Some(delay) = retry.next(&e) else {
+                    return Err(e);
+                };
+                if delay >= Duration::from_secs(2) {
+                    eprintln!(
+                        "\x1b[2mretrying in {}s ({})\x1b[0m",
+                        delay.as_secs_f32().ceil() as u64,
+                        e.class().label()
+                    );
+                }
+                sleep_interruptible(delay);
+            }
         }
-    })
+    }
 }
 
 fn send_sse(
@@ -152,7 +338,8 @@ fn send_sse(
     // the blocking read lives on its own thread while this loop polls the
     // interrupt flag between 100ms slices — a silent server (long thinking
     // stretches, a hung connection) interrupts at once instead of waiting
-    // for the next SSE line
+    // for the next SSE line, and a stream silent past the idle window is
+    // declared dead however long the generation might have been
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     std::thread::spawn(move || {
         for line in reader.lines() {
@@ -162,30 +349,34 @@ fn send_sse(
         }
     });
     let mut event_type = String::new();
+    let mut last_byte = Instant::now();
     loop {
         let line = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(line) => line,
+            Ok(line) => {
+                last_byte = Instant::now();
+                line
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if interrupted() {
-                    return Err(HttpError {
-                        status: 0,
-                        message: "interrupted".to_string(),
-                    });
+                    return Err(HttpError::new(0, "interrupted"));
+                }
+                if last_byte.elapsed() >= STREAM_IDLE_TIMEOUT {
+                    return Err(HttpError::new(
+                        0,
+                        format!(
+                            "stream idle for {}s (no bytes from the server)",
+                            last_byte.elapsed().as_secs()
+                        ),
+                    ));
                 }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
         if interrupted() {
-            return Err(HttpError {
-                status: 0,
-                message: "interrupted".to_string(),
-            });
+            return Err(HttpError::new(0, "interrupted"));
         }
-        let line = line.map_err(|e| HttpError {
-            status: 0,
-            message: e,
-        })?;
+        let line = line.map_err(|e| HttpError::new(0, format!("stream: {e}")))?;
         if line.is_empty() {
             event_type.clear();
             continue;
@@ -202,16 +393,32 @@ fn send_sse(
     }
 }
 
-/// Non-streaming POST returning the raw body.
+/// Non-streaming POST returning the raw body, under the same retry policy.
 pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
     let a = agent();
-    send_raw(a, req)?
-        .into_body()
-        .read_to_string()
-        .map_err(|e| HttpError {
-            status: 0,
-            message: e.to_string(),
-        })
+    let mut retry = Retry::new();
+    loop {
+        match send_raw(a, req).and_then(|r| {
+            r.into_body()
+                .read_to_string()
+                .map_err(|e| HttpError::new(0, format!("stream: {e}")))
+        }) {
+            Ok(body) => return Ok(body),
+            Err(e) => {
+                let Some(delay) = retry.next(&e) else {
+                    return Err(e);
+                };
+                if delay >= Duration::from_secs(2) {
+                    eprintln!(
+                        "\x1b[2mretrying in {}s ({})\x1b[0m",
+                        delay.as_secs_f32().ceil() as u64,
+                        e.class().label()
+                    );
+                }
+                sleep_interruptible(delay);
+            }
+        }
+    }
 }
 
 fn send_raw(
@@ -225,6 +432,22 @@ fn send_raw(
     let response = request.send(&req.body).map_err(map_error)?;
     let status = response.status().as_u16();
     if status >= 400 {
+        // keep what bug reports need: the body, the server's retry hint and
+        // the request id it can trace
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_retry_after);
+        let request_id = ["x-request-id", "x-oai-request-id", "cf-ray"]
+            .iter()
+            .find_map(|h| {
+                response
+                    .headers()
+                    .get(*h)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            });
         let body = response
             .into_body()
             .read_to_string()
@@ -232,16 +455,20 @@ fn send_raw(
         return Err(HttpError {
             status,
             message: body,
+            retry_after,
+            request_id,
         });
     }
     Ok(response)
 }
 
+/// Retry-After as seconds; the HTTP-date form is rare enough to skip.
+fn parse_retry_after(v: &str) -> Option<u64> {
+    v.trim().parse().ok()
+}
+
 fn map_error(e: ureq::Error) -> HttpError {
-    HttpError {
-        status: 0,
-        message: e.to_string(),
-    }
+    HttpError::new(0, e.to_string())
 }
 
 fn get_text_with(agent: &ureq::Agent, url: &str) -> Result<String, String> {
@@ -261,4 +488,115 @@ fn get_text_with(agent: &ureq::Agent, url: &str) -> Result<String, String> {
 /// instead of hanging a task for minutes. Proxies still come from env vars.
 pub fn get_text_short(url: &str) -> Result<String, String> {
     get_text_with(short_agent(), url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_classify_into_retryable_and_fatal() {
+        let conn = HttpError::new(0, "tcp connect error");
+        assert_eq!(conn.class(), Class::Connection);
+        let drop = HttpError::new(0, "stream: connection reset");
+        assert_eq!(drop.class(), Class::Stream);
+        let idle = HttpError::new(0, "stream idle for 300s (no bytes from the server)");
+        assert_eq!(idle.class(), Class::Stream);
+        assert_eq!(HttpError::new(0, "interrupted").class(), Class::Interrupted);
+        assert_eq!(HttpError::new(429, "slow down").class(), Class::RateLimited);
+        assert_eq!(HttpError::new(503, "unavailable").class(), Class::Server);
+        assert_eq!(HttpError::new(401, "bad key").class(), Class::Auth);
+        assert_eq!(
+            HttpError::new(400, "unknown parameter").class(),
+            Class::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn context_overflow_bodies_classify_as_window_errors() {
+        assert_eq!(
+            HttpError::new(400, "This model's maximum context length is 8192 tokens").class(),
+            Class::ContextTooLarge
+        );
+        assert_eq!(
+            HttpError::new(400, "prompt is too long: 210000 tokens > 200000 maximum").class(),
+            Class::ContextTooLarge
+        );
+        assert_eq!(
+            HttpError::new(
+                400,
+                "the request's input length and `max_tokens` exceed context limit"
+            )
+            .class(),
+            Class::ContextTooLarge
+        );
+        // other 400s stay ordinary bad requests
+        assert_eq!(
+            HttpError::new(400, "invalid model").class(),
+            Class::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn retry_budget_honors_class_and_server_delay() {
+        let mut r = Retry::new();
+        // auth never retries
+        assert_eq!(r.next(&HttpError::new(401, "bad key")), None);
+        // server errors retry REQUEST_MAX_RETRIES times, then give up
+        let mut r = Retry::new();
+        for _ in 0..REQUEST_MAX_RETRIES {
+            assert!(r.next(&HttpError::new(503, "unavailable")).is_some());
+        }
+        assert_eq!(r.next(&HttpError::new(503, "unavailable")), None);
+        // connection failures get their own larger budget
+        let mut r = Retry::new();
+        for _ in 0..CONNECTION_MAX_RETRIES {
+            assert!(r.next(&HttpError::new(0, "dns failure")).is_some());
+        }
+        assert_eq!(r.next(&HttpError::new(0, "dns failure")), None);
+        // a server-provided Retry-After wins over computed backoff
+        let mut r = Retry::new();
+        let e = HttpError {
+            status: 429,
+            message: "slow down".into(),
+            retry_after: Some(7),
+            request_id: None,
+        };
+        assert_eq!(r.next(&e), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn backoff_doubles_caps_and_jitters_within_ten_percent() {
+        assert_eq!(
+            backoff_with(1, false, 0.0),
+            Duration::from_secs_f64(1.0 * 0.9)
+        );
+        assert_eq!(
+            backoff_with(1, false, 1.0),
+            Duration::from_secs_f64(1.0 * 1.1)
+        );
+        // plain sequence 1,2,4,8… capped at 30 (response) / 5,10,20… 60 (connection)
+        assert_eq!(backoff_with(2, false, 0.5), Duration::from_secs_f64(2.0));
+        assert_eq!(backoff_with(20, false, 0.5), Duration::from_secs_f64(30.0));
+        assert_eq!(backoff_with(1, true, 0.5), Duration::from_secs_f64(5.0));
+        assert_eq!(backoff_with(20, true, 0.5), Duration::from_secs_f64(60.0));
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_only() {
+        assert_eq!(parse_retry_after("7"), Some(7));
+        assert_eq!(parse_retry_after(" 12 "), Some(12));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn display_carries_the_request_id() {
+        let e = HttpError {
+            status: 500,
+            message: "boom".into(),
+            retry_after: None,
+            request_id: Some("req_abc123".into()),
+        };
+        assert_eq!(e.to_string(), "HTTP 500: boom [req req_abc123]");
+    }
 }
