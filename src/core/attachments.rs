@@ -5,7 +5,23 @@
 use std::io::{IsTerminal, Read};
 
 use crate::core::logstore::StoredAttachment;
-use crate::providers::Attachment;
+
+/// The wire form of an attachment, carried on user messages and tool
+/// results: mime, base64 bytes and a display name. `path`/`url` ride along
+/// as storage provenance (where the bytes came from) — the provider
+/// adapters never read them, but the log store needs them so a stored
+/// attachment can point back at its source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    pub mime_type: String,
+    pub base64_data: String,
+    /// display name for file-typed wire blocks; None for stdin/clipboard bytes
+    pub filename: Option<String>,
+    /// the local path the bytes were loaded from, when they were
+    pub path: Option<String>,
+    /// the URL the bytes were fetched from, when they were
+    pub url: Option<String>,
+}
 
 /// An attachment with provenance: feeds both the request and the log store.
 pub struct Loaded {
@@ -24,6 +40,8 @@ impl Loaded {
                 .unwrap_or_else(|| "application/octet-stream".into()),
             base64_data: crate::b64::encode(&self.content),
             filename: self.file_name(),
+            path: self.path.clone(),
+            url: self.url.clone(),
         }
     }
 
@@ -260,6 +278,8 @@ pub fn from_bytes(mime: Option<&str>, content: Vec<u8>) -> Attachment {
         mime_type,
         base64_data: crate::b64::encode(&content),
         filename: None,
+        path: None,
+        url: None,
     }
 }
 

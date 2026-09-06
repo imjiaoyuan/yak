@@ -411,6 +411,8 @@ mod tests {
             mime_type: "text/plain".into(),
             base64_data: crate::b64::encode(b"see inside"),
             filename: Some("notes.md".into()),
+            path: None,
+            url: None,
         }];
         i.attachments = &atts;
         let body = build_body(&model("openai-compat"), &i, false).unwrap();

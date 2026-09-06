@@ -10,6 +10,10 @@ pub use message::{
     Msg, ORPHAN_RESULT, ToolCall, ToolCallAccumulator, ToolDef, call_answered, last_result_index,
 };
 
+// the attachment type lives with its loader in core; re-exported here so
+// the adapters' `Attachment` vocabulary keeps working
+pub use crate::core::attachments::Attachment;
+
 use serde_json::{Value, json};
 
 use crate::core::config::Provider;
@@ -200,14 +204,6 @@ pub struct ResolvedModel {
     pub options: Vec<(String, String)>,
     /// --schema structured output (openai-compat only)
     pub schema: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Attachment {
-    pub mime_type: String,
-    pub base64_data: String,
-    /// display name for file-typed wire blocks; None for stdin/clipboard bytes
-    pub filename: Option<String>,
 }
 
 /// Borrowed request inputs: history and tools stay owned by the caller so a
@@ -426,6 +422,8 @@ pub(crate) mod testutil {
             mime_type: mime.into(),
             base64_data: "AAAA".into(),
             filename: name.map(String::from),
+            path: None,
+            url: None,
         }
     }
 }

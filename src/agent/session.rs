@@ -472,8 +472,11 @@ pub fn msg_to_message(m: &Msg) -> Message {
                     }
                 };
                 parts.push(Part::Attachment(StoredAttachment {
-                    path: a.filename.clone(),
-                    url: None,
+                    // the wire attachment carries the real provenance from
+                    // its loader; a bare filename is a display name, not a
+                    // readable path, and must never land here
+                    path: a.path.clone(),
+                    url: a.url.clone(),
                     mime_type: Some(a.mime_type.clone()),
                     content,
                 }));
@@ -604,4 +607,54 @@ pub fn rebuild_thread(db: &Db, cid: &str) -> (Vec<Msg>, Option<String>) {
         }
     }
     (msgs, system)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::logstore::Part;
+
+    #[test]
+    fn user_attachments_keep_their_real_provenance_in_storage() {
+        // a wire attachment carrying loader provenance stores the path/url
+        // it came from — never the bare display filename as a path
+        let msg = crate::providers::Msg::user_with(
+            "look",
+            vec![crate::providers::Attachment {
+                mime_type: "image/png".into(),
+                base64_data: crate::b64::encode(b"pngbytes"),
+                filename: Some("shot.png".into()),
+                path: Some("/tmp/cam/2026/shot.png".into()),
+                url: None,
+            }],
+        );
+        let stored = msg_to_message(&msg);
+        let Part::Attachment(a) = &stored.parts[1] else {
+            panic!("expected an attachment part");
+        };
+        assert_eq!(a.path.as_deref(), Some("/tmp/cam/2026/shot.png"));
+        assert_eq!(a.url, None);
+        assert_eq!(a.content, b"pngbytes");
+
+        // a URL attachment stores the URL, hashing like the prompt path
+        let msg = crate::providers::Msg::user_with(
+            "look",
+            vec![crate::providers::Attachment {
+                mime_type: "image/png".into(),
+                base64_data: crate::b64::encode(b"pngbytes"),
+                filename: Some("shot.png".into()),
+                path: None,
+                url: Some("https://example.com/shot.png?token=1".into()),
+            }],
+        );
+        let stored = msg_to_message(&msg);
+        let Part::Attachment(a) = &stored.parts[1] else {
+            panic!("expected an attachment part");
+        };
+        assert_eq!(
+            a.url.as_deref(),
+            Some("https://example.com/shot.png?token=1")
+        );
+        assert_eq!(a.path, None);
+    }
 }

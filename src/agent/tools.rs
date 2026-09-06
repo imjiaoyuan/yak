@@ -261,6 +261,8 @@ impl Tool for ReadTool {
                 mime_type: mime,
                 base64_data: crate::b64::encode(&bytes),
                 filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                path: Some(path.display().to_string()),
+                url: None,
             });
             return out;
         }

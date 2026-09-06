@@ -407,6 +407,8 @@ mod tests {
             mime_type: "text/plain".into(),
             base64_data: crate::b64::encode(b"hello notes"),
             filename: Some("notes.txt".into()),
+            path: None,
+            url: None,
         }];
         i.attachments = &atts;
         let body = build_body(&model("anthropic"), &i, false).unwrap();
@@ -424,6 +426,8 @@ mod tests {
             mime_type: "text/csv".into(),
             base64_data: crate::b64::encode(&[0xff, 0xfe, 0x00]),
             filename: Some("rows.csv".into()),
+            path: None,
+            url: None,
         }];
         i.attachments = &atts;
         let err = build_body(&model("anthropic"), &i, false).unwrap_err();
