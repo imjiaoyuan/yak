@@ -191,15 +191,78 @@ fn command_word(seg: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Whitespace tokens of a segment with surrounding quotes stripped, so a
+/// `bash -c 'sudo id'` payload reads as its own command line.
+fn tokens(seg: &str) -> Vec<String> {
+    seg.split_whitespace()
+        .map(|t| t.trim_matches(['\'', '"']).to_string())
+        .collect()
+}
+
+/// Programs that only ever run another command: whatever follows them (past
+/// their own flags and argument) is a command position too.
+const WRAPPERS: &[&str] = &[
+    "xargs", "nohup", "setsid", "stdbuf", "nice", "ionice", "time", "watch", "env", "timeout",
+    "command", "exec",
+];
+
+/// Shells whose `-c` argument is a full command line of its own.
+const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
+
+/// Every token of a segment that starts a command: the first word (past any
+/// leading env assignments), whatever a wrapper runs next, and `shell -c`
+/// payloads recursed one level. `xargs rm`, `env sudo id` and
+/// `bash -c 'sudo id'` all surface their inner command; a bare argument like
+/// the `sudo` in `grep sudo file` never does.
+fn command_positions(seg: &str, depth: usize) -> Vec<String> {
+    let toks = tokens(seg);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() && toks[i].contains('=') {
+        i += 1;
+    }
+    while i < toks.len() {
+        let t = toks[i].as_str();
+        if SHELLS.contains(&t)
+            && matches!(
+                toks.get(i + 1).map(String::as_str),
+                Some("-c") | Some("-lc")
+            )
+            && i + 2 < toks.len()
+        {
+            if depth < 2 {
+                out.extend(command_positions(&toks[i + 2..].join(" "), depth + 1));
+            }
+            return out;
+        }
+        out.push(t.to_string());
+        if WRAPPERS.contains(&t) {
+            i += 1;
+            while i < toks.len() && toks[i].starts_with('-') {
+                i += 1;
+            }
+            if t == "timeout" && i < toks.len() && !toks[i].contains('=') {
+                i += 1; // the duration word
+            }
+            continue;
+        }
+        return out;
+    }
+    out
+}
+
 /// Privilege-escalation commands the agent must never run, in any mode
-/// (the user runs those themselves). Matches the command word of each
-/// segment, so `ls | sudo tee` is caught but `grep sudo file` is not.
+/// (the user runs those themselves). Matches every command position of
+/// each segment, so `ls | sudo tee` and `bash -c 'sudo id'` are caught but
+/// `grep sudo file` is not.
 pub fn root_reason(command: &str) -> Option<&'static str> {
     for seg in split_compound(command) {
-        if matches!(
-            command_word(&seg),
-            "sudo" | "sudoedit" | "doas" | "pkexec" | "su" | "visudo"
-        ) {
+        if command_positions(&seg, 0).iter().any(|t| {
+            matches!(
+                t.as_str(),
+                "sudo" | "sudoedit" | "doas" | "pkexec" | "su" | "visudo"
+            )
+        }) {
             return Some(
                 "root commands (sudo/su/doas/pkexec) are not allowed — run it yourself and tell the agent the result",
             );
@@ -221,7 +284,7 @@ pub fn critical_reason(command: &str) -> Option<&'static str> {
                 || s.contains("-r -f")
                 || s.contains("-f -r"))
             && (s.contains(" /") || s.starts_with("sudo"));
-        if command_word(s) == "rm" {
+        if command_positions(s, 0).iter().any(|t| t == "rm") {
             return Some("rm always needs an explicit approval");
         }
         if s.contains("--no-preserve-root") {
@@ -281,7 +344,7 @@ pub fn critical_reason(command: &str) -> Option<&'static str> {
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
 /// terminal is available.
-pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool) -> ApprovalResponse {
+pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool, pre: Vec<u8>) -> ApprovalResponse {
     if json_mode {
         crate::agent::emit_json(&serde_json::json!({
             "type": "approval_request",
@@ -315,7 +378,7 @@ pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool) -> ApprovalRespon
     };
     eprint!("  \x1b[1m\x1b[36mAllow?\x1b[0m {keys} ");
     let _ = std::io::stderr().flush();
-    match read_approval_key() {
+    match read_approval_key(pre) {
         Some(ApprovalKey::Yes) => ApprovalResponse::Allow,
         Some(ApprovalKey::Always) => ApprovalResponse::AllowSession,
         // n, ctrl-c, ctrl-d, esc → deny; the tool result carries the reason
@@ -454,5 +517,33 @@ mod tests {
         assert!(root_reason("grep sudo PKGBUILD").is_none());
         assert!(root_reason("echo 'sudo'").is_none());
         assert!(root_reason("ls -la").is_none());
+    }
+
+    #[test]
+    fn root_commands_inside_wrappers_and_shell_payloads_are_denied() {
+        // a nested shell hides the command word from a plain first-word
+        // match; the payload is a command line of its own
+        assert!(root_reason("bash -c 'sudo pacman -S x'").is_some());
+        assert!(root_reason("sh -c \"doas apk add x\"").is_some());
+        assert!(root_reason("env sudo id").is_some());
+        assert!(root_reason("nohup su root").is_some());
+        assert!(root_reason("echo hi | xargs sudo rm").is_some());
+        assert!(root_reason("timeout 5 pkexec ls").is_some());
+        assert!(root_reason("FOO=1 setsid sudo id").is_some());
+        // still only command positions: arguments stay arguments
+        assert!(root_reason("cat sudo-notes.txt").is_none());
+        assert!(root_reason("vim -c 'echo sudo'").is_none());
+    }
+
+    #[test]
+    fn rm_behind_xargs_and_shell_payloads_prompts() {
+        // `xargs rm` runs rm without the command word ever being rm
+        assert!(critical_reason("find . -name '*.tmp' | xargs rm -rf").is_some());
+        assert!(critical_reason("xargs rm").is_some());
+        assert!(critical_reason("bash -c 'rm -rf build'").is_some());
+        assert!(critical_reason("timeout 10 rm -rf /tmp/x").is_some());
+        // rm as an argument or filename still does not prompt
+        assert!(critical_reason("grep rm Makefile").is_none());
+        assert!(critical_reason("cat rm.go").is_none());
     }
 }

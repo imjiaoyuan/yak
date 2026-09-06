@@ -162,7 +162,7 @@ fn interactive(db: &Db, only: Option<&str>) -> i32 {
     // one key continues the conversation where it left off: chat threads
     // reopen the tool-less session, everything else the agent session
     eprint!("\x1b[2menter this conversation? [Y/n]\x1b[0m ");
-    match crate::term::lineedit::read_approval_key() {
+    match crate::term::lineedit::read_approval_key(Vec::new()) {
         Some(crate::term::lineedit::ApprovalKey::Yes)
         | Some(crate::term::lineedit::ApprovalKey::Always) => {
             let argv: Vec<String> = vec!["--session".into(), t.id.clone()];

@@ -278,11 +278,13 @@ impl Session {
         let watcher_queue = self.steer_queue.clone();
         let mut watcher = crate::term::lineedit::KeyWatcher::start_with(watcher_queue.clone());
         let mut on_approval = |req: ApprovalRequest| {
-            watcher.stop();
+            // keystrokes typed in the stop window ride along so an eager
+            // y/n answer is not swallowed by the dying watcher thread
+            let pre = watcher.stop();
             // silence the spinner and close the thinking trace so the
             // banner lands on a clean line
             view.borrow_mut().pause();
-            let answer = approval::prompt_approval(&req, json_mode);
+            let answer = approval::prompt_approval(&req, json_mode, pre);
             if !matches!(answer, ApprovalResponse::Deny) {
                 *approved_echo.borrow_mut() = Some((req.tool.to_string(), req.preview.to_string()));
             }

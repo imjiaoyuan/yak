@@ -129,6 +129,12 @@ impl LineEditor {
                         line.settle(&mut out, prompt, "");
                         return LineResult::Interrupt;
                     }
+                    // a second ESC inside one poll slice: the first press
+                    // was a lone ESC (nothing real starts with ESC ESC)
+                    RawByte::Key(0x1b) => {
+                        line.settle(&mut out, prompt, "");
+                        return LineResult::Interrupt;
+                    }
                     RawByte::Key(first) => match term.escape_from(first) {
                         Some(Esc::Key(cp, m))
                             if (m == 5 || m == 6) && (97u32..=122).contains(&cp) =>
@@ -1071,17 +1077,24 @@ fn common_prefix(candidates: &[String]) -> String {
 /// Two-step approval input: type `y`/`n`/`a` to pick an option (echoed live),
 /// then press Enter to confirm; a bare Enter keeps the default yes.
 /// Esc/ctrl-c/ctrl-d cancels (Deny) immediately. The prompt banner has
-/// already been printed by the caller. Returns None when raw mode is
-/// unavailable (the caller fails closed).
-pub fn read_approval_key() -> Option<ApprovalKey> {
+/// already been printed by the caller. `pre` carries keystrokes typed while
+/// the task still ran (parked by the KeyWatcher), so an eager `y` is not
+/// lost. Returns None when raw mode is unavailable (the caller fails
+/// closed).
+pub fn read_approval_key(pre: Vec<u8>) -> Option<ApprovalKey> {
     let mut term = RawTerm::acquire_console(1, 0)?;
+    let mut pre = pre.into_iter();
     // raw mode disables echo: echo each accepted letter as it is typed so the
     // user sees their selection, but do not commit until Enter (or a cancel).
     let mut choice: Option<ApprovalKey> = None;
     let key = loop {
-        let b = match term.next_byte() {
-            RawByte::Key(b) => b,
-            RawByte::Timeout => continue,
+        let b = if let Some(b) = pre.next() {
+            b
+        } else {
+            match term.next_byte() {
+                RawByte::Key(b) => b,
+                RawByte::Timeout => continue,
+            }
         };
         match b {
             b'y' | b'Y' => {
@@ -1107,16 +1120,15 @@ pub fn read_approval_key() -> Option<ApprovalKey> {
                 break ApprovalKey::Deny;
             }
             0x1b => {
-                // a lone ESC cancels like ctrl-c, but arrow keys and other
-                // escape sequences also start with ESC — wait one poll slice
-                // to tell them apart and swallow sequence bodies whole
-                match term.next_byte() {
-                    RawByte::Timeout => {
+                // a lone ESC cancels like ctrl-c; arrow keys and other
+                // sequences are swallowed whole so their tail bytes can
+                // never land on the y/n/a answers
+                match term.escape_seq() {
+                    Some(_) => continue,
+                    None => {
                         crate::core::http::request_interrupt();
                         break ApprovalKey::Deny;
                     }
-                    // the sequence's tail bytes land in the catch-all below
-                    RawByte::Key(_) => continue,
                 }
             }
             0x04 => break ApprovalKey::Deny,
@@ -1337,7 +1349,11 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 let delta = match term.escape_seq() {
                     Some(Esc::Up) => -1i64,
                     Some(Esc::Down) => 1,
-                    _ => {
+                    // edit keys (home/end/delete/arrows) and F-keys are not
+                    // bound in the menu: ignore them instead of cancelling
+                    // and throwing the selection away
+                    Some(_) => continue,
+                    None => {
                         erase(&mut out, printed, true);
                         return None;
                     }
@@ -1401,15 +1417,24 @@ fn row_body(item: &str, selected: bool) -> String {
 pub struct KeyWatcher {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// un-entered keystrokes the dying thread had buffered when the stop
+    /// flag landed mid-slice; handed to whoever reads the terminal next
+    leftover: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl KeyWatcher {
     pub fn start_with(queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> KeyWatcher {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leftover = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let Some(mut term) = RawTerm::acquire(1, 0) else {
-            return KeyWatcher { stop, handle: None };
+            return KeyWatcher {
+                stop,
+                handle: None,
+                leftover,
+            };
         };
         let flag = stop.clone();
+        let parked = leftover.clone();
         let handle = std::thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::new();
             loop {
@@ -1421,9 +1446,18 @@ impl KeyWatcher {
                     RawByte::Key(b) => match b {
                         // raw mode disables ISIG, so ctrl-c arrives here as 0x03;
                         // an interrupt also discards the half-typed line
-                        0x1b | 0x03 => {
+                        0x03 => {
                             buf.clear();
                             crate::core::http::request_interrupt();
+                        }
+                        // a lone ESC interrupts like ctrl-c, but arrow and
+                        // edit keys also start with ESC — swallow whole
+                        // sequences so their tails cannot raise the flag
+                        0x1b => {
+                            if term.escape_seq().is_none() {
+                                buf.clear();
+                                crate::core::http::request_interrupt();
+                            }
                         }
                         // enter: queue the line. No per-character echo — it would
                         // interleave with the streaming answer and tear lines
@@ -1458,19 +1492,30 @@ impl KeyWatcher {
                     },
                 }
             }
+            // the flag can land between bytes: un-entered input is parked
+            // for the next terminal reader (the approval prompt) instead of
+            // vanishing with this thread
+            if let Ok(mut parked) = parked.lock() {
+                *parked = buf;
+            }
             drop(term); // restores cooked mode
         });
         KeyWatcher {
             stop,
             handle: Some(handle),
+            leftover,
         }
     }
 
-    pub fn stop(&mut self) {
+    /// Stop the watcher and return any un-entered keystrokes it had
+    /// buffered, so the answer typed at the moment the approval prompt
+    /// appeared is not silently swallowed.
+    pub fn stop(&mut self) -> Vec<u8> {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+        std::mem::take(&mut *self.leftover.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
