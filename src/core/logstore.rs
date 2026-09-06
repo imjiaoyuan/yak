@@ -1258,7 +1258,7 @@ pub struct RowFilters<'a> {
 
 /// Query the turn store, newest-first (or relevance-ranked for -q).
 pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
-    let mut rows: Vec<(f64, Value)> = Vec::new();
+    let mut rows: Vec<Value> = Vec::new();
 
     // -- new store ---------------------------------------------------------
     let mut where_clauses: Vec<String> = Vec::new();
@@ -1312,13 +1312,10 @@ pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
         Ok(mut stmt) => {
             let refs: Vec<&dyn rusqlite::types::ToSql> =
                 params.iter().map(|p| p.as_ref()).collect();
-            match stmt.query_map(refs.as_slice(), |r| {
-                let rank: f64 = r.get(14).unwrap_or(0.0);
-                Ok((rank, new_store_row(r)))
-            }) {
+            match stmt.query_map(refs.as_slice(), |r| Ok(new_store_row(r))) {
                 Ok(mapped) => {
-                    for (rank, row) in mapped.flatten() {
-                        rows.push((rank, row));
+                    for row in mapped.flatten() {
+                        rows.push(row);
                     }
                 }
                 Err(err) => {
@@ -1331,18 +1328,8 @@ pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
         }
         Err(e) => eprintln!("Warning: cannot query turns: {e}"),
     }
-
-    // newest-first unless relevance search already ordered inside each store
-    if !f.search {
-        rows.sort_by(|a, b| {
-            let id_a = a.1["id"].as_str().unwrap_or("");
-            let id_b = b.1["id"].as_str().unwrap_or("");
-            id_b.cmp(id_a)
-        });
-    } else {
-        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    }
-    rows.into_iter().map(|(_, row)| row).collect()
+    // the SQL above already orders (rank, id DESC); no Rust-side re-sort
+    rows
 }
 
 macro_rules! get_str {

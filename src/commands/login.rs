@@ -31,7 +31,7 @@ struct Preset {
     name: String,
     kind: String,
     base_url: String,
-    env_keys: Vec<&'static str>,
+    env_key: Option<&'static str>,
     needs_key: bool,
     /// interactive URL building: cloudflare-gateway | cloudflare-workers | azure
     template: Option<&'static str>,
@@ -47,11 +47,7 @@ fn presets() -> Vec<Preset> {
             name: e.id.to_string(),
             kind: e.kind.to_string(),
             base_url: e.base_url.to_string(),
-            env_keys: if e.env.is_empty() {
-                Vec::new()
-            } else {
-                vec![e.env]
-            },
+            env_key: (!e.env.is_empty()).then_some(e.env),
             needs_key: !e.env.is_empty(),
             template: None,
         })
@@ -60,7 +56,7 @@ fn presets() -> Vec<Preset> {
         name: "cloudflare-ai-gateway".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_keys: vec!["CLOUDFLARE_API_KEY"],
+        env_key: Some("CLOUDFLARE_API_KEY"),
         needs_key: true,
         template: Some("cloudflare-gateway"),
     });
@@ -68,7 +64,7 @@ fn presets() -> Vec<Preset> {
         name: "cloudflare-workers-ai".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_keys: vec!["CLOUDFLARE_API_KEY"],
+        env_key: Some("CLOUDFLARE_API_KEY"),
         needs_key: true,
         template: Some("cloudflare-workers"),
     });
@@ -76,7 +72,7 @@ fn presets() -> Vec<Preset> {
         name: "azure-openai".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_keys: vec!["AZURE_OPENAI_API_KEY"],
+        env_key: Some("AZURE_OPENAI_API_KEY"),
         needs_key: true,
         template: Some("azure"),
     });
@@ -139,11 +135,7 @@ pub(crate) fn wizard() -> Result<(), String> {
     let mut items: Vec<String> = list
         .iter()
         .map(|p| {
-            let env = p
-                .env_keys
-                .first()
-                .map(|k| format!(" (${k})"))
-                .unwrap_or_default();
+            let env = p.env_key.map(|k| format!(" (${k})")).unwrap_or_default();
             let base = if p.base_url.is_empty() {
                 "(URL prompted)".to_string()
             } else {
@@ -216,8 +208,7 @@ pub(crate) fn wizard() -> Result<(), String> {
         (None, String::new())
     } else {
         let detected = preset
-            .and_then(|p| p.env_keys.iter().find(|k| std::env::var_os(k).is_some()))
-            .copied()
+            .and_then(|p| p.env_key.filter(|k| std::env::var_os(k).is_some()))
             .or_else(|| {
                 // custom flow: check the obvious names for the chosen kind
                 let vars: &[&str] = if kind == "anthropic" {

@@ -45,7 +45,7 @@ pub fn run_shell_stream(
     on_stdout_line: &mut dyn FnMut(&str),
 ) -> ShellOutcome {
     let spec = shell_spec();
-    run_shell_streaming_with_spec(&spec, cmd, cwd, timeout, interrupt, on_stdout_line)
+    run_shell_prepared(&spec, cmd, cwd, None, timeout, interrupt, on_stdout_line)
 }
 
 /// Run a shell command interactively with inherited stdio.
@@ -161,17 +161,6 @@ pub fn shell_spec() -> ShellSpec {
 
 /// Like run_shell, but complete stdout lines are handed to `on_stdout_line`
 /// live while the command runs (the agent streams long command output).
-pub(crate) fn run_shell_streaming_with_spec(
-    spec: &ShellSpec,
-    cmd: &str,
-    cwd: &Path,
-    timeout: u64,
-    interrupt: &AtomicBool,
-    on_stdout_line: &mut dyn FnMut(&str),
-) -> ShellOutcome {
-    run_shell_prepared(spec, cmd, cwd, None, timeout, interrupt, on_stdout_line)
-}
-
 fn run_shell_prepared(
     spec: &ShellSpec,
     cmd: &str,

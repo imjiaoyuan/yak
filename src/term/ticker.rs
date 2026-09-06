@@ -10,7 +10,7 @@ const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
 pub struct Ticker {
     flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     handle: Option<std::thread::JoinHandle<()>>,
-    phase: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    phase: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl Ticker {
@@ -44,16 +44,14 @@ impl Ticker {
         Ticker {
             flag: Some(flag),
             handle: Some(handle),
-            phase: Some(phase),
+            phase,
         }
     }
 
     /// Swap the label without restarting the clock: a relabel must never
     /// read as the wait starting over.
     pub fn set_phase(&self, phase: &str) {
-        if let Some(p) = &self.phase
-            && let Ok(mut p) = p.lock()
-        {
+        if let Ok(mut p) = self.phase.lock() {
             *p = phase.to_string();
         }
     }

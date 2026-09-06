@@ -16,8 +16,6 @@ pub struct AgentSettings {
     pub roles: std::collections::BTreeMap<String, String>,
     pub model_windows: std::collections::BTreeMap<String, u64>,
     pub disabled_skills: Vec<String>,
-    /// "auto" = extract memories when the REPL exits; default manual/off
-    pub memory: Option<String>,
 }
 
 pub fn load() -> AgentSettings {
@@ -68,10 +66,6 @@ pub fn parse(raw: &str) -> AgentSettings {
             }
         }
     }
-    s.memory = agent
-        .get("memory")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
     s
 }
 
@@ -95,7 +89,6 @@ mod agent_settings_tests {
     "reserve_tokens": 100,
     "keep_recent_tokens": 100,
     "disabled_skills": ["old-thing"],
-    "memory": "auto",
     "tools": {"bash": "prompt"},
     "roles": {"task": "mock/m1"},
     "models": {"mock/m1": {"context_window": 9000}}
@@ -113,7 +106,6 @@ mod agent_settings_tests {
         assert_eq!(s.roles.get("task").map(String::as_str), Some("mock/m1"));
         assert_eq!(s.model_windows.get("mock/m1"), Some(&9000));
         assert_eq!(s.disabled_skills, vec!["old-thing".to_string()]);
-        assert_eq!(s.memory.as_deref(), Some("auto"));
     }
 
     #[test]

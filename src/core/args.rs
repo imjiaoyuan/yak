@@ -231,28 +231,6 @@ pub fn parse(argv: &[String], specs: &[OptSpec]) -> Result<ParsedArgs, String> {
                 if spec.takes_value == 0 {
                     out.flags.push(spec.long.to_string());
                     ci += 1;
-                } else if spec.takes_value == 2 {
-                    let mut values: Vec<String> = chars[ci + 1..]
-                        .iter()
-                        .collect::<String>()
-                        .split_whitespace()
-                        .map(String::from)
-                        .collect();
-                    if values.len() < 2 {
-                        for _ in values.len()..2 {
-                            i += 1;
-                            values.push(
-                                argv.get(i)
-                                    .ok_or_else(|| {
-                                        format!("Error: Option '-{c}' requires two values")
-                                    })?
-                                    .clone(),
-                            );
-                        }
-                    }
-                    let entry = out.multi.entry(spec.long.to_string()).or_default();
-                    entry.extend(values);
-                    ci = chars.len();
                 } else {
                     // rest of cluster is the value, else next argv
                     let rest: String = chars[ci + 1..].iter().collect();

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::jsonfmt;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
@@ -18,15 +18,6 @@ pub struct Config {
     /// resolution does not re-read it from disk
     #[serde(skip)]
     pub aliases: BTreeMap<String, String>,
-}
-
-impl Default for Config {
-    fn default() -> Config {
-        Config {
-            providers: BTreeMap::new(),
-            aliases: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -167,10 +167,6 @@ pub fn run_agent(
     loop {
         turn += 1;
         if turn > max_turns {
-            // hard stop: strip dangling calls so stored history stays paired
-            if let Some(Msg::Assistant { tool_calls, .. }) = history.last_mut() {
-                tool_calls.clear();
-            }
             break;
         }
         if turn == soft_limit && !warned {

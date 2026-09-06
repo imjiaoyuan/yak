@@ -5,7 +5,7 @@
 
 use std::io::IsTerminal;
 
-use crate::core::args::{OptSpec, parse, render_help, split_subcommand};
+use crate::core::args::{OptSpec, render_help, split_subcommand};
 use crate::core::config::{self};
 use crate::{flag_spec, multi_spec, value_spec};
 
@@ -431,18 +431,12 @@ fn list(argv: &[String]) -> i32 {
             }) {
                 continue;
             }
-            let kind = cfg
-                .providers
-                .get(&provider)
-                .map(|p| p.kind.clone())
-                .unwrap_or_default();
             let alias_suffix = if model_aliases.is_empty() {
                 String::new()
             } else {
                 format!(" (aliases: {})", model_aliases.join(", "))
             };
             println!("{qualified}{alias_suffix}");
-            let _ = kind;
         }
     }
     0
@@ -453,13 +447,15 @@ fn list(argv: &[String]) -> i32 {
 fn options(argv: &[String]) -> i32 {
     let (sub, rest) = split_subcommand(argv, "list");
     let rest: Vec<String> = rest.to_vec();
-    let args = match parse(&rest, SIMPLE_SPECS) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
+    let (args, code) = crate::core::args::parse_with_help(&rest, SIMPLE_SPECS, || {
+        render_help(
+            "llm models options [list|show|set|clear]",
+            "Per-model default -o options, in the models.options table",
+            SIMPLE_SPECS,
+            &[("MODEL", "provider/model id, alias or bare name")],
+        )
+    });
+    let Some(args) = args else { return code };
     let mut model_options = config::load_model_options();
     // the options table is keyed by qualified id: resolve alias/bare names
     // so a hand-typed "deepseek-chat" lands where `llm prompt` reads it

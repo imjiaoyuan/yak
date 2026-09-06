@@ -55,7 +55,6 @@ fn project_roots(cwd: &Path, user: &Path) -> Vec<PathBuf> {
     }
     // nearest first already (walked up); user dir is the base so project
     // entries (appended) override on name
-    let _ = &mut found;
     roots.extend(found);
     roots
 }
@@ -115,7 +114,7 @@ fn load_manifest(path: &Path) -> Option<ScriptToolSpec> {
             .map(|a| {
                 a.iter()
                     .filter_map(Value::as_str)
-                    .map(|s| crate::core::config::expand_env(s))
+                    .map(crate::core::config::expand_env)
                     .collect()
             })
             .unwrap_or_default(),
@@ -259,11 +258,7 @@ fn args_schema(args: &[ArgDecl]) -> Value {
 }
 
 fn warn(path: &Path, why: &str) {
-    eprintln!(
-        "Warning: {} in tools dir {}: {why}",
-        path.display(),
-        "skipped"
-    );
+    eprintln!("Warning: skipped in tools dir {}: {why}", path.display());
 }
 
 #[cfg(test)]
