@@ -18,7 +18,7 @@ pub fn generate_image(
     let url = format!("{}/images/generations", m.base_url.trim_end_matches('/'));
     let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     if let Some(key) = &m.api_key {
-        headers.push(("Authorization".to_string(), format!("Bearer {key}")));
+        headers.extend(super::auth_headers(&m.kind, key));
     }
     let mut body = json!({"model": m.model_id, "prompt": prompt, "n": 1});
     if let Some(s) = size {
@@ -63,7 +63,7 @@ pub fn generate_speech(
     let url = format!("{}/audio/speech", m.base_url.trim_end_matches('/'));
     let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     if let Some(key) = &m.api_key {
-        headers.push(("Authorization".to_string(), format!("Bearer {key}")));
+        headers.extend(super::auth_headers(&m.kind, key));
     }
     let mut body = json!({"model": m.model_id, "input": input});
     if let Some(v) = voice {
@@ -200,6 +200,46 @@ pub fn plan_outputs(target: &str, exts: &[&str], dir_stem: &str) -> Result<Vec<P
         ));
     }
     Ok(paths)
+}
+
+/// Where a `--out` generation landed: raw bytes for stdout, or written
+/// files with their byte counts.
+pub enum MediaOutcome {
+    Stdout(Vec<u8>),
+    Files(Vec<(PathBuf, usize)>),
+}
+
+/// Generate and (for a file target) write the media, returning where it
+/// landed. The caller owns stdout writing and the "Wrote N bytes" printing;
+/// this only dispatches on the model kind and plans/writes the files.
+pub fn generate_and_write(
+    m: &ResolvedModel,
+    prompt: &str,
+    out: &str,
+    size: Option<&str>,
+    voice: Option<&str>,
+) -> Result<MediaOutcome, String> {
+    let blobs: Vec<Vec<u8>> = match m.kind.as_str() {
+        "image" => generate_image(m, prompt, size)?,
+        "tts" => vec![generate_speech(m, prompt, voice)?],
+        other => return Err(format!("--out is only for image/tts models (kind={other})")),
+    };
+    let exts: Vec<&str> = if m.kind == "image" {
+        blobs.iter().map(|b| image_ext(b)).collect()
+    } else {
+        vec![speech_ext(&m.options); blobs.len()]
+    };
+    let stem = if m.kind == "image" { "image" } else { "speech" };
+    let targets = plan_outputs(out, &exts, stem)?;
+    if targets.is_empty() {
+        return Ok(MediaOutcome::Stdout(blobs[0].clone()));
+    }
+    let mut written = Vec::with_capacity(targets.len());
+    for (blob, path) in blobs.iter().zip(&targets) {
+        std::fs::write(path, blob).map_err(|e| format!("write failed: {e}"))?;
+        written.push((path.clone(), blob.len()));
+    }
+    Ok(MediaOutcome::Files(written))
 }
 
 #[cfg(test)]

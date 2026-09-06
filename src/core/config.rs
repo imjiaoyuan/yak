@@ -320,25 +320,34 @@ fn set_default_thinking_in(value: &mut serde_json::Value, thinking: Option<&str>
 
 /// Clear the default (and its thinking) when it points at `provider` —
 /// used when the provider is removed, so the dangling entry cannot block
-/// the first-provider auto-default. Returns true when something was cleared.
-pub fn clear_default_for(provider: &str) -> bool {
-    let prefix = format!("{provider}/");
+/// the first-provider auto-default. Returns Ok(true) when something was
+/// cleared; the write error is surfaced instead of silently dropping it.
+pub fn clear_default_for(provider: &str) -> std::io::Result<bool> {
     let mut cleared = false;
-    let _ = edit_mode_default(|root| {
-        if default_model_from(root).is_some_and(|m| m.starts_with(&prefix)) {
-            cleared = true;
-            if let Some(models) = root.as_object_mut().and_then(|m| m.get_mut("models"))
-                && let Some(map) = models.as_object_mut()
-            {
-                map.remove("default");
-                map.remove("thinking");
-                for mode in ["prompt", "agent", "chat"] {
-                    map.remove(mode);
-                }
+    edit_mode_default(|root| {
+        cleared = clear_default_for_in(root, provider);
+    })?;
+    Ok(cleared)
+}
+
+/// The pure edit: drop the default/thinking/mode entries when they point at
+/// `provider`. Returns true when anything was removed.
+fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
+    let prefix = format!("{provider}/");
+    if default_model_from(root).is_some_and(|m| m.starts_with(&prefix)) {
+        if let Some(models) = root.as_object_mut().and_then(|m| m.get_mut("models"))
+            && let Some(map) = models.as_object_mut()
+        {
+            map.remove("default");
+            map.remove("thinking");
+            for mode in ["prompt", "agent", "chat"] {
+                map.remove(mode);
             }
         }
-    });
-    cleared
+        true
+    } else {
+        false
+    }
 }
 
 /// Remove the default entry entirely (`llm models unset`).
@@ -452,21 +461,38 @@ pub fn ensure_dir_exists(path: &std::path::Path) {
 
 impl Config {
     /// Resolve a model id (either `provider/model` or a bare name/alias)
-    /// to (provider_name, provider, model_id).
-    pub fn resolve_model(&self, query: &str) -> Option<(String, &Provider, String)> {
+    /// to (provider_name, provider, model_id). `Ok(None)` means the name is
+    /// not known; `Err` lists the candidates when a bare name is served by
+    /// more than one provider, instead of silently taking the first in
+    /// config order.
+    pub fn resolve_model(
+        &self,
+        query: &str,
+    ) -> Result<Option<(String, &Provider, String)>, String> {
         let query = self.aliases.get(query).map(|s| s.as_str()).unwrap_or(query);
         if let Some((prov, model)) = query.split_once('/')
             && let Some(p) = self.providers.get(prov)
         {
-            return Some((prov.to_string(), p, model.to_string()));
+            return Ok(Some((prov.to_string(), p, model.to_string())));
         }
-        // bare model name: find a provider that lists it
-        for (name, p) in &self.providers {
-            if p.models.iter().any(|m| m == query) {
-                return Some((name.clone(), p, query.to_string()));
-            }
+        // bare model name: every provider that lists it
+        let hits: Vec<(&str, &Provider)> = self
+            .providers
+            .iter()
+            .filter(|(_, p)| p.models.iter().any(|m| m == query))
+            .map(|(n, p)| (n.as_str(), p))
+            .collect();
+        match hits.len() {
+            0 => Ok(None),
+            1 => Ok(Some((hits[0].0.to_string(), hits[0].1, query.to_string()))),
+            _ => Err(format!(
+                "'{query}' matches more than one provider: {} — qualify it as provider/model",
+                hits.iter()
+                    .map(|(n, _)| format!("{n}/{query}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
-        None
     }
 
     /// API key for a provider: its config.json api_key field, with ${VAR}
@@ -559,5 +585,62 @@ mod default_model_tests {
         assert_eq!(default_thinking_from(&root), None);
         // nothing set anywhere
         assert_eq!(default_model_from(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn clear_default_for_removes_only_a_default_pointing_at_the_provider() {
+        let mut v = json!({"models": {"default": "p/m", "thinking": "high"}});
+        assert!(clear_default_for_in(&mut v, "p"));
+        assert!(v["models"].get("default").is_none());
+        assert!(v["models"].get("thinking").is_none());
+
+        // a default aimed at another provider is left alone
+        let mut other = json!({"models": {"default": "q/m", "thinking": "medium"}});
+        assert!(!clear_default_for_in(&mut other, "p"));
+        assert_eq!(other["models"]["default"], json!("q/m"));
+        assert_eq!(other["models"]["thinking"], json!("medium"));
+    }
+
+    #[test]
+    fn resolve_model_reports_ambiguity_instead_of_picking_a_provider() {
+        let mut config = Config {
+            providers: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+        };
+        config.providers.insert(
+            "alpha".to_string(),
+            Provider {
+                kind: "openai-compat".to_string(),
+                base_url: String::new(),
+                api_key: None,
+                models: vec!["claude-3".to_string()],
+            },
+        );
+        config.providers.insert(
+            "beta".to_string(),
+            Provider {
+                kind: "openai-compat".to_string(),
+                base_url: String::new(),
+                api_key: None,
+                models: vec!["claude-3".to_string(), "gpt-4".to_string()],
+            },
+        );
+
+        // a bare name served by two providers lists the candidates
+        let err = config.resolve_model("claude-3").unwrap_err();
+        assert!(err.contains("matches more than one provider"), "{err}");
+        assert!(err.contains("alpha/claude-3"), "{err}");
+        assert!(err.contains("beta/claude-3"), "{err}");
+
+        // a unique bare name resolves to its single provider
+        let (n, _, m) = config.resolve_model("gpt-4").unwrap().unwrap();
+        assert_eq!(n, "beta");
+        assert_eq!(m, "gpt-4");
+
+        // a qualified id wins even for a shared model id
+        let (n, _, _) = config.resolve_model("alpha/claude-3").unwrap().unwrap();
+        assert_eq!(n, "alpha");
+
+        assert!(config.resolve_model("nope").unwrap().is_none());
     }
 }

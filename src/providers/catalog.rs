@@ -260,3 +260,61 @@ pub const ALL: &[Entry] = &[
 pub fn by_id(id: &str) -> Option<&'static Entry> {
     ALL.iter().find(|e| e.id == id)
 }
+
+/// The `/models` endpoint a provider kind serves. Anthropic mounts it under
+/// `/v1/models`; the openai-compat half talks to bare `/models`.
+pub fn models_url(kind: &str, base_url: &str) -> String {
+    if kind == "anthropic" {
+        format!("{}/v1/models", base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/models", base_url.trim_end_matches('/'))
+    }
+}
+
+/// The models endpoint plus its auth headers (an empty key sends no
+/// credentials — local runtimes like ollama accept that).
+pub fn fetch_models_url(
+    kind: &str,
+    base_url: &str,
+    api_key: &str,
+) -> (String, Vec<(String, String)>) {
+    let headers = if api_key.is_empty() {
+        Vec::new()
+    } else {
+        super::auth_headers(kind, api_key)
+    };
+    (models_url(kind, base_url), headers)
+}
+
+/// Fetch a provider's model list (OpenAI-compatible `/models` endpoint); the
+/// wizard offers what the endpoint actually serves.
+pub fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
+    let agent = crate::core::http::short_agent();
+    let mut request = agent.get(url);
+    for (k, v) in headers {
+        request = request.header(k, v);
+    }
+    let resp = request.call().map_err(|e| e.to_string())?;
+    if resp.status().as_u16() >= 400 {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut resp.into_body().into_reader(), &mut buf)
+        .map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&buf).map_err(|e| e.to_string())?;
+    let array = value["data"]
+        .as_array()
+        .or_else(|| value["models"].as_array())
+        .ok_or("no model list in response")?;
+    Ok(array
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect())
+}
+
+/// Fetch the model list, swallowing transport/protocol errors (an empty
+/// result means "fall back to the built-in list").
+pub fn try_fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
+    let (url, headers) = fetch_models_url(kind, base_url, api_key);
+    fetch_model_list(&url, &headers).unwrap_or_default()
+}

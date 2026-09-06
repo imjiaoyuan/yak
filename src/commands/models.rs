@@ -137,7 +137,8 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     // step 2: the provider's configured models merged with its live list
     eprintln!("\x1b[2mfetching models from {pname} …\x1b[0m");
     let key = cfg.api_key(provider).unwrap_or_default();
-    let live = crate::commands::login::try_fetch_models(&provider.kind, &provider.base_url, &key);
+    let live =
+        crate::providers::catalog::try_fetch_models(&provider.kind, &provider.base_url, &key);
     let mut ids: Vec<String> = provider.models.clone();
     for mid in live {
         if !ids.contains(&mid) {
@@ -212,12 +213,18 @@ fn get(argv: &[String]) -> i32 {
         )
     });
     let Some(_) = args else { return code };
-    match (config::default_model(), config::default_thinking()) {
-        (Some(m), Some(t)) => println!("default    {m} (thinking: {t})"),
-        (Some(m), None) => println!("default    {m}"),
-        (None, _) => println!("default    (unset — llm models set)"),
-    }
+    println!("{}", default_line());
     0
+}
+
+/// The shared "default model" line used by `models get` and the `list`
+/// header: the stored default with its thinking depth, or the unset hint.
+fn default_line() -> String {
+    match (config::default_model(), config::default_thinking()) {
+        (Some(m), Some(t)) => format!("default    {m} (thinking: {t})"),
+        (Some(m), None) => format!("default    {m}"),
+        (None, _) => "default    (unset — llm models set)".to_string(),
+    }
 }
 
 fn set(argv: &[String]) -> i32 {
@@ -249,9 +256,16 @@ fn set(argv: &[String]) -> i32 {
         None => None,
     };
     let cfg = config::load();
-    let Some((n, _, m)) = cfg.resolve_model(&model) else {
-        eprintln!("Error: Unknown model: {model}");
-        return 1;
+    let (n, _, m) = match cfg.resolve_model(&model) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("Error: Unknown model: {model}");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
     };
     let qualified = format!("{n}/{m}");
     if let Err(e) = config::try_set_default_model(&qualified) {
@@ -392,11 +406,7 @@ fn list(argv: &[String]) -> i32 {
     // the stored default leads: what runs matters more than the inventory,
     // and only shows without filters
     if queries.is_empty() {
-        match (config::default_model(), config::default_thinking()) {
-            (Some(m), Some(t)) => println!("default    {m} (thinking: {t})"),
-            (Some(m), None) => println!("default    {m}"),
-            (None, _) => println!("default    (unset — llm models set)"),
-        }
+        println!("{}", default_line());
         println!();
     }
 
@@ -465,6 +475,8 @@ fn options(argv: &[String]) -> i32 {
         };
         let cfg = config::load();
         cfg.resolve_model(query)
+            .ok()
+            .flatten()
             .map(|(n, _, m)| format!("{n}/{m}"))
             .unwrap_or_else(|| query.to_string())
     };

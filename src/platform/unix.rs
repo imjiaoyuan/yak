@@ -275,7 +275,7 @@ pub fn term_size() -> TermSize {
 
 pub fn install_sigint() {
     unsafe extern "C" fn on_sigint(_: i32) {
-        crate::core::http::request_interrupt();
+        crate::platform::interrupt::request();
     }
     const SIGINT: i32 = 2;
     let _ = unsafe { ffi::signal(SIGINT, on_sigint as *const () as usize) };
@@ -285,7 +285,7 @@ pub fn restore_sigint() {
     const SIGINT: i32 = 2;
     const SIG_DFL: usize = 0;
     let _ = unsafe { ffi::signal(SIGINT, SIG_DFL) };
-    crate::core::http::clear_interrupt();
+    crate::platform::interrupt::clear();
 }
 
 pub fn init_console() {}

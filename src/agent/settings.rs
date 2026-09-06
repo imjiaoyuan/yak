@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use crate::agent::compact::CompactConfig;
 use crate::core::config::config_path;
 
 /// `[agent]` settings from config.json — everything optional, defaults live
@@ -16,6 +17,25 @@ pub struct AgentSettings {
     pub roles: std::collections::BTreeMap<String, String>,
     pub model_windows: std::collections::BTreeMap<String, u64>,
     pub disabled_skills: Vec<String>,
+}
+
+impl AgentSettings {
+    /// Compaction limits for a resolved model: the qualified-id window, then
+    /// the bare model-id window, then the global context_window, then the
+    /// 128k default; reserve and keep_recent fall back to their defaults.
+    pub fn compact_config(&self, qualified: &str, model_id: &str) -> CompactConfig {
+        CompactConfig {
+            context_window: self
+                .model_windows
+                .get(qualified)
+                .or_else(|| self.model_windows.get(model_id))
+                .copied()
+                .or(self.context_window)
+                .unwrap_or(128_000),
+            reserve_tokens: self.reserve_tokens.unwrap_or(16_384),
+            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(20_000),
+        }
+    }
 }
 
 pub fn load() -> AgentSettings {

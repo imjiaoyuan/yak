@@ -18,6 +18,32 @@ mod unix;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// The cooperative interrupt flag: SIGINT and ctrl+c handlers set it, the
+/// long-running loops poll it. Lives here so the SIGINT handlers in the
+/// platform leaves can set it without reaching up into `core::http`; core
+/// re-exports the same three functions so existing callers stay put.
+pub mod interrupt {
+    use super::AtomicBool;
+
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    pub fn request() {
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn clear() {
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn checked() -> bool {
+        INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn flag() -> &'static AtomicBool {
+        &INTERRUPTED
+    }
+}
+
 #[cfg(target_os = "linux")]
 use linux::configure_shell_command;
 #[cfg(target_os = "macos")]
@@ -210,7 +236,9 @@ pub(crate) fn build_shell_command(spec: &ShellSpec, cmd: &str, cwd: &Path) -> Co
         if full.is_empty() {
             full.push_str("exit $LASTEXITCODE");
         } else {
-            full.push_str("; exit $LASTEXITCODE");
+            // a newline, not a semicolon: a trailing `# comment` would
+            // swallow the `; exit ...` on the same physical line
+            full.push_str("\nexit $LASTEXITCODE");
         }
         command.arg(full);
     } else {

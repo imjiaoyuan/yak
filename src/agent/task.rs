@@ -111,14 +111,8 @@ pub fn discover(user_dir: &Path, cwd: &Path) -> Vec<AgentDef> {
     };
     load_dir(&user_dir.join("agents"), &mut defs);
     // nearest project dir wins
-    let mut dir = Some(cwd);
-    while let Some(d) = dir {
-        let candidate = d.join(".llm/agents");
-        if candidate.is_dir() {
-            load_dir(&candidate, &mut defs);
-            break;
-        }
-        dir = d.parent();
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/agents", false) {
+        load_dir(&d, &mut defs);
     }
     // later entries (project) override earlier (user) by name
     let mut merged: Vec<AgentDef> = Vec::new();
@@ -149,6 +143,15 @@ fn send_line(progress: Progress, line: String) {
     if let Some(tx) = progress {
         let _ = tx.send(line);
     }
+}
+
+/// Shared preview shape for external tools (script tools, MCP mounts): the
+/// mounted name or command plus a short JSON rendering of the arguments.
+pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
+    format!(
+        "{prefix} {}",
+        short(&serde_json::to_string(args).unwrap_or_default())
+    )
 }
 
 /// `512 -> "512 chars"`, `4321 -> "4.3k chars"` — the live-output size of a
@@ -408,9 +411,11 @@ impl Tool for TaskTool {
 }
 
 pub(crate) fn short(s: &str) -> String {
-    let mut out: String = s.chars().take(60).collect();
-    if out.len() < s.len() {
-        out.push('…');
+    let mut out = crate::core::text::truncate_chars(s, 60);
+    if let Some(stripped) = out.strip_suffix("...") {
+        // truncate_chars appends "..." but the task surface has always used
+        // the single ellipsis glyph; keep the bytes it renders today.
+        out = format!("{stripped}…");
     }
     out
 }
@@ -704,8 +709,8 @@ fn run_child(
             "{} · done ({} · ↑{} ↓{})",
             def.name,
             kchars(final_text.len()),
-            crate::core::render::humanize_tokens(child_tokens.0),
-            crate::core::render::humanize_tokens(child_tokens.1)
+            crate::term::render::humanize_tokens(child_tokens.0),
+            crate::term::render::humanize_tokens(child_tokens.1)
         ),
     );
     let stderr_text = stderr_handle

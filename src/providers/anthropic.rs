@@ -342,12 +342,9 @@ pub fn run(
     on_event: &mut dyn FnMut(Event),
 ) -> Result<(), String> {
     let url = format!("{}/v1/messages", m.base_url.trim_end_matches('/'));
-    let mut headers = vec![
-        ("Content-Type".into(), "application/json".into()),
-        ("anthropic-version".into(), "2023-06-01".into()),
-    ];
+    let mut headers = vec![("Content-Type".into(), "application/json".into())];
     if let Some(key) = &m.api_key {
-        headers.push(super::auth_header(&m.kind, key));
+        headers.extend(super::auth_headers(&m.kind, key));
     }
     super::dispatch(
         HttpRequest {

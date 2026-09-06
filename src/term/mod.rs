@@ -3,6 +3,7 @@
 //! platform-specific implementation lives in `crate::platform`.
 
 pub mod lineedit;
+pub mod render;
 pub mod ticker;
 
 /// Hidden input, backed by the platform console implementation. Falling back

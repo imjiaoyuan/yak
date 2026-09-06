@@ -27,6 +27,26 @@ const LOGIN_SPECS: &[OptSpec] = &[
 
 const LOGOUT_SPECS: &[OptSpec] = &[flag_spec!("help", Some('h'), "Show this message and exit")];
 
+/// Remove a provider from config and clear any default that pointed at it,
+/// reporting the outcome to stderr. One save covers the provider removal;
+/// the default clear is a separate read-modify-write so a failure there
+/// warns without rolling back the removal.
+fn remove_provider(cfg: &mut config::Config, name: &str) -> Result<(), String> {
+    config::save(cfg).map_err(|e| e.to_string())?;
+    eprintln!(
+        "\x1b[2mremoved provider '{name}' (and its key) from {}\x1b[0m",
+        config::config_path().display()
+    );
+    match config::clear_default_for(name) {
+        Ok(true) => eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m"),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "\x1b[2mWarning: could not clear the default model pointed at {name}: {e}\x1b[0m"
+        ),
+    }
+    Ok(())
+}
+
 struct Preset {
     name: String,
     kind: String,
@@ -103,15 +123,7 @@ pub(crate) fn logout_picker() -> Result<(), String> {
         .expect("picked in range")
         .clone();
     cfg.providers.remove(&name);
-    config::save(&cfg).map_err(|e| e.to_string())?;
-    eprintln!(
-        "\x1b[2mremoved provider '{name}' (and its key) from {}\x1b[0m",
-        config::config_path().display()
-    );
-    if config::clear_default_for(&name) {
-        eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
-    }
-    Ok(())
+    remove_provider(&mut cfg, &name)
 }
 
 fn prompt(label: &str) -> Option<String> {
@@ -298,7 +310,7 @@ pub(crate) fn wizard() -> Result<(), String> {
     if !selected.is_empty() {
         let mut items: Vec<String> = selected.iter().map(|m| format!("{name}/{m}")).collect();
         items.push("skip (keep current default)".to_string());
-        let picked = crate::term::lineedit::pick("default model:", &items, true);
+        let picked = crate::term::lineedit::pick("default model:", &items, false);
         let chosen = match picked {
             Some(i) if i < selected.len() => Some(selected[i].clone()),
             _ => {
@@ -320,68 +332,14 @@ pub(crate) fn wizard() -> Result<(), String> {
     Ok(())
 }
 
-/// Fetch the provider's /models list; the caller prints progress/errors.
-pub(crate) fn try_fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
-    let (url, headers) = fetch_models_url(kind, base_url, api_key);
-    fetch_model_list(&url, &headers).unwrap_or_default()
-}
-
 fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
-    let (url, _) = fetch_models_url(kind, base_url, api_key);
+    let (url, _) = crate::providers::catalog::fetch_models_url(kind, base_url, api_key);
     eprintln!("Fetching models from {url} ...");
-    let models = try_fetch_models(kind, base_url, api_key);
+    let models = crate::providers::catalog::try_fetch_models(kind, base_url, api_key);
     if models.is_empty() {
         eprintln!("could not fetch models — falling back to the built-in list");
     }
     models
-}
-
-pub(crate) fn fetch_models_url(
-    kind: &str,
-    base_url: &str,
-    api_key: &str,
-) -> (String, Vec<(String, String)>) {
-    let mut headers = Vec::new();
-    if !api_key.is_empty() {
-        if kind == "anthropic" {
-            headers.push(("x-api-key".to_string(), api_key.to_string()));
-            headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
-        } else {
-            headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
-        }
-    }
-    let url = if kind == "anthropic" {
-        format!("{}/v1/models", base_url.trim_end_matches('/'))
-    } else {
-        format!("{}/models", base_url.trim_end_matches('/'))
-    };
-    (url, headers)
-}
-
-/// Fetch a provider's model list (OpenAI-compatible /models endpoint); the
-/// wizard offers what the endpoint actually serves.
-fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
-    let agent = crate::core::http::short_agent();
-    let mut request = agent.get(url);
-    for (k, v) in headers {
-        request = request.header(k, v);
-    }
-    let resp = request.call().map_err(|e| e.to_string())?;
-    if resp.status().as_u16() >= 400 {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let mut buf = String::new();
-    std::io::Read::read_to_string(&mut resp.into_body().into_reader(), &mut buf)
-        .map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&buf).map_err(|e| e.to_string())?;
-    let array = value["data"]
-        .as_array()
-        .or_else(|| value["models"].as_array())
-        .ok_or("no model list in response")?;
-    Ok(array
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(String::from))
-        .collect())
 }
 
 /// `llm login [NAME [KEY]]` — bare on a terminal: the wizard. With a
@@ -432,7 +390,7 @@ pub fn run_login(argv: &[String]) -> i32 {
         }
         let fetch_key = api_key.clone().unwrap_or_default();
         eprintln!("Fetching models from {base_url} ...");
-        let models = try_fetch_models(&kind, base_url, &fetch_key);
+        let models = crate::providers::catalog::try_fetch_models(&kind, base_url, &fetch_key);
         return save_new_provider(&name, &kind, base_url, api_key, models);
     }
     let Some(entry) = crate::providers::catalog::by_id(&name) else {
@@ -452,7 +410,8 @@ pub fn run_login(argv: &[String]) -> i32 {
         None => (None, String::new()),
     };
     eprintln!("Fetching models from {} ...", entry.base_url);
-    let models = try_fetch_models(entry.kind, entry.base_url, &fetch_key);
+    let models =
+        crate::providers::catalog::try_fetch_models(entry.kind, entry.base_url, &fetch_key);
     save_new_provider(&name, entry.kind, entry.base_url, api_key, models)
 }
 
@@ -567,17 +526,8 @@ pub fn run_logout(argv: &[String]) -> i32 {
         eprintln!("Error: No provider found with name '{name}'");
         return 1;
     }
-    match config::save(&cfg) {
-        Ok(()) => {
-            eprintln!(
-                "removed provider '{name}' (and its key) from {}",
-                config::config_path().display()
-            );
-            if config::clear_default_for(name) {
-                eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
-            }
-            0
-        }
+    match remove_provider(&mut cfg, name) {
+        Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e}");
             1

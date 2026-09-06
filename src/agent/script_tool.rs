@@ -133,11 +133,7 @@ impl Tool for ScriptTool {
         self.spec.schema.clone()
     }
     fn preview(&self, args: &Value) -> String {
-        format!(
-            "{} {}",
-            self.spec.command,
-            super::task::short(&serde_json::to_string(args).unwrap_or_default())
-        )
+        super::task::args_preview(&self.spec.command, args)
     }
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
         let mut command = std::process::Command::new(&self.spec.command);

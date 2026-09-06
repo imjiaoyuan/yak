@@ -288,8 +288,8 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
     let model_filter: Option<String> = args.opt(&["model"]).map(|m| {
         let cfg = config::load();
         match cfg.resolve_model(m) {
-            Some((n, _, mid)) => format!("{n}/{mid}"),
-            None => m.to_string(),
+            Ok(Some((n, _, mid))) => format!("{n}/{mid}"),
+            _ => m.to_string(),
         }
     });
 
@@ -335,7 +335,7 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
         if let Some(last) = rows.last() {
             let response = last["response"].as_str().unwrap_or_default();
             if args.flag(&["extract", "extract-last", "xl"]) {
-                let block = crate::core::render::extract_fenced(
+                let block = crate::term::render::extract_fenced(
                     response,
                     args.flag(&["extract-last", "xl"]),
                 )
@@ -351,7 +351,7 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
         for row in &rows {
             let response = row["response"].as_str().unwrap_or_default();
             if let Some(block) =
-                crate::core::render::extract_fenced(response, args.flag(&["extract-last", "xl"]))
+                crate::term::render::extract_fenced(response, args.flag(&["extract-last", "xl"]))
             {
                 println!("{block}");
                 return 0;

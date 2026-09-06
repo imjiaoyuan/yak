@@ -31,6 +31,20 @@ pub fn auth_header(kind: &str, key: &str) -> (String, String) {
     }
 }
 
+/// The full auth header set for a provider kind: anthropic also needs its
+/// protocol version header (the /models fetch and the messages API both
+/// reject requests without it).
+pub fn auth_headers(kind: &str, key: &str) -> Vec<(String, String)> {
+    if kind == "anthropic" {
+        vec![
+            auth_header(kind, key),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ]
+    } else {
+        vec![auth_header(kind, key)]
+    }
+}
+
 /// Prompt-cache hit tokens from an openai-compat usage object, in whatever
 /// shape the gateway reports: DeepSeek `prompt_cache_hit_tokens`, OpenAI
 /// `prompt_tokens_details.cached_tokens`, OpenRouter top-level `cached_tokens`.
@@ -40,6 +54,76 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
         .or(usage["prompt_tokens_details"]["cached_tokens"].as_u64())
         .or(usage["cached_tokens"].as_u64())
         .unwrap_or(0)
+}
+
+/// The model a command run resolves to — the one shared chain for prompt,
+/// agent and chat: `-m` > `LLM_MODEL` > `context` (a template's pinned
+/// model or the conversation's last model) > the stored default. A
+/// dangling default warns and drops out instead of erroring. Saved
+/// per-model options ride under CLI `-o` pairs.
+pub fn resolve_run_model(
+    args: &crate::core::args::ParsedArgs,
+    context: Option<String>,
+) -> Result<ResolvedModel, String> {
+    use crate::core::config;
+    let cfg = config::load();
+    let stored_default = config::default_model().filter(|m| {
+        let resolves = cfg.resolve_model(m).ok().flatten().is_some();
+        if !resolves {
+            eprintln!("Warning: models.default '{m}' does not resolve, ignoring it");
+        }
+        resolves
+    });
+    let query = args
+        .opt(&["model"])
+        .map(str::to_string)
+        .or_else(|| std::env::var("LLM_MODEL").ok())
+        .or(context)
+        .or(stored_default);
+    let Some(query) = query else {
+        return Err(
+            "No default model configured. Run `llm models set <model>`, `llm login`, or use -m."
+                .to_string(),
+        );
+    };
+    let (name, provider, model_id) = match cfg.resolve_model(&query) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Err(format!(
+                "Invalid model: {query}. Add it to {} or check spelling.",
+                config::config_path().display()
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    let api_key = args
+        .opt(&["key"])
+        .map(str::to_string)
+        .or_else(|| cfg.api_key(provider));
+    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
+    let qualified = model.qualified_id();
+    let mut options: Vec<(String, String)> = Vec::new();
+    let saved = config::load_model_options();
+    for (k, v) in saved
+        .get(&qualified)
+        .or_else(|| saved.get(&model_id))
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+    {
+        if !options.iter().any(|(existing, _)| *existing == k) {
+            options.push((k, v));
+        }
+    }
+    for (k, v) in crate::core::text::parse_kv(&args.multi(&["option"]))? {
+        options.retain(|(existing, _)| existing != &k);
+        options.push((k, v));
+    }
+    model.options = options;
+    Ok(model)
 }
 
 /// A user message body: plain text, or content parts when attachments

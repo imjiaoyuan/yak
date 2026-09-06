@@ -68,6 +68,41 @@ impl Session {
         if self.chat_mode { "chat" } else { "agent" }
     }
 
+    /// Reset the in-memory session: drop history, forget the conversation id,
+    /// clear file snapshots and token counters. The stored log is untouched.
+    pub fn clear(&mut self) {
+        self.seed.clear();
+        self.conversation_id = None;
+        if let Some(ck) = &self.checkpoints
+            && let Ok(mut c) = ck.lock()
+        {
+            c.clear();
+        }
+        self.tokens = (0, 0);
+        self.tokens_cached = 0;
+    }
+
+    /// Rewind the conversation to where `idx` began: truncate the in-memory
+    /// seed and, when `persisted`, pop the stored thread too (a failed or
+    /// interrupted round stored nothing, so it must not rewind the store).
+    pub fn rewind_to(&mut self, idx: usize, persisted: bool) -> Result<(), String> {
+        self.seed.truncate(idx);
+        if persisted && let (Some(db), Some(cid)) = (&self.db, &self.conversation_id) {
+            crate::core::logstore::undo_thread(db, cid)?;
+        }
+        Ok(())
+    }
+
+    /// Replace the oldest `cut` messages with one summary, keeping the tail
+    /// and turning the conversation into `[summary, ...tail]`.
+    pub fn compact_prefix(&mut self, summary: String, cut: usize) {
+        let tail = self.seed.split_off(cut);
+        self.seed.clear();
+        self.seed
+            .push(crate::providers::Msg::Summary { text: summary });
+        self.seed.extend(tail);
+    }
+
     /// Rebuild the tool registry: built-ins plus the session's plugin tools
     /// (script tools and mounted MCP tools); called once at startup, and
     /// chat mode mounts none.
@@ -115,7 +150,7 @@ impl Session {
         // shared behind a RefCell so the approval callback can pause the
         // spinner before printing its banner (otherwise they race mid-line)
         let view =
-            std::cell::RefCell::new(crate::core::render::TaskView::new(2, &model_id, !json_mode));
+            std::cell::RefCell::new(crate::term::render::TaskView::new(2, &model_id, !json_mode));
         view.borrow_mut().renderer_mut().terminal_md(2);
         let task_start = std::time::Instant::now();
         // an approval prompt already echoed the command; the matching

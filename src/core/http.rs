@@ -2,30 +2,25 @@
 
 use std::io::{BufRead, BufReader};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Cooperative interrupt flag set by the agent REPL's SIGINT handler: an
-/// in-flight stream aborts at the next chunk boundary instead of dying.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
 pub fn request_interrupt() {
-    INTERRUPTED.store(true, Ordering::SeqCst);
+    crate::platform::interrupt::request();
 }
 
 pub fn clear_interrupt() {
-    INTERRUPTED.store(false, Ordering::SeqCst);
+    crate::platform::interrupt::clear();
 }
 
 pub fn interrupted() -> bool {
-    INTERRUPTED.load(Ordering::SeqCst)
+    crate::platform::interrupt::checked()
 }
 
 /// Shared handle to the cooperative interrupt flag for platform shell
-/// execution. The platform layer only reads this flag; it does not depend on
-/// the agent module.
+/// execution. Core re-exports the platform flag so existing callers stay put.
 pub fn interrupt_flag() -> &'static AtomicBool {
-    &INTERRUPTED
+    crate::platform::interrupt::flag()
 }
 
 /// Events emitted while a model streams a response.
@@ -483,7 +478,12 @@ fn map_error(e: ureq::Error) -> HttpError {
 
 /// GET and read the whole body: (bytes, content-type) after a status check.
 pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
-    let resp = agent()
+    get_with(agent(), url)
+}
+
+/// One GET through `agent`: status check, whole body, content type.
+fn get_with(agent: &ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    let resp = agent
         .get(url)
         .call()
         .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
@@ -503,16 +503,8 @@ pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
 }
 
 fn get_text_with(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    let resp = agent
-        .get(url)
-        .call()
-        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
-    if resp.status().as_u16() >= 400 {
-        return Err(format!("Failed to fetch {url}: HTTP {}", resp.status()));
-    }
-    resp.into_body()
-        .read_to_string()
-        .map_err(|e| format!("Failed to read {url}: {e}"))
+    let (bytes, _) = get_with(agent, url)?;
+    String::from_utf8(bytes).map_err(|_| format!("Failed to read {url}: invalid UTF-8"))
 }
 
 /// GET with a bounded timeout, for the agent's webfetch tool: fails fast

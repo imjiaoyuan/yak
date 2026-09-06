@@ -5,8 +5,8 @@ use crate::core::config;
 use crate::core::db::Db;
 use crate::core::http::Event;
 use crate::core::logstore::{self, Message, Part};
-use crate::core::render::{Renderer, extract_fenced};
 use crate::providers::{PromptInput, ResolvedModel};
+use crate::term::render::{Renderer, extract_fenced};
 use crate::{flag_spec, multi_spec, value_spec};
 
 const SPECS: &[OptSpec] = &[
@@ -131,7 +131,6 @@ fn execute(
     args: &ParsedArgs,
     preset: Option<(&crate::core::templates::Template, &str)>,
 ) -> Result<i32, String> {
-    let config = config::load();
     let mut prompt_text = match preset {
         Some((_, input)) => input.to_string(),
         None => args.positionals.join(" "),
@@ -185,11 +184,7 @@ fn execute(
         return Err("cannot continue a conversation when logging is disabled (-n)".to_string());
     }
     if !no_log {
-        let db = match args.opt(&["database"]) {
-            Some(p) => Db::open_path(std::path::Path::new(p)).map_err(|e| e.to_string())?,
-            None => Db::open().map_err(|e| e.to_string())?,
-        };
-        db_opt = Some(db);
+        db_opt = Some(Db::open_from_arg(args.opt(&["database"]))?);
     }
 
     // attachments: template-declared ones first (original
@@ -238,57 +233,13 @@ fn execute(
     }
 
     // resolve model: -m/LLM_MODEL > template.model > conversation's model > default
-    let model_query = args
-        .opt(&["model"])
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("LLM_MODEL").ok())
-        .or_else(|| template.as_ref().and_then(|t| t.model.clone()))
-        .or_else(|| conv_model.clone())
-        .or_else(config::default_model);
-    let Some(query) = model_query else {
-        return Err(
-            "No default model configured. Run `llm models set <model>` or use -m.".to_string(),
-        );
-    };
-    let resolved = config.resolve_model(&query);
-    let Some((name, provider, model_id)) = resolved else {
-        return Err(format!(
-            "Invalid model: {query}. Add it to {} or check spelling.",
-            crate::core::config::config_path().display()
-        ));
-    };
-
-    let api_key = args
-        .opt(&["key"])
-        .map(|s| s.to_string())
-        .or_else(|| config.api_key(provider));
-    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
-    // per-model saved options first, CLI -o last
-    let qualified = model.qualified_id();
-    let mut options: Vec<(String, String)> = Vec::new();
-    let saved_options = config::load_model_options();
-    for (k, v) in saved_options
-        .get(&qualified)
-        .or_else(|| saved_options.get(&model_id))
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-    {
-        if !options.iter().any(|(existing, _)| *existing == k) {
-            options.push((k, v));
-        }
-    }
-    let cli_options = crate::core::text::parse_kv(&args.multi(&["option"]))?;
-    for (k, _) in &cli_options {
-        options.retain(|(existing, _)| existing != k);
-    }
-    for (k, v) in cli_options {
-        options.push((k, v));
-    }
-    model.options = options;
+    let mut model = crate::providers::resolve_run_model(
+        args,
+        template
+            .as_ref()
+            .and_then(|t| t.model.clone())
+            .or_else(|| conv_model.clone()),
+    )?;
 
     // --schema resolution (CLI beats the template's schema)
     let schema = match args.opt(&["schema"]) {
@@ -325,68 +276,32 @@ fn execute(
 
     // media generation: image / tts kinds write files (or stdout) via --out
     if let Some(out_path) = args.opt(&["out"]) {
-        let blobs: Vec<Vec<u8>> = match model.kind.as_str() {
-            "image" => match crate::providers::media::generate_image(
-                &model,
-                &prompt_text,
-                args.opt(&["size"]),
-            ) {
-                Ok(images) => images,
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    return Ok(1);
-                }
-            },
-            "tts" => match crate::providers::media::generate_speech(
-                &model,
-                &prompt_text,
-                args.opt(&["voice"]),
-            ) {
-                Ok(bytes) => vec![bytes],
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    return Ok(1);
-                }
-            },
-            other => {
-                eprintln!("Error: --out is only for image/tts models (kind={other})");
-                return Ok(1);
+        use crate::providers::media::MediaOutcome;
+        match crate::providers::media::generate_and_write(
+            &model,
+            &prompt_text,
+            out_path,
+            args.opt(&["size"]),
+            args.opt(&["voice"]),
+        ) {
+            Ok(MediaOutcome::Stdout(bytes)) => {
+                use std::io::Write;
+                std::io::stdout()
+                    .write_all(&bytes)
+                    .map_err(|e| format!("write failed: {e}"))?;
+                return Ok(0);
             }
-        };
-        // extension per output: sniffed for images, response_format for tts
-        let exts: Vec<&str> = if model.kind == "image" {
-            blobs
-                .iter()
-                .map(|b| crate::providers::media::image_ext(b))
-                .collect()
-        } else {
-            vec![crate::providers::media::speech_ext(&model.options); blobs.len()]
-        };
-        let stem = if model.kind == "image" {
-            "image"
-        } else {
-            "speech"
-        };
-        let targets = match crate::providers::media::plan_outputs(out_path, &exts, stem) {
-            Ok(t) => t,
+            Ok(MediaOutcome::Files(written)) => {
+                for (path, n) in written {
+                    println!("Wrote {n} bytes to {}", path.display());
+                }
+                return Ok(0);
+            }
             Err(e) => {
                 eprintln!("Error: {e}");
                 return Ok(1);
             }
-        };
-        if targets.is_empty() {
-            // `--out -`: the single output goes to stdout, raw bytes
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(&blobs[0])
-                .map_err(|e| format!("write failed: {e}"))?;
-            return Ok(0);
         }
-        for (blob, path) in blobs.iter().zip(&targets) {
-            std::fs::write(path, blob).map_err(|e| format!("write failed: {e}"))?;
-            println!("Wrote {} bytes to {}", blob.len(), path.display());
-        }
-        return Ok(0);
     }
 
     // extract flags force non-streaming, like the original
@@ -394,7 +309,7 @@ fn execute(
     let stream = !args.flag(&["no-stream"]) && !extract_mode && !args.flag(&["json"]);
     let hide_reasoning = args.flag(&["hide-reasoning"]);
     let quiet = args.flag(&["json"]) || extract_mode;
-    let mut view = crate::core::render::TaskView::new(2, &model.qualified_id(), !quiet);
+    let mut view = crate::term::render::TaskView::new(2, &model.qualified_id(), !quiet);
     {
         let r = view.renderer_mut();
         r.set_quiet(quiet);

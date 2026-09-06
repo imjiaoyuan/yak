@@ -356,15 +356,9 @@ pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool, pre: Vec<u8>) -> 
             "critical": req.critical,
         }));
     }
-    let width = crate::term::columns().max(20);
     let verb = crate::agent::tools::display_verb(req.tool);
-    let vis = 2 + verb.chars().count() + 1;
-    let preview = crate::core::render_md::wrap_plain(req.preview, width.saturating_sub(vis), 2);
-    // same shape as the tool activity line: bold $, the command in green
-    eprintln!("\x1b[1m$\x1b[0m {verb} \x1b[1m\x1b[32m{preview}\x1b[0m");
-    if let Some(diff) = req.diff {
-        crate::agent::tools::print_diff_block(diff);
-    }
+    // the same activity line the tool log prints (bold $, command in green)
+    crate::agent::tools::print_action_line(verb, req.preview, req.diff);
     if req.critical {
         eprintln!("\x1b[2m  warning: {reason}\x1b[0m", reason = req.reason);
     }

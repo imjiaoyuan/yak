@@ -5,13 +5,11 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::agent::approval::{self, ApprovalConfig, Policy};
-use crate::agent::compact::CompactConfig;
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
 use crate::core::db::Db;
 use crate::core::logstore::{self};
 use crate::providers::Msg;
-use crate::providers::ResolvedModel;
 use crate::{flag_spec, multi_spec, value_spec};
 
 const SPECS: &[OptSpec] = &[
@@ -116,10 +114,12 @@ fn chat_help() -> String {
             matches!(
                 s.long,
                 "model"
+                    | "option"
                     | "system-prompt"
                     | "attachment"
                     | "at"
                     | "continue"
+                    | "fork"
                     | "session"
                     | "cid"
                     | "database"
@@ -230,47 +230,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     }
 
     // model resolution: -m > LLM_MODEL > session's model > the default
-    let cfg = config::load();
-    let stored_default = config::default_model().filter(|m| {
-        let resolves = cfg.resolve_model(m).is_some();
-        if !resolves {
-            eprintln!("Warning: models.default '{m}' does not resolve, ignoring it");
-        }
-        resolves
-    });
-    let query = args
-        .opt(&["model"])
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("LLM_MODEL").ok())
-        .or_else(|| conv_model.clone())
-        .or(stored_default);
-    let Some(query) = query else {
-        return Err(
-            "No default model configured. Run `llm models set <model>`, `llm login`, or use -m."
-                .to_string(),
-        );
-    };
-    let Some((name, provider, model_id)) = cfg.resolve_model(&query) else {
-        return Err(format!("'{query}' is not a known model"));
-    };
-    let api_key = args
-        .opt(&["key"])
-        .map(|s| s.to_string())
-        .or_else(|| cfg.api_key(provider));
-    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
-    let mut options: Vec<(String, String)> = {
-        let saved = config::load_model_options();
-        saved
-            .get(&model.qualified_id())
-            .or_else(|| saved.get(&model_id))
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
-    };
-    for (k, v) in crate::core::text::parse_kv(&args.multi(&["option"]))? {
-        options.retain(|(existing, _)| existing != &k);
-        options.push((k, v));
-    }
-    model.options = options;
+    let model = crate::providers::resolve_run_model(args, conv_model.clone())?;
 
     // approval config: CLI > [agent] settings > defaults
     let mode_str = if args.flag(&["yolo"]) {
@@ -333,6 +293,12 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     if chat && args.opt(&["tools"]).is_some() {
         return Err("chat has no tools (run `llm agent` for the tool session)".to_string());
     }
+    if chat && args.opt(&["append-system-prompt"]).is_some() {
+        return Err(
+            "chat does not accept --append-system-prompt (run `llm agent` for an appended system prompt)"
+                .to_string(),
+        );
+    }
     // plugin tools: script tools from the config `tools` table and MCP
     // servers from `mcpServers`. Connecting spawns every configured
     // server, so a --tools subset with no mcp__ names skips it entirely
@@ -368,18 +334,11 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         std::sync::Arc::new(crate::agent::mcp::McpRegistry::empty())
     };
     let (system, agents, skills) = if chat {
-        // the conversational preset: chat's historical default system
-        // (or the loaded conversation's), plus global user memory — no
-        // cwd context, no agents/skills block
-        let base = args
-            .opt(&["system-prompt"])
-            .map(|s| s.to_string())
-            .or_else(|| conv_system.clone())
-            .unwrap_or_else(|| {
-                "You are llm chat, a terminal assistant. Reply in the user's language. Do not use emoji.".to_string()
-            });
         (
-            crate::agent::memory::inject_system(Some(base)),
+            crate::agent::system_prompt::chat_system_prompt(
+                conv_system,
+                args.opt(&["system-prompt"]),
+            ),
             Vec::new(),
             Vec::new(),
         )
@@ -405,17 +364,7 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     };
 
     let mut session = crate::agent::session::Session {
-        compact: CompactConfig {
-            context_window: settings
-                .model_windows
-                .get(&model.qualified_id())
-                .or_else(|| settings.model_windows.get(&model_id))
-                .copied()
-                .or(settings.context_window)
-                .unwrap_or(128_000),
-            reserve_tokens: settings.reserve_tokens.unwrap_or(16_384),
-            keep_recent_tokens: settings.keep_recent_tokens.unwrap_or(20_000),
-        },
+        compact: settings.compact_config(&model.qualified_id(), &model.model_id),
         model,
         tools: Vec::new(),
         chat_mode: chat,
@@ -490,9 +439,5 @@ fn open_db(args: &ParsedArgs) -> Result<Option<Db>, String> {
     if args.flag(&["no-session"]) {
         return Ok(None);
     }
-    let db = match args.opt(&["database"]) {
-        Some(p) => Db::open_path(std::path::Path::new(p)).map_err(|e| e.to_string())?,
-        None => Db::open().map_err(|e| e.to_string())?,
-    };
-    Ok(Some(db))
+    Ok(Some(Db::open_from_arg(args.opt(&["database"]))?))
 }

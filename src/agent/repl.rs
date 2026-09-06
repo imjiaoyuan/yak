@@ -5,7 +5,7 @@ use crate::agent::approval;
 use crate::agent::session::Session;
 use std::io::Write;
 
-use crate::core::render::humanize_tokens;
+use crate::term::render::humanize_tokens;
 
 pub fn repl(
     mut session: crate::agent::session::Session,
@@ -566,15 +566,7 @@ fn repl_command(
             eprintln!("\x1b[2mapproval → {}{note}\x1b[0m", mode.label());
         }
         "/clear" => {
-            session.seed.clear();
-            session.conversation_id = None;
-            if let Some(ck) = &session.checkpoints
-                && let Ok(mut c) = ck.lock()
-            {
-                c.clear();
-            }
-            session.tokens = (0, 0);
-            session.tokens_cached = 0;
+            session.clear();
             eprint!("\x1b[2J\x1b[H");
             let _ = std::io::stderr().flush();
             let agents =
@@ -613,14 +605,7 @@ fn repl_command(
                     return false;
                 }
             };
-            session.seed.truncate(idx);
-            // only a round that stored a turn may rewind the thread: an
-            // interrupted or failed round stored nothing, and popping the
-            // previous turn would desync the session from the store
-            if persisted
-                && let (Some(db), Some(cid)) = (&session.db, &session.conversation_id)
-                && let Err(e) = crate::core::logstore::undo_thread(db, cid)
-            {
+            if let Err(e) = session.rewind_to(idx, persisted) {
                 eprintln!("Warning: {e}");
             }
             eprintln!("\x1b[2mundo — dropped the last round\x1b[0m");
@@ -790,17 +775,12 @@ fn repl_command(
                     eprintln!("  \x1b[2mcompacting …\x1b[0m");
                     match crate::agent::compact::summarize(&session.model, &session.seed[..cut]) {
                         Ok(summary) if !summary.is_empty() => {
-                            let tail = session.seed.split_off(cut);
-                            session.seed.clear();
-                            session
-                                .seed
-                                .push(crate::providers::Msg::Summary { text: summary });
-                            session.seed.extend(tail);
+                            session.compact_prefix(summary, cut);
                             let now = crate::agent::compact::estimate_tokens(&session.seed, None);
                             eprintln!(
                                 "  \x1b[2mcompacted {} → {}\x1b[0m",
-                                crate::core::render::humanize_tokens(estimate),
-                                crate::core::render::humanize_tokens(now)
+                                crate::term::render::humanize_tokens(estimate),
+                                crate::term::render::humanize_tokens(now)
                             );
                         }
                         _ => eprintln!("  \x1b[2mcompaction failed; history kept as-is\x1b[0m"),

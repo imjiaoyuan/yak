@@ -350,7 +350,7 @@ pub fn restore_console() {
 }
 
 extern "system" fn ctrl_event(_: u32) -> i32 {
-    crate::core::http::request_interrupt();
+    crate::platform::interrupt::request();
     1
 }
 
@@ -360,7 +360,7 @@ pub fn install_sigint() {
 
 pub fn restore_sigint() {
     let _ = unsafe { SetConsoleCtrlHandler(None, 0) };
-    crate::core::http::clear_interrupt();
+    crate::platform::interrupt::clear();
 }
 
 /// Create a fresh Windows process group so `taskkill /T` can clean up the
@@ -406,7 +406,7 @@ pub fn paste_clipboard_image() -> Option<Vec<u8>> {
     }
     let bytes = std::fs::read(&path).ok();
     let _ = std::fs::remove_file(&path);
-    bytes.filter(|b| crate::core::attachments::sniff_mime(b).is_some())
+    bytes
 }
 
 #[cfg(test)]
