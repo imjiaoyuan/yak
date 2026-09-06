@@ -99,6 +99,7 @@ pub fn builtin_tools_configured(
         Box::new(GrepTool),
         Box::new(GlobTool),
         Box::new(LsTool),
+        Box::new(RememberTool),
         Box::new(FetchTool),
         Box::new(PlanTool),
         Box::new(super::task::TaskTool {
@@ -913,6 +914,51 @@ impl Tool for GlobTool {
         let mut out = hits.join("\n");
         out.push('\n');
         ToolOutput::ok(out)
+    }
+}
+
+/// The global-memory writer: when the user asks to remember/note something
+/// ("记住我喜欢..."), it lands as a dated line in ~/.llm/LLM.md and is
+/// injected into every future session's system prompt.
+struct RememberTool;
+
+impl Tool for RememberTool {
+    fn name(&self) -> &str {
+        "remember"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Write
+    }
+    fn description(&self) -> &str {
+        "Save one durable fact to the user's global memory (LLM.md), injected \
+into every future session. Use it when the user asks you to remember or note \
+a preference, environment detail or long-term decision; skip it for \
+task-specific details."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The fact to remember, one line"}
+            },
+            "required": ["text"]
+        })
+    }
+    fn preview(&self, args: &Value) -> String {
+        args["text"].as_str().unwrap_or("?").to_string()
+    }
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+        let text = args["text"].as_str().unwrap_or("").trim();
+        if text.is_empty() {
+            return ToolOutput::err("nothing to remember");
+        }
+        match crate::agent::memory::remember(text) {
+            Ok(true) => {
+                ToolOutput::ok("noted — it will apply from the next session on".to_string())
+            }
+            Ok(false) => ToolOutput::ok("already in memory"),
+            Err(e) => ToolOutput::err(format!("cannot write memory: {e}")),
+        }
     }
 }
 

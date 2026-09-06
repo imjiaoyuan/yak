@@ -311,7 +311,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::providers::testutil::{att, input, tool_def};
-    use crate::providers::{ToolCall, ToolCallAccumulator, ToolDef};
+    use crate::providers::{ToolCall, ToolCallAccumulator};
 
     fn model(kind: &str) -> ResolvedModel {
         crate::providers::testutil::model(kind)

@@ -115,18 +115,6 @@ pub fn repl(
             }
         }
     }
-    // [agent] memory = "auto": extract once on the way out, long sessions only
-    if settings.memory.as_deref() == Some("auto") {
-        let turns = session
-            .seed
-            .iter()
-            .filter(|m| matches!(m, crate::providers::Msg::User { .. }))
-            .count();
-        if turns > 5 {
-            eprintln!("\x1b[2mextracting memories …\x1b[0m");
-            let _ = crate::agent::memory::update(&session.model, &session.seed);
-        }
-    }
     restore_default_sigint();
     Ok(0)
 }
@@ -736,15 +724,9 @@ fn repl_command(
             match sub {
                 "" => {
                     let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    let doc = crate::agent::memory::parse(&text);
-                    let manual_lines = doc.manual.lines().filter(|l| !l.trim().is_empty()).count();
-                    eprintln!(
-                        "\x1b[2m{} · {} manual lines · {} auto memories\x1b[0m",
-                        path.display(),
-                        manual_lines,
-                        doc.auto.len()
-                    );
-                    for l in doc.manual.lines().filter(|l| !l.trim().is_empty()).take(3) {
+                    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                    eprintln!("\x1b[2m{} · {} lines\x1b[0m", path.display(), lines);
+                    for l in text.lines().filter(|l| !l.trim().is_empty()).take(3) {
                         eprintln!("\x1b[2m  {l}\x1b[0m");
                     }
                 }
@@ -757,24 +739,6 @@ fn repl_command(
                         eprintln!("\x1b[2mnoted\x1b[0m");
                     }
                 }
-                "update" => {
-                    eprintln!("\x1b[2mextracting memories from this session …\x1b[0m");
-                    match crate::agent::memory::update(&session.model, &session.seed) {
-                        Ok(added) if added.is_empty() => {
-                            eprintln!("\x1b[2mnothing new worth remembering\x1b[0m")
-                        }
-                        Ok(added) => {
-                            for a in &added {
-                                eprintln!("\x1b[2m+ {a}\x1b[0m");
-                            }
-                        }
-                        Err(e) => eprintln!("Error: {e}"),
-                    }
-                }
-                "clean" => match crate::agent::memory::clean(&session.model) {
-                    Ok(()) => eprintln!("\x1b[2mauto memories consolidated\x1b[0m"),
-                    Err(e) => eprintln!("Error: {e}"),
-                },
                 "edit" => {
                     let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
                     if !path.exists() {

@@ -353,7 +353,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::testutil::{att, input, tool_def};
+    use crate::providers::testutil::{att, input};
     use crate::providers::{ToolCall, ToolCallAccumulator, ToolDef};
 
     fn model(kind: &str) -> ResolvedModel {

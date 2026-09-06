@@ -25,6 +25,7 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "grep",
     "glob",
     "ls",
+    "remember",
     "webfetch",
     "update_plan",
     "task",
