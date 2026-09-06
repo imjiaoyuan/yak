@@ -179,7 +179,7 @@ fn interactive(db: &Db, only: Option<&str>) -> i32 {
 /// One conversation's full per-turn report — the same rendering `--cid --full`
 /// produces, minus the flags.
 fn show_conversation_full(db: &Db, cid: &str) -> i32 {
-    let mut rows = crate::core::logstore::collect_rows(
+    let mut rows = match crate::core::logstore::collect_rows(
         db,
         &crate::core::logstore::RowFilters {
             conversation: Some(cid),
@@ -188,7 +188,13 @@ fn show_conversation_full(db: &Db, cid: &str) -> i32 {
             count: None,
             search: false,
         },
-    );
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
     rows.reverse();
     let annotated = crate::core::logstore::annotate(db, rows, false);
     render_browse_conversation(&annotated);
@@ -292,7 +298,7 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
     // it must not silently drop the search
     let search = query.is_some();
 
-    let mut rows = crate::core::logstore::collect_rows(
+    let mut rows = match crate::core::logstore::collect_rows(
         &db,
         &crate::core::logstore::RowFilters {
             conversation: conversation.as_deref(),
@@ -301,7 +307,13 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
             count: if count > 0 { Some(count) } else { None },
             search,
         },
-    );
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
 
     // display order is chronological
     rows.reverse();
@@ -354,14 +366,17 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
         return 0;
     }
 
-    // mode labels resolved once per conversation (db provenance first)
+    // mode labels resolved once per conversation (db provenance first); the
+    // real stored turn count feeds the pre-provenance guess, so a lone
+    // prompt turn reads as prompt however the global row limit sliced it
     let mut modes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for row in &rows {
         let cid = row["conversation_id"].as_str().unwrap_or("");
         if !cid.is_empty() && !modes.contains_key(cid) {
+            let turns = crate::core::logstore::thread_turn_count(&db, cid);
             modes.insert(
                 cid.to_string(),
-                conversation_mode(Some(&db), cid, 0, &modes),
+                conversation_mode(Some(&db), cid, turns, &modes),
             );
         }
     }
@@ -443,26 +458,28 @@ fn compact_lines(
         80
     };
 
-    // conversations in row order (newest first), each with its mode label
+    // conversations by id, first-seen order: the globally newest-first row
+    // stream can interleave threads, and grouping only runs of consecutive
+    // rows would split one conversation into mislabeled halves
     struct Group<'a> {
         cid: &'a str,
-        rows: &'a [serde_json::Value],
+        rows: Vec<&'a serde_json::Value>,
         mode: String,
     }
     let mut groups: Vec<Group> = Vec::new();
-    let mut i = 0;
-    while i < rows.len() {
-        let cid = rows[i]["conversation_id"].as_str().unwrap_or("");
-        let mut j = i;
-        while j < rows.len() && rows[j]["conversation_id"].as_str().unwrap_or("") == cid {
-            j += 1;
+    for row in rows {
+        let cid = row["conversation_id"].as_str().unwrap_or("");
+        match groups.iter_mut().find(|g| g.cid == cid) {
+            Some(g) => g.rows.push(row),
+            None => groups.push(Group {
+                cid,
+                rows: vec![row],
+                mode: String::new(),
+            }),
         }
-        groups.push(Group {
-            cid,
-            rows: &rows[i..j],
-            mode: conversation_mode(None, cid, j - i, modes),
-        });
-        i = j;
+    }
+    for g in &mut groups {
+        g.mode = conversation_mode(None, g.cid, g.rows.len(), modes);
     }
 
     let mut out = String::new();

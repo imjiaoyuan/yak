@@ -996,6 +996,19 @@ pub fn undo_thread(db: &Db, thread_id: &str) -> Result<(), String> {
     .map_err(|e| format!("cannot undo {thread_id}: {e}"))
 }
 
+/// How many turns a thread has stored (the mode-guess input for the compact
+/// logs list: a lone turn reads as prompt, a thread as chat).
+pub fn thread_turn_count(db: &Db, thread_id: &str) -> usize {
+    db.conn()
+        .query_row(
+            "SELECT count(*) FROM turns WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        .max(0) as usize
+}
+
 /// The thread id of the most recent turn — one definition of "latest" for
 /// `-c ""` continuation and the logs browser alike (the thread created last
 /// can differ from the one chatted with last).
@@ -1277,8 +1290,10 @@ pub struct RowFilters<'a> {
     pub search: bool,
 }
 
-/// Query the turn store, newest-first (or relevance-ranked for -q).
-pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
+/// Query the turn store, newest-first (or relevance-ranked for -q). Errors
+/// on a bad FTS query or an unpreparable statement — the CLI owns the
+/// message and exit code, not the store layer.
+pub fn collect_rows(db: &Db, f: &RowFilters) -> Result<Vec<Value>, String> {
     let mut rows: Vec<Value> = Vec::new();
 
     // -- new store ---------------------------------------------------------
@@ -1340,17 +1355,16 @@ pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
                     }
                 }
                 Err(err) => {
-                    eprintln!(
-                        "Error: Invalid search query: {err} - see the FTS5 query syntax documentation at https://sqlite.org/fts5.html#full_text_query_syntax"
-                    );
-                    std::process::exit(1);
+                    return Err(format!(
+                        "invalid search query: {err} - see the FTS5 query syntax documentation at https://sqlite.org/fts5.html#full_text_query_syntax"
+                    ));
                 }
             }
         }
-        Err(e) => eprintln!("Warning: cannot query turns: {e}"),
+        Err(e) => return Err(format!("cannot query turns: {e}")),
     }
     // the SQL above already orders (rank, id DESC); no Rust-side re-sort
-    rows
+    Ok(rows)
 }
 
 macro_rules! get_str {
