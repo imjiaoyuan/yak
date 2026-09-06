@@ -226,25 +226,32 @@ impl LineEditor {
                     // submit); a text clipboard pastes via the terminal's
                     // own bracketed paste instead
                     match crate::platform::paste_clipboard_image() {
-                        Some(bytes) => {
-                            let ext = match crate::core::attachments::sniff_mime(&bytes) {
-                                Some("image/jpeg") => "jpg",
-                                Some("image/gif") => "gif",
-                                Some("image/webp") => "webp",
-                                _ => "png",
-                            };
-                            let dir = crate::core::config::user_dir().join("tmp");
-                            let _ = std::fs::create_dir_all(&dir);
-                            let path =
-                                dir.join(format!("paste-{}.{}", crate::core::db::ulid(), ext));
-                            if std::fs::write(&path, &bytes).is_ok() {
-                                let text = path.display().to_string();
-                                buf.insert_str(cursor, &text);
-                                cursor += text.len();
-                                nav.reset(self.history.len());
+                        Some(bytes) => match crate::core::attachments::sniff_mime(&bytes) {
+                            Some(mime) => {
+                                let ext = match mime {
+                                    "image/jpeg" => "jpg",
+                                    "image/gif" => "gif",
+                                    "image/webp" => "webp",
+                                    _ => "png",
+                                };
+                                let dir = crate::core::config::user_dir().join("tmp");
+                                let _ = std::fs::create_dir_all(&dir);
+                                let path =
+                                    dir.join(format!("paste-{}.{}", crate::core::db::ulid(), ext));
+                                if std::fs::write(&path, &bytes).is_ok() {
+                                    let text = path.display().to_string();
+                                    buf.insert_str(cursor, &text);
+                                    cursor += text.len();
+                                    nav.reset(self.history.len());
+                                    line.draw(&mut out, prompt, &buf, cursor);
+                                }
+                            }
+                            None => {
+                                let _ = writeln!(out, "\x1b[2m(no image on the clipboard)\x1b[0m");
+                                line.rows = 0;
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
-                        }
+                        },
                         None => {
                             let _ = writeln!(out, "\x1b[2m(no image on the clipboard)\x1b[0m");
                             line.rows = 0;
@@ -1342,13 +1349,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 return Some(matched[sel]);
             }
             0x08 | 0x7f => {
-                // pop one full char (skip UTF-8 continuation bytes)
-                while let Some(&last) = query_bytes.last()
-                    && last & 0xC0 == 0x80
-                {
-                    query_bytes.pop();
-                }
-                query_bytes.pop();
+                crate::core::text::pop_utf8_char(&mut query_bytes);
             }
             0x03 | 0x04 => {
                 erase(&mut out, printed, true);
@@ -1487,14 +1488,7 @@ impl KeyWatcher {
                             buf.clear();
                         }
                         0x7f | 0x08 => {
-                            // pop one full char (skip UTF-8 continuation
-                            // bytes, like the picker's filter does)
-                            while let Some(&last) = buf.last()
-                                && last & 0xC0 == 0x80
-                            {
-                                buf.pop();
-                            }
-                            buf.pop();
+                            crate::core::text::pop_utf8_char(&mut buf);
                         }
                         c if c >= 0x20 => buf.push(c),
                         _ => {}

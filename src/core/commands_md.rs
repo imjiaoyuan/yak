@@ -67,13 +67,11 @@ pub fn find(name: &str) -> Option<CommandMd> {
     }
     let cwd = std::env::current_dir().ok()?;
     let file = format!("{name}.md");
-    let mut dir = Some(cwd.as_path());
-    while let Some(d) = dir {
+    for d in crate::core::paths::ancestors(&cwd) {
         let candidate = d.join(".llm/commands").join(&file);
         if let Ok(text) = std::fs::read_to_string(&candidate) {
             return Some(parse(&text));
         }
-        dir = d.parent();
     }
     std::fs::read_to_string(user_dir().join("commands").join(&file))
         .ok()

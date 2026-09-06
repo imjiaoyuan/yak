@@ -20,7 +20,8 @@ pub(super) fn configure_shell_command(command: &mut Command) {
 }
 
 /// Image bytes from the clipboard, if any: wl-paste first, xclip fallback,
-/// validated by magic sniffing (both speak the image/png target).
+/// both speaking the image/png target. The caller sniffs the bytes to pick
+/// the extension.
 pub fn paste_clipboard_image() -> Option<Vec<u8>> {
     let candidates: Vec<Vec<&str>> = vec![
         vec!["wl-paste", "-t", "image/png"],
@@ -30,7 +31,6 @@ pub fn paste_clipboard_image() -> Option<Vec<u8>> {
         if let Ok(out) = Command::new(cmd[0]).args(&cmd[1..]).output()
             && out.status.success()
             && !out.stdout.is_empty()
-            && crate::core::attachments::sniff_mime(&out.stdout).is_some()
         {
             return Some(out.stdout);
         }

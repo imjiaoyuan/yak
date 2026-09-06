@@ -602,6 +602,18 @@ select turns.id,
         or coalesce(response_text.text, '') != '') and turns.id = ?1
 "#;
 
+/// The recursive walk from a chain tip back to its root, seeded with the tip
+/// hash as `?1`, yielding every message hash on the chain (used by the
+/// whole-chain reads that do not need roles or depth).
+const CHAIN_HASH_CTE: &str = r#"
+WITH RECURSIVE chain(hash) AS (
+    SELECT ?1
+    UNION ALL
+    SELECT m.parent_hash FROM messages m JOIN chain c ON m.hash = c.hash
+     WHERE m.parent_hash IS NOT NULL
+)
+"#;
+
 // reading
 
 /// The chain from `tip` back to its root in ONE query (recursive CTE),
@@ -647,6 +659,25 @@ pub struct ReadPart {
     pub payload: Option<String>,
 }
 
+/// Map one parts row to a `ReadPart`, falling back to the fragments table
+/// for legacy `text_ref` payloads that carry no inline `text`.
+fn read_part(
+    conn: &Connection,
+    part_type: Option<String>,
+    text: Option<String>,
+    payload: Option<String>,
+) -> ReadPart {
+    let text = match text {
+        Some(t) => Some(t),
+        None => payload.as_ref().and_then(|p| resolve_text_ref(conn, p)),
+    };
+    ReadPart {
+        part_type: part_type.unwrap_or_default(),
+        text,
+        payload,
+    }
+}
+
 /// One stored message by hash: its role plus parts, in position order.
 /// A single joined query (role + parts together).
 fn message_parts(conn: &Connection, hash: &str) -> Option<(String, Vec<ReadPart>)> {
@@ -682,15 +713,7 @@ fn message_parts(conn: &Connection, hash: &str) -> Option<(String, Vec<ReadPart>
         if role.is_none() {
             role = Some(r);
         }
-        let text = match text {
-            Some(t) => Some(t),
-            None => payload.as_ref().and_then(|p| resolve_text_ref(conn, p)),
-        };
-        parts.push(ReadPart {
-            part_type: part_type.unwrap_or_default(),
-            text,
-            payload,
-        });
+        parts.push(read_part(conn, part_type, text, payload));
     }
     role.map(|role| (role, parts))
 }
@@ -704,17 +727,13 @@ fn chain_parts(conn: &Connection, tip: &str) -> Vec<(String, Vec<ReadPart>)> {
     }
     let mut by_hash: std::collections::HashMap<String, Vec<ReadPart>> =
         std::collections::HashMap::with_capacity(order.len());
-    let mut stmt = match conn.prepare(
-        "WITH RECURSIVE chain(hash) AS (
-             SELECT ?1
-             UNION ALL
-             SELECT m.parent_hash FROM messages m JOIN chain c ON m.hash = c.hash
-              WHERE m.parent_hash IS NOT NULL
-         )
+    let sql = format!(
+        "{CHAIN_HASH_CTE}
          SELECT p.message_hash, p.type, p.text, p.payload
            FROM parts p JOIN chain c ON p.message_hash = c.hash
-          ORDER BY p.message_hash, p.position",
-    ) {
+          ORDER BY p.message_hash, p.position"
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Warning: cannot read the chain's parts: {e}");
@@ -743,15 +762,10 @@ fn chain_parts(conn: &Connection, tip: &str) -> Vec<(String, Vec<ReadPart>)> {
                 continue;
             }
         };
-        let text = match text {
-            Some(t) => Some(t),
-            None => payload.as_ref().and_then(|p| resolve_text_ref(conn, p)),
-        };
-        by_hash.entry(hash).or_default().push(ReadPart {
-            part_type: part_type.unwrap_or_default(),
-            text,
-            payload,
-        });
+        by_hash
+            .entry(hash)
+            .or_default()
+            .push(read_part(conn, part_type, text, payload));
     }
     order
         .into_iter()
@@ -1525,20 +1539,16 @@ pub fn annotate(db: &Db, rows: Vec<Value>, truncate: bool) -> Vec<Value> {
 /// Attachments on a message chain: part_attachments → attachments rows, in
 /// ONE query over the whole chain instead of one per message.
 fn chain_attachments(conn: &Connection, tip: &str) -> Vec<Value> {
-    let mut stmt = match conn.prepare(
-        "WITH RECURSIVE chain(hash) AS (
-             SELECT ?1
-             UNION ALL
-             SELECT m.parent_hash FROM messages m JOIN chain c ON m.hash = c.hash
-              WHERE m.parent_hash IS NOT NULL
-         )
+    let sql = format!(
+        "{CHAIN_HASH_CTE}
          SELECT a.id, a.type, a.path, a.url, length(a.content)
            FROM chain c
            JOIN parts p ON p.message_hash = c.hash
            JOIN part_attachments pa ON pa.part_id = p.id
            JOIN attachments a ON a.id = pa.attachment_id
-          ORDER BY p.id, pa.\"order\"",
-    ) {
+          ORDER BY p.id, pa.\"order\""
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Warning: cannot read chain attachments: {e}");

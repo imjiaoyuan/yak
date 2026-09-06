@@ -65,18 +65,13 @@ pub fn discover_in(cwd: &Path, user: &Path) -> Vec<ScriptToolSpec> {
 /// on name.
 fn project_roots(cwd: &Path, user: &Path) -> Vec<PathBuf> {
     let mut roots = vec![user.to_path_buf()];
-    let mut dir = Some(cwd.to_path_buf());
-    let mut found: Vec<PathBuf> = Vec::new();
-    while let Some(d) = dir {
-        let candidate = d.join(".llm").join("tools");
-        if candidate.is_dir() {
-            found.push(candidate);
-        }
-        dir = d.parent().map(Path::to_path_buf);
-    }
-    // the walk-up collects nearest-first; loading farthest-last-but-one
-    // makes the nearest dir the final word on a name
-    roots.extend(found.into_iter().rev());
+    // dirs_up collects nearest-first; loading farthest-last-but-one makes
+    // the nearest dir the final word on a name
+    roots.extend(
+        crate::core::paths::dirs_up(cwd, ".llm/tools")
+            .into_iter()
+            .rev(),
+    );
     roots
 }
 

@@ -88,22 +88,6 @@ fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
     }
 }
 
-/// Nearest `suffix` directory walking up from cwd, stopping at the git root.
-fn nearest_dir(cwd: &Path, suffix: &str) -> Option<PathBuf> {
-    let mut dir = Some(cwd);
-    while let Some(d) = dir {
-        let candidate = d.join(suffix);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-        if d.join(".git").exists() {
-            return None;
-        }
-        dir = d.parent();
-    }
-    None
-}
-
 /// Discover skills, lowest priority first so later entries override earlier
 /// by name: `~/.agents/skills`, `~/.llm/skills`, then the nearest project
 /// `.agents/skills`, then the nearest `.llm/skills` (project beats user, our
@@ -115,10 +99,10 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
         &mut defs,
     );
     load_dir(&user_dir.join("skills"), &mut defs);
-    if let Some(d) = nearest_dir(cwd, ".agents/skills") {
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".agents/skills", true) {
         load_dir(&d, &mut defs);
     }
-    if let Some(d) = nearest_dir(cwd, ".llm/skills") {
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/skills", true) {
         load_dir(&d, &mut defs);
     }
     let mut merged: Vec<SkillDef> = Vec::new();

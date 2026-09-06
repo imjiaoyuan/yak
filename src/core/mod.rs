@@ -12,6 +12,7 @@ pub mod config;
 pub mod db;
 pub mod http;
 pub mod logstore;
+pub mod paths;
 pub mod render;
 pub mod render_md;
 pub mod schemas;

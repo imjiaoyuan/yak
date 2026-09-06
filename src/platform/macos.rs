@@ -42,5 +42,5 @@ pub fn paste_clipboard_image() -> Option<Vec<u8>> {
     }
     let bytes = std::fs::read(&path).ok();
     let _ = std::fs::remove_file(&path);
-    bytes.filter(|b| crate::core::attachments::sniff_mime(b).is_some())
+    bytes
 }

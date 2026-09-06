@@ -35,6 +35,17 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     }
 }
 
+/// Pop one full UTF-8 character off the end of a byte buffer (raw-mode
+/// backspace over multibyte input skips the continuation bytes first).
+pub fn pop_utf8_char(buf: &mut Vec<u8>) {
+    while let Some(&last) = buf.last()
+        && last & 0xC0 == 0x80
+    {
+        buf.pop();
+    }
+    buf.pop();
+}
+
 /// Parse KEY=VALUE items, rejecting entries without `=`.
 pub fn parse_kv(items: &[String]) -> Result<Vec<(String, String)>, String> {
     items
