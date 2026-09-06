@@ -661,6 +661,13 @@ fn run_child(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        // the reader thread blocks on the child's stdout, so a child that is
+        // still running (timeout, interrupt, error) must die before the join
+        // below — otherwise the join waits for it to finish on its own and
+        // the deadline never actually stops anything
+        if timed_out || error.is_some() || interrupted {
+            let _ = guard.0.kill();
+        }
         drop(rx);
         let _ = handle.join();
         while let Ok(u) = in_rx.try_recv() {
@@ -668,10 +675,6 @@ fn run_child(
             child_tokens.1 += u.1;
             child_tokens.2 += u.2;
         }
-    }
-    if timed_out || error.is_some() || interrupted {
-        // stop a child that is still running before waiting on it
-        let _ = guard.0.kill();
     }
     let status = guard.0.wait();
     if interrupted {

@@ -338,6 +338,27 @@ mod tests {
     }
 
     #[test]
+    fn backgrounded_grandchild_does_not_hang_the_call() {
+        // the shell exits at once; the backgrounded sleep inherits the
+        // stdout pipe and would hold it open for 30s without the grace kill
+        let started = std::time::Instant::now();
+        let outcome = super::super::run_shell_stream(
+            "sleep 30 & echo done",
+            Path::new("."),
+            60,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        assert_eq!(outcome.code, 0);
+        assert!(String::from_utf8_lossy(&outcome.stdout).contains("done"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "call took {:?}, the grandchild held the pipe",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn run_shell_stream_keeps_multibyte_chars_across_chunk_edges() {
         // ~26KB of CJK lines: the 8KiB pipe chunks land inside multibyte
         // chars, and the per-line decode must still come out clean

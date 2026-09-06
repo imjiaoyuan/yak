@@ -251,7 +251,9 @@ pub(crate) fn run_with_progress(
                     kill_process_tree(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
-                    pipes.finish(on_stdout_line);
+                    pipes.finish_with_deadline(on_stdout_line, PIPE_EOF_GRACE, || {
+                        kill_process_tree(child.id())
+                    });
                     let Pipes { stdout, stderr, .. } = pipes;
                     return ShellOutcome {
                         code: -1,
@@ -267,7 +269,9 @@ pub(crate) fn run_with_progress(
                 kill_process_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                pipes.finish(on_stdout_line);
+                pipes.finish_with_deadline(on_stdout_line, PIPE_EOF_GRACE, || {
+                    kill_process_tree(child.id())
+                });
                 let Pipes {
                     stdout, mut stderr, ..
                 } = pipes;
@@ -283,7 +287,11 @@ pub(crate) fn run_with_progress(
         }
     };
 
-    pipes.finish(on_stdout_line);
+    // the child has exited, but a backgrounded grandchild can still hold
+    // the pipe open — bound the wait so the call cannot hang on it
+    pipes.finish_with_deadline(on_stdout_line, PIPE_EOF_GRACE, || {
+        kill_process_tree(child.id())
+    });
     let Pipes { stdout, stderr, .. } = pipes;
     ShellOutcome {
         code: status.code().unwrap_or(-1),
@@ -298,6 +306,10 @@ pub(crate) fn run_with_progress(
 /// Every consumer truncates to the tail anyway, and an unbounded capture
 /// would let a chatty command eat all memory.
 const PIPE_TAIL_CAP: usize = 512 * 1024;
+
+/// How long to wait for pipe EOF after the child exited before killing its
+/// process group (a backgrounded grandchild still holds the write end).
+const PIPE_EOF_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The child's two output pipes: reader threads forward chunks through
 /// channels; the main loop drains them into buffers and hands complete
@@ -370,11 +382,41 @@ impl Pipes {
         }
     }
 
-    /// Join the reader threads, drain what they sent, flush a trailing
-    /// partial stdout line.
-    fn finish(&mut self, on_stdout_line: &mut dyn FnMut(&str)) {
+    /// Join the reader threads with a way out of a blocked join: after the
+    /// direct child has
+    /// exited, a grandchild that inherited the pipe (`cmd &`, daemonizing
+    /// installers) keeps its write end open, so the readers never see EOF and
+    /// a plain join hangs the whole call. Wait `grace` for a natural EOF,
+    /// then fire `kill` (the child's process group) to close the inherited
+    /// fds, then wait one more `grace`; a grandchild still holding the pipe
+    /// past that (it re-sessioned itself out of the group) is abandoned —
+    /// the call returns with what it collected instead of hanging.
+    fn finish_with_deadline(
+        &mut self,
+        on_stdout_line: &mut dyn FnMut(&str),
+        grace: std::time::Duration,
+        kill: impl FnOnce(),
+    ) {
+        let t0 = std::time::Instant::now();
+        let mut kill = Some(kill);
+        while !self.handles.iter().all(|h| h.is_finished()) {
+            self.drain(on_stdout_line);
+            let elapsed = t0.elapsed();
+            if elapsed >= grace
+                && let Some(k) = kill.take()
+            {
+                k();
+            }
+            if kill.is_none() && elapsed >= grace * 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // join what finished; abandoned handles detach when dropped
         for h in self.handles.drain(..) {
-            let _ = h.join();
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
         self.drain(on_stdout_line);
         if !self.residue.is_empty() {

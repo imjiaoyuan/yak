@@ -153,7 +153,10 @@ struct Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
+        // kill then reap: a killed child never reaped stays a zombie for
+        // the life of the REPL, one per server respawn
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
