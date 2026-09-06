@@ -102,6 +102,10 @@ impl LineEditor {
         // (token, payload): large pastes keep their text here and only the
         // token rides in the buffer, expanded at submit
         let mut pastes: Vec<(String, String)> = Vec::new();
+        // monotonic token numbering: deleting a token and pasting again must
+        // not mint a second token with identical text (token_span matches by
+        // first occurrence and would then edit the wrong block)
+        let mut paste_seq = 0usize;
 
         loop {
             let mut b = loop {
@@ -515,7 +519,8 @@ impl LineEditor {
                             if should_placeholder(&chunk) {
                                 // too big to edit comfortably: keep the text
                                 // aside and insert an atomic token instead
-                                let token = paste_token(pastes.len() + 1, &chunk);
+                                paste_seq += 1;
+                                let token = paste_token(paste_seq, &chunk);
                                 pastes.push((token.clone(), chunk));
                                 buf.insert_str(cursor, &token);
                                 cursor += token.len();
@@ -850,14 +855,18 @@ fn load_history_from(path: &Path) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > HISTORY_FILE_LIMIT {
         // rewrite down to the soft cap (raw lines, timestamps intact) so the
-        // trim doesn't refire on every start
+        // trim doesn't refire on every start; temp file + rename so a
+        // concurrent appender never sees a torn or half-truncated file
         let kept = &lines[lines.len() - HISTORY_FILE_KEEP..];
         let mut out = String::new();
         for l in kept {
             out.push_str(l);
             out.push('\n');
         }
-        let _ = std::fs::write(path, out);
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp); // the next trim overwrites it
+        }
     }
     let start = lines.len().saturating_sub(HISTORY_LIMIT);
     lines[start..]

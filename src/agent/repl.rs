@@ -389,7 +389,7 @@ fn completions(buf: &str, skill_names: &[String], mode: approval::Mode, cwd: &st
     }
     if let Some(arg) = buf.strip_prefix("/memory ") {
         // the editor replaces the current WORD, so candidates are bare
-        let subs = ["add", "update", "clean", "edit"];
+        let subs = ["add", "edit"];
         return subs
             .iter()
             .filter(|s| s.starts_with(arg.trim_start()))
@@ -773,7 +773,7 @@ fn repl_command(
                         .unwrap_or_else(|_| crate::platform::default_editor().to_string());
                     let _ = std::process::Command::new(editor).arg(&path).status();
                 }
-                other => eprintln!("unknown subcommand '{other}' (add, update, clean, edit)"),
+                other => eprintln!("unknown subcommand '{other}' (add, edit)"),
             }
         }
         "/compact" => {
