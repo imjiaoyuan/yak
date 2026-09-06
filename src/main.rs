@@ -21,23 +21,26 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ABOUT: &str = "\
 Access Large Language Models from the command-line
 
-Usage: llm [OPTIONS] [PROMPT]...
+Usage:
+  llm [flags]
+  llm [command]
 
-  Running `llm` without a subcommand executes a prompt.
+Bare `llm \"prompt\"` runs the prompt command.
 
-Commands:
-  (default)  Execute a prompt
-  prompt     Execute a prompt
+Available commands:
   agent      Run an agentic task with tools
   chat       Hold an ongoing conversation (tool-less agent session)
-  logs       Show past conversations
-  models     Pick the default model and its thinking level
   login      Add a provider
+  logs       Show past conversations
   logout     Remove a provider
+  models     Pick the default model and its thinking level
+  prompt     Execute a prompt
 
-Options:
-  -h, --help     Show this message and exit
-      --version  Show the version and exit
+Use \"llm [command] --help\" for more information about a command.
+
+Flags:
+  -h, --help      Show this message and exit
+  -v, --version   Show the version number
 ";
 
 fn main() {
@@ -60,7 +63,7 @@ fn dispatch(argv: &[String]) -> i32 {
     };
 
     match first.as_str() {
-        "--version" | "version" => {
+        "--version" | "-v" | "version" => {
             println!("llm, version {VERSION}");
             0
         }
