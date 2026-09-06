@@ -13,7 +13,7 @@ use super::tools::{Tool, ToolOutput};
 use crate::core::config::expand_env;
 
 /// Default per-call timeout in seconds.
-const DEFAULT_TIMEOUT: u64 = 60;
+pub const DEFAULT_TIMEOUT: u64 = 60;
 
 /// Built-in tool names; script tools must not shadow these. Tied to the
 /// actual registry by a test.

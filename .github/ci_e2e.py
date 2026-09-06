@@ -46,6 +46,15 @@ args = json.loads(sys.stdin.readline())
 print("script-tool saw: " + args.get("value", "?"))
 """
 
+DROPIN_TOOL = """#!/usr/bin/env python3
+# --- llm-tool: dropper ---
+# description: drop the given word twice
+# args: word (string) the word to drop
+import json, sys
+args = json.loads(sys.stdin.readline())
+print(json.dumps({"dropped": args.get("word", "") * 2}))
+"""
+
 HOOK_APPEND = """import sys
 with open(sys.argv[1], "a") as f:
     f.write(sys.stdin.read() + "\\n")
@@ -256,6 +265,12 @@ def main():
     os.makedirs(os.path.join(user, "commands"))
     with open(os.path.join(user, "commands", "hello-cmd.md"), "w") as f:
         f.write("---\nmodel: mock/m-a\n---\nSay hello to $input")
+    os.makedirs(os.path.join(work, ".llm", "tools"), exist_ok=True)
+    dropin = os.path.join(work, ".llm", "tools", "dropper")
+    with open(dropin, "w") as f:
+        f.write(DROPIN_TOOL)
+    os.chmod(dropin, 0o755)
+
     env = dict(os.environ, LLM_USER_PATH=user)
 
     p = run([binary, "hi"], env, stdin=subprocess.DEVNULL)
@@ -281,11 +296,13 @@ def main():
     # the model calls mcp__fake__echo, the fake server logs the call and
     # the second round returns the final answer
     a = run([binary, "agent", "--yolo", "--no-session",
-             "use the echo tool with text 'hi from model'"], env,
+             "use the echo tool with text 'hi from model'"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert a.returncode == 0, f"agent rc={a.returncode} err={a.stderr[-800:]}"
     assert "shout" in (seen.get("tools") or []), f"script tool not mounted: {seen.get('tools')}"
     assert "mcp__fake__echo" in (seen.get("tools") or []), f"mcp tool not mounted: {seen.get('tools')}"
+    assert "dropper" in (seen.get("tools") or []), \
+        f"drop-in tool not discovered: {seen.get('tools')}"
     assert os.path.exists(fake_log) and "hi from model" in open(fake_log).read(), \
         f"mcp call never reached the server: {open(fake_log).read() if os.path.exists(fake_log) else 'no log'}"
     assert "final answer after tool" in a.stdout + a.stderr, \

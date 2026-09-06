@@ -277,7 +277,7 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 
 const SLASH_COMMANDS: &[&str] = &[
     "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
-    "/mcp", "/undo", "/exit",
+    "/mcp", "/tools", "/undo", "/exit",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -688,6 +688,31 @@ fn repl_command(
             );
         }
 
+        "/tools" => {
+            let specs = crate::agent::user_tools::discover(&session.cwd);
+            let mut count = 0;
+            for s in &specs {
+                eprintln!("\x1b[2m  {} — {}\x1b[0m", s.name, s.description);
+                count += 1;
+            }
+            for row in session.mcp.rows() {
+                let state = if row.ready {
+                    format!("{} tools", row.tools)
+                } else {
+                    format!("failed: {}", row.reason)
+                };
+                eprintln!(
+                    "\x1b[2m  {} (mcp) — {} · {}\x1b[0m",
+                    row.name, row.target, state
+                );
+                count += 1;
+            }
+            if count == 0 {
+                eprintln!(
+                    "\x1b[2mno plugin tools — drop scripts into ~/.llm/tools/ or .llm/tools/, or configure mcpServers\x1b[0m"
+                );
+            }
+        }
         "/mcp" => {
             let registry = &session.mcp;
             let rows = registry.rows();

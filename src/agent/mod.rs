@@ -15,6 +15,7 @@ pub mod skills;
 pub mod system_prompt;
 pub mod task;
 pub mod tools;
+pub mod user_tools;
 
 use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};

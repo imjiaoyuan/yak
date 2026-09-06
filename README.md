@@ -137,14 +137,27 @@ llm models set deepseek/deepseek-chat
 
 ## Plugins
 
+The quickest plugin is a drop-in tool: any executable with a manifest header, dropped into `~/.llm/tools/` or the project's `.llm/tools/` (the project copy wins by name). One file is one tool, any language — the header declares it, the file itself runs, receiving the tool arguments as one JSON line on stdin and answering on stdout:
+
+```bash
+#!/usr/bin/env python3
+# --- llm-tool: wordcount ---
+# description: count characters in the text
+# args: text (string) the text to count
+import json, sys
+args = json.loads(sys.stdin.readline())
+print(len(args["text"]))
+```
+
+`args:` lines build the input schema (string, int, float, bool); the tool mounts automatically at startup, `/tools` in the agent REPL lists everything (drop-ins, config-table tools and MCP servers together). A `name.json` manifest beside a script points at an external command instead — same fields as the config `tools` table, as a file. Everything runs at the exec approval tier, so a plugin asks before it runs.
+
 The extension surfaces follow one rule: files declare, processes compute, the binary itself never
 recompiles. Aliases, commands and skills were always files; what follows adds the three
 code-bearing surfaces, all declared in config.json or dropped in as files.
 
-When you want a tool the agent does not have, write a script and point config at it. A script tool
-spawns once per call, receives the tool arguments as one JSON line on stdin, and whatever it prints
-to stdout becomes the tool result; a nonzero exit reports as an error. Say you keep tickets in a
-file and want the agent to look them up:
+When you want a tool that needs no shebang of its own, declare it in config instead — same spawn
+model (one process per call, arguments as a JSON line on stdin, stdout is the result, nonzero exit
+reports as an error). Say you keep tickets in a file and want the agent to look them up:
 
 ```python
 # ~/.llm/scripts/ticket.py
@@ -167,9 +180,10 @@ print(f"ticket {args['id']}: see ~/.llm/notes")
 
 That whole entry is the plugin. `description` tells the model what the tool does, `schema` is a
 JSON Schema for the arguments (default `{"type": "object"}`), `timeout` bounds each call in seconds
-(default 60), and `${ENV_VAR}` expands in `command` and `args`. Script tools mount under their own
-name next to the built-ins, ask approval like any exec-tier tool (`Allow? [Y/n/a]`, remembered per
-session with `a`), obey `[agent] tools` policies, and can be picked with `--tools ticket,bash`.
+(default 60), and `${ENV_VAR}` expands in `command` and `args`. Both kinds — drop-in and declared —
+mount under their own name next to the built-ins, ask approval like any exec-tier tool
+(`Allow? [Y/n/a]`, remembered per session with `a`), obey `[agent] tools` policies, and can be
+picked with `--tools ticket,bash`.
 Sub-agents default to the built-in tool set (`read,grep,glob,ls`); name plugin tools in an agent
 definition's `tools:` list to hand them through.
 

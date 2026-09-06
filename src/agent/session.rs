@@ -78,11 +78,9 @@ impl Session {
         }
         let mut tools =
             crate::agent::tools::builtin_tools_configured(Some(&self.model.qualified_id()), roles);
-        tools.extend(
-            self.script_tools
-                .iter()
-                .map(crate::agent::script_tool::mount),
-        );
+        let mut specs = crate::agent::user_tools::discover(&self.cwd);
+        specs.extend(self.script_tools.iter().cloned());
+        tools.extend(specs.iter().map(crate::agent::script_tool::mount));
         self.mcp.mount_tools(&mut tools);
         self.tools = tools;
     }
