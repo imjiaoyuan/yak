@@ -1,10 +1,31 @@
-//! The provider wizard behind `llm models add` (catalog of common presets,
-//! hidden-input key capture, live model list) and the removal picker behind
-//! `llm models rm`.
+//! `llm login` / `llm logout` — the provider lifecycle. Login runs the
+//! wizard (catalog of common presets, hidden-input key capture, live model
+//! list) or takes NAME [KEY] directly for catalog entries; logout removes a
+//! provider by picker or name.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
+use crate::core::args::{OptSpec, render_help};
 use crate::core::config::{self, Provider};
+use crate::{flag_spec, value_spec};
+
+const LOGIN_SPECS: &[OptSpec] = &[
+    value_spec!(
+        "base-url",
+        None,
+        "Custom endpoint for a non-catalog provider",
+        "URL"
+    ),
+    value_spec!(
+        "kind",
+        None,
+        "Wire kind: openai-compat or anthropic",
+        "KIND"
+    ),
+    flag_spec!("help", Some('h'), "Show this message and exit"),
+];
+
+const LOGOUT_SPECS: &[OptSpec] = &[flag_spec!("help", Some('h'), "Show this message and exit")];
 
 struct Preset {
     name: String,
@@ -67,7 +88,7 @@ fn presets() -> Vec<Preset> {
 pub(crate) fn logout_picker() -> Result<(), String> {
     let mut cfg = config::load();
     if cfg.providers.is_empty() {
-        eprintln!("\x1b[2mno providers configured (llm models add)\x1b[0m");
+        eprintln!("\x1b[2mno providers configured (llm login)\x1b[0m");
         return Ok(());
     }
     let items: Vec<String> = cfg
@@ -370,4 +391,205 @@ fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<Strin
         .iter()
         .filter_map(|m| m["id"].as_str().map(String::from))
         .collect())
+}
+
+/// `llm login [NAME [KEY]]` — bare on a terminal: the wizard. With a
+/// catalog NAME: the direct form (optionally a KEY, or the catalog's env
+/// var). With --base-url: any custom endpoint.
+pub fn run_login(argv: &[String]) -> i32 {
+    let (args, code) = crate::core::args::parse_with_help(argv, LOGIN_SPECS, || {
+        render_help(
+            "llm login [NAME [KEY]]",
+            "Add a provider (bare: the interactive wizard)",
+            LOGIN_SPECS,
+            &[(
+                "NAME",
+                "a catalog provider id, or a custom name with --base-url",
+            )],
+        )
+    });
+    let Some(args) = args else { return code };
+    if args.positionals.is_empty() {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("Error: llm login requires a terminal, or NAME and KEY");
+            return 1;
+        }
+        return match wizard() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        };
+    }
+    let name = args.positionals[0].clone();
+    let api_key = args.positionals.get(1).cloned();
+    // custom endpoint: any name + --base-url (+ --kind, default openai-compat)
+    if let Some(base_url) = args.opt(&["base-url"]) {
+        let kind = args.opt(&["kind"]).unwrap_or("openai-compat").to_string();
+        if kind != "openai-compat" && kind != "anthropic" {
+            eprintln!("Error: --kind must be openai-compat or anthropic");
+            return 2;
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || name.is_empty()
+        {
+            eprintln!("Error: invalid provider name: {name}");
+            return 2;
+        }
+        let fetch_key = api_key.clone().unwrap_or_default();
+        eprintln!("Fetching models from {base_url} ...");
+        let models = try_fetch_models(&kind, base_url, &fetch_key);
+        return save_new_provider(&name, &kind, base_url, api_key, models);
+    }
+    let Some(entry) = crate::providers::catalog::by_id(&name) else {
+        eprintln!(
+            "Error: unknown provider '{name}' (not in the catalog; custom endpoints take --base-url, or use the interactive `llm login`)"
+        );
+        return 1;
+    };
+    // the catalog entry's env var backs an omitted key, so
+    // `llm login deepseek` works with $DEEPSEEK_API_KEY exported
+    let (api_key, fetch_key) = match &api_key {
+        Some(k) => (api_key.clone(), k.clone()),
+        None if !entry.env.is_empty() && std::env::var_os(entry.env).is_some() => (
+            Some(format!("${{{}}}", entry.env)),
+            std::env::var(entry.env).unwrap_or_default(),
+        ),
+        None => (None, String::new()),
+    };
+    eprintln!("Fetching models from {} ...", entry.base_url);
+    let models = try_fetch_models(entry.kind, entry.base_url, &fetch_key);
+    save_new_provider(&name, entry.kind, entry.base_url, api_key, models)
+}
+
+/// Insert the provider (or refresh a model-less entry) and print the
+/// outcome; `allow_empty_models` controls whether a failed fetch still
+/// saves (catalog form keeps the wizard's behavior of saving for retry).
+fn save_new_provider(
+    name: &str,
+    kind: &str,
+    base_url: &str,
+    api_key: Option<String>,
+    models: Vec<String>,
+) -> i32 {
+    let mut cfg = config::load();
+    if let Some(existing) = cfg.providers.get(name) {
+        // an entry left model-less by a failed fetch is a retry target:
+        // refresh its list instead of bouncing the user through logout
+        if !existing.models.is_empty() {
+            eprintln!("Error: provider '{name}' already exists (llm logout {name} first)");
+            return 1;
+        }
+        if models.is_empty() {
+            eprintln!("Error: provider '{name}' still lists no models — nothing to refresh");
+            return 1;
+        }
+        let provider = Provider {
+            models,
+            ..existing.clone()
+        };
+        cfg.providers.insert(name.to_string(), provider);
+        return match config::save(&cfg) {
+            Ok(()) => {
+                let count = cfg.providers[name].models.len();
+                eprintln!("refreshed models for '{name}' ({count} models)");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        };
+    }
+    if models.is_empty() {
+        eprintln!(
+            "could not fetch models — provider saved without models (re-run `llm login {name}` to retry)"
+        );
+    }
+    cfg.providers.insert(
+        name.to_string(),
+        Provider {
+            kind: kind.to_string(),
+            base_url: base_url.to_string(),
+            api_key,
+            models,
+        },
+    );
+    match config::save(&cfg) {
+        Ok(()) => {
+            eprintln!(
+                "Provider '{name}' written to {}",
+                config::config_path().display()
+            );
+            // the first provider's first model becomes the default, so a
+            // fresh install is ready to run without another command
+            if config::default_model().is_none()
+                && let Some(first) = cfg
+                    .providers
+                    .get(name)
+                    .and_then(|p| p.models.first().cloned())
+            {
+                let qualified = format!("{name}/{first}");
+                if config::try_set_default_model(&qualified).is_ok() {
+                    eprintln!("\x1b[2mdefault model: {qualified}\x1b[0m");
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
+}
+
+/// `llm logout [NAME]` — bare on a terminal: the picker.
+pub fn run_logout(argv: &[String]) -> i32 {
+    let (args, code) = crate::core::args::parse_with_help(argv, LOGOUT_SPECS, || {
+        render_help(
+            "llm logout [NAME]",
+            "Remove a provider (bare: the picker)",
+            LOGOUT_SPECS,
+            &[],
+        )
+    });
+    let Some(args) = args else { return code };
+    if args.positionals.is_empty() {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("Error: llm logout requires a terminal, or NAME");
+            return 1;
+        }
+        return match logout_picker() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        };
+    }
+    let name = &args.positionals[0];
+    let mut cfg = config::load();
+    if cfg.providers.remove(name).is_none() {
+        eprintln!("Error: No provider found with name '{name}'");
+        return 1;
+    }
+    match config::save(&cfg) {
+        Ok(()) => {
+            eprintln!(
+                "removed provider '{name}' (and its key) from {}",
+                config::config_path().display()
+            );
+            if config::clear_default_for(name) {
+                eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
 }

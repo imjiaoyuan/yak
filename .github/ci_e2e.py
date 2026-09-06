@@ -61,6 +61,17 @@ TINY_PNG = bytes.fromhex(
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.endswith("/models"):
+            body = {"data": [{"id": "m-a"}, {"id": "m-b"}]}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         if self.path.endswith("/v1/messages"):
@@ -392,10 +403,20 @@ def main():
     lst = run([binary, "models", "options", "list"], env, stdin=subprocess.DEVNULL)
     assert "mock/m-b" in lst.stdout, f"options key not qualified: {lst.stdout!r}"
 
-    # removing a provider clears the mode defaults that pointed at it
-    w = run([binary, "models", "remove", "mock-write"], env, stdin=subprocess.DEVNULL)
-    assert w.returncode == 0 and "cleared" not in w.stderr,         f"unreferenced remove must clear nothing: {w.stderr!r}"
-    r = run([binary, "models", "remove", "mock"], env, stdin=subprocess.DEVNULL)
+    # login builds a custom provider from --base-url: the models list
+    # comes back through the /models endpoint
+    lo = run([binary, "login", "mockx", "--base-url", f"http://127.0.0.1:{PORT}/v1",
+              "--kind", "openai-compat", "sk-ci"], env, stdin=subprocess.DEVNULL)
+    assert lo.returncode == 0, f"login rc={lo.returncode} err={lo.stderr[-400:]}"
+    lst = run([binary, "models", "list"], env, stdin=subprocess.DEVNULL)
+    assert "mockx/m-a" in lst.stdout and "mockx/m-b" in lst.stdout, \
+        f"custom provider models: {lst.stdout!r}"
+
+    # removing a provider clears the default that pointed at it
+    w = run([binary, "logout", "mock-write"], env, stdin=subprocess.DEVNULL)
+    assert w.returncode == 0 and "cleared" not in w.stderr, \
+        f"unreferenced remove must clear nothing: {w.stderr!r}"
+    r = run([binary, "logout", "mock"], env, stdin=subprocess.DEVNULL)
     assert r.returncode == 0 and "cleared the default model" in r.stderr, f"remove clearing: {r.stderr!r}"
     g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
     assert "(unset" in g.stdout, f"defaults survived removal: {g.stdout!r}"

@@ -63,15 +63,18 @@ stdin the CLI reads plain input as before.
 The quickest way to get going is the interactive provider wizard — no need to hand-edit any file:
 
 ```bash
-llm models add                     # the wizard
-llm models add deepseek sk-xxx     # direct form: catalog name + key, no prompts
+llm login                     # the wizard
+llm login deepseek sk-xxx     # direct form: catalog name + key, no prompts
+llm login deepseek            # keyless catalog form: ${DEEPSEEK_API_KEY} backs it
+llm login my-proxy --base-url https://proxy.internal/v1 --kind openai-compat
 ```
 
 The wizard opens a picker over the built-in provider catalog (Anthropic, OpenAI, DeepSeek, Google,
 Groq, Ollama, ...), asks for your API key with hidden input, and writes the provider into
-`config.json`; the first provider's first model automatically becomes the default for prompt,
-agent and chat, so a fresh install is ready to run. Every configuration command is dual-form like
-this: bare on a terminal opens the interactive flow, full arguments run directly. You can also
+`config.json`; the first provider's first model automatically becomes the shared default, so a
+fresh install is ready to run. Every configuration command is dual-form like this: bare on a
+terminal opens the interactive flow, full arguments run directly. `llm logout` (or
+`llm logout deepseek`) removes a provider and clears the default if it pointed there. You can also
 inspect or replace a single key:
 
 ```bash
@@ -103,28 +106,31 @@ Providers are registered in `config.json` in that directory, alongside any other
 `kind` is one of `openai-compat`, `anthropic`, `image`, `tts`, and `api_key` expands `${ENV_VAR}`
 references at request time, so literal secrets and environment indirection live in the same field.
 
-`llm models` is the configuration center for everything model-shaped. Bare on a terminal it walks
-you through mode → provider → model → thinking depth; the same subcommands take direct arguments:
+`llm models` picks the default model and its thinking depth — one default shared by every mode
+(bare `llm`, agent and chat REPLs all start on it). Bare on a terminal it walks you through
+provider → model → thinking depth; the same subcommands take direct arguments:
 
 ```bash
 llm models                      # the wizard (or: llm models set)
-llm models set chat zai/glm-5.2 --thinking high
-llm models set deepseek/deepseek-chat           # a bare model targets the prompt mode
-llm models get                  # the current setting of every mode
-llm models unset chat
+llm models set zai/glm-5.2 --thinking high
+llm models set deepseek/deepseek-chat           # bare model names and aliases resolve too
+llm models get                  # the current default
+llm models unset
 ```
 
 It is all one `models` object in config.json (distinct from the nested `agent.models`
-context-window table): `prompt` is what a bare `llm "prompt"` uses, `agent`/`chat` are what
-their REPLs start on, and `options` holds per-model default
-options (`llm models options set MODEL KEY VALUE`). `-m` and `LLM_MODEL` stay per-invocation;
-a mode's `thinking` loses only to `--thinking`; when a stored model no longer resolves (its
-provider was removed), the mode warns and falls back to the prompt default.
+context-window table): `default` is the shared model every mode starts on, `thinking` the
+reasoning depth riding it, and `options` per-model default options
+(`llm models options set MODEL KEY VALUE`). `-m` and `LLM_MODEL` stay per-invocation; the stored
+`thinking` loses only to `--thinking`. Legacy per-mode entries (`prompt`/`agent`/`chat` keys from
+older versions) migrate on first read: the prompt entry wins, and the next `models set` collapses
+the file onto the new shape. When the stored default no longer resolves (its provider was
+removed), commands warn and fall back.
 
-A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, Cerebras, NVIDIA, Hugging Face, Together, Baseten, Fireworks, xAI, OpenRouter, Moonshot, Kimi, Z.ai, Qwen token plans, Xiaomi MiMo, MiniMax, Vercel AI Gateway, SiliconFlow, Zhipu, and the local runtimes Ollama, LM Studio, llama.cpp, vLLM, plus `openai-image`/`openai-tts` entries whose `image` and `tts` kinds drive `--out`) carries canonical endpoints and env var names, and `llm models add` builds its wizard picker straight from it:
+A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, Cerebras, NVIDIA, Hugging Face, Together, Baseten, Fireworks, xAI, OpenRouter, Moonshot, Kimi, Z.ai, Qwen token plans, Xiaomi MiMo, MiniMax, Vercel AI Gateway, SiliconFlow, Zhipu, and the local runtimes Ollama, LM Studio, llama.cpp, vLLM, plus `openai-image`/`openai-tts` entries whose `image` and `tts` kinds drive `--out`) carries canonical endpoints and env var names, and `llm login` builds its wizard picker straight from it:
 
 ```bash
-llm models add                             # provider wizard (catalog + templates)
+llm login                                  # provider wizard (catalog + templates)
 llm models key deepseek sk-xxx             # set the provider's key directly
 llm models set deepseek/deepseek-chat
 ```
@@ -246,7 +252,9 @@ Commands:
   agent      Run an agentic task with tools
   chat       Hold an ongoing conversation (tool-less agent session)
   logs       Show past conversations
-  models     Manage models, defaults and provider keys
+  models     Pick the default model and its thinking level
+  login      Add a provider
+  logout     Remove a provider
 
 Options:
   -h, --help     Show this message and exit
@@ -389,6 +397,47 @@ Options:
   -h, --help                    Show this message and exit
 ```
 
+### Configuration
+
+```
+Add a provider (bare: the interactive wizard)
+
+Usage: llm login [NAME [KEY]] [OPTIONS] NAME
+
+Options:
+      --base-url URL    Custom endpoint for a non-catalog provider
+      --kind KIND       Wire kind: openai-compat or anthropic
+  -h, --help            Show this message and exit
+```
+
+```
+Remove a provider (bare: the picker)
+
+Usage: llm logout [NAME] [OPTIONS] 
+
+Options:
+  -h, --help            Show this message and exit
+```
+
+```
+Manage the default model and per-model options
+
+Commands:
+  set       Set the default model (bare: interactive wizard)
+  get       Show the default
+  unset     Clear the default
+  key       Show or set a provider's API key
+  list      List available models
+  options   Per-model default options
+
+Providers are added and removed with `llm login` and `llm logout`.
+
+Usage: llm models [COMMAND] [ARGS]... [OPTIONS] 
+
+Options:
+  -h, --help            Show this message and exit
+```
+
 
 ## Examples
 
@@ -398,15 +447,15 @@ Pick a model per call with `-m deepseek/deepseek-chat`, or fuzzily with `-q clau
 
 Conversations continue with `llm -c "and in python?"` or `llm --cid 01ABC... "..."` (a short unambiguous prefix like `01m13d` works too), and every prompt lands in `logs.db` unless you pass `-n`. `llm logs list` groups conversations under mode sections (`agent`, `chat`, `prompt`), each row a six-character id, the model and the turn count, with previews truncated by display width so CJK prompts stay inside the margin. Bare `llm logs` on a terminal is interactive the way bare `llm models` is: one filterable list of recent conversations, each row tagged with its mode, and typing filters across mode, preview and id (fuzzy-filter style — `agent`, a model name or a phrase from the prompt all narrow it); enter opens the transcript and then offers to jump straight into the conversation (answering Y resumes it in the right session, chat threads in the chat preset, everything else in the agent); piped or flagged invocations keep printing the list. When a prompt is worth keeping, drop it in `~/.llm/commands/review.md`: the body is the prompt, `$input` receives whatever follows the command name, and `$name` / `${name}` variables fill from `-p lang=rust` on `llm review -p lang=rust`. Frontmatter can pin `model:` and `system:`, or declare `attachments` (a list of files, URLs or `-`) and `attachment_types` (a path to mimetype map) that ride along on every run, ahead of any `-a` entries.
 
-Chat is the multi-turn form: `llm chat` opens the same line-editing REPL as the agent, minus the tools, starting on the model configured for the chat mode (`llm models set chat ...`). It shares everything with the agent session: `/clear` starts fresh, `/mcp` reports servers, history and tab completion behave identically, and turns land in the same store tagged `chat`. Images join by pasting (ctrl+v pulls the clipboard image in as a file path) or by simply naming an image path in the message; both attach automatically. Bare `llm logs` on a terminal is the way back into any past conversation: pick one, read the transcript, answer the enter question and the session continues where it left off. Pressing ctrl+c once interrupts the running turn; a second press within two seconds leaves.
+Chat is the multi-turn form: `llm chat` opens the same line-editing REPL as the agent, minus the tools, starting on the shared default model (`llm models set ...`). It shares everything with the agent session: `/clear` starts fresh, `/mcp` reports servers, history and tab completion behave identically, and turns land in the same store tagged `chat`. Images join by pasting (ctrl+v pulls the clipboard image in as a file path) or by simply naming an image path in the message; both attach automatically. Bare `llm logs` on a terminal is the way back into any past conversation: pick one, read the transcript, answer the enter question and the session continues where it left off. Pressing ctrl+c once interrupts the running turn; a second press within two seconds leaves.
 
-Agent mode adds tools: `llm agent "fix the failing test"` runs a loop that can read, edit, search and run commands, pausing for approval on writes, commands and reads outside the working directory unless you pass `--yolo` or set `approval_mode = "yolo"` in config; file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. Bare `llm agent` on a terminal opens an interactive session on the agent mode's configured model (`llm models set agent ...`), with slash commands (`/skills`, `/memory`, `/compact`, `/status`, `/init`, `/mcp`, ...), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Past sessions reopen from `llm logs`: pick a conversation, answer the enter question. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm agent --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one. Delegation covers the rest of the reference's shape: the `task` tool runs sub-agents defined as markdown files (`~/.llm/agents/*.md` or `.llm/agents/`), one at a time, chained with `{previous}`, or fanned out with `tasks: [...]` where every running sub-agent streams a live `name · progress` line; definitions can declare a single-line `output_schema:` (or a call can pass `outputSchema`) and the child's final answer comes back validated as JSON.
+Agent mode adds tools: `llm agent "fix the failing test"` runs a loop that can read, edit, search and run commands, pausing for approval on writes, commands and reads outside the working directory unless you pass `--yolo` or set `approval_mode = "yolo"` in config; file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. Bare `llm agent` on a terminal opens an interactive session on the shared default model (`llm models set ...`), with slash commands (`/skills`, `/memory`, `/compact`, `/status`, `/init`, `/mcp`, ...), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Past sessions reopen from `llm logs`: pick a conversation, answer the enter question. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm agent --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one. Delegation covers the rest of the reference's shape: the `task` tool runs sub-agents defined as markdown files (`~/.llm/agents/*.md` or `.llm/agents/`), one at a time, chained with `{previous}`, or fanned out with `tasks: [...]` where every running sub-agent streams a live `name · progress` line; definitions can declare a single-line `output_schema:` (or a call can pass `outputSchema`) and the child's final answer comes back validated as JSON.
 
 Multimodal input reaches every mode the same way: `-a screenshot.png` rides the task's first message, and inside a session ctrl+v pastes the clipboard image as a temp-file path you can see and edit, while any local image path typed into a message attaches itself automatically (a dim note confirms each one). Limit the toolbox with `--tools read,grep`, the turn budget with `--max-turns`, and swap the system prompt with `-s` or `--append-system-prompt`. Sessions persist, so `llm agent -c "now run it"` picks up where the last one ended, `--no-session` opts out, and `--mode json` emits one JSON event per line for driving the agent from other programs.
 
 Binary formats stay outside the binary on purpose: the agent's read tool answers with a hint at local tooling instead of garbage bytes — `pdftotext` for PDFs, `samtools` for BAM and CRAM, `duckdb` for Parquet and HDF5, `libreoffice --headless --convert-to csv` for the legacy Office formats. Convert first, then feed the `.txt` to any command.
 
-Reasoning effort is a first-class dial on every entry point: `llm prompt --thinking high`, `llm chat --thinking medium`, and `llm agent --thinking high` map to `reasoning_effort` on OpenAI-compatible endpoints and a thinking budget on Anthropic ones; each mode's default depth lives next to its model in config.json (`llm models set MODE MODEL --thinking LEVEL`, `off` omits the parameter entirely).
+Reasoning effort is a first-class dial on every entry point: `llm prompt --thinking high`, `llm chat --thinking medium`, and `llm agent --thinking high` map to `reasoning_effort` on OpenAI-compatible endpoints and a thinking budget on Anthropic ones; the default depth lives next to the default model in config.json (`llm models set MODEL --thinking LEVEL`; `off` omits the parameter entirely).
 
 Skills and memory live under the user directory. Skills are SKILL.md folders discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from the working directory (later wins by name, so packs installed by other tools keep working); clone or copy a folder into one of those and the agent picks it up, listing them via `/skills` and running one with `/skill:<name>`, and the model can pick skills itself from the system-prompt list (disabled per skill with `disable_model_invocation` or globally via `[agent] disabled_skills`). Global memory is a hand-editable `~/.llm/LLM.md` injected into the agent and chat system prompts, with `/memory add` appending a manual line, `/memory update` extracting durable facts from the session into the marker-delimited auto region, `/memory clean` consolidating it, and `[agent] memory = "auto"` extracting automatically when the REPL exits. Model traffic goes through HTTP proxies from `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`) automatically
 

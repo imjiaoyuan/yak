@@ -245,7 +245,10 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         .or_else(|| conv_model.clone())
         .or(stored_default);
     let Some(query) = query else {
-        return Err("No default model configured. Run `llm models set <model>`, `llm models add`, or use -m.".to_string());
+        return Err(
+            "No default model configured. Run `llm models set <model>`, `llm login`, or use -m."
+                .to_string(),
+        );
     };
     let Some((name, provider, model_id)) = cfg.resolve_model(&query) else {
         return Err(format!("'{query}' is not a known model"));

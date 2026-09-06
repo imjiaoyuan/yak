@@ -6,7 +6,7 @@
 use std::io::IsTerminal;
 
 use crate::core::args::{OptSpec, parse, render_help, split_subcommand};
-use crate::core::config::{self, Provider};
+use crate::core::config::{self};
 use crate::providers::ResolvedModel;
 use crate::{flag_spec, multi_spec, value_spec};
 
@@ -55,15 +55,13 @@ pub fn run(argv: &[String]) -> i32 {
         "set" => set(&rest),
         "unset" => unset(&rest),
         "key" | "keys" => key(&rest),
-        "add" => add(&rest),
-        "remove" | "rm" => remove(&rest),
         "options" => options(&rest),
         "--help" | "-h" | "help" => {
             print!(
                 "{}",
                 render_help(
                     "llm models [COMMAND] [ARGS]...",
-                    "Manage models, per-mode defaults and provider keys\n\nCommands:\n  set       Configure a mode (bare: interactive wizard)\n  get       Show the current settings\n  unset     Clear a mode's default\n  key       Show or set a provider's API key\n  add       Add a provider (bare: the login wizard)\n  remove    Remove a provider\n  list      List available models\n  options   Per-model default options",
+                    "Manage the default model and per-model options\n\nCommands:\n  set       Set the default model (bare: interactive wizard)\n  get       Show the default\n  unset     Clear the default\n  key       Show or set a provider's API key\n  list      List available models\n  options   Per-model default options\n\nProviders are added and removed with `llm login` and `llm logout`.",
                     SIMPLE_SPECS,
                     &[],
                 )
@@ -114,7 +112,7 @@ pub struct ModelChoice {
 pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Option<ModelChoice> {
     let cfg = config::load();
     if cfg.providers.is_empty() {
-        eprintln!("\x1b[2mno models available (run `llm models add`)\x1b[0m");
+        eprintln!("\x1b[2mno models available (run `llm login`)\x1b[0m");
         return None;
     }
     let current_provider = current.split_once('/').map(|(p, _)| p);
@@ -152,7 +150,7 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        eprintln!("\x1b[2mno models available (run `llm models add`)\x1b[0m");
+        eprintln!("\x1b[2mno models available (run `llm login`)\x1b[0m");
         return None;
     }
     let current_model = current.split_once('/').map(|(_, m)| m);
@@ -313,7 +311,7 @@ fn key(argv: &[String]) -> i32 {
     let cfg = config::load();
     let Some(name) = args.first_positional().map(String::from) else {
         if cfg.providers.is_empty() {
-            println!("No providers configured (llm models add)");
+            println!("No providers configured (llm login)");
             return 0;
         }
         for (name, p) in &cfg.providers {
@@ -327,7 +325,7 @@ fn key(argv: &[String]) -> i32 {
         return 0;
     };
     if !cfg.providers.contains_key(&name) {
-        eprintln!("Error: No provider found with name '{name}' (add one with llm models add)");
+        eprintln!("Error: No provider found with name '{name}' (add one with llm login)");
         return 1;
     }
     if args.flag(&["set"]) {
@@ -378,161 +376,6 @@ fn set_provider_key(name: &str, value: &str) -> i32 {
     }
 }
 
-// add / remove — the provider lifecycle; bare invocation on a terminal
-// opens the wizard
-
-fn add(argv: &[String]) -> i32 {
-    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
-        render_help(
-            "llm models add [NAME [KEY]]",
-            "Add a provider (bare: the interactive wizard)",
-            SIMPLE_SPECS,
-            &[],
-        )
-    });
-    let Some(args) = args else { return code };
-    if args.positionals.is_empty() {
-        if !std::io::stdin().is_terminal() {
-            eprintln!("Error: llm models add requires a terminal, or NAME and KEY");
-            return 1;
-        }
-        return match crate::commands::login::wizard() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        };
-    }
-    let name = args.positionals[0].clone();
-    let Some(entry) = crate::providers::catalog::by_id(&name) else {
-        eprintln!(
-            "Error: unknown provider '{name}' (not in the catalog; custom endpoints go through the interactive `llm models add`)"
-        );
-        return 1;
-    };
-    let api_key = args.positionals.get(1).cloned();
-    let fetch_key = api_key.clone().unwrap_or_default();
-    eprintln!("Fetching models from {} ...", entry.base_url);
-    let models = crate::commands::login::try_fetch_models(entry.kind, entry.base_url, &fetch_key);
-    let mut cfg = config::load();
-    if let Some(existing) = cfg.providers.get(&name) {
-        // an entry left model-less by a failed fetch is a retry target:
-        // refresh its list instead of bouncing the user through remove
-        if !existing.models.is_empty() {
-            eprintln!("Error: provider '{name}' already exists (llm models remove {name} first)");
-            return 1;
-        }
-        if models.is_empty() {
-            eprintln!("Error: provider '{name}' still lists no models — nothing to refresh");
-            return 1;
-        }
-        let provider = Provider {
-            models,
-            ..existing.clone()
-        };
-        cfg.providers.insert(name.clone(), provider);
-        return match config::save(&cfg) {
-            Ok(()) => {
-                let count = cfg.providers[&name].models.len();
-                eprintln!("refreshed models for '{name}' ({count} models)");
-                0
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        };
-    }
-    if models.is_empty() {
-        eprintln!(
-            "could not fetch models — provider saved without models (re-run `llm models add {name}` to retry)"
-        );
-    }
-    cfg.providers.insert(
-        name.clone(),
-        Provider {
-            kind: entry.kind.to_string(),
-            base_url: entry.base_url.to_string(),
-            api_key,
-            models,
-        },
-    );
-    match config::save(&cfg) {
-        Ok(()) => {
-            eprintln!(
-                "Provider '{name}' written to {}",
-                config::config_path().display()
-            );
-            // the first provider's first model becomes the default, so a
-            // fresh install is ready to run without another command
-            if config::default_model().is_none()
-                && let Some(first) = cfg
-                    .providers
-                    .get(&name)
-                    .and_then(|p| p.models.first().cloned())
-            {
-                let qualified = format!("{name}/{first}");
-                if config::try_set_default_model(&qualified).is_ok() {
-                    eprintln!("\x1b[2mdefault model: {qualified}\x1b[0m");
-                }
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("Error: {e}");
-            1
-        }
-    }
-}
-
-fn remove(argv: &[String]) -> i32 {
-    let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
-        render_help(
-            "llm models remove [NAME]",
-            "Remove a provider (bare: the picker)",
-            SIMPLE_SPECS,
-            &[],
-        )
-    });
-    let Some(args) = args else { return code };
-    if args.positionals.is_empty() {
-        if !std::io::stdin().is_terminal() {
-            eprintln!("Error: llm models remove requires a terminal, or NAME");
-            return 1;
-        }
-        return match crate::commands::login::logout_picker() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        };
-    }
-    let name = &args.positionals[0];
-    let mut cfg = config::load();
-    if cfg.providers.remove(name).is_none() {
-        eprintln!("Error: No provider found with name '{name}'");
-        return 1;
-    }
-    match config::save(&cfg) {
-        Ok(()) => {
-            eprintln!(
-                "removed provider '{name}' (and its key) from {}",
-                config::config_path().display()
-            );
-            if config::clear_default_for(name) {
-                eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("Error: {e}");
-            1
-        }
-    }
-}
-
 // list / options — browsing and per-model defaults
 
 fn list(argv: &[String]) -> i32 {
@@ -572,7 +415,7 @@ fn list(argv: &[String]) -> i32 {
                 && std::io::stdout().is_terminal()
             {
                 println!(
-                    "\x1b[90m{provider}/ · no models listed · `llm models add` fetches them\x1b[0m"
+                    "\x1b[90m{provider}/ · no models listed · `llm login` fetches them\x1b[0m"
                 );
             }
             continue;

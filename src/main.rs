@@ -31,7 +31,9 @@ Commands:
   agent      Run an agentic task with tools
   chat       Hold an ongoing conversation (tool-less agent session)
   logs       Show past conversations
-  models     Manage models, defaults and provider keys
+  models     Pick the default model and its thinking level
+  login      Add a provider
+  logout     Remove a provider
 
 Options:
   -h, --help     Show this message and exit
@@ -71,6 +73,8 @@ fn dispatch(argv: &[String]) -> i32 {
         "chat" => commands::agent::run_chat(&argv[1..]),
         "logs" => commands::logs::run(&argv[1..]),
         "models" => commands::models::run(&argv[1..]),
+        "login" => commands::login::run_login(&argv[1..]),
+        "logout" => commands::login::run_logout(&argv[1..]),
         // anything else (flags or plain text) → default prompt; a word that
         // reads like a mistyped command gets a hint instead of a surprise
         // model call. Custom commands win over the hint: an exact name match
@@ -97,7 +101,7 @@ fn dispatch(argv: &[String]) -> i32 {
 /// Subcommand names and aliases. Keep in sync with the match in `dispatch`
 /// above.
 const SUBCOMMANDS: &[&str] = &[
-    "prompt", "agent", "chat", "logs", "models", "help", "version",
+    "prompt", "agent", "chat", "logs", "models", "login", "logout", "help", "version",
 ];
 
 /// Suggest a subcommand for a word that is probably a mistyped command: a

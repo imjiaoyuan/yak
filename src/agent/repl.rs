@@ -560,7 +560,7 @@ fn repl_command(
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!("  multi-line: ctrl+j / alt+enter newline · ctrl+g edits in $EDITOR");
-            eprintln!("  models live in `llm models` (set agent defaults there)\x1b[0m");
+            eprintln!("  llm models picks the default; llm login adds providers\x1b[0m");
         }
         "/ask" | "/yolo" => {
             // match on the command word: an argument ("/ask always confirm
