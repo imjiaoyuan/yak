@@ -17,7 +17,7 @@ pub const DEFAULT_TIMEOUT: u64 = 60;
 
 /// Built-in tool names; script tools must not shadow these. Tied to the
 /// actual registry by a test.
-const BUILTIN_TOOL_NAMES: &[&str] = &[
+pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "read",
     "write",
     "edit",
@@ -106,7 +106,7 @@ fn parse_table(table: &serde_json::Map<String, Value>) -> Vec<ScriptToolSpec> {
 
 /// Script names share the tool-name space the providers expect; the `mcp__`
 /// prefix is reserved for mounted MCP tools.
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     crate::core::text::valid_plugin_name(name, 64) && !name.starts_with("mcp__")
 }
 

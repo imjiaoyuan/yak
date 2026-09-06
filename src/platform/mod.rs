@@ -159,6 +159,22 @@ pub fn shell_spec() -> ShellSpec {
     }
 }
 
+/// Resolve a bare program name through `$PATH`, like a shell would. Names
+/// containing a path separator are left to the caller.
+pub fn find_in_path(program: &str) -> Option<std::path::PathBuf> {
+    if program.is_empty() || program.contains('/') {
+        return None;
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Like run_shell, but complete stdout lines are handed to `on_stdout_line`
 /// live while the command runs (the agent streams long command output).
 fn run_shell_prepared(

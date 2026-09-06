@@ -78,8 +78,15 @@ impl Session {
         }
         let mut tools =
             crate::agent::tools::builtin_tools_configured(Some(&self.model.qualified_id()), roles);
+        // drop-ins win over same-named config-table tools (the nearer the
+        // home, the more specific), and a name never mounts twice
         let mut specs = crate::agent::user_tools::discover(&self.cwd);
-        specs.extend(self.script_tools.iter().cloned());
+        for cfg in &self.script_tools {
+            match specs.iter_mut().find(|s| s.name == cfg.name) {
+                Some(hit) => *hit = cfg.clone(),
+                None => specs.push(cfg.clone()),
+            }
+        }
         tools.extend(specs.iter().map(crate::agent::script_tool::mount));
         self.mcp.mount_tools(&mut tools);
         self.tools = tools;

@@ -16,11 +16,17 @@ const HEADER_MARK: &str = "--- llm-tool:";
 
 /// Discover every drop-in tool: embedded-manifest executables plus JSON
 /// manifests, from both roots. Later roots (nearer the cwd) win on name
-/// collisions, mirroring skills' project-over-user rule.
+/// collisions, mirroring skills' project-over-user rule. Drop-in names live
+/// under the same rules as config-table tools: the charset and mcp__
+/// reservation of the provider schema, and no shadowing of built-ins.
 pub fn discover(cwd: &Path) -> Vec<ScriptToolSpec> {
+    discover_in(cwd, &crate::core::config::user_dir().join("tools"))
+}
+
+/// `discover` with an explicit user tools dir, so tests stay hermetic.
+pub fn discover_in(cwd: &Path, user: &Path) -> Vec<ScriptToolSpec> {
     let mut specs: Vec<ScriptToolSpec> = Vec::new();
-    let user = crate::core::config::user_dir().join("tools");
-    for root in project_roots(cwd, &user) {
+    for root in project_roots(cwd, user) {
         let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
@@ -29,6 +35,20 @@ pub fn discover(cwd: &Path) -> Vec<ScriptToolSpec> {
             let Some(spec) = load_one(&path) else {
                 continue;
             };
+            if !crate::agent::script_tool::valid_name(&spec.name) {
+                warn(
+                    &path,
+                    &format!(
+                        "name '{}' must match [A-Za-z0-9_-]{{1,64}} and not start with mcp__",
+                        spec.name
+                    ),
+                );
+                continue;
+            }
+            if crate::agent::script_tool::BUILTIN_TOOL_NAMES.contains(&spec.name.as_str()) {
+                warn(&path, "collides with a built-in tool");
+                continue;
+            }
             if let Some(existing) = specs.iter_mut().find(|s| s.name == spec.name) {
                 *existing = spec; // nearer root overrides
             } else {
@@ -40,8 +60,9 @@ pub fn discover(cwd: &Path) -> Vec<ScriptToolSpec> {
 }
 
 /// The project root nearest the cwd wins: walk up collecting every
-/// `.llm/tools` found (nearer later), then the user dir first (so later,
-/// nearer entries override it).
+/// `.llm/tools` found, then the user dir first and the found roots behind
+/// it farthest-first, so the nearest project dir loads last and overrides
+/// on name.
 fn project_roots(cwd: &Path, user: &Path) -> Vec<PathBuf> {
     let mut roots = vec![user.to_path_buf()];
     let mut dir = Some(cwd.to_path_buf());
@@ -53,9 +74,9 @@ fn project_roots(cwd: &Path, user: &Path) -> Vec<PathBuf> {
         }
         dir = d.parent().map(Path::to_path_buf);
     }
-    // nearest first already (walked up); user dir is the base so project
-    // entries (appended) override on name
-    roots.extend(found);
+    // the walk-up collects nearest-first; loading farthest-last-but-one
+    // makes the nearest dir the final word on a name
+    roots.extend(found.into_iter().rev());
     roots
 }
 
@@ -90,9 +111,20 @@ fn load_manifest(path: &Path) -> Option<ScriptToolSpec> {
             let sibling = path.with_file_name(&name);
             sibling.exists().then(|| format!("./{name}"))
         })?;
-    // relative commands resolve against the manifest's directory
+    // absolute and $VAR commands expand as-is; ./relative resolves against
+    // the manifest's directory; a bare name resolves through $PATH like a
+    // shell would (falling back to the directory for the error message)
     let command = if command.starts_with('/') || command.starts_with('$') {
         crate::core::config::expand_env(&command)
+    } else if !command.contains('/') {
+        match crate::platform::find_in_path(&command) {
+            Some(found) => found.display().to_string(),
+            None => format!(
+                "{}/{}",
+                path.parent().unwrap_or(Path::new(".")).display(),
+                command
+            ),
+        }
     } else {
         format!(
             "{}/{}",
@@ -135,13 +167,14 @@ fn load_manifest(path: &Path) -> Option<ScriptToolSpec> {
 /// # --- llm-tool: wordcount ---
 /// # description: count characters in the text
 /// # args: text (string) the text to count
+/// # timeout: 30
 /// ```
 ///
 /// `args:` lines build the input schema; the file itself runs on call.
 fn load_embedded(path: &Path) -> Option<ScriptToolSpec> {
     let raw = std::fs::read_to_string(path).ok()?;
     let text = raw.as_str();
-    let (name, description, args) = parse_header(text)?;
+    let (name, description, args, timeout) = parse_header(text)?;
     let has_shebang = text.starts_with("#!");
     if !has_shebang {
         // still loadable if it parses, but warn: it cannot run
@@ -153,17 +186,18 @@ fn load_embedded(path: &Path) -> Option<ScriptToolSpec> {
         command: path.display().to_string(),
         args: Vec::new(),
         schema: args_schema(&args),
-        timeout: crate::agent::script_tool::DEFAULT_TIMEOUT,
+        timeout,
     })
 }
 
 /// Parse the manifest header: the `--- llm-tool: name ---` opener followed
 /// by `key: value` comment lines until a non-comment line. Returns
-/// (name, description, arg declarations).
-fn parse_header(text: &str) -> Option<(String, String, Vec<ArgDecl>)> {
+/// (name, description, arg declarations, timeout seconds).
+fn parse_header(text: &str) -> Option<(String, String, Vec<ArgDecl>, u64)> {
     let mut name = None;
     let mut description = String::new();
     let mut args: Vec<ArgDecl> = Vec::new();
+    let mut timeout = crate::agent::script_tool::DEFAULT_TIMEOUT;
     let mut in_header = false;
     for line in text.lines().take(40) {
         let trimmed = line.trim_start();
@@ -192,12 +226,14 @@ fn parse_header(text: &str) -> Option<(String, String, Vec<ArgDecl>)> {
             if let Some(decl) = parse_arg(arg.trim()) {
                 args.push(decl);
             }
-        } else if let Some(t) = comment.strip_prefix("timeout:") {
-            let _ = t.trim().parse::<u64>(); // documented; per-spec timeout stays default
+        } else if let Some(t) = comment.strip_prefix("timeout:")
+            && let Ok(secs) = t.trim().parse::<u64>()
+        {
+            timeout = secs;
         }
     }
     let name = name.filter(|n| !n.is_empty())?;
-    Some((name, description, args))
+    Some((name, description, args, timeout))
 }
 
 /// `name (type) description` — type defaults to string.
@@ -274,7 +310,7 @@ mod tests {
                       # args: verbose (bool) print more\n\
                       \n\
                       import json, sys\n";
-        let (name, desc, args) = parse_header(script).unwrap();
+        let (name, desc, args, timeout) = parse_header(script).unwrap();
         assert_eq!(name, "wordcount");
         assert_eq!(desc, "count characters");
         assert_eq!(args.len(), 2);
@@ -282,6 +318,20 @@ mod tests {
         assert_eq!(args[0].ty, "string");
         assert_eq!(args[0].description, "the text");
         assert_eq!(args[1].ty, "boolean");
+        assert_eq!(timeout, crate::agent::script_tool::DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn header_timeout_overrides_the_default() {
+        let script = "#!/bin/sh\n# --- llm-tool: slow ---\n# timeout: 30\necho hi\n";
+        let (_, _, _, timeout) = parse_header(script).unwrap();
+        assert_eq!(timeout, 30);
+        // a non-numeric or missing value keeps the default
+        let bad = "#!/bin/sh\n# --- llm-tool: slow ---\n# timeout: soon\necho hi\n";
+        assert_eq!(
+            parse_header(bad).unwrap().3,
+            crate::agent::script_tool::DEFAULT_TIMEOUT
+        );
     }
 
     #[test]
@@ -314,37 +364,92 @@ mod tests {
     }
 
     #[test]
-    fn discovery_overrides_project_over_user() {
+    fn discovery_overrides_nearest_project_then_project_over_user() {
         let base = std::env::temp_dir().join(format!("llm-tools-{}", crate::core::db::ulid()));
-        let user = base.join("user");
-        let proj = base.join("proj");
-        for d in [user.join("tools"), proj.join(".llm").join("tools")] {
-            std::fs::create_dir_all(&d).unwrap();
+        let user = base.join("user").join("tools");
+        let outer = base.join("proj").join(".llm").join("tools");
+        let inner = base.join("proj").join("deep").join(".llm").join("tools");
+        for d in [&user, &outer, &inner] {
+            std::fs::create_dir_all(d).unwrap();
         }
-        std::fs::write(
-            user.join("tools").join("hello"),
-            "#!/bin/sh\n# --- llm-tool: hello ---\n# description: user version\necho '{}'\n",
-        )
-        .unwrap();
-        std::fs::write(
-            proj.join(".llm").join("tools").join("hello"),
-            "#!/bin/sh\n# --- llm-tool: hello ---\n# description: project version\necho '{}'\n",
-        )
-        .unwrap();
-        let specs = discover(&proj);
+        for (dir, variant) in [
+            (&user, "user"),
+            (&outer, "outer project"),
+            (&inner, "inner project"),
+        ] {
+            std::fs::write(
+                dir.join("hello"),
+                format!("#!/bin/sh\n# --- llm-tool: hello ---\n# description: {variant}\necho\n"),
+            )
+            .unwrap();
+        }
+        // from inside the nested project dir, the NEAREST .llm/tools wins
+        let specs = discover_in(&base.join("proj").join("deep"), &user);
         assert_eq!(specs.len(), 1, "one name, one winner");
-        assert_eq!(specs[0].description, "project version");
+        assert_eq!(specs[0].description, "inner project");
+        // one level up, the outer project dir is the nearest
+        let specs = discover_in(&base.join("proj"), &user);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].description, "outer project");
+        // outside any project dir the user version stands
+        let specs = discover_in(&base.join("elsewhere"), &user);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].description, "user");
 
         // a JSON manifest beside the script names an external command
         std::fs::write(
-            proj.join(".llm").join("tools").join("count.json"),
+            outer.join("count.json"),
             serde_json::json!({"description": "external", "command": "/bin/true"}).to_string(),
         )
         .unwrap();
-        let specs = discover(&proj);
+        let specs = discover_in(&base.join("proj"), &user);
         assert_eq!(specs.len(), 2);
         let ext = specs.iter().find(|s| s.name == "count").unwrap();
         assert_eq!(ext.command, "/bin/true");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn discovery_skips_builtin_and_invalid_names() {
+        let base = std::env::temp_dir().join(format!("llm-tools-{}", crate::core::db::ulid()));
+        let user = base.join("tools");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("bash"),
+            "#!/bin/sh\n# --- llm-tool: bash ---\n# description: not this one\necho\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("bad"),
+            "#!/bin/sh\n# --- llm-tool: has spaces ---\necho\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("spoof"),
+            "#!/bin/sh\n# --- llm-tool: mcp__fake__echo ---\necho\n",
+        )
+        .unwrap();
+        let specs = discover_in(&base.join("cwd"), &user);
+        assert!(specs.is_empty(), "all three must be skipped: {specs:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_bare_command_resolves_through_path() {
+        let base = std::env::temp_dir().join(format!("llm-tools-{}", crate::core::db::ulid()));
+        let user = base.join("tools");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("shout.json"),
+            serde_json::json!({"description": "shout", "command": "sh"}).to_string(),
+        )
+        .unwrap();
+        let specs = discover_in(&base.join("cwd"), &user);
+        let spec = specs.iter().find(|s| s.name == "shout").unwrap();
+        // resolved to the real sh on PATH, not <tools dir>/sh
+        assert!(spec.command.ends_with("/sh"), "command: {}", spec.command);
+        assert!(!spec.command.contains(&user.display().to_string()));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
