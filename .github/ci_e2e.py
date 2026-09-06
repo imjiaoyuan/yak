@@ -279,6 +279,18 @@ def main():
     assert seen.get("auth") == "Bearer sk-ci", f"auth header: {seen.get('auth')!r}"
     assert seen.get("model") == "m-a", f"model: {seen.get('model')!r}"
 
+    # a bare multi-word prompt joins into one sentence, no word is dropped
+    mw = run([binary, "two", "words", "here"], env, stdin=subprocess.DEVNULL)
+    assert mw.returncode == 0, f"multi-word rc={mw.returncode} err={mw.stderr[-300:]}"
+    assert seen.get("last_prompt") == "two words here", \
+        f"joined prompt: {seen.get('last_prompt')!r}"
+
+    # continuing a conversation under -n is refused, never silently logged
+    nl = run([binary, "prompt", "-n", "-c", "x"], env, stdin=subprocess.DEVNULL)
+    out = nl.stdout + nl.stderr
+    assert nl.returncode == 1 and "logging is disabled (-n)" in out, \
+        f"-n -c refusal: rc={nl.returncode} out={out[-300:]!r}"
+
     s = run([binary, "models", "set", "mock/m-b", "--thinking", "high"], env,
             stdin=subprocess.DEVNULL)
     assert s.returncode == 0, f"models set rc={s.returncode} err={s.stderr[-500:]}"

@@ -134,7 +134,7 @@ fn execute(
     let config = config::load();
     let mut prompt_text = match preset {
         Some((_, input)) => input.to_string(),
-        None => args.first_positional().unwrap_or("").to_string(),
+        None => args.positionals.join(" "),
     };
 
     // stdin piped → joined with a space before the argument, like the
@@ -181,8 +181,10 @@ fn execute(
     // writing is gated on the logs-on state further down
     let no_log = args.flag(&["no-log"]);
     let mut db_opt: Option<Db> = None;
-    let need_db = !no_log || continue_id.is_some();
-    if need_db {
+    if no_log && continue_id.is_some() {
+        return Err("cannot continue a conversation when logging is disabled (-n)".to_string());
+    }
+    if !no_log {
         let db = match args.opt(&["database"]) {
             Some(p) => Db::open_path(std::path::Path::new(p)).map_err(|e| e.to_string())?,
             None => Db::open().map_err(|e| e.to_string())?,
@@ -208,9 +210,8 @@ fn execute(
     let mut conv_system: Option<String> = None;
     let mut conv_model: Option<String> = None;
     if let Some(cid) = continue_id {
-        let db = db_opt.as_ref().ok_or_else(|| {
-            "Error: cannot continue a conversation when logging is disabled (-n)".to_string()
-        })?;
+        // the early -n refusal above guarantees the db is open here
+        let db = db_opt.as_ref().expect("db open for continuation");
         let cid = if cid.is_empty() {
             logstore::latest_conversation_id(db)
                 .ok_or_else(|| "No conversations found".to_string())?

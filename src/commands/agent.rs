@@ -167,7 +167,7 @@ fn run_mode(argv: &[String], chat: bool) -> i32 {
 }
 
 fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
-    let mut prompt = args.first_positional().unwrap_or("").to_string();
+    let mut prompt = args.positionals.join(" ");
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task
     prompt = crate::core::attachments::read_piped_prompt(args, prompt)?;
 
