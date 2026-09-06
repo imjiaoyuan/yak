@@ -7,7 +7,6 @@ use std::io::IsTerminal;
 
 use crate::core::args::{OptSpec, parse, render_help, split_subcommand};
 use crate::core::config::{self};
-use crate::providers::ResolvedModel;
 use crate::{flag_spec, multi_spec, value_spec};
 
 const LIST_SPECS: &[OptSpec] = &[
@@ -17,8 +16,6 @@ const LIST_SPECS: &[OptSpec] = &[
         "Filter models matching these strings",
         "QUERY"
     ),
-    flag_spec!("options", None, "Show options for each model, if available"),
-    flag_spec!("json", None, "Output as JSON"),
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
 
@@ -391,12 +388,10 @@ fn list(argv: &[String]) -> i32 {
     let cfg = config::load();
     let aliases = config::load_aliases();
     let queries = args.multi(&["query"]);
-    // one options block per kind: models of a kind share the same schema
-    let mut shown_kinds = std::collections::HashSet::new();
 
-    // the per-mode defaults lead: what runs where matters more than the
-    // inventory, and only shows without filters
-    if !args.flag(&["json"]) && queries.is_empty() {
+    // the stored default leads: what runs matters more than the inventory,
+    // and only shows without filters
+    if queries.is_empty() {
         match (config::default_model(), config::default_thinking()) {
             (Some(m), Some(t)) => println!("default    {m} (thinking: {t})"),
             (Some(m), None) => println!("default    {m}"),
@@ -441,98 +436,16 @@ fn list(argv: &[String]) -> i32 {
                 .get(&provider)
                 .map(|p| p.kind.clone())
                 .unwrap_or_default();
-            if args.flag(&["json"]) {
-                let mut obj = serde_json::json!({
-                    "model_id": qualified,
-                    "aliases": model_aliases,
-                    "can_stream": true,
-                    "supports_schema": true,
-                    "supports_tools": false,
-                    "attachment_types": [],
-                });
-                if args.flag(&["options"]) {
-                    let mut props = serde_json::Map::new();
-                    for (name, type_, description) in
-                        crate::providers::option_schema_for_kind(&kind)
-                    {
-                        let mut field = serde_json::json!({ "type": type_ });
-                        if let Some(d) = description {
-                            field
-                                .as_object_mut()
-                                .expect("object literal")
-                                .insert("description".into(), d.into());
-                        }
-                        props.insert(name.to_string(), field);
-                    }
-                    obj.as_object_mut()
-                        .expect("object literal")
-                        .insert("options".into(), serde_json::Value::Object(props));
-                }
-                println!("{}", crate::jsonfmt::dumps_indent(&obj, 2));
+            let alias_suffix = if model_aliases.is_empty() {
+                String::new()
             } else {
-                let alias_suffix = if model_aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (aliases: {})", model_aliases.join(", "))
-                };
-                println!("{qualified}{alias_suffix}");
-                if args.flag(&["options"]) && shown_kinds.insert(kind.clone()) {
-                    print_kind_options(&kind);
-                }
-            }
+                format!(" (aliases: {})", model_aliases.join(", "))
+            };
+            println!("{qualified}{alias_suffix}");
+            let _ = kind;
         }
     }
     0
-}
-
-/// Options + Features block for one model kind — shared by `llm prompt
-/// --options` and `llm models list --options`. Option schemas come from a
-/// per-kind static table (our stand-in for the original's per-model pydantic
-/// Options).
-pub fn print_kind_options(kind: &str) {
-    let options = crate::providers::option_schema_for_kind(kind);
-    if !options.is_empty() {
-        println!("  Options:");
-        for (name, type_, description) in options {
-            println!("    {name}: {type_}, null");
-            if let Some(description) = description {
-                for line in wrap(description, 70) {
-                    println!("      {line}");
-                }
-            }
-        }
-    }
-    let features = crate::providers::features_for_kind(kind);
-    if !features.is_empty() {
-        println!("  Features:");
-        for feature in features {
-            println!("  - {feature}");
-        }
-    }
-}
-
-/// Render the model plus its options block — used by `llm prompt --options`.
-pub fn render_model_with_options(model: &ResolvedModel) {
-    println!("Model: {}", model.qualified_id());
-    print_kind_options(&model.kind);
-}
-
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.len() + word.len() + 1 > width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
 }
 
 /// `llm models options [list|show|set|clear]` — per-model default -o options

@@ -1252,9 +1252,6 @@ pub struct RowFilters<'a> {
     pub conversation: Option<&'a str>,
     pub model: Option<&'a str>,
     pub query: Option<&'a str>,
-    pub schema_id: Option<&'a str>,
-    pub id_gt: Option<&'a str>,
-    pub id_gte: Option<&'a str>,
     pub count: Option<i64>,
     pub search: bool,
 }
@@ -1287,18 +1284,6 @@ pub fn collect_rows(db: &Db, f: &RowFilters) -> Vec<Value> {
     {
         where_clauses.push(format!("turn_search_fts MATCH ?{}", params.len() + 1));
         params.push(Box::new(q.to_string()));
-    }
-    if let Some(sid) = f.schema_id {
-        where_clauses.push(format!("turns.schema_id = ?{}", params.len() + 1));
-        params.push(Box::new(sid.to_string()));
-    }
-    if let Some(gt) = f.id_gt {
-        where_clauses.push(format!("turns.id > ?{}", params.len() + 1));
-        params.push(Box::new(gt.to_string()));
-    }
-    if let Some(gte) = f.id_gte {
-        where_clauses.push(format!("turns.id >= ?{}", params.len() + 1));
-        params.push(Box::new(gte.to_string()));
     }
     let where_sql = if where_clauses.is_empty() {
         String::new()

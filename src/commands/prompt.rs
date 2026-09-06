@@ -26,17 +26,10 @@ const SPECS: &[OptSpec] = &[
         "key/value options for the model",
         "KEY=VALUE"
     ),
-    flag_spec!("options", None, "Show options for the selected model"),
     value_spec!(
         "schema",
         None,
-        "JSON schema, filepath or the compact DSL",
-        "SCHEMA"
-    ),
-    value_spec!(
-        "schema-multi",
-        None,
-        "JSON schema for multiple results",
+        "JSON schema, or a path to a schema file",
         "SCHEMA"
     ),
     multi_spec!(
@@ -296,20 +289,10 @@ fn execute(
     }
     model.options = options;
 
-    // --options: render the model's options block, then exit
-    if args.flag(&["options"]) {
-        crate::commands::models::render_model_with_options(&model);
-        return Ok(0);
-    }
-
-    // --schema / --schema-multi resolution (CLI beats the template's schema)
-    let schema = if let Some(schema_input) = args.opt(&["schema-multi"]) {
-        let inner = crate::core::schemas::resolve_schema(schema_input)?;
-        Some(crate::core::schemas::multi_schema(&inner))
-    } else if let Some(schema_input) = args.opt(&["schema"]) {
-        Some(crate::core::schemas::resolve_schema(schema_input)?)
-    } else {
-        None
+    // --schema resolution (CLI beats the template's schema)
+    let schema = match args.opt(&["schema"]) {
+        Some(schema_input) => Some(crate::core::schemas::resolve_schema(schema_input)?),
+        None => None,
     };
     if let Some(schema) = &schema {
         if model.kind != "openai-compat" {

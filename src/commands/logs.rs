@@ -24,7 +24,6 @@ const LIST_SPECS: &[OptSpec] = &[
         "Search for logs matching this string",
         "QUERY"
     ),
-    value_spec!("schema", None, "Show logs that use this schema", "SCHEMA"),
     flag_spec!("current", Some('c'), "Show the current conversation"),
     value_spec!(
         "conversation",
@@ -33,8 +32,6 @@ const LIST_SPECS: &[OptSpec] = &[
         "ID"
     ),
     value_spec!("cid", None, "(alias of --conversation)", "ID"),
-    value_spec!("id-gt", None, "Return responses with ID > this", "ID"),
-    value_spec!("id-gte", None, "Return responses with ID >= this", "ID"),
     flag_spec!(
         "latest",
         Some('l'),
@@ -188,9 +185,6 @@ fn show_conversation_full(db: &Db, cid: &str) -> i32 {
             conversation: Some(cid),
             model: None,
             query: None,
-            schema_id: None,
-            id_gt: None,
-            id_gte: None,
             count: None,
             search: false,
         },
@@ -284,19 +278,6 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
             .unwrap_or(3)
     };
 
-    // schema id for --schema / --schema-multi
-    let schema_id: Option<String> = if let Some(s) = args.opt(&["schema"]) {
-        match crate::core::schemas::resolve_schema(s) {
-            Ok(v) => Some(crate::core::logstore::make_schema_id(&v).0),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                return 1;
-            }
-        }
-    } else {
-        None
-    };
-
     // model filter: alias-expanded to its target id
     let model_filter: Option<String> = args.opt(&["model"]).map(|m| {
         let cfg = config::load();
@@ -317,9 +298,6 @@ fn list(argv: &[String], mode_filter: Option<&str>) -> i32 {
             conversation: conversation.as_deref(),
             model: model_filter.as_deref(),
             query: query.as_deref(),
-            schema_id: schema_id.as_deref(),
-            id_gt: args.opt(&["id-gt"]),
-            id_gte: args.opt(&["id-gte"]),
             count: if count > 0 { Some(count) } else { None },
             search,
         },

@@ -1,6 +1,6 @@
 //! user_dir resolution and the files kept there: config.json (providers with
 //! inline api keys, the "models" settings family and hand-added tables like
-//! "agent") and the logs-off marker.
+//! "agent").
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,7 +24,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             providers: BTreeMap::new(),
-            aliases: load_aliases(),
+            aliases: BTreeMap::new(),
         }
     }
 }
@@ -67,12 +67,8 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Prompt logging switch: the "logging" boolean in config.json (absent =
-/// on). A legacy `logs-off` marker file in the user directory still counts
-/// as off, so old installs keep their choice until they flip it again.
+/// on).
 pub fn logs_on() -> bool {
-    if user_dir().join("logs-off").exists() {
-        return false;
-    }
     read_root()
         .ok()
         .and_then(|root| root.get("logging").and_then(|v| v.as_bool()))
@@ -80,12 +76,6 @@ pub fn logs_on() -> bool {
 }
 
 pub fn set_logs_enabled(on: bool) {
-    let legacy = user_dir().join("logs-off");
-    if on {
-        let _ = fs::remove_file(&legacy);
-    } else {
-        let _ = fs::write(&legacy, b"");
-    }
     let _ = edit_root(|root| {
         if let Some(map) = root.as_object_mut() {
             map.insert("logging".to_string(), serde_json::json!(on));
@@ -153,9 +143,6 @@ pub fn load() -> Config {
         .map_err(|e| eprintln!("Warning: cannot read aliases from {}: {e}", path.display()))
         .map(|a| a.aliases)
         .unwrap_or_default();
-    if config.aliases.is_empty() {
-        config.aliases = load_legacy_aliases();
-    }
     config
 }
 
@@ -213,38 +200,22 @@ fn write_root(root: &serde_json::Value) -> std::io::Result<()> {
     Ok(())
 }
 
-// model aliases — the "aliases" object in config.json (a legacy standalone
-// aliases.json, indent 4, folds in once and is then ignored)
+// model aliases — the hand-edited "aliases" object in config.json
 
-/// Read the alias map from config.json, importing a legacy aliases.json on
-/// first sight so upgrades keep working.
+/// Read the alias map from config.json.
 pub fn load_aliases() -> BTreeMap<String, String> {
+    let Ok(root) = read_root() else {
+        return BTreeMap::new();
+    };
     let mut map = BTreeMap::new();
-    if let Ok(root) = read_root()
-        && let Some(existing) = root.get("aliases").and_then(|v| v.as_object())
-    {
+    if let Some(existing) = root.get("aliases").and_then(|v| v.as_object()) {
         for (k, v) in existing {
             if let Some(id) = v.as_str() {
                 map.insert(k.clone(), id.to_string());
             }
         }
     }
-    if map.is_empty() {
-        map = load_legacy_aliases();
-    }
     map
-}
-
-/// The legacy standalone aliases.json (indent 4); folds in once and is then
-/// ignored.
-fn load_legacy_aliases() -> BTreeMap<String, String> {
-    match fs::read_to_string(user_dir().join("aliases.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(&raw).ok())
-    {
-        Some(legacy) if !legacy.is_empty() => legacy,
-        _ => BTreeMap::new(),
-    }
 }
 
 pub fn save(config: &Config) -> std::io::Result<()> {

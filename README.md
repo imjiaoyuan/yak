@@ -278,9 +278,7 @@ Options:
   -a, --attachment ATTACHMENT   Attachment path or URL or -
       --at PATH MIMETYPE        Attachment with explicit mimetype
   -o, --option KEY=VALUE        key/value options for the model
-      --options                 Show options for the selected model
-      --schema SCHEMA           JSON schema, filepath or the compact DSL
-      --schema-multi SCHEMA     JSON schema for multiple results
+      --schema SCHEMA           JSON schema, or a path to a schema file
   -p, --param KEY=VALUE         Parameters for a custom command's $variables
       --no-stream               Do not stream output
   -n, --no-log                  Don't log to database
@@ -358,11 +356,8 @@ Options:
   -d, --database PATH           Path to log database
   -m, --model MODEL             Filter by model or model alias
   -q, --query QUERY             Search for logs matching this string
-      --schema SCHEMA           Show logs that use this schema
   -c, --current                 Show the current conversation
       --conversation, --cid ID  Show the conversation with this ID
-      --id-gt ID                Return responses with ID > this
-      --id-gte ID               Return responses with ID >= this
   -l, --latest                  Sort by time (newest first), not relevance
       --full                    Show the full per-turn report (default is a compact list)
   -t, --truncate                Truncate long strings in output
@@ -384,11 +379,8 @@ Options:
   -d, --database PATH           Path to log database
   -m, --model MODEL             Filter by model or model alias
   -q, --query QUERY             Search for logs matching this string
-      --schema SCHEMA           Show logs that use this schema
   -c, --current                 Show the current conversation
       --conversation, --cid ID  Show the conversation with this ID
-      --id-gt ID                Return responses with ID > this
-      --id-gte ID               Return responses with ID >= this
   -l, --latest                  Sort by time (newest first), not relevance
       --full                    Show the full per-turn report (default is a compact list)
   -t, --truncate                Truncate long strings in output
