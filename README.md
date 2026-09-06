@@ -318,10 +318,12 @@ Usage: llm chat [OPTIONS] [PROMPT]
 
 Options:
   -m, --model MODEL            Model to use
+  -o, --option KEY=VALUE       key/value options for the model
   -s, --system-prompt TEXT     Replace the built-in system prompt
       --thinking LEVEL         Reasoning effort: off, minimal, low, medium, high or xhigh
   -c, --continue               Continue the most recent agent session
       --session, --cid ID      Continue the session with the given ID
+      --fork                   Continue a session on a new branch (original untouched; combine with --session)
   -a, --attachment ATTACHMENT  Attachment path or URL or -
       --at PATH MIMETYPE       Attachment with explicit mimetype
   -d, --database PATH          Path to log database
