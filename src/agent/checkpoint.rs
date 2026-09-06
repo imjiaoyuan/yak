@@ -27,6 +27,9 @@ struct RoundUndo {
     seed_len: usize,
     dir_no: usize,
     files: Vec<FileUndo>,
+    /// whether the round persisted a turn to logs.db: `/undo` may only
+    /// rewind the stored thread when it actually added one
+    persisted: bool,
 }
 
 struct FileUndo {
@@ -54,6 +57,7 @@ impl CheckpointState {
             seed_len,
             dir_no,
             files: Vec::new(),
+            persisted: false,
         });
     }
 
@@ -91,10 +95,13 @@ impl CheckpointState {
         }
     }
 
-    /// Close the round; it joins the stack even when nothing was touched,
-    /// keeping the stack aligned with the conversation rounds.
-    pub fn end_round(&mut self) {
-        if let Some(round) = self.current.take() {
+    /// Close the round, recording whether it persisted a turn (an
+    /// interrupted or failed round stores nothing); it joins the stack even
+    /// when nothing was touched, keeping the stack aligned with the
+    /// conversation rounds.
+    pub fn end_round(&mut self, persisted: bool) {
+        if let Some(mut round) = self.current.take() {
+            round.persisted = persisted;
             if round.files.is_empty() {
                 let _ = std::fs::remove_dir_all(self.round_dir(round.dir_no));
             }
@@ -104,9 +111,10 @@ impl CheckpointState {
     }
 
     /// Pop the newest round, restore its files, drop its snapshots.
-    /// Returns the conversation length to truncate to and how many files
-    /// were restored.
-    pub fn undo(&mut self) -> Option<(usize, usize)> {
+    /// Returns the conversation length to truncate to, how many files were
+    /// restored, and whether the round persisted a turn (the caller rewinds
+    /// the stored thread only when it did).
+    pub fn undo(&mut self) -> Option<(usize, usize, bool)> {
         let round = self.rounds.pop()?;
         for f in round.files.iter().rev() {
             if f.snapshot.as_os_str().is_empty() {
@@ -117,7 +125,7 @@ impl CheckpointState {
         }
         let n = round.files.len();
         let _ = std::fs::remove_dir_all(self.round_dir(round.dir_no));
-        Some((round.seed_len, n))
+        Some((round.seed_len, n, round.persisted))
     }
 
     /// Drop every snapshot and reset the stack (`/clear`, session end).
@@ -162,17 +170,17 @@ mod tests {
         ck.snapshot(&a);
         std::fs::write(&a, "two").unwrap();
         ck.snapshot(&a); // second touch: the pre-round "one" must survive
-        ck.end_round();
+        ck.end_round(false);
 
         ck.begin_round(3);
-        ck.end_round(); // a file-less round still occupies the stack
+        ck.end_round(false); // a file-less round still occupies the stack
 
-        let (len, files_restored) = ck.undo().unwrap();
-        assert_eq!((len, files_restored), (3, 0)); // pops the empty round
+        let (len, files_restored, persisted) = ck.undo().unwrap();
+        assert_eq!((len, files_restored, persisted), (3, 0, false)); // pops the empty round
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "two"); // untouched
 
-        let (len, files_restored) = ck.undo().unwrap();
-        assert_eq!((len, files_restored), (0, 1));
+        let (len, files_restored, persisted) = ck.undo().unwrap();
+        assert_eq!((len, files_restored, persisted), (0, 1, false));
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "one"); // rewound
         assert!(ck.undo().is_none());
         let _ = std::fs::remove_dir_all(&files);
@@ -188,10 +196,10 @@ mod tests {
         let mut ck = CheckpointState::new(root);
         ck.begin_round(2);
         ck.snapshot(&b); // does not exist yet
-        ck.end_round();
+        ck.end_round(false);
         std::fs::write(&b, "created by the round").unwrap();
 
-        let (len, n) = ck.undo().unwrap();
+        let (len, n, _) = ck.undo().unwrap();
         assert_eq!((len, n), (2, 1));
         assert!(!b.exists(), "undo must delete a round-created file");
         let _ = std::fs::remove_dir_all(&files);
@@ -206,7 +214,7 @@ mod tests {
         let mut ck = CheckpointState::new(root.clone());
         ck.begin_round(0);
         ck.snapshot(&c);
-        ck.end_round();
+        ck.end_round(false);
         assert!(root.exists());
         ck.clear();
         assert!(!root.exists());
@@ -225,7 +233,7 @@ mod tests {
             ck.begin_round(i);
             ck.snapshot(&f);
             std::fs::write(&f, format!("v{i}")).unwrap();
-            ck.end_round();
+            ck.end_round(false);
         }
         assert_eq!(ck.rounds.len(), KEEP_ROUNDS);
         assert_eq!(ck.rounds[0].seed_len, 3); // the oldest three were trimmed

@@ -597,24 +597,28 @@ fn repl_command(
                 .seed
                 .iter()
                 .rposition(|m| matches!(m, crate::providers::Msg::User { .. }));
-            let idx = match (round, last_user) {
-                (Some((len, files)), _) => {
+            let (idx, persisted) = match (round, last_user) {
+                (Some((len, files, persisted)), _) => {
                     if files > 0 {
                         eprintln!(
                             "\x1b[2mrestored {files} file{}\x1b[0m",
                             if files == 1 { "" } else { "s" }
                         );
                     }
-                    len
+                    (len, persisted)
                 }
-                (None, Some(idx)) => idx,
+                (None, Some(idx)) => (idx, false),
                 (None, None) => {
                     eprintln!("\x1b[2mnothing to undo\x1b[0m");
                     return false;
                 }
             };
             session.seed.truncate(idx);
-            if let (Some(db), Some(cid)) = (&session.db, &session.conversation_id)
+            // only a round that stored a turn may rewind the thread: an
+            // interrupted or failed round stored nothing, and popping the
+            // previous turn would desync the session from the store
+            if persisted
+                && let (Some(db), Some(cid)) = (&session.db, &session.conversation_id)
                 && let Err(e) = crate::core::logstore::undo_thread(db, cid)
             {
                 eprintln!("Warning: {e}");

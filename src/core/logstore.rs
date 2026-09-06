@@ -949,30 +949,51 @@ pub fn fork_thread(db: &Db, source: &str) -> Option<String> {
     Some(new_id)
 }
 
-/// Undo the most recent turn: rewind the thread's tip to the chain tip that
-/// round started from (each `turns` row records `parent_message_hash` —
-/// the tip before the round) so the last round is no longer reachable.
+/// Undo the most recent turn: delete its `turns` row (and its `turn_search`
+/// row first, under the foreign key), then rewind the thread's tip past the
+/// whole round. Deleting the row keeps
+/// the turn-walking readers (`conversation_history`) and the tip-walking
+/// ones (`thread_chain`) in agreement, and a second undo reaches the round
+/// before it.
 pub fn undo_thread(db: &Db, thread_id: &str) -> Result<(), String> {
-    let parent: Option<String> = match db.conn().query_row(
-        "SELECT parent_message_hash FROM turns WHERE thread_id = ?1
+    let conn = db.conn();
+    let (turn_id, parent): (String, Option<String>) = match conn.query_row(
+        "SELECT id, parent_message_hash FROM turns WHERE thread_id = ?1
           ORDER BY datetime_utc DESC LIMIT 1",
         params![thread_id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     ) {
-        Ok(p) => p,
+        Ok(pair) => pair,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Err("no turns to undo".to_string()),
         Err(e) => return Err(format!("cannot read turns of {thread_id}: {e}")),
     };
-    let Some(parent) = parent else {
-        return Err("no turn boundary to rewind to".to_string());
-    };
-    db.conn()
-        .execute(
-            "UPDATE threads SET tip_message_hash = ?2 WHERE id = ?1",
-            params![thread_id, parent],
-        )
-        .map(|_| ())
-        .map_err(|e| format!("cannot undo {thread_id}: {e}"))
+    // turns.parent_message_hash is the tip AFTER the round's input chain,
+    // so the rewind target is that message's own parent: the tip as it
+    // stood before the round began (NULL for the first round)
+    let rewind_to = parent
+        .map(|p| {
+            conn.query_row(
+                "SELECT parent_hash FROM messages WHERE hash = ?1",
+                params![p],
+                |r| r.get::<_, Option<String>>(0),
+            )
+        })
+        .transpose()
+        .map_err(|e| format!("cannot undo {thread_id}: {e}"))?
+        .flatten();
+    conn.execute(
+        "DELETE FROM turn_search WHERE turn_id = ?1",
+        params![turn_id],
+    )
+    .map_err(|e| format!("cannot undo {thread_id}: {e}"))?;
+    conn.execute("DELETE FROM turns WHERE id = ?1", params![turn_id])
+        .map_err(|e| format!("cannot undo {thread_id}: {e}"))?;
+    conn.execute(
+        "UPDATE threads SET tip_message_hash = ?2 WHERE id = ?1",
+        params![thread_id, rewind_to],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("cannot undo {thread_id}: {e}"))
 }
 
 /// The thread id of the most recent turn — one definition of "latest" for
@@ -1691,6 +1712,48 @@ mod tests {
             .query_row("SELECT thread_id FROM turns", [], |r| r.get(0))
             .unwrap();
         assert_eq!(thread_first_prompt(&db, &thread_id), "检查这些包");
+    }
+
+    #[test]
+    fn undo_deletes_the_turn_and_repeats_backwards() {
+        let db = Db::open_memory().unwrap();
+        let options = serde_json::Map::new();
+        let turn = |thread: Option<&str>, ask: &str, answer: &str| {
+            let tip = thread.and_then(|cid| thread_tip(&db, cid));
+            log_turn(
+                &db,
+                &TurnToLog {
+                    thread_id: thread,
+                    history_tip: tip.as_deref(),
+                    input_messages: &[Message::text("user", ask)],
+                    reasoning: None,
+                    response_text: answer,
+                    model: "prov/model",
+                    options: &options,
+                    schema: None,
+                    usage: None,
+                    duration_ms: None,
+                },
+            )
+        };
+        let cid = "undo-test-thread";
+        turn(Some(cid), "one", "ans one");
+        turn(Some(cid), "two", "ans two");
+        // the tip walk and the turn walk agree before any undo
+        assert_eq!(conversation_history(&db, cid).len(), 2);
+        assert_eq!(thread_chain(&db, cid).len(), 4); // user+assistant × 2
+        undo_thread(&db, cid).unwrap();
+        let rows = conversation_history(&db, cid);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the undone round must vanish for turn-walk readers"
+        );
+        assert_eq!(rows[0].0, "one");
+        assert_eq!(thread_chain(&db, cid).len(), 2, "and for tip-walk readers");
+        undo_thread(&db, cid).unwrap(); // a second undo reaches the round before
+        assert!(conversation_history(&db, cid).is_empty());
+        assert!(undo_thread(&db, cid).is_err(), "nothing left to undo");
     }
 
     #[test]

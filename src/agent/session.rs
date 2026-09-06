@@ -330,11 +330,17 @@ impl Session {
         // the interrupt flag must not leak into the next prompt or task
         crate::core::http::clear_interrupt();
         // close the checkpoint round on every exit path so the undo stack
-        // stays aligned with the conversation rounds
+        // stays aligned with the conversation rounds; only a round that
+        // will persist a turn (ok outcome, final text, a db — agent and
+        // chat always log) may rewind the stored thread on /undo
+        let persisted_turn = match &result {
+            Ok(outcome) => !self.no_session && !outcome.final_text.is_empty() && self.db.is_some(),
+            Err(_) => false,
+        };
         if let Some(ck) = &self.checkpoints
             && let Ok(mut ck) = ck.lock()
         {
-            ck.end_round();
+            ck.end_round(persisted_turn);
         }
         self.tokens.0 += total_in;
         self.tokens.1 += total_out;
