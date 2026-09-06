@@ -95,9 +95,21 @@ pub(crate) fn dispatch(
     if stream {
         let mut usage: Option<Usage> = None;
         let mut stop = StopReason::default();
-        stream_events(&req, |event_type, chunk| {
+        // visible-output record shared with the retry policy in post_sse:
+        // only real content counts, protocol prelude events do not
+        let handed = std::sync::atomic::AtomicBool::new(false);
+        let mut forward = |e: Event| {
+            if matches!(
+                e,
+                Event::Delta(_) | Event::ReasoningDelta(_) | Event::ToolCallDelta { .. }
+            ) {
+                handed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            on_event(e);
+        };
+        stream_events(&req, &handed, |event_type, chunk| {
             feed(event_type, chunk, &mut usage, &mut stop, &mut |e| {
-                on_event(e)
+                forward(e)
             });
         })?;
         on_event(Event::Done { usage, stop });
@@ -120,13 +132,19 @@ pub(crate) fn decoded_text(a: &Attachment) -> Result<String, String> {
 
 /// Run an SSE request, parsing each event's data as JSON and handing
 /// (event_type, value) to `on_value`. An `error` event aborts with its
-/// message (parsed when possible, raw otherwise).
+/// message (parsed when possible, raw otherwise). A stream that closes
+/// without its completion marker — `[DONE]` for openai-compat,
+/// `message_stop` for anthropic — is a truncation, not a success: the
+/// answer half-arrived and must surface as an error instead of being
+/// logged as a finished turn.
 pub fn stream_events(
     req: &HttpRequest,
+    handed: &std::sync::atomic::AtomicBool,
     mut on_value: impl FnMut(&str, &Value),
 ) -> Result<(), String> {
     let mut stream_error: Option<String> = None;
-    let result = http::post_sse(req, |event_type, data| {
+    let mut saw_done = false;
+    let result = http::post_sse(req, handed, |event_type, data| {
         if event_type == "error" {
             let msg = serde_json::from_str::<Value>(data)
                 .ok()
@@ -137,7 +155,8 @@ pub fn stream_events(
         }
         // OpenAI-compatible streams end with a literal `data: [DONE]`
         // sentinel, not JSON — swallow it instead of warning on every turn.
-        if data.trim() == "[DONE]" {
+        if data.trim() == "[DONE]" || event_type == "message_stop" {
+            saw_done = true;
             return;
         }
         match serde_json::from_str::<Value>(data) {
@@ -151,6 +170,10 @@ pub fn stream_events(
     result.map_err(|e| e.to_string())?;
     match stream_error {
         Some(err) => Err(err),
+        None if !saw_done => Err(
+            "stream ended without a completion marker ([DONE] / message_stop) — the answer may be truncated"
+                .to_string(),
+        ),
         None => Ok(()),
     }
 }

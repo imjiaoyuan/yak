@@ -307,28 +307,36 @@ pub fn short_agent() -> &'static ureq::Agent {
 
 /// POST and hand each SSE `data:` line (with its `event:` type) to the
 /// caller's parser. Retryable failures (transport, 429 with its Retry-After,
-/// 5xx) resend with jittered backoff; a stream that already delivered output
-/// never resends transparently — replaying it would duplicate the answer —
-/// so mid-stream drops surface as errors instead.
-pub fn post_sse(req: &HttpRequest, mut on_data: impl FnMut(&str, &str)) -> Result<(), HttpError> {
+/// 5xx) resend with jittered backoff; a stream that already handed output to
+/// the user never resends transparently — replaying it would duplicate the
+/// answer — so mid-stream drops surface as errors instead. `handed` is the
+/// caller-owned record of visible output (text/reasoning/tool deltas): the
+/// first SSE event alone does not count, a drop before any real output can
+/// still be retried safely.
+pub fn post_sse(
+    req: &HttpRequest,
+    handed: &std::sync::atomic::AtomicBool,
+    mut on_data: impl FnMut(&str, &str),
+) -> Result<(), HttpError> {
     let a = agent();
     let mut retry = Retry::new();
-    let mut emitted = false;
     loop {
         let result = send_sse(a, req, &mut |ev, data| {
-            emitted = true;
             on_data(ev, data);
         });
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
-                if emitted && e.class() == Class::Stream {
+                if handed.load(std::sync::atomic::Ordering::Relaxed) && e.class() == Class::Stream {
                     return Err(e);
                 }
                 let Some(delay) = next_delay(&mut retry, &e) else {
                     return Err(e);
                 };
                 sleep_interruptible(delay);
+                if interrupted() {
+                    return Err(HttpError::new(0, "interrupted"));
+                }
             }
         }
     }
@@ -415,6 +423,9 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
                     return Err(e);
                 };
                 sleep_interruptible(delay);
+                if interrupted() {
+                    return Err(HttpError::new(0, "interrupted"));
+                }
             }
         }
     }

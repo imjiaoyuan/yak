@@ -109,6 +109,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
         if messages:
             seen["last_prompt"] = messages[-1].get("content", "")
+        if body.get("model") == "m-trunc":
+            # a stream that closes without [DONE]: a truncation, not a success
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"data: " + json.dumps(
+                {"choices": [{"index": 0, "delta": {"content": "half an ans"}}]}
+            ).encode() + b"\n\n")
+            return
         if body.get("model") == "m-write":
             self.handle_write_tool(body)
             return
@@ -157,10 +166,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         asserted from the test driver."""
         seen.setdefault("ant_bodies", []).append(body)
         self.sse_events([
+            ("message_start", {"message": {"usage": {"input_tokens": 7}}}),
             ("content_block_start", {"index": 0, "content_block": {"type": "text"}}),
             ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "ant ok"}}),
             ("message_delta", {"delta": {"stop_reason": "end_turn"},
-                               "usage": {"input_tokens": 7, "output_tokens": 2}}),
+                               "usage": {"output_tokens": 2}}),
+            ("message_stop", {}),
         ])
 
     def handle_write_tool(self, body):
@@ -290,6 +301,13 @@ def main():
     out = nl.stdout + nl.stderr
     assert nl.returncode == 1 and "logging is disabled (-n)" in out, \
         f"-n -c refusal: rc={nl.returncode} out={out[-300:]!r}"
+
+    # a stream that closes without [DONE] is a truncation error, never a
+    # silently completed turn
+    tr = run([binary, "prompt", "-m", "mock/m-trunc", "x"], env, stdin=subprocess.DEVNULL)
+    tout = tr.stdout + tr.stderr
+    assert tr.returncode == 1 and "completion marker" in tout, \
+        f"truncated stream: rc={tr.returncode} out={tout[-300:]!r}"
 
     s = run([binary, "models", "set", "mock/m-b", "--thinking", "high"], env,
             stdin=subprocess.DEVNULL)

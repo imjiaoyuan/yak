@@ -204,18 +204,39 @@ fn map_stop(reason: &str) -> StopReason {
     }
 }
 
-/// Usage with Anthropic's cache fields folded in: `input_tokens` excludes
-/// the cache read and write, but `Usage.input` means the whole prompt (the
-/// openai-compat `prompt_tokens` semantics), so token counts and the
-/// `cache N%` footer stay comparable across provider kinds.
-fn usage_with_cache(u: &Value, input: u64, output: u64) -> Usage {
-    let read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-    let write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-    Usage {
-        input: input + read + write,
-        output,
-        cached: read,
+/// Merge the fields one usage event carries into the running total.
+/// Anthropic splits usage across events: `message_start` seeds `input_tokens`
+/// plus the cache read/write counts, `message_delta` later carries only
+/// `output_tokens`. Fields absent from an event keep their previous value;
+/// gateways that repeat everything in one event work the same way.
+/// `input_tokens` excludes the cache read and write, but `Usage.input` means
+/// the whole prompt (the openai-compat `prompt_tokens` semantics), so token
+/// counts and the `cache N%` footer stay comparable across provider kinds.
+fn apply_usage(u: &Value, usage: &mut Option<Usage>) {
+    let read = u["cache_read_input_tokens"].as_u64();
+    let write = u["cache_creation_input_tokens"].as_u64();
+    let input = u["input_tokens"].as_u64().or(u["prompt_tokens"].as_u64());
+    let output = u["output_tokens"]
+        .as_u64()
+        .or(u["completion_tokens"].as_u64());
+    if input.is_none() && output.is_none() && read.is_none() && write.is_none() {
+        return;
     }
+    let mut cur = usage.take().unwrap_or(Usage {
+        input: 0,
+        output: 0,
+        cached: 0,
+    });
+    if let Some(p) = input {
+        cur.input = p + read.unwrap_or(0) + write.unwrap_or(0);
+    }
+    if let Some(r) = read {
+        cur.cached = r;
+    }
+    if let Some(c) = output {
+        cur.output = c;
+    }
+    *usage = Some(cur);
 }
 
 /// Feed one SSE event (type + parsed data) through the request state.
@@ -256,16 +277,16 @@ pub(crate) fn feed_event(
                 });
             }
         }
+        "message_start" => {
+            let u = if chunk["message"]["usage"].is_object() {
+                &chunk["message"]["usage"]
+            } else {
+                &chunk["usage"]
+            };
+            apply_usage(u, usage);
+        }
         "message_delta" => {
-            let u = &chunk["usage"];
-            if let (Some(p), Some(c)) = (
-                u["input_tokens"].as_u64().or(u["prompt_tokens"].as_u64()),
-                u["output_tokens"]
-                    .as_u64()
-                    .or(u["completion_tokens"].as_u64()),
-            ) {
-                *usage = Some(usage_with_cache(u, p, c));
-            }
+            apply_usage(&chunk["usage"], usage);
             if let Some(reason) = chunk["delta"]["stop_reason"].as_str() {
                 *stop = map_stop(reason);
             }
@@ -276,13 +297,8 @@ pub(crate) fn feed_event(
 
 /// Emit events for a complete (non-streaming) response. Returns usage.
 pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<Usage> {
-    let usage = match (
-        value["usage"]["input_tokens"].as_u64(),
-        value["usage"]["output_tokens"].as_u64(),
-    ) {
-        (Some(p), Some(c)) => Some(usage_with_cache(&value["usage"], p, c)),
-        _ => None,
-    };
+    let mut usage = None;
+    apply_usage(&value["usage"], &mut usage);
     for (i, block) in value["content"]
         .as_array()
         .unwrap_or(&vec![])
@@ -587,6 +603,58 @@ mod tests {
         let body = build_body(&model("anthropic"), &input(&[], &[]), false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["content"], json!("go"));
+    }
+
+    #[test]
+    fn streaming_usage_merges_message_start_and_delta() {
+        // the documented split: input + cache counts in message_start, only
+        // output_tokens in message_delta — both must land in one Usage
+        let mut usage = None;
+        let mut stop = StopReason::default();
+        feed_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 25, "cache_read_input_tokens": 500,
+                                       "cache_creation_input_tokens": 40}}
+            }),
+            &mut usage,
+            &mut stop,
+            &mut |_| {},
+        );
+        assert!(usage.is_none() || usage.as_ref().unwrap().output == 0);
+        feed_event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 15}
+            }),
+            &mut usage,
+            &mut stop,
+            &mut |_| {},
+        );
+        let u = usage.expect("usage recorded");
+        assert_eq!(u.input, 565);
+        assert_eq!(u.cached, 500);
+        assert_eq!(u.output, 15);
+        assert_eq!(stop, StopReason::Stop);
+    }
+
+    #[test]
+    fn streaming_usage_accepts_everything_in_message_delta() {
+        // lenient gateways repeat the full usage object on message_delta
+        let mut usage = None;
+        let mut stop = StopReason::default();
+        feed_event(
+            "message_delta",
+            &json!({"usage": {"input_tokens": 7, "output_tokens": 9}}),
+            &mut usage,
+            &mut stop,
+            &mut |_| {},
+        );
+        let u = usage.expect("usage recorded");
+        assert_eq!((u.input, u.output), (7, 9));
     }
 
     #[test]
