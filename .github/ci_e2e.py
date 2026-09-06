@@ -253,12 +253,15 @@ def main():
     assert seen.get("auth") == "Bearer sk-ci", f"auth header: {seen.get('auth')!r}"
     assert seen.get("model") == "m-a", f"model: {seen.get('model')!r}"
 
-    s = run([binary, "models", "set", "chat", "mock/m-b", "--thinking", "high"], env,
+    s = run([binary, "models", "set", "mock/m-b", "--thinking", "high"], env,
             stdin=subprocess.DEVNULL)
     assert s.returncode == 0, f"models set rc={s.returncode} err={s.stderr[-500:]}"
 
-    g = run([binary, "models", "get", "chat"], env, stdin=subprocess.DEVNULL)
+    g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
     assert "mock/m-b" in g.stdout and "high" in g.stdout, f"get: {g.stdout!r}"
+
+    # a legacy per-mode config migrates: the stored default is read from it
+    # (the config above writes the new shape via `models set`)
 
     k = run([binary, "models", "key", "mock"], env, stdin=subprocess.DEVNULL)
     assert k.stdout.strip() == "sk-ci", f"key: {k.stdout!r}"
@@ -393,10 +396,9 @@ def main():
     w = run([binary, "models", "remove", "mock-write"], env, stdin=subprocess.DEVNULL)
     assert w.returncode == 0 and "cleared" not in w.stderr,         f"unreferenced remove must clear nothing: {w.stderr!r}"
     r = run([binary, "models", "remove", "mock"], env, stdin=subprocess.DEVNULL)
-    assert r.returncode == 0 and "cleared prompt default" in r.stderr \
-        and "cleared agent default" in r.stderr, f"remove clearing: {r.stderr!r}"
+    assert r.returncode == 0 and "cleared the default model" in r.stderr, f"remove clearing: {r.stderr!r}"
     g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
-    assert "(unset)" in g.stdout, f"defaults survived removal: {g.stdout!r}"
+    assert "(unset" in g.stdout, f"defaults survived removal: {g.stdout!r}"
 
     # the typo guard keeps precedence over command/prompt fallback
     t = run([binary, "lgos", "x"], env, stdin=subprocess.DEVNULL)

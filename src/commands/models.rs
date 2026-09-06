@@ -39,19 +39,6 @@ const KEY_SPECS: &[OptSpec] = &[
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
 
-/// The modes with per-mode defaults.
-const ALL_MODES: &[&str] = &["prompt", "agent", "chat"];
-
-/// Mode names as accepted on the command line.
-fn canonical_mode(name: &str) -> Option<&'static str> {
-    match name {
-        "prompt" => Some("prompt"),
-        "agent" => Some("agent"),
-        "chat" => Some("chat"),
-        _ => None,
-    }
-}
-
 pub fn run(argv: &[String]) -> i32 {
     let Some(first) = argv.first() else {
         // bare `llm models`: the wizard on a terminal, the values otherwise
@@ -92,37 +79,25 @@ pub fn run(argv: &[String]) -> i32 {
 
 // interactive wizard — mode → provider → model → thinking depth
 
-/// The interactive configurator behind bare `llm models` and `llm models set`.
+/// The interactive configurator behind bare `llm models` and `llm models set`:
+/// the provider → model → thinking cascade, saved as the shared default.
 fn wizard() -> i32 {
-    let items: Vec<String> = ALL_MODES
-        .iter()
-        .map(|m| {
-            let current = config::mode_default(m)
-                .map(|(id, _)| id)
-                .unwrap_or_else(|| "(unset)".to_string());
-            format!("{m:<9} {current}")
-        })
-        .collect();
-    let Some(i) = crate::term::lineedit::pick("mode:", &items, false) else {
+    let current = config::default_model().unwrap_or_default();
+    let current_thinking = config::default_thinking();
+    let Some(choice) = cascade_model_picker(&current, current_thinking.as_deref()) else {
         return 0;
     };
-    let mode = ALL_MODES[i];
-    let (current_model, current_thinking) =
-        config::mode_default(mode).unwrap_or((String::new(), None));
-    let Some(choice) = cascade_model_picker(&current_model, current_thinking.as_deref()) else {
-        return 0;
-    };
-    if let Err(e) = config::try_set_mode_default_model(mode, &choice.model) {
+    if let Err(e) = config::try_set_default_model(&choice.model) {
         eprintln!("Error: failed to save: {e}");
         return 1;
     }
     if let Some(thinking) = choice.thinking
-        && let Err(e) = config::try_set_mode_default_thinking(mode, thinking.as_deref())
+        && let Err(e) = config::try_set_default_thinking(thinking.as_deref())
     {
         eprintln!("Error: failed to save thinking: {e}");
         return 1;
     }
-    eprintln!("\x1b[2m{mode} model: {}\x1b[0m", choice.model);
+    eprintln!("\x1b[2mdefault model: {}\x1b[0m", choice.model);
     0
 }
 
@@ -232,36 +207,20 @@ pub fn thinking_picker(current: Option<&str>) -> Option<Option<String>> {
 
 // get / set / unset — the per-mode defaults
 
-fn print_mode_line(mode: &str) {
-    match config::mode_default(mode) {
-        Some((m, thinking)) => match thinking {
-            Some(t) => println!("{mode:<9} {m} (thinking: {t})"),
-            None => println!("{mode:<9} {m}"),
-        },
-        None => println!("{mode:<9} (unset)"),
-    }
-}
-
 fn get(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
         render_help(
-            "llm models get [MODE]",
-            "Show the current model settings",
+            "llm models get",
+            "Show the default model",
             SIMPLE_SPECS,
             &[],
         )
     });
-    let Some(args) = args else { return code };
-    if let Some(name) = args.first_positional() {
-        let Some(mode) = canonical_mode(name) else {
-            eprintln!("Error: unknown mode '{name}' (prompt, agent, chat)");
-            return 2;
-        };
-        print_mode_line(mode);
-    } else {
-        for mode in ALL_MODES {
-            print_mode_line(mode);
-        }
+    let Some(_) = args else { return code };
+    match (config::default_model(), config::default_thinking()) {
+        (Some(m), Some(t)) => println!("default    {m} (thinking: {t})"),
+        (Some(m), None) => println!("default    {m}"),
+        (None, _) => println!("default    (unset — llm models set)"),
     }
     0
 }
@@ -269,32 +228,21 @@ fn get(argv: &[String]) -> i32 {
 fn set(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, SET_SPECS, || {
         render_help(
-            "llm models set [MODE] MODEL",
-            "Configure a mode's model (bare: interactive wizard; no MODE: the prompt default)",
+            "llm models set MODEL",
+            "Set the default model (bare: interactive wizard)",
             SET_SPECS,
-            &[("MODE", "prompt (default), agent or chat")],
+            &[("MODEL", "provider/model id, alias or bare name")],
         )
     });
     let Some(args) = args else { return code };
     if args.positionals.is_empty() {
         if !std::io::stdin().is_terminal() {
-            eprintln!("Error: Usage: llm models set [MODE] MODEL [--thinking LEVEL]");
+            eprintln!("Error: Usage: llm models set MODEL [--thinking LEVEL]");
             return 2;
         }
         return wizard();
     }
-    // a leading mode word targets that mode; a bare model targets prompt
-    let (mode, model_pos) = match canonical_mode(&args.positionals[0]) {
-        Some(mode) => {
-            if args.positionals.len() < 2 {
-                eprintln!("Error: Usage: llm models set [MODE] MODEL [--thinking LEVEL]");
-                return 2;
-            }
-            (mode, 1)
-        }
-        None => ("prompt", 0),
-    };
-    let model = args.positionals[model_pos].clone();
+    let model = args.positionals[0].clone();
     let thinking: Option<Option<String>> = match args.opt(&["thinking"]) {
         Some(level) => match crate::providers::parse_thinking_level(level) {
             Ok(v) => Some(v),
@@ -311,12 +259,12 @@ fn set(argv: &[String]) -> i32 {
         return 1;
     };
     let qualified = format!("{n}/{m}");
-    if let Err(e) = config::try_set_mode_default_model(mode, &qualified) {
+    if let Err(e) = config::try_set_default_model(&qualified) {
         eprintln!("Error: failed to save: {e}");
         return 1;
     }
     if let Some(t) = &thinking
-        && let Err(e) = config::try_set_mode_default_thinking(mode, t.as_deref())
+        && let Err(e) = config::try_set_default_thinking(t.as_deref())
     {
         eprintln!("Error: failed to save thinking: {e}");
         return 1;
@@ -324,40 +272,23 @@ fn set(argv: &[String]) -> i32 {
     let depth = thinking
         .map(|t| format!(" (thinking: {})", t.unwrap_or_else(|| "off".to_string())))
         .unwrap_or_default();
-    eprintln!("{mode} model: {qualified}{depth}");
+    eprintln!("default model: {qualified}{depth}");
     0
 }
 
 fn unset(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, SIMPLE_SPECS, || {
         render_help(
-            "llm models unset MODE",
-            "Clear a mode's default model",
+            "llm models unset",
+            "Clear the default model",
             SIMPLE_SPECS,
             &[],
         )
     });
-    let Some(args) = args else { return code };
-    let mode = if let Some(name) = args.first_positional() {
-        let Some(mode) = canonical_mode(name) else {
-            eprintln!("Error: unknown mode '{name}' (prompt, agent, chat)");
-            return 2;
-        };
-        mode.to_string()
-    } else if std::io::stdin().is_terminal() {
-        let items: Vec<String> = ALL_MODES.iter().map(|m| m.to_string()).collect();
-        let Some(i) = crate::term::lineedit::pick("mode:", &items, false) else {
-            return 0;
-        };
-        ALL_MODES[i].to_string()
-    } else {
-        eprintln!("Error: Usage: llm models unset MODE");
-        return 2;
-    };
-    let result = config::unset_mode_default(&mode);
-    match result {
+    let Some(_) = args else { return code };
+    match config::unset_default() {
         Ok(()) => {
-            eprintln!("{mode} default cleared");
+            eprintln!("default model cleared");
             0
         }
         Err(e) => {
@@ -535,14 +466,14 @@ fn add(argv: &[String]) -> i32 {
             );
             // the first provider's first model becomes the default, so a
             // fresh install is ready to run without another command
-            if config::mode_default("prompt").is_none()
+            if config::default_model().is_none()
                 && let Some(first) = cfg
                     .providers
                     .get(&name)
                     .and_then(|p| p.models.first().cloned())
             {
                 let qualified = format!("{name}/{first}");
-                if config::set_default_model_all(&qualified).is_ok() {
+                if config::try_set_default_model(&qualified).is_ok() {
                     eprintln!("\x1b[2mdefault model: {qualified}\x1b[0m");
                 }
             }
@@ -552,14 +483,6 @@ fn add(argv: &[String]) -> i32 {
             eprintln!("Error: {e}");
             1
         }
-    }
-}
-
-/// After a provider goes away, drop the mode defaults that pointed at it —
-/// otherwise they dangle and also block the first-provider auto-default.
-fn note_cleared_defaults(provider: &str) {
-    for mode in config::clear_mode_defaults_for(provider) {
-        eprintln!("\x1b[2mcleared {mode} default (pointed at {provider})\x1b[0m");
     }
 }
 
@@ -598,7 +521,9 @@ fn remove(argv: &[String]) -> i32 {
                 "removed provider '{name}' (and its key) from {}",
                 config::config_path().display()
             );
-            note_cleared_defaults(name);
+            if config::clear_default_for(name) {
+                eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
+            }
             0
         }
         Err(e) => {
@@ -629,8 +554,10 @@ fn list(argv: &[String]) -> i32 {
     // the per-mode defaults lead: what runs where matters more than the
     // inventory, and only shows without filters
     if !args.flag(&["json"]) && queries.is_empty() {
-        for mode in ALL_MODES {
-            print_mode_line(mode);
+        match (config::default_model(), config::default_thinking()) {
+            (Some(m), Some(t)) => println!("default    {m} (thinking: {t})"),
+            (Some(m), None) => println!("default    {m}"),
+            (None, _) => println!("default    (unset — llm models set)"),
         }
         println!();
     }

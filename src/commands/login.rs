@@ -91,8 +91,8 @@ pub(crate) fn logout_picker() -> Result<(), String> {
         "\x1b[2mremoved provider '{name}' (and its key) from {}\x1b[0m",
         config::config_path().display()
     );
-    for mode in config::clear_mode_defaults_for(&name) {
-        eprintln!("\x1b[2mcleared {mode} default (pointed at {name})\x1b[0m");
+    if config::clear_default_for(&name) {
+        eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m");
     }
     Ok(())
 }
@@ -290,7 +290,7 @@ pub(crate) fn wizard() -> Result<(), String> {
         let chosen = match picked {
             Some(i) if i < selected.len() => Some(selected[i].clone()),
             _ => {
-                if config::get_default_model().is_none() {
+                if config::default_model().is_none() {
                     Some(selected[0].clone())
                 } else {
                     None
@@ -298,7 +298,7 @@ pub(crate) fn wizard() -> Result<(), String> {
             }
         };
         if let Some(m) = chosen {
-            match config::set_default_model_all(&format!("{name}/{m}")) {
+            match config::try_set_default_model(&format!("{name}/{m}")) {
                 Ok(()) => eprintln!("\x1b[2mdefault model: {name}/{m}\x1b[0m"),
                 Err(e) => eprintln!("Warning: failed to save default model: {e}"),
             }

@@ -250,11 +250,10 @@ fn execute(
         .or_else(|| std::env::var("LLM_MODEL").ok())
         .or_else(|| template.as_ref().and_then(|t| t.model.clone()))
         .or_else(|| conv_model.clone())
-        .or_else(config::get_default_model);
+        .or_else(config::default_model);
     let Some(query) = model_query else {
         return Err(
-            "No default model configured. Run `llm models set prompt <model>` or use -m."
-                .to_string(),
+            "No default model configured. Run `llm models set <model>` or use -m.".to_string(),
         );
     };
     let resolved = config.resolve_model(&query);

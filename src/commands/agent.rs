@@ -229,29 +229,23 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         conversation_id = Some(forked);
     }
 
-    // model resolution: -m > LLM_MODEL > session's model > mode default > default
-    let mode_name = if chat { "chat" } else { "agent" };
+    // model resolution: -m > LLM_MODEL > session's model > the default
     let cfg = config::load();
-    let mode_default = config::mode_default(mode_name);
-    let mode_model = mode_default.as_ref().and_then(|(m, _)| {
-        if cfg.resolve_model(m).is_some() {
-            Some(m.clone())
-        } else {
-            eprintln!(
-                "Warning: models.{mode_name} '{m}' does not resolve, using the global default"
-            );
-            None
+    let stored_default = config::default_model().filter(|m| {
+        let resolves = cfg.resolve_model(m).is_some();
+        if !resolves {
+            eprintln!("Warning: models.default '{m}' does not resolve, ignoring it");
         }
+        resolves
     });
     let query = args
         .opt(&["model"])
         .map(|s| s.to_string())
         .or_else(|| std::env::var("LLM_MODEL").ok())
         .or_else(|| conv_model.clone())
-        .or(mode_model)
-        .or_else(config::get_default_model);
+        .or(stored_default);
     let Some(query) = query else {
-        return Err("No default model configured. Run `llm models set prompt <model>`, `llm models add`, or use -m.".to_string());
+        return Err("No default model configured. Run `llm models set <model>`, `llm models add`, or use -m.".to_string());
     };
     let Some((name, provider, model_id)) = cfg.resolve_model(&query) else {
         return Err(format!("'{query}' is not a known model"));
@@ -312,13 +306,13 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         Some(m) => return Err(format!("invalid --mode '{m}' (text or json)")),
     };
 
-    // reasoning effort: CLI > models.agent thinking; invalid values are a
-    // hard error on the CLI and a warning from config
+    // reasoning effort: CLI > the stored global; invalid values are a hard
+    // error on the CLI and a warning from config
     let thinking: Option<String> = match args.opt(&["thinking"]) {
         Some(level) => crate::providers::parse_thinking_level(level)?,
         None => {
-            let level = mode_default.as_ref().and_then(|(_, t)| t.as_deref());
-            match level {
+            let level = config::default_thinking();
+            match level.as_deref() {
                 Some(level) if crate::providers::is_valid_reasoning_level(level) => {
                     Some(level.to_string())
                 }
