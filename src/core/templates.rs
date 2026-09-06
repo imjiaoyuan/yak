@@ -35,7 +35,7 @@ fn template_vars(text: &str) -> Vec<String> {
                     vars.push(name);
                 }
             }
-            Some(&c2) if is_ident_char(c2) => {
+            Some(&c2) if is_ident_start(c2) => {
                 let mut name = String::new();
                 name.push(c2);
                 chars.next();
@@ -59,6 +59,13 @@ fn template_vars(text: &str) -> Vec<String> {
 
 fn is_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(is_ident_char)
+}
+
+/// A placeholder name starts with a letter or underscore (Python's
+/// string.Template rule): `$5` and `$100` are literal dollar amounts, not
+/// variables, so a command body containing them still runs.
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -93,9 +100,14 @@ pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> Result<Strin
                     }
                     name.push(c);
                 }
-                out.push_str(params.get(&name).map(|s| s.as_str()).unwrap_or(""));
+                if is_ident(&name) {
+                    out.push_str(params.get(&name).map(|s| s.as_str()).unwrap_or(""));
+                } else {
+                    // an invalid braced name stays literal text
+                    out.push_str(&format!("${{{name}}}"));
+                }
             }
-            Some(&c2) if is_ident_char(c2) => {
+            Some(&c2) if is_ident_start(c2) => {
                 let mut name = String::new();
                 name.push(c2);
                 chars.next();
@@ -142,4 +154,37 @@ pub fn apply(
         None => None,
     };
     Ok((prompt, system))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dollar_amounts_stay_literal() {
+        // Python's string.Template idstart rule: a leading digit is not a
+        // variable, so a command body may quote prices unpunished
+        let params = BTreeMap::new();
+        assert_eq!(
+            substitute("costs $5 or $100", &params).unwrap(),
+            "costs $5 or $100"
+        );
+        assert_eq!(
+            substitute("regex groups: $1 and $2", &params).unwrap(),
+            "regex groups: $1 and $2"
+        );
+    }
+
+    #[test]
+    fn invalid_braced_names_stay_literal() {
+        let params = BTreeMap::new();
+        assert_eq!(
+            substitute("shell ${HOME-ish}", &params).unwrap(),
+            "shell ${HOME-ish}"
+        );
+        // valid names still substitute
+        let mut p = BTreeMap::new();
+        p.insert("name".to_string(), "x".to_string());
+        assert_eq!(substitute("hi ${name}!", &p).unwrap(), "hi x!");
+    }
 }

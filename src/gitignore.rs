@@ -10,11 +10,12 @@ use std::rc::Rc;
 /// up during the walk.
 pub(crate) fn scopes_for(root: &Path) -> Vec<Rc<IgnoreScope>> {
     let mut scopes: Vec<Rc<IgnoreScope>> = Vec::new();
-    let mut dir = if root.is_dir() {
+    let walk_base = if root.is_dir() {
         root
     } else {
         root.parent().unwrap_or(root)
     };
+    let mut dir = walk_base;
     let mut gitignore_dirs = vec![dir.to_path_buf()];
     if !dir.join(".git").exists() {
         while let Some(parent) = dir.parent() {
@@ -26,7 +27,18 @@ pub(crate) fn scopes_for(root: &Path) -> Vec<Rc<IgnoreScope>> {
         }
     }
     for d in gitignore_dirs.iter().rev() {
-        if let Some(scope) = IgnoreScope::load(d) {
+        if let Some(mut scope) = IgnoreScope::load(d) {
+            // ancestor .gitignores anchor at their own directory, so their
+            // anchored patterns must see the walk base as a prefix
+            if d != walk_base
+                && let Ok(rel) = walk_base.strip_prefix(d)
+            {
+                scope.anchor = Anchor::Above(
+                    rel.iter()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .collect(),
+                );
+            }
             scopes.push(Rc::new(scope));
         }
     }
@@ -44,7 +56,15 @@ pub(crate) fn collect_files(
 ) {
     // nested .gitignore: scoped to this directory, popped on the way out;
     // scopes clone as Rc pointers, not pattern vectors
-    let pushed = IgnoreScope::load(dir).map(|scope| {
+    let pushed = IgnoreScope::load(dir).map(|mut scope| {
+        // this scope's patterns anchor right here: strip the walked prefix
+        if let Ok(rel) = dir.strip_prefix(root) {
+            scope.anchor = Anchor::Below(
+                rel.iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect(),
+            );
+        }
         let mut all = scopes.to_vec();
         all.push(Rc::new(scope));
         all
@@ -78,6 +98,26 @@ pub(crate) fn collect_files(
 #[derive(Clone)]
 pub(crate) struct IgnoreScope {
     patterns: Vec<Pattern>,
+    /// where this scope's directory sits relative to the walk root: paths
+    /// handed to `is_ignored` are walk-root-relative and must be translated
+    /// into the scope's own frame before its anchored patterns can match
+    anchor: Anchor,
+}
+
+/// gitignore semantics anchor every pattern at the file's own directory: a
+/// `/dist/` in `packages/web/.gitignore` matches `packages/web/dist`, and
+/// an ancestor repo's `/build/` does not hit a same-named directory when
+/// the walk starts inside a subdirectory.
+#[derive(Clone)]
+pub(crate) enum Anchor {
+    /// the scope's directory is the walk root
+    Root,
+    /// the walk root lies these segments below the scope's directory
+    /// (an ancestor .gitignore): prepend them to every walked path
+    Above(Vec<String>),
+    /// the scope's directory lies these segments below the walk root
+    /// (a nested .gitignore): strip them from every walked path
+    Below(Vec<String>),
 }
 
 /// A compiled glob pattern, ready to match without re-parsing (the glob tool
@@ -98,6 +138,7 @@ impl IgnoreScope {
         let text = std::fs::read_to_string(dir.join(".gitignore")).ok()?;
         Some(IgnoreScope {
             patterns: text.lines().filter_map(parse_pattern).collect(),
+            anchor: Anchor::Root,
         })
     }
 
@@ -108,6 +149,7 @@ impl IgnoreScope {
                 .iter()
                 .filter_map(|p| parse_pattern(p))
                 .collect(),
+            anchor: Anchor::Root,
         }
     }
 }
@@ -152,8 +194,25 @@ fn is_ignored(scopes: &[Rc<IgnoreScope>], rel: &str, is_dir: bool) -> bool {
     let mut result = false;
     let segs: Vec<&str> = rel.split('/').collect();
     for scope in scopes {
+        // translate the walk-root-relative path into this scope's frame;
+        // a nested scope simply does not apply to paths outside it
+        let frame: Vec<&str> = match &scope.anchor {
+            Anchor::Root => segs.clone(),
+            Anchor::Above(tail) => {
+                let mut v: Vec<&str> = tail.iter().map(String::as_str).collect();
+                v.extend_from_slice(&segs);
+                v
+            }
+            Anchor::Below(prefix) => {
+                let refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+                match segs.strip_prefix(refs.as_slice()) {
+                    Some(rest) => rest.to_vec(),
+                    None => continue,
+                }
+            }
+        };
         for pattern in &scope.patterns {
-            if pattern_matches(pattern, &segs, is_dir) {
+            if pattern_matches(pattern, &frame, is_dir) {
                 result = !pattern.negated;
             }
         }
@@ -306,8 +365,42 @@ mod gitignore_tests {
     fn ignored_with(patterns: &[&str], path: &str, is_dir: bool) -> bool {
         let scope = IgnoreScope {
             patterns: patterns.iter().filter_map(|p| parse_pattern(p)).collect(),
+            anchor: Anchor::Root,
         };
         is_ignored(&[Rc::new(scope)], path, is_dir)
+    }
+
+    #[test]
+    fn anchored_patterns_resolve_against_their_own_directory() {
+        // nested packages/web/.gitignore with /dist/: matches that dist only
+        let nested = IgnoreScope {
+            patterns: ["/dist/"].iter().filter_map(|p| parse_pattern(p)).collect(),
+            anchor: Anchor::Below(vec!["packages".into(), "web".into()]),
+        };
+        assert!(is_ignored(
+            &[Rc::new(nested.clone())],
+            "packages/web/dist",
+            true
+        ));
+        assert!(!is_ignored(
+            &[Rc::new(nested.clone())],
+            "packages/web/src/dist",
+            true
+        ));
+        assert!(!is_ignored(&[Rc::new(nested.clone())], "other/dist", true));
+
+        // an ancestor repo .gitignore with /build/ does not hit a
+        // same-named dir inside a sub-walk-root (the walk base rides along)
+        let ancestor = IgnoreScope {
+            patterns: ["/build/"]
+                .iter()
+                .filter_map(|p| parse_pattern(p))
+                .collect(),
+            anchor: Anchor::Above(vec!["packages".into(), "web".into()]),
+        };
+        // walk-rel "build" is repo/packages/web/build, not repo/build
+        assert!(!is_ignored(&[Rc::new(ancestor.clone())], "build", true));
+        assert!(!is_ignored(&[Rc::new(ancestor)], "src/build", true));
     }
 
     #[test]

@@ -153,7 +153,30 @@ pub fn parse(text: &str) -> Result<Yaml, YamlError> {
     let lines: Vec<&str> = text.lines().collect();
     let mut pos = 0;
     let value = parse_block(&lines, &mut pos, 0)?;
+    if pos < lines.len() {
+        // a structure the subset cannot represent must not be silently
+        // dropped: half-parsed frontmatter is a real error
+        return Err(YamlError(format!(
+            "unparsed lines remain starting at: {}",
+            lines[pos]
+        )));
+    }
     Ok(value)
+}
+
+/// The next content line at or after `pos` (skipping blanks and comments)
+/// with its indent and trimmed text.
+fn next_content_line<'a>(lines: &[&'a str], pos: usize) -> Option<(usize, &'a str)> {
+    let mut i = pos;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        return Some((indent_of(lines[i]), lines[i].trim_start()));
+    }
+    None
 }
 
 fn parse_block(lines: &[&str], pos: &mut usize, min_indent: usize) -> Result<Yaml, YamlError> {
@@ -226,7 +249,14 @@ fn parse_map(lines: &[&str], pos: &mut usize, base: usize) -> Result<Yaml, YamlE
             if value_raw == "|" || value_raw == "|-" || value_raw == ">" || value_raw == ">-" {
                 parse_block_scalar(lines, pos, base, value_raw.starts_with('>'))
             } else if value_raw.is_empty() {
-                if text_block_ahead(lines, *pos, base + 1) {
+                // a sequence may sit at the parent key's own indent (the
+                // common YAML style), not only one level deeper
+                if let Some((ind, next)) = next_content_line(lines, *pos)
+                    && ind == base
+                    && (next.starts_with("- ") || next == "-")
+                {
+                    parse_list(lines, pos, base)?
+                } else if text_block_ahead(lines, *pos, base + 1) {
                     parse_plain_block(lines, pos, base + 1)
                 } else {
                     parse_block(lines, pos, base + 1)?
@@ -458,5 +488,29 @@ items:
         let y = parse("描述: 你好\nother: x\n").unwrap();
         assert_eq!(y.get("描述").unwrap().as_str(), Some("你好"));
         assert_eq!(y.get("other").unwrap().as_str(), Some("x"));
+    }
+
+    #[test]
+    fn same_indent_sequences_parse_under_their_key() {
+        // the common YAML style: list items at the parent key's own indent
+        let y = parse("name: x\ntools:\n- read\n- write\nafter: y\n").unwrap();
+        assert_eq!(
+            y.get("tools").unwrap().as_str_list(),
+            Some(vec!["read".to_string(), "write".to_string()])
+        );
+        assert_eq!(y.get("after").and_then(|v| v.as_str()), Some("y"));
+        // one level deeper keeps working
+        let y = parse("tools:\n  - read\n  - write\n").unwrap();
+        assert_eq!(y.get("tools").unwrap().as_str_list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unparsable_leftover_lines_error_instead_of_vanishing() {
+        // a stray list item after a map makes the parser stop early; the
+        // remainder must surface as an error, not vanish
+        let err = parse("a: 1\nb:\n  c: 2\n- orphan\n").unwrap_err();
+        assert!(err.0.contains("unparsed lines remain"), "{}", err.0);
+        // and a malformed line is its own error
+        assert!(parse("a: 1\n<garbage>\n").is_err());
     }
 }
