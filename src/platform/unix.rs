@@ -65,7 +65,6 @@ mod termios_impl {
         c_oflag: u64,
         c_cflag: u64,
         c_lflag: u64,
-        c_line: u8,
         c_cc: [u8; 20],
         c_ispeed: u64,
         c_ospeed: u64,
@@ -79,7 +78,6 @@ mod termios_impl {
             c_oflag: 0,
             c_cflag: 0,
             c_lflag: 0,
-            c_line: 0,
             c_cc: [0; 20],
             c_ispeed: 0,
             c_ospeed: 0,
@@ -100,8 +98,9 @@ mod termios_impl {
         const IGNCR: u64 = 0x80;
         b.c_lflag &= !(ICANON | ECHO | ISIG);
         b.c_iflag &= !(ICRNL | INLCR | IGNCR);
-        b.c_cc[5] = vtime; // VTIME
-        b.c_cc[6] = vmin; // VMIN
+        // macOS c_cc indices: VMIN = 16, VTIME = 17
+        b.c_cc[17] = vtime;
+        b.c_cc[16] = vmin;
     }
 
     pub fn echo_off(b: &mut Buf) {
