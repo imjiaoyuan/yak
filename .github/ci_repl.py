@@ -4,6 +4,12 @@ keystrokes and checks the wire, the history file and the drawn screen —
 multiline keys, kitty CSI-u encoded keys, tab completion and the ctrl+g
 editor round-trip. Exit code is nonzero on any assertion failure."""
 
+import sys
+
+if sys.platform == "win32":
+    print("repl smoke: skipped (Windows)")
+    sys.exit(0)
+
 import fcntl
 import http.server
 import json
@@ -12,7 +18,6 @@ import pty
 import re
 import select
 import struct
-import sys
 import tempfile
 import termios
 import threading
