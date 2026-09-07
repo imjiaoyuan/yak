@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ureq::ResponseExt;
+
 pub fn request_interrupt() {
     crate::platform::interrupt::request();
 }
@@ -543,15 +545,49 @@ fn get_with(agent: &ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>),
     Ok((buf, content_type))
 }
 
-fn get_text_with(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    let (bytes, _) = get_with(agent, url)?;
-    String::from_utf8(bytes).map_err(|_| format!("Failed to read {url}: invalid UTF-8"))
+/// A fetched web page, decoded to text: the final URL (after redirects),
+/// the bare mime type, and the UTF-8 body.
+pub struct FetchedPage {
+    pub url: String,
+    pub content_type: String,
+    pub body: String,
 }
 
-/// GET with a bounded timeout, for the agent's webfetch tool: fails fast
-/// instead of hanging a task for minutes. Proxies still come from env vars.
-pub fn get_text_short(url: &str) -> Result<String, String> {
-    get_text_with(short_agent(), url)
+/// GET with the short-timeout agent for the agent's webfetch tool: follows
+/// redirects, carries the final URL and mime type, and decodes to UTF-8 —
+/// a binary body (image/pdf/audio/…) errors naming its content type instead
+/// of producing garbage text. Fails fast instead of hanging a task.
+pub fn fetch_page(url: &str) -> Result<FetchedPage, String> {
+    let mut request = short_agent().get(url);
+    for (k, v) in identity_headers(url) {
+        request = request.header(k, v);
+    }
+    let resp = request
+        .call()
+        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        return Err(format!("Failed to fetch {url}: HTTP {status}"));
+    }
+    let final_url = resp.get_uri().to_string();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|c| c.split(';').next().unwrap_or(c).trim().to_string())
+        .unwrap_or_default();
+    let mut buf = Vec::new();
+    let mut reader = resp.into_body().into_reader();
+    std::io::Read::read_to_end(&mut reader, &mut buf)
+        .map_err(|e| format!("Failed to read {url}: {e}"))?;
+    let body = String::from_utf8(buf).map_err(|_| {
+        format!("Failed to read {url}: non-UTF-8 body (content-type: {content_type})")
+    })?;
+    Ok(FetchedPage {
+        url: final_url,
+        content_type,
+        body,
+    })
 }
 
 #[cfg(test)]

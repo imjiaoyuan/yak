@@ -1020,9 +1020,10 @@ impl Tool for LsTool {
 /// Cap on the response body returned to the model (bytes).
 const FETCH_MAX_BYTES: usize = 256 * 1024;
 
-/// Fetch a URL and hand the model plain text: strips HTML tags/scripts for
-/// web pages, returns other text bodies as-is. Reads are Tier::Read, so the
-/// agent can fetch freely without an approval prompt (like the reference's webfetch).
+/// Fetch a URL and hand the model readable text: HTML is stripped to text
+/// with its <title> extracted, JSON/XML/plain text pass through untouched, and
+/// the final URL is reported when redirects moved the fetch. Reads are
+/// Tier::Read, so the agent can fetch freely without an approval prompt.
 struct FetchTool;
 
 impl Tool for FetchTool {
@@ -1033,9 +1034,9 @@ impl Tool for FetchTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as plain text. Use for docs, articles, \
-         API pages and other web resources. HTML is stripped to text; the body is \
-         capped at 256KB."
+        "Fetch a URL and return its content. HTML pages are stripped to readable text \
+         (title first); JSON, XML and plain text pass through as-is. The body is capped \
+         at 256KB and the final URL is noted when a redirect moved the fetch."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -1056,22 +1057,66 @@ impl Tool for FetchTool {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return ToolOutput::err(format!("only http(s) URLs are allowed (refusing {url})"));
         }
-        let body = match crate::core::http::get_text_short(url) {
-            Ok(b) => b,
+        let page = match crate::core::http::fetch_page(url) {
+            Ok(p) => p,
             Err(e) => return ToolOutput::err(e),
         };
-        let text = html_to_text(&body);
-        if text.len() > FETCH_MAX_BYTES {
-            let end = crate::core::text::floor_boundary(&text, FETCH_MAX_BYTES);
+        let is_html = page.content_type.eq_ignore_ascii_case("text/html")
+            || page
+                .content_type
+                .eq_ignore_ascii_case("application/xhtml+xml");
+        let out = if is_html {
+            let text = html_to_text(&page.body);
+            let mut s = String::new();
+            if page.url != url {
+                s.push_str(&format!("[final URL: {}]\n", page.url));
+            }
+            if let Some(title) = extract_title(&page.body)
+                && !title.is_empty()
+            {
+                s.push_str(&title);
+                s.push_str("\n\n");
+            }
+            s.push_str(&text);
+            s
+        } else {
+            // JSON, XML, plain text, CSV, … — pass through untouched
+            page.body.trim().to_string()
+        };
+        if out.len() > FETCH_MAX_BYTES {
+            let end = crate::core::text::floor_boundary(&out, FETCH_MAX_BYTES);
             return ToolOutput::ok(format!(
                 "{}…\n[truncated: {} bytes, showing first {}]",
-                &text[..end],
-                text.len(),
+                &out[..end],
+                out.len(),
                 end
             ));
         }
-        ToolOutput::ok(text)
+        ToolOutput::ok(out)
     }
+}
+
+/// The first <title>…</title> of an HTML document, whitespace-collapsed and
+/// entity-decoded (a bare helper — no full HTML parser in the dependency set).
+fn extract_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after_open = &html[start..];
+    let close = after_open.find('>')?;
+    let content_start = start + close + 1;
+    let lower_rest = &lower[content_start..];
+    let end = lower_rest.find("</title")?;
+    let raw = &html[content_start..content_start + end];
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    let title = title.trim().to_string();
+    (!title.is_empty()).then_some(title)
 }
 
 struct PlanTool;
@@ -1422,6 +1467,23 @@ mod tests {
         assert!(out.is_error);
         let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
         assert!(out.is_error);
+    }
+
+    #[test]
+    fn extract_title_collapses_and_decodes() {
+        assert_eq!(
+            extract_title("<html><head><title>  My &amp; page\n</title></head></html>"),
+            Some("My & page".to_string())
+        );
+        // tags inside the title are stripped
+        assert_eq!(
+            extract_title("<title><b>bold</b> title</title>"),
+            Some("<b>bold</b> title".to_string())
+        );
+        // no title
+        assert_eq!(extract_title("<html><body>no title</body></html>"), None);
+        // empty title is None
+        assert_eq!(extract_title("<title>   </title>"), None);
     }
 
     #[test]
