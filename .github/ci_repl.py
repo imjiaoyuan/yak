@@ -132,6 +132,22 @@ def main():
     send(fd, b"\r")
     time.sleep(0.3)
 
+    # -- lone backslash + enter inserts a newline ---------------------------
+    read_until(fd, rb">")
+    send(fd, b"line four")
+    send(fd, b"\\")
+    send(fd, b"\r")              # enter after a lone \ -> newline, not submit
+    time.sleep(0.3)
+    read_until(fd, rb">")        # the continuation row's dim > marker
+    send(fd, b"line five")
+    send(fd, b"\r")
+    time.sleep(1.0)
+    prompts = seen.get("prompts") or []
+    assert prompts and prompts[-1] == "line four\nline five", \
+        f"prompt on the wire: {prompts!r}"
+    hist = open(os.path.join(user, "history.jsonl")).read()
+    assert "line four\\nline five" in hist, f"history: {hist!r}"
+
     # -- tab completion on ! shell lines ------------------------------------
     read_until(fd, rb">")
     send(fd, b"!he")
@@ -177,7 +193,7 @@ def main():
     send(fd, b"\r")
     time.sleep(1.0)
     prompts = seen.get("prompts") or []
-    assert len(prompts) >= 2 and prompts[1] == "from editor", \
+    assert prompts and prompts[-1] == "from editor", \
         f"editor round-trip on the wire: {prompts!r}"
 
     # -- exit: the kitty stack is popped ------------------------------------

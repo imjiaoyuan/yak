@@ -5,9 +5,10 @@
 //!
 //! The buffer is multiline: ctrl+j (a raw `\n`, distinct from Enter's `\r`
 //! because the platform clears ICRNL), alt+enter, shift/ctrl+enter (via the
-//! kitty keyboard protocol) and bracketed paste all insert real newlines;
-//! only Enter submits. Arrows move through the multiline text and only recall
-//! history from the top line with the cursor parked at its start.
+//! kitty keyboard protocol), a lone `\` before Enter (the Linux continuation
+//! gesture) and bracketed paste all insert real newlines; only Enter submits.
+//! Arrows move through the multiline text and only recall history from the
+//! top line with the cursor parked at its start.
 
 use crate::platform::{RawByte, RawTerm};
 use std::io::Write;
@@ -15,7 +16,7 @@ use std::path::Path;
 
 pub enum LineResult {
     /// a completed line (without the trailing newline); may contain embedded
-    /// newlines from ctrl+j, alt+enter or backslash continuation
+    /// newlines from ctrl+j, alt+enter or a lone backslash before Enter
     Line(String),
     /// ctrl-d on an empty line
     Eof,
@@ -74,8 +75,9 @@ impl LineEditor {
 
     /// Read one line with editing. Tab completes bash-style via `completer`:
     /// a single candidate is inserted, several extend to the common prefix
-    /// and then list the options. Lines ending in a backslash continue onto
-    /// the next input; ctrl+j / alt+enter / shift+enter insert a newline.
+    /// and then list the options. A line ending in a lone backslash turns
+    /// Enter into a newline; ctrl+j / alt+enter / shift+enter insert one
+    /// directly.
     pub fn read_line(
         &mut self,
         prompt: &str,
@@ -153,13 +155,15 @@ impl LineEditor {
                 // enter submits (raw mode clears ICRNL, so enter is always
                 // \r; a raw \n is ctrl+j and inserts a newline below)
                 b'\r' => {
-                    // backslash at end of line: continue reading the same input
-                    if buf.ends_with('\\') && !buf.ends_with("\\\\") {
+                    // a lone trailing backslash escapes the enter into a
+                    // newline (the Linux continuation gesture); a doubled
+                    // backslash submits literally
+                    if enter_breaks_line(&buf) {
                         buf.pop();
+                        buf.push('\n');
                         cursor = buf.len();
-                        line.settle(&mut out, prompt, &buf);
-                        let _ = write!(out, "\x1b[2m…\x1b[0m ");
-                        let _ = out.flush();
+                        nav.reset(self.history.len());
+                        line.draw(&mut out, prompt, &buf, cursor);
                         continue;
                     }
                     let text = expand_pastes(&buf, &pastes);
@@ -783,6 +787,13 @@ fn kill_word_back(buf: &mut String, cursor: &mut usize, kill: &mut String) {
 /// every other position moves through the multiline text instead.
 fn recall_on_up(buf: &str, cursor: usize, browsing: bool) -> bool {
     browsing || buf.is_empty() || cursor == 0
+}
+
+/// Enter's disposition at the buffer end: a lone trailing backslash escapes
+/// the enter into a newline instead of submitting; a doubled backslash (or
+/// no backslash) submits.
+fn enter_breaks_line(buf: &str) -> bool {
+    buf.ends_with('\\') && !buf.ends_with("\\\\")
 }
 
 /// Push `text` onto the in-memory history (adjacent duplicates and blank
@@ -1543,6 +1554,15 @@ fn plain_read(prompt: &str) -> LineResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_breaks_after_a_lone_trailing_backslash() {
+        assert!(enter_breaks_line("foo\\"));
+        assert!(enter_breaks_line("\\"));
+        assert!(enter_breaks_line("foo\nbar\\"));
+        assert!(!enter_breaks_line("foo"));
+        assert!(!enter_breaks_line("foo\\\\")); // doubled submits literally
+    }
 
     #[test]
     fn recall_only_while_browsing_empty_or_parked_at_start() {

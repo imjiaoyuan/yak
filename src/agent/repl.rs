@@ -223,7 +223,7 @@ fn abbrev_home(path: &str) -> String {
 /// Full help page shown on ctrl+o.
 fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> String {
     let mut h = String::from(
-        "\x1b[2mkeys      enter submit · ctrl+j or alt+enter = newline · tab complete · ctrl+g editor",
+        "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
     h.push_str("\ncommands   /help /clear /init /mcp /exit · !cmd runs shell");
@@ -547,7 +547,9 @@ fn repl_command(
             eprintln!("  /undo         drop the last round");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
-            eprintln!("  multi-line: ctrl+j / alt+enter newline · ctrl+g edits in $EDITOR");
+            eprintln!(
+                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR"
+            );
             eprintln!("  llm models picks the default; llm login adds providers\x1b[0m");
         }
         "/ask" | "/yolo" => {
