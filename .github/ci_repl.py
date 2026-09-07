@@ -120,7 +120,11 @@ def main():
     send(fd, b"line three")
     time.sleep(0.3)
     send(fd, b"\r")              # enter submits
-    time.sleep(1.0)
+    # poll for the POST: pty delivery can lag, so give it a real window
+    for _ in range(40):
+        time.sleep(0.25)
+        if seen.get("prompts"):
+            break
     prompts = seen.get("prompts") or []
     if not (prompts and prompts[0] == "line one\nline two\nline three"):
         # drain and show what the REPL actually drew, for cross-platform diagnosis
@@ -132,7 +136,7 @@ def main():
             except OSError:
                 pass
         raise AssertionError(
-            f"prompt on the wire: {prompts!r}; screen tail: {bytes(OUT[-600:])!r}"
+            f"prompt on the wire: {prompts!r}; screen tail: {bytes(OUT[-800:])!r}"
         )
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line one\\nline two\\nline three" in hist, f"history: {hist!r}"
