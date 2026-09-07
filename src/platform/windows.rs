@@ -5,11 +5,9 @@
 
 use std::ffi::c_void;
 use std::io::{BufRead, Write};
-use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
 
 use super::{RawByte, TermSize};
 
@@ -259,7 +257,6 @@ pub fn term_size() -> TermSize {
     let rows = std::env::var("LINES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok());
-    #[cfg(windows)]
     let ioctl_size = {
         let h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
         let invalid = h.is_null() || h as usize == usize::MAX;
@@ -417,7 +414,7 @@ mod tests {
 
     #[test]
     fn run_shell_uses_platform_spec() {
-        let outcome = run_shell_stream(
+        let outcome = super::super::run_shell_stream(
             "Write-Output hi",
             Path::new("."),
             30,
