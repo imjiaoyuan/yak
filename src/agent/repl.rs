@@ -16,25 +16,10 @@ pub fn repl(
     let mut settings = crate::agent::settings::load();
     let mut editor = crate::term::lineedit::LineEditor::new();
 
-    // two-way undo: write/edit targets snapshot before their first touch,
-    // `/undo` restores the files together with the conversation round (the
-    // tree is keyed by a fresh ulid and dies with the session)
-    session.checkpoints = Some(std::sync::Arc::new(std::sync::Mutex::new(
-        crate::agent::checkpoint::CheckpointState::new(
-            crate::core::config::user_dir()
-                .join("checkpoints")
-                .join(crate::core::db::ulid()),
-        ),
-    )));
-
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
 
-    if session.chat_mode {
-        eprintln!("\x1b[1mllm chat\x1b[0m · {}", session.model.qualified_id());
-    } else {
-        print_banner(&session, &agents);
-    }
+    print_banner(&session, &agents);
     render_history(&session.seed);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
@@ -277,7 +262,7 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
 
 const SLASH_COMMANDS: &[&str] = &[
     "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
-    "/mcp", "/tools", "/undo", "/exit",
+    "/mcp", "/tools", "/exit",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -544,7 +529,6 @@ fn repl_command(
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
             eprintln!("  /ask          approvals always on /compact condense history");
             eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
-            eprintln!("  /undo         drop the last round");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!(
@@ -579,38 +563,6 @@ fn repl_command(
                 &settings.disabled_skills,
             );
             print_banner(session, &agents);
-        }
-        "/undo" => {
-            // files first: the round's first-touch snapshots restore, then
-            // the conversation rewinds to where that round began
-            let round = session
-                .checkpoints
-                .as_ref()
-                .and_then(|ck| ck.lock().ok().and_then(|mut c| c.undo()));
-            let last_user = session
-                .seed
-                .iter()
-                .rposition(|m| matches!(m, crate::providers::Msg::User { .. }));
-            let (idx, persisted) = match (round, last_user) {
-                (Some((len, files, persisted)), _) => {
-                    if files > 0 {
-                        eprintln!(
-                            "\x1b[2mrestored {files} file{}\x1b[0m",
-                            if files == 1 { "" } else { "s" }
-                        );
-                    }
-                    (len, persisted)
-                }
-                (None, Some(idx)) => (idx, false),
-                (None, None) => {
-                    eprintln!("\x1b[2mnothing to undo\x1b[0m");
-                    return false;
-                }
-            };
-            if let Err(e) = session.rewind_to(idx, persisted) {
-                eprintln!("Warning: {e}");
-            }
-            eprintln!("\x1b[2mundo — dropped the last round\x1b[0m");
         }
         "/status" => {
             let used = crate::agent::compact::estimate_tokens(&session.seed, None);

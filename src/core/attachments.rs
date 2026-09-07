@@ -1,10 +1,10 @@
 //! Attachment loading: `-a`/`--at` references (paths, URLs, stdin) resolved
-//! into bytes with a mime type, feeding the wire `Attachment` and the log
-//! store. Shared by prompt, chat and agent.
+//! into bytes with a mime type, feeding the wire `Attachment` and the thread
+//! store. Shared by prompt and agent.
 
 use std::io::{IsTerminal, Read};
 
-use crate::core::logstore::StoredAttachment;
+use crate::core::threads::StoredAttachment;
 
 /// The wire form of an attachment, carried on user messages and tool
 /// results: mime, base64 bytes and a display name. `path`/`url` ride along
@@ -50,7 +50,7 @@ impl Loaded {
             path: self.path.clone(),
             url: self.url.clone(),
             mime_type: self.mime_type.clone(),
-            content: self.content.clone(),
+            base64: Some(crate::b64::encode(&self.content)),
         }
     }
 

@@ -25,10 +25,15 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "grep",
     "glob",
     "ls",
-    "remember",
     "webfetch",
     "update_plan",
     "task",
+    "spawn_agent",
+    "wait_agent",
+    "followup_task",
+    "resume_agent",
+    "list_agents",
+    "interrupt_agent",
 ];
 
 #[derive(Clone, Debug)]
@@ -174,11 +179,14 @@ mod tests {
 
     #[test]
     fn builtin_names_const_matches_registry() {
-        let registry: Vec<String> =
-            super::super::tools::builtin_tools_configured(None, &Default::default())
-                .iter()
-                .map(|t| t.name().to_string())
-                .collect();
+        let registry: Vec<String> = super::super::tools::builtin_tools_configured(
+            None,
+            &Default::default(),
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
         assert_eq!(registry, BUILTIN_TOOL_NAMES);
     }
 

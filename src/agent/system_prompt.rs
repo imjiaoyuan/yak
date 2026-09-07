@@ -33,20 +33,8 @@ pub fn project_context(cwd: &Path) -> Option<String> {
     ))
 }
 
-/// The conversational preset used by `llm chat`: the explicit `--system-prompt`
-/// (or the loaded conversation's system), falling back to chat's historical
-/// default, with global user memory injected. No cwd context, no agents block.
-pub fn chat_system_prompt(conv_system: Option<String>, replace: Option<&str>) -> Option<String> {
-    let base = replace
-        .map(str::to_string)
-        .or(conv_system)
-        .unwrap_or_else(|| {
-            "You are llm chat, a terminal assistant. Reply in the user's language. Do not use emoji."
-                .to_string()
-        });
-    crate::agent::memory::inject_system(Some(base))
-}
-
+/// Assemble the agent system prompt: built-ins plus project
+/// CLAUDE.md/AGENTS.md discovery, skills, and global user memory.
 pub fn build_system_prompt(
     cwd: &Path,
     replace: Option<&str>,

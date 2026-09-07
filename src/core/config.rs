@@ -75,8 +75,8 @@ pub fn set_logs_enabled(on: bool) {
     });
 }
 
-pub fn logs_db_path() -> PathBuf {
-    user_dir().join("logs.db")
+pub fn threads_dir() -> PathBuf {
+    user_dir().join("threads")
 }
 
 /// Expand `${VAR}` references in provider api keys, falling back to the
@@ -222,7 +222,7 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 
 // the default model — the "models" object in config.json:
 // {"default": "provider/model", "thinking": "high"}. One default serves
-// every mode (prompt/agent/chat); -m and LLM_MODEL override per run.
+// every mode (prompt/agent); -m and LLM_MODEL override per run.
 // Legacy per-mode entries migrate on read: the prompt entry wins, then any
 // set mode; the first write collapses the file onto the new shape.
 
@@ -240,7 +240,7 @@ fn default_model_from(value: &serde_json::Value) -> Option<String> {
     {
         return Some(m.to_string());
     }
-    for mode in ["prompt", "agent", "chat"] {
+    for mode in ["prompt", "agent"] {
         if let Some(m) = value
             .get("models")
             .and_then(|m| m.get(mode))
@@ -267,7 +267,7 @@ fn default_thinking_from(value: &serde_json::Value) -> Option<String> {
     {
         return Some(t.to_string());
     }
-    for mode in ["prompt", "agent", "chat"] {
+    for mode in ["prompt", "agent"] {
         if let Some(t) = value
             .get("models")
             .and_then(|m| m.get(mode))
@@ -289,7 +289,7 @@ pub fn try_set_default_model(model: &str) -> std::io::Result<()> {
 
 fn set_default_model_in(value: &mut serde_json::Value, model: &str) {
     let map = models_map_mut(value);
-    for mode in ["prompt", "agent", "chat"] {
+    for mode in ["prompt", "agent"] {
         map.remove(mode);
     }
     map.insert(
@@ -340,7 +340,7 @@ fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
         {
             map.remove("default");
             map.remove("thinking");
-            for mode in ["prompt", "agent", "chat"] {
+            for mode in ["prompt", "agent"] {
                 map.remove(mode);
             }
         }
@@ -358,7 +358,7 @@ pub fn unset_default() -> std::io::Result<()> {
         {
             map.remove("default");
             map.remove("thinking");
-            for mode in ["prompt", "agent", "chat"] {
+            for mode in ["prompt", "agent"] {
                 map.remove(mode);
             }
         }
@@ -451,13 +451,7 @@ pub fn add_model(provider: &str, model_id: &str) {
     }
 }
 
-// logging gate — the config.json `logging` bool; a legacy marker file still counts as off
-
-pub fn ensure_dir_exists(path: &std::path::Path) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-}
+// logging gate — the config.json `logging` bool
 
 impl Config {
     /// Resolve a model id (either `provider/model` or a bare name/alias)
@@ -533,7 +527,7 @@ mod default_model_tests {
         });
         set_default_model_in(&mut v, "new/m");
         assert_eq!(v["models"]["default"], json!("new/m"));
-        for mode in ["prompt", "agent", "chat"] {
+        for mode in ["prompt", "agent"] {
             assert!(v["models"].get(mode).is_none(), "{mode} survived");
         }
         // the options table is a sibling, not a mode: it stays
@@ -574,15 +568,12 @@ mod default_model_tests {
         let root = serde_json::json!({"models": {"default": "a/x", "thinking": "high"}});
         assert_eq!(default_model_from(&root).as_deref(), Some("a/x"));
         assert_eq!(default_thinking_from(&root).as_deref(), Some("high"));
-        // legacy per-mode entries: prompt wins, then any other set mode
+        // legacy per-mode entries: prompt wins, then agent
         let root = serde_json::json!({"models": {
             "prompt": {"model": "p/x"}, "agent": {"model": "a/y", "thinking": "low"}
         }});
         assert_eq!(default_model_from(&root).as_deref(), Some("p/x"));
         assert_eq!(default_thinking_from(&root).as_deref(), Some("low"));
-        let root = serde_json::json!({"models": {"chat": {"model": "c/z"}}});
-        assert_eq!(default_model_from(&root).as_deref(), Some("c/z"));
-        assert_eq!(default_thinking_from(&root), None);
         // nothing set anywhere
         assert_eq!(default_model_from(&serde_json::json!({})), None);
     }

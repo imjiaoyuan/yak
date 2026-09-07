@@ -1,7 +1,7 @@
 //! Global user memory: a single hand-editable `~/.llm/LLM.md` injected into
-//! the system prompt (agent and chat). One manual region only — the user
-//! writes it by hand, `/memory add` appends a line, and the agent's
-//! `remember` tool appends dated lines when asked to note something down.
+//! the system prompt (agent). One manual region only — the user writes it
+//! by hand, `/memory add` appends a line. (The agent `remember` tool was
+//! removed on purpose: memory is manual, not agent-written.)
 
 use std::path::PathBuf;
 
@@ -16,22 +16,6 @@ pub fn memory_path() -> PathBuf {
 /// or empty.
 pub fn section() -> Option<String> {
     section_at(&memory_path())
-}
-
-/// Append the global memory section to a chat system prompt; used at
-/// startup, so every conversation sees the same memory.
-pub fn inject_system(system: Option<String>) -> Option<String> {
-    inject_section(system, section())
-}
-
-fn inject_section(system: Option<String>, mem: Option<String>) -> Option<String> {
-    match mem {
-        Some(mem) => Some(match system {
-            Some(s) => format!("{s}\n\n{mem}"),
-            None => mem,
-        }),
-        None => system,
-    }
 }
 
 fn section_at(path: &std::path::Path) -> Option<String> {
@@ -69,55 +53,10 @@ fn add_manual_line_at(path: &std::path::Path, line: &str) -> Result<(), String> 
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
-/// The agent-facing remember: one dated line, deduped against what is
-/// already noted (containment either way, case-insensitive).
-pub fn remember(line: &str) -> Result<bool, String> {
-    remember_at(&memory_path(), line)
-}
-
-fn remember_at(path: &std::path::Path, line: &str) -> Result<bool, String> {
-    let line = line.trim().trim_matches(['"', '.']);
-    if line.is_empty() {
-        return Ok(false);
-    }
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let lower = line.to_lowercase();
-    let dup = text
-        .lines()
-        .map(|l| l.to_lowercase())
-        .any(|l| l.contains(&lower) || lower.contains(&l));
-    if dup {
-        return Ok(false);
-    }
-    add_manual_line_at(path, &format!("- [{}] {}", crate::core::db::today(), line))?;
-    Ok(true)
-}
-
+// The agent-facing `remember` tool was removed: memory is hand-edited only.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn remember_dedups_and_dates() {
-        let tmp = std::env::temp_dir().join(format!("llm-mem-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let file = tmp.join("LLM.md");
-        std::fs::write(&file, "- [2026-01-01] likes concise replies\n").unwrap();
-        // new fact lands with today's date
-        assert!(remember_at(&file, "prefers vim over emacs").unwrap());
-        let out = std::fs::read_to_string(&file).unwrap();
-        assert!(out.contains(&format!(
-            "- [{}] prefers vim over emacs",
-            crate::core::db::today()
-        )));
-        // containment either way is a duplicate
-        assert!(!remember_at(&file, "prefers vim").unwrap());
-        assert!(!remember_at(&file, "LIKES CONCISE REPLIES").unwrap());
-        // empty/whitespace is a no-op
-        assert!(!remember_at(&file, "  ").unwrap());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 
     #[test]
     fn section_wraps_and_truncates() {
@@ -133,15 +72,5 @@ mod tests {
         std::fs::write(&file, "   \n").unwrap();
         assert!(section_at(&file).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn inject_keeps_existing_system_and_skips_absent_memory() {
-        let mem = Some("<user_memory>…</user_memory>".to_string());
-        assert_eq!(
-            inject_section(Some("base".into()), mem.clone()),
-            Some("base\n\n<user_memory>…</user_memory>".to_string())
-        );
-        assert_eq!(inject_section(None, None), None);
     }
 }

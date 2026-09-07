@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use crate::agent::approval::{self, ApprovalConfig, Policy};
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
-use crate::core::db::Db;
-use crate::core::logstore::{self};
+use crate::core::threads;
 use crate::providers::Msg;
 use crate::{flag_spec, multi_spec, value_spec};
 
@@ -61,7 +60,7 @@ const SPECS: &[OptSpec] = &[
     flag_spec!(
         "no-session",
         None,
-        "Don't log the conversation to the database"
+        "Don't log the conversation to the thread store"
     ),
     flag_spec!(
         "continue",
@@ -87,7 +86,7 @@ const SPECS: &[OptSpec] = &[
         "ATTACHMENT"
     ),
     crate::two_value_spec!("at", "Attachment with explicit mimetype", "PATH MIMETYPE"),
-    value_spec!("database", Some('d'), "Path to log database", "PATH"),
+    value_spec!("database", Some('d'), "Path to thread directory", "PATH"),
     flag_spec!("no-stream", None, "Do not stream output"),
     value_spec!("key", None, "API key to use", "KEY"),
     flag_spec!("help", Some('h'), "Show this message and exit"),
@@ -105,59 +104,10 @@ fn help() -> String {
     )
 }
 
-/// Chat parses the same specs; the help row set is the conversational
-/// subset (tools/approval/session flags do not apply).
-fn chat_help() -> String {
-    let subset: Vec<OptSpec> = SPECS
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.long,
-                "model"
-                    | "option"
-                    | "system-prompt"
-                    | "attachment"
-                    | "at"
-                    | "continue"
-                    | "fork"
-                    | "session"
-                    | "cid"
-                    | "database"
-                    | "no-stream"
-                    | "thinking"
-                    | "key"
-                    | "help"
-            )
-        })
-        .cloned()
-        .collect();
-    render_help(
-        "llm chat",
-        "Hold an ongoing conversation with a model (tool-less agent session)",
-        &subset,
-        &[(
-            "[PROMPT]",
-            "Optional first message; omit for interactive mode",
-        )],
-    )
-}
-
 pub fn run(argv: &[String]) -> i32 {
-    run_mode(argv, false)
-}
-
-/// `llm chat`: the same machinery as `llm agent` in the tool-less
-/// conversational preset (mode default from `models.chat`, no tools,
-/// turns stamped mode "chat").
-pub fn run_chat(argv: &[String]) -> i32 {
-    run_mode(argv, true)
-}
-
-fn run_mode(argv: &[String], chat: bool) -> i32 {
-    let (args, code) =
-        crate::core::args::parse_with_help(argv, SPECS, || if chat { chat_help() } else { help() });
+    let (args, code) = crate::core::args::parse_with_help(argv, SPECS, help);
     let Some(args) = args else { return code };
-    match execute_mode(&args, chat) {
+    match execute_mode(&args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -166,7 +116,7 @@ fn run_mode(argv: &[String], chat: bool) -> i32 {
     }
 }
 
-fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
+fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let mut prompt = args.positionals.join(" ");
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task
     prompt = crate::core::attachments::read_piped_prompt(args, prompt)?;
@@ -184,42 +134,49 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     let mut seed: Vec<Msg> = Vec::new();
     let mut conv_system: Option<String> = None;
     let mut conv_model: Option<String> = None;
-    let db = open_db(args)?;
+    let store = open_store(args)?;
     if let Some(raw) = args.opt(&["session", "cid"]) {
-        let db = db
+        let store = store
             .as_ref()
-            .ok_or("--session requires a database (remove -n)?")?;
-        let Some(cid) = logstore::resolve_conversation(db, raw) else {
+            .ok_or("--session requires a store (remove -n)?")?;
+        let Some(cid) = store.resolve_thread(raw)? else {
             return Err(format!(
                 "session id or prefix '{raw}' matches nothing (or is ambiguous)"
             ));
         };
-        let (msgs, system) = crate::agent::session::rebuild_thread(db, &cid);
+        let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
         seed = msgs;
         conv_system = system;
-        conv_model = logstore::conversation_info(db, &cid).map(|(m, _)| m);
+        conv_model = store
+            .read_thread(&cid)
+            .ok()
+            .and_then(|turns| turns.last().map(|t| t.model.clone()));
         conversation_id = Some(cid);
     } else if args.flag(&["continue"])
-        && let Some(db) = db.as_ref()
-        && let Some(cid) = logstore::latest_conversation_id(db)
+        && let Some(store) = store.as_ref()
+        && let Some(cid) = store.latest_thread().ok().flatten()
     {
-        let (msgs, system) = crate::agent::session::rebuild_thread(db, &cid);
+        let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
         seed = msgs;
         conv_system = system;
-        conv_model = logstore::conversation_info(db, &cid).map(|(m, _)| m);
+        conv_model = store
+            .read_thread(&cid)
+            .ok()
+            .and_then(|turns| turns.last().map(|t| t.model.clone()));
         conversation_id = Some(cid);
     }
 
     // --fork: branch the loaded session onto a fresh thread id sharing the
-    // same message-chain tip; the original keeps its own tip from here on
+    // same turns so far; the original keeps its own from here on
     if args.flag(&["fork"]) {
-        let db = db
+        let store = store
             .as_ref()
-            .ok_or("--fork requires a database (remove -n)?")?;
+            .ok_or("--fork requires a store (remove -n)?")?;
         let source = conversation_id
             .take()
             .ok_or("--fork found no session to fork")?;
-        let forked = logstore::fork_thread(db, &source)
+        let forked = store
+            .fork_thread(&source)?
             .ok_or_else(|| format!("cannot fork session {source}"))?;
         eprintln!(
             "\x1b[2mforked {} → {}\x1b[0m",
@@ -290,35 +247,21 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
 
     let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
 
-    if chat && args.opt(&["tools"]).is_some() {
-        return Err("chat has no tools (run `llm agent` for the tool session)".to_string());
-    }
-    if chat && args.opt(&["append-system-prompt"]).is_some() {
-        return Err(
-            "chat does not accept --append-system-prompt (run `llm agent` for an appended system prompt)"
-                .to_string(),
-        );
-    }
     // plugin tools: script tools from the config `tools` table and MCP
     // servers from `mcpServers`. Connecting spawns every configured
     // server, so a --tools subset with no mcp__ names skips it entirely
     // (sub-agents pass exactly such subsets); a failed server warns and
     // mounts nothing, never aborting the session
-    let script_specs = if chat {
-        Vec::new()
-    } else {
-        crate::agent::script_tool::load()
-    };
+    let script_specs = crate::agent::script_tool::load();
     let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
         csv.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect()
     });
-    let need_mcp = !chat
-        && wanted
-            .as_ref()
-            .is_none_or(|w| w.iter().any(|n| n.starts_with("mcp__")));
+    let need_mcp = wanted
+        .as_ref()
+        .is_none_or(|w| w.iter().any(|n| n.starts_with("mcp__")));
     let mcp = if need_mcp {
         let registry = crate::agent::mcp::McpRegistry::connect(&crate::agent::mcp::load(), &cwd);
         for row in registry.rows() {
@@ -333,48 +276,32 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     } else {
         std::sync::Arc::new(crate::agent::mcp::McpRegistry::empty())
     };
-    let (system, agents, skills) = if chat {
-        (
-            crate::agent::system_prompt::chat_system_prompt(
-                conv_system,
-                args.opt(&["system-prompt"]),
-            ),
-            Vec::new(),
-            Vec::new(),
-        )
-    } else {
-        let agents = crate::agent::task::discover(&crate::core::config::user_dir(), &cwd);
-        let skills = crate::agent::skills::discover(
-            &crate::core::config::user_dir(),
-            &cwd,
-            &settings.disabled_skills,
-        );
-        (
-            crate::agent::system_prompt::build_system_prompt(
-                &cwd,
-                args.opt(&["system-prompt"]),
-                args.opt(&["append-system-prompt"]),
-                conv_system.as_deref(),
-                &agents,
-                &skills,
-            ),
-            agents,
-            skills,
-        )
-    };
+    let agents = crate::agent::task::discover(&crate::core::config::user_dir(), &cwd);
+    let skills = crate::agent::skills::discover(
+        &crate::core::config::user_dir(),
+        &cwd,
+        &settings.disabled_skills,
+    );
+    let system = crate::agent::system_prompt::build_system_prompt(
+        &cwd,
+        args.opt(&["system-prompt"]),
+        args.opt(&["append-system-prompt"]),
+        conv_system.as_deref(),
+        &agents,
+        &skills,
+    );
 
     let mut session = crate::agent::session::Session {
         compact: settings.compact_config(&model.qualified_id(), &model.model_id),
         model,
         tools: Vec::new(),
-        chat_mode: chat,
         system,
         cwd,
         max_turns,
         stream: !args.flag(&["no-stream"]),
         json_mode,
         no_session: args.flag(&["no-session"]),
-        db,
+        store,
         approval: approval_cfg,
         conversation_id,
         seed,
@@ -382,9 +309,9 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
         steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         script_tools: script_specs,
         mcp,
+        live_agents: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         tokens: (0, 0),
         tokens_cached: 0,
-        checkpoints: None,
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;
@@ -434,10 +361,12 @@ fn execute_mode(args: &ParsedArgs, chat: bool) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Open the session DB unless --no-session; -d picks a custom path.
-fn open_db(args: &ParsedArgs) -> Result<Option<Db>, String> {
+/// Open the thread store unless --no-session; -d picks a custom directory.
+fn open_store(args: &ParsedArgs) -> Result<Option<threads::Store>, String> {
     if args.flag(&["no-session"]) {
         return Ok(None);
     }
-    Ok(Some(Db::open_from_arg(args.opt(&["database"]))?))
+    Ok(Some(threads::Store::open_from_arg(
+        args.opt(&["database"]),
+    )?))
 }

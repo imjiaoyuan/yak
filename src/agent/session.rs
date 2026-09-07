@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use crate::agent::approval::{self, ApprovalConfig};
 use crate::agent::compact::CompactConfig;
 use crate::agent::{AgentOptions, AgentUpdate, ApprovalRequest, ApprovalResponse, run_agent};
-use crate::core::db::Db;
-use crate::core::logstore::{self, Message, Part, ReadPart, StoredAttachment};
+use crate::core::threads::{self, StoredAttachment, StoredMsg, StoredToolCall, StoredTurn};
 use crate::providers::{Msg, ResolvedModel, ToolCall};
 
 /// Everything one agent task needs; the interactive REPL reuses this across
@@ -22,7 +21,7 @@ pub struct Session {
     pub compact: CompactConfig,
     pub json_mode: bool,
     pub no_session: bool,
-    pub db: Option<Db>,
+    pub store: Option<threads::Store>,
     pub approval: ApprovalConfig,
     pub conversation_id: Option<String>,
     pub seed: Vec<Msg>,
@@ -31,9 +30,6 @@ pub struct Session {
     /// steering lines typed mid-run; shared with the KeyWatcher, drained by
     /// the agent loop at tool-round boundaries and by the REPL afterwards
     pub steer_queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// chat mode: the tool-less conversational preset (`llm chat`) —
-    /// no tools mount and turns are stamped mode "chat"
-    pub chat_mode: bool,
     /// script tools from the config `tools` table; re-mounted by
     /// [`Session::rebuild_tools`] on every registry rebuild
     pub script_tools: Vec<crate::agent::script_tool::ScriptToolSpec>,
@@ -41,56 +37,39 @@ pub struct Session {
     /// without orphaning the child processes (they die with the Session,
     /// RAII kill on drop); an empty registry when none are configured
     pub mcp: std::sync::Arc<crate::agent::mcp::McpRegistry>,
+    /// backgrounded sub-agent children (spawn_agent family), RAII-killed on
+    /// drop so a session exit never orphans a running child
+    pub live_agents: crate::agent::task::LiveAgents,
     /// cumulative input/output tokens across the session (for the status line)
     pub tokens: (u64, u64),
     /// cumulative input tokens served from the provider prompt cache
     pub tokens_cached: u64,
-    /// first-touch write/edit snapshots for two-way `/undo`; enabled by the
-    /// interactive REPL, None in one-shot and child-agent runs
-    pub checkpoints:
-        Option<std::sync::Arc<std::sync::Mutex<crate::agent::checkpoint::CheckpointState>>>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // snapshots live and die with the interactive session
-        if let Some(ck) = &self.checkpoints
-            && let Ok(mut ck) = ck.lock()
-        {
-            ck.clear();
+        // backgrounded sub-agents die with the session
+        if let Ok(mut live) = self.live_agents.lock() {
+            for (_, mut agent) in live.drain() {
+                let _ = agent.child.kill();
+            }
         }
     }
 }
 
 impl Session {
-    /// The turn-provenance mode stamp ("agent" or "chat").
+    /// The turn-provenance mode stamp (always "agent").
     pub fn mode_label(&self) -> &str {
-        if self.chat_mode { "chat" } else { "agent" }
+        "agent"
     }
 
-    /// Reset the in-memory session: drop history, forget the conversation id,
-    /// clear file snapshots and token counters. The stored log is untouched.
+    /// Reset the in-memory session: drop history, forget the conversation id
+    /// and token counters. The stored log is untouched.
     pub fn clear(&mut self) {
         self.seed.clear();
         self.conversation_id = None;
-        if let Some(ck) = &self.checkpoints
-            && let Ok(mut c) = ck.lock()
-        {
-            c.clear();
-        }
         self.tokens = (0, 0);
         self.tokens_cached = 0;
-    }
-
-    /// Rewind the conversation to where `idx` began: truncate the in-memory
-    /// seed and, when `persisted`, pop the stored thread too (a failed or
-    /// interrupted round stored nothing, so it must not rewind the store).
-    pub fn rewind_to(&mut self, idx: usize, persisted: bool) -> Result<(), String> {
-        self.seed.truncate(idx);
-        if persisted && let (Some(db), Some(cid)) = (&self.db, &self.conversation_id) {
-            crate::core::logstore::undo_thread(db, cid)?;
-        }
-        Ok(())
     }
 
     /// Replace the oldest `cut` messages with one summary, keeping the tail
@@ -105,14 +84,13 @@ impl Session {
 
     /// Rebuild the tool registry: built-ins plus the session's plugin tools
     /// (script tools and mounted MCP tools); called once at startup, and
-    /// chat mode mounts none.
+    /// again on a model switch.
     pub fn rebuild_tools(&mut self, roles: &std::collections::BTreeMap<String, String>) {
-        if self.chat_mode {
-            self.tools = Vec::new();
-            return;
-        }
-        let mut tools =
-            crate::agent::tools::builtin_tools_configured(Some(&self.model.qualified_id()), roles);
+        let mut tools = crate::agent::tools::builtin_tools_configured(
+            Some(&self.model.qualified_id()),
+            roles,
+            self.live_agents.clone(),
+        );
         // drop-ins win over same-named config-table tools (the nearer the
         // home, the more specific), and a name never mounts twice
         let mut specs = crate::agent::user_tools::discover(&self.cwd);
@@ -141,7 +119,6 @@ impl Session {
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
-            checkpoints: self.checkpoints.clone(),
         };
         let json_mode = self.json_mode;
         let model_id = self.model.model_id.clone();
@@ -341,11 +318,6 @@ impl Session {
                 .unwrap_or_default()
         };
         let seed_len = self.seed.len();
-        if let Some(ck) = &self.checkpoints
-            && let Ok(mut ck) = ck.lock()
-        {
-            ck.begin_round(seed_len);
-        }
         let result = run_agent(
             &self.model,
             &self.tools,
@@ -364,19 +336,6 @@ impl Session {
         view.borrow_mut().abort();
         // the interrupt flag must not leak into the next prompt or task
         crate::core::http::clear_interrupt();
-        // close the checkpoint round on every exit path so the undo stack
-        // stays aligned with the conversation rounds; only a round that
-        // will persist a turn (ok outcome, final text, a db — agent and
-        // chat always log) may rewind the stored thread on /undo
-        let persisted_turn = match &result {
-            Ok(outcome) => !self.no_session && !outcome.final_text.is_empty() && self.db.is_some(),
-            Err(_) => false,
-        };
-        if let Some(ck) = &self.checkpoints
-            && let Ok(mut ck) = ck.lock()
-        {
-            ck.end_round(persisted_turn);
-        }
         self.tokens.0 += total_in;
         self.tokens.1 += total_out;
         self.tokens_cached += total_cached;
@@ -415,9 +374,9 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// Persist the turn: the wire-level chain (system + messages with tool
-    /// parts) so `-c` can replay it. Runs inside `run_task` (the callers
-    /// never see the history). Skipped with --no-session.
+    /// Persist the turn: the wire-level messages so `-c` can replay it.
+    /// Runs inside `run_task` (the callers never see the history). Skipped
+    /// with --no-session.
     fn persist_turn(
         &mut self,
         seed_len: usize,
@@ -429,13 +388,18 @@ impl Session {
         if self.no_session || outcome.final_text.is_empty() {
             return;
         }
-        let Some(db) = self.db.as_ref() else { return };
-        let mut new_messages: Vec<Message> = history[seed_len.min(history.len())..]
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let mut new_messages: Vec<StoredMsg> = history[seed_len.min(history.len())..]
             .iter()
-            .map(msg_to_message)
+            .map(msg_to_stored)
             .collect();
         // the final no-tool assistant message doubles as the turn response
-        let ends_plain = matches!(history.last(), Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty());
+        let ends_plain = matches!(
+            history.last(),
+            Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty()
+        );
         if ends_plain {
             new_messages.pop();
         }
@@ -443,7 +407,6 @@ impl Session {
         // and filter conversations by project directory
         let mut turn_options = self.model.options.clone();
         turn_options.push(("cwd".to_string(), self.cwd.display().to_string()));
-        turn_options.push(("mode".to_string(), self.mode_label().to_string()));
         let attached: Vec<String> = history[seed_len.min(history.len())..]
             .iter()
             .filter_map(|m| match m {
@@ -460,185 +423,158 @@ impl Session {
         if !attached.is_empty() {
             turn_options.push(("attachments".to_string(), attached.join("; ")));
         }
-        logstore::log_completed_turn(
-            db,
-            &logstore::CompletedTurn {
-                conversation_id: self.conversation_id.as_deref(),
-                system: self.system.as_deref(),
-                input_messages: &new_messages,
-                reasoning: if reasoning.is_empty() {
-                    None
-                } else {
-                    Some(reasoning)
-                },
-                response_text: &outcome.final_text,
-                model: &self.model.qualified_id(),
-                options: &turn_options,
-                schema: None,
-                usage: outcome.usage.map(|u| (u.input, u.output)),
-                duration_ms: start.elapsed().as_millis() as i64,
+        // the first user text of the round is the prompt preview
+        let prompt = history[seed_len.min(history.len())..]
+            .iter()
+            .find_map(|m| match m {
+                Msg::User { text, .. } if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let turn = StoredTurn {
+            id: crate::core::db::ulid(),
+            ts: crate::core::db::now_turn_datetime(),
+            mode: self.mode_label().to_string(),
+            model: self.model.qualified_id(),
+            cwd: Some(self.cwd.display().to_string()),
+            system: self.system.clone(),
+            prompt,
+            response: outcome.final_text.clone(),
+            reasoning: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning.to_string())
             },
-        );
-        if self.conversation_id.is_none() {
-            self.conversation_id = logstore::latest_conversation_id(db);
+            usage: outcome.usage.map(|u| (u.input, u.output)),
+            duration_ms: Some(start.elapsed().as_millis() as i64),
+            options: turn_options,
+            schema: None,
+            tools: None,
+            messages: new_messages,
+        };
+        let thread_id = store
+            .append_turn(self.conversation_id.as_deref(), &turn)
+            .map_err(|e| eprintln!("Warning: {e}"))
+            .unwrap_or_default();
+        if self.conversation_id.is_none() && !thread_id.is_empty() {
+            self.conversation_id = Some(thread_id);
         }
     }
 }
 
-pub fn msg_to_message(m: &Msg) -> Message {
+pub fn msg_to_stored(m: &Msg) -> StoredMsg {
     match m {
-        Msg::User { text, attachments } => {
-            if attachments.is_empty() {
-                return Message::text("user", text.clone());
-            }
-            let mut parts: Vec<Part> = Vec::new();
-            if !text.is_empty() {
-                parts.push(Part::Text(text.clone()));
-            }
-            for a in attachments {
-                let content = match crate::b64::decode(&a.base64_data) {
-                    Some(bytes) => bytes,
-                    None => {
-                        eprintln!(
-                            "Warning: attachment {} failed to decode for storage; stored empty",
-                            a.filename.as_deref().unwrap_or("attachment")
-                        );
-                        Vec::new()
-                    }
-                };
-                parts.push(Part::Attachment(StoredAttachment {
-                    // the wire attachment carries the real provenance from
-                    // its loader; a bare filename is a display name, not a
-                    // readable path, and must never land here
-                    path: a.path.clone(),
-                    url: a.url.clone(),
-                    mime_type: Some(a.mime_type.clone()),
-                    content,
-                }));
-            }
-            Message {
-                role: "user".into(),
-                parts,
-            }
-        }
-        Msg::Summary { text } => Message::text("system", text.clone()),
-        Msg::Assistant { text, tool_calls } => {
-            let mut parts: Vec<Part> = Vec::new();
-            if !text.is_empty() {
-                parts.push(Part::Text(text.clone()));
-            }
-            for c in tool_calls {
-                parts.push(Part::ToolCall {
+        Msg::User { text, attachments } => StoredMsg::User {
+            text: text.clone(),
+            attachments: attachments.iter().map(attachment_to_stored).collect(),
+        },
+        Msg::Summary { text } => StoredMsg::Summary { text: text.clone() },
+        Msg::Assistant { text, tool_calls } => StoredMsg::Assistant {
+            text: text.clone(),
+            tool_calls: tool_calls
+                .iter()
+                .map(|c| StoredToolCall {
                     id: c.id.clone(),
                     name: c.name.clone(),
                     arguments: c.arguments.clone(),
-                });
-            }
-            Message {
-                role: "assistant".into(),
-                parts,
-            }
-        }
+                })
+                .collect(),
+        },
         Msg::ToolResult {
             call_id,
             name,
             content,
             is_error,
-            ..
-        } => Message {
-            role: "tool".into(),
-            parts: vec![Part::ToolResult {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                content: content.clone(),
-                is_error: *is_error,
-            }],
+            attachments,
+        } => StoredMsg::Tool {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+            attachments: attachments.iter().map(attachment_to_stored).collect(),
         },
     }
 }
 
-/// Rebuild a wire-level history (plus the original system prompt) from the
-/// stored chain of a thread. The leading system message is the prompt; any
-/// later system message is a compaction summary.
-pub fn rebuild_thread(db: &Db, cid: &str) -> (Vec<Msg>, Option<String>) {
-    let chain = logstore::thread_chain(db, cid);
+fn attachment_to_stored(a: &crate::providers::Attachment) -> StoredAttachment {
+    StoredAttachment {
+        path: a.path.clone(),
+        url: a.url.clone(),
+        mime_type: Some(a.mime_type.clone()),
+        base64: (!a.base64_data.is_empty()).then(|| a.base64_data.clone()),
+    }
+}
+
+fn attachment_from_stored(a: &StoredAttachment) -> crate::providers::Attachment {
+    crate::providers::Attachment {
+        mime_type: a
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".into()),
+        base64_data: a.base64.clone().unwrap_or_default(),
+        filename: None,
+        path: a.path.clone(),
+        url: a.url.clone(),
+    }
+}
+
+/// Rebuild a wire-level history (plus the original system prompt) from a
+/// thread's stored turns. The first turn's system is the prompt; later
+/// `Summary` messages are compaction summaries.
+pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<String>) {
+    let turns = match store.read_thread(cid) {
+        Ok(t) => t,
+        Err(_) => return (Vec::new(), None),
+    };
     let mut msgs: Vec<Msg> = Vec::new();
     let mut system: Option<String> = None;
-    let mut seen_first_system = false;
-    for (role, parts) in &chain {
-        let text_of = |parts: &[ReadPart]| -> String {
-            parts
-                .iter()
-                .filter(|p| p.part_type == "text")
-                .filter_map(|p| p.text.clone())
-                .collect::<Vec<_>>()
-                .join("")
-        };
-        match role.as_str() {
-            "system" => {
-                let text = text_of(parts);
-                if !seen_first_system {
-                    system = Some(text);
-                    seen_first_system = true;
-                } else {
-                    msgs.push(Msg::Summary { text });
-                }
-            }
-            "user" => {
-                let text = text_of(parts);
-                if !text.is_empty() {
-                    msgs.push(Msg::user(text));
-                }
-            }
-            "assistant" => {
-                let mut text = String::new();
-                let mut calls: Vec<ToolCall> = Vec::new();
-                for p in parts {
-                    match p.part_type.as_str() {
-                        "text" => {
-                            if let Some(t) = &p.text {
-                                text.push_str(t);
-                            }
-                        }
-                        "tool_call" => {
-                            if let Some(payload) = &p.payload
-                                && let Ok(v) = serde_json::from_str::<serde_json::Value>(payload)
-                            {
-                                calls.push(ToolCall {
-                                    id: v["id"].as_str().unwrap_or_default().to_string(),
-                                    name: v["name"].as_str().unwrap_or_default().to_string(),
-                                    arguments: v["arguments"].clone(),
-                                });
-                            }
-                        }
-                        _ => {}
+    for turn in &turns {
+        if system.is_none() {
+            system = turn.system.clone();
+        }
+        for m in &turn.messages {
+            match m {
+                StoredMsg::User { text, attachments } => {
+                    if !text.is_empty() || !attachments.is_empty() {
+                        msgs.push(Msg::user_with(
+                            text.clone(),
+                            attachments.iter().map(attachment_from_stored).collect(),
+                        ));
                     }
                 }
-                msgs.push(Msg::Assistant {
-                    text,
-                    tool_calls: calls,
-                });
-            }
-            "tool" => {
-                for p in parts {
-                    if p.part_type != "tool_result" {
-                        continue;
-                    }
-                    let payload = p
-                        .payload
-                        .as_deref()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .unwrap_or(serde_json::json!({}));
-                    msgs.push(Msg::ToolResult {
-                        call_id: payload["call_id"].as_str().unwrap_or_default().to_string(),
-                        name: payload["name"].as_str().unwrap_or_default().to_string(),
-                        content: p.text.clone().unwrap_or_default(),
-                        is_error: payload["is_error"].as_bool().unwrap_or(false),
-                        attachments: Vec::new(),
+                StoredMsg::Assistant { text, tool_calls } => {
+                    msgs.push(Msg::Assistant {
+                        text: text.clone(),
+                        tool_calls: tool_calls
+                            .iter()
+                            .map(|c| ToolCall {
+                                id: c.id.clone(),
+                                name: c.name.clone(),
+                                arguments: c.arguments.clone(),
+                            })
+                            .collect(),
                     });
                 }
+                StoredMsg::Tool {
+                    call_id,
+                    name,
+                    content,
+                    is_error,
+                    attachments,
+                } => msgs.push(Msg::ToolResult {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                    attachments: attachments.iter().map(attachment_from_stored).collect(),
+                }),
+                StoredMsg::Summary { text } => msgs.push(Msg::Summary { text: text.clone() }),
             }
-            _ => {}
+        }
+        // the final plain assistant was popped out of `messages` (it doubles
+        // as the turn response); ride it back in so a resume sees the answer
+        if !turn.response.is_empty() {
+            msgs.push(Msg::assistant(turn.response.clone()));
         }
     }
     (msgs, system)
@@ -647,7 +583,6 @@ pub fn rebuild_thread(db: &Db, cid: &str) -> (Vec<Msg>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::logstore::Part;
 
     #[test]
     fn user_attachments_keep_their_real_provenance_in_storage() {
@@ -663,15 +598,17 @@ mod tests {
                 url: None,
             }],
         );
-        let stored = msg_to_message(&msg);
-        let Part::Attachment(a) = &stored.parts[1] else {
-            panic!("expected an attachment part");
+        let stored = msg_to_stored(&msg);
+        let StoredMsg::User { attachments, .. } = &stored else {
+            panic!("expected a user message");
         };
-        assert_eq!(a.path.as_deref(), Some("/tmp/cam/2026/shot.png"));
-        assert_eq!(a.url, None);
-        assert_eq!(a.content, b"pngbytes");
+        assert_eq!(
+            attachments[0].path.as_deref(),
+            Some("/tmp/cam/2026/shot.png")
+        );
+        assert_eq!(attachments[0].url, None);
 
-        // a URL attachment stores the URL, hashing like the prompt path
+        // a URL attachment stores the URL
         let msg = crate::providers::Msg::user_with(
             "look",
             vec![crate::providers::Attachment {
@@ -682,14 +619,102 @@ mod tests {
                 url: Some("https://example.com/shot.png?token=1".into()),
             }],
         );
-        let stored = msg_to_message(&msg);
-        let Part::Attachment(a) = &stored.parts[1] else {
-            panic!("expected an attachment part");
+        let stored = msg_to_stored(&msg);
+        let StoredMsg::User { attachments, .. } = &stored else {
+            panic!("expected a user message");
         };
         assert_eq!(
-            a.url.as_deref(),
+            attachments[0].url.as_deref(),
             Some("https://example.com/shot.png?token=1")
         );
-        assert_eq!(a.path, None);
+        assert_eq!(attachments[0].path, None);
+    }
+
+    #[test]
+    fn rebuild_thread_restores_final_response_and_attachments() {
+        let dir = std::env::temp_dir().join(format!("llm-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = threads::Store::open_path(&dir).unwrap();
+
+        // user (with attachment) → assistant tool_call → tool result (with
+        // attachment) → final plain assistant, stored only as `response`
+        let turn = StoredTurn {
+            id: "t1".into(),
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: Some("sys".into()),
+            prompt: "look at this".into(),
+            response: "it is a cat".into(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            schema: None,
+            tools: None,
+            messages: vec![
+                StoredMsg::User {
+                    text: "look at this".into(),
+                    attachments: vec![StoredAttachment {
+                        path: None,
+                        url: None,
+                        mime_type: Some("image/png".into()),
+                        base64: Some("aGk=".into()),
+                    }],
+                },
+                StoredMsg::Assistant {
+                    text: String::new(),
+                    tool_calls: vec![StoredToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "a.png"}),
+                    }],
+                },
+                StoredMsg::Tool {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    content: "bytes".into(),
+                    is_error: false,
+                    attachments: vec![StoredAttachment {
+                        path: Some("a.png".into()),
+                        url: None,
+                        mime_type: Some("image/png".into()),
+                        base64: Some("aGk=".into()),
+                    }],
+                },
+            ],
+        };
+        store.append_turn(Some("th1"), &turn).unwrap();
+
+        let (msgs, system) = rebuild_thread(&store, "th1");
+        assert_eq!(system.as_deref(), Some("sys"));
+        assert_eq!(msgs.len(), 4);
+        match &msgs[0] {
+            Msg::User { text, attachments } => {
+                assert_eq!(text, "look at this");
+                assert_eq!(attachments[0].base64_data, "aGk=");
+            }
+            _ => panic!("expected user"),
+        }
+        match &msgs[2] {
+            Msg::ToolResult {
+                call_id,
+                attachments,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(attachments[0].base64_data, "aGk=");
+            }
+            _ => panic!("expected tool result"),
+        }
+        match &msgs[3] {
+            Msg::Assistant { text, tool_calls } => {
+                assert_eq!(text, "it is a cat");
+                assert!(tool_calls.is_empty());
+            }
+            _ => panic!("expected final assistant"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

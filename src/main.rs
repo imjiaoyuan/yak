@@ -2,11 +2,9 @@
 
 mod agent;
 mod b64;
-mod blake2;
 mod commands;
 mod core;
 mod gitignore;
-mod hash;
 mod jsonfmt;
 mod platform;
 mod providers;
@@ -29,7 +27,6 @@ Bare `llm \"prompt\"` runs the prompt command.
 
 Available commands:
   agent      Run an agentic task with tools
-  chat       Hold an ongoing conversation (tool-less agent session)
   login      Add a provider
   logs       Show past conversations
   logout     Remove a provider
@@ -73,7 +70,6 @@ fn dispatch(argv: &[String]) -> i32 {
         }
         "prompt" => commands::prompt::run(&argv[1..]),
         "agent" => commands::agent::run(&argv[1..]),
-        "chat" => commands::agent::run_chat(&argv[1..]),
         "logs" => commands::logs::run(&argv[1..]),
         "models" => commands::models::run(&argv[1..]),
         "login" => commands::login::run_login(&argv[1..]),
@@ -104,7 +100,7 @@ fn dispatch(argv: &[String]) -> i32 {
 /// Subcommand names and aliases. Keep in sync with the match in `dispatch`
 /// above.
 const SUBCOMMANDS: &[&str] = &[
-    "prompt", "agent", "chat", "logs", "models", "login", "logout", "help", "version",
+    "prompt", "agent", "logs", "models", "login", "logout", "help", "version",
 ];
 
 /// Suggest a subcommand for a word that is probably a mistyped command: a

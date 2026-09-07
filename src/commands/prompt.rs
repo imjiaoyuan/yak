@@ -2,9 +2,8 @@
 
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
-use crate::core::db::Db;
 use crate::core::http::Event;
-use crate::core::logstore::{self, Message, Part};
+use crate::core::threads::{self, StoredMsg, StoredTurn};
 use crate::providers::{PromptInput, ResolvedModel};
 use crate::term::render::{Renderer, extract_fenced};
 use crate::{flag_spec, multi_spec, value_spec};
@@ -12,7 +11,7 @@ use crate::{flag_spec, multi_spec, value_spec};
 const SPECS: &[OptSpec] = &[
     value_spec!("system", Some('s'), "System prompt to use", "TEXT"),
     value_spec!("model", Some('m'), "Model to use", "MODEL"),
-    value_spec!("database", Some('d'), "Path to log database", "PATH"),
+    value_spec!("database", Some('d'), "Path to thread directory", "PATH"),
     multi_spec!(
         "attachment",
         Some('a'),
@@ -39,8 +38,8 @@ const SPECS: &[OptSpec] = &[
         "KEY=VALUE"
     ),
     flag_spec!("no-stream", None, "Do not stream output"),
-    flag_spec!("no-log", Some('n'), "Don't log to database"),
-    flag_spec!("log", None, "Log prompt and response to the database"),
+    flag_spec!("no-log", Some('n'), "Don't log to the thread store"),
+    flag_spec!("log", None, "Log prompt and response to the thread store"),
     flag_spec!("hide-reasoning", Some('R'), "Hide reasoning output"),
     value_spec!(
         "thinking",
@@ -176,15 +175,15 @@ fn execute(
         None
     };
 
-    // the db is opened early so continuation can read history;
+    // the store is opened early so continuation can read history;
     // writing is gated on the logs-on state further down
     let no_log = args.flag(&["no-log"]);
-    let mut db_opt: Option<Db> = None;
+    let mut store_opt: Option<threads::Store> = None;
     if no_log && continue_id.is_some() {
         return Err("cannot continue a conversation when logging is disabled (-n)".to_string());
     }
     if !no_log {
-        db_opt = Some(Db::open_from_arg(args.opt(&["database"]))?);
+        store_opt = Some(threads::Store::open_from_arg(args.opt(&["database"]))?);
     }
 
     // attachments: template-declared ones first (original
@@ -205,13 +204,14 @@ fn execute(
     let mut conv_system: Option<String> = None;
     let mut conv_model: Option<String> = None;
     if let Some(cid) = continue_id {
-        // the early -n refusal above guarantees the db is open here
-        let db = db_opt.as_ref().expect("db open for continuation");
+        // the early -n refusal above guarantees the store is open here
+        let store = store_opt.as_ref().expect("store open for continuation");
         let cid = if cid.is_empty() {
-            logstore::latest_conversation_id(db)
+            store
+                .latest_thread()?
                 .ok_or_else(|| "No conversations found".to_string())?
         } else {
-            match logstore::resolve_conversation(db, &cid) {
+            match store.resolve_thread(&cid)? {
                 Some(full) => full,
                 None => {
                     return Err(format!(
@@ -220,15 +220,15 @@ fn execute(
                 }
             }
         };
-        let turns = logstore::conversation_history(db, &cid);
-        conv_system = turns.iter().find_map(|(_, _, s, _)| s.clone());
-        for (prompt, response, _, _) in turns {
-            history.push(crate::providers::Msg::user(prompt));
-            if !response.is_empty() {
-                history.push(crate::providers::Msg::assistant(response));
+        let turns = store.read_thread(&cid)?;
+        conv_system = turns.iter().find_map(|t| t.system.clone());
+        for t in &turns {
+            history.push(crate::providers::Msg::user(t.prompt.clone()));
+            if !t.response.is_empty() {
+                history.push(crate::providers::Msg::assistant(t.response.clone()));
             }
         }
-        conv_model = logstore::conversation_info(db, &cid).map(|(m, _)| m);
+        conv_model = turns.last().map(|t| t.model.clone());
         conversation_id = Some(cid);
     }
 
@@ -333,8 +333,8 @@ fn execute(
     let renderer = view.into_renderer();
 
     if args.flag(&["json"]) {
-        let turn_id = log_turn(
-            db_opt.as_ref(),
+        let turn = log_turn(
+            store_opt.as_ref(),
             &model,
             &prompt_text,
             &system,
@@ -345,9 +345,15 @@ fn execute(
             schema.as_ref(),
             args.flag(&["log"]),
         )?;
-        let turn_id = turn_id.unwrap_or_default();
-        let rows = crate::core::logstore::rows_for_ids_json(db_opt.as_ref(), &[turn_id]);
-        println!("{rows}");
+        if let Some(turn) = turn {
+            println!(
+                "{}",
+                crate::jsonfmt::dumps_indent(
+                    &serde_json::to_value(&turn).unwrap_or(serde_json::json!({})),
+                    2
+                )
+            );
+        }
         return Ok(0);
     }
 
@@ -369,7 +375,7 @@ fn execute(
     }
 
     log_turn(
-        db_opt.as_ref(),
+        store_opt.as_ref(),
         &model,
         &prompt_text,
         &system,
@@ -385,7 +391,7 @@ fn execute(
 
 #[allow(clippy::too_many_arguments)]
 fn log_turn(
-    db: Option<&Db>,
+    store: Option<&threads::Store>,
     model: &ResolvedModel,
     prompt: &str,
     system: &Option<String>,
@@ -395,46 +401,39 @@ fn log_turn(
     attachments: &[LoadedAttachment],
     schema: Option<&serde_json::Value>,
     log_override: bool,
-) -> Result<Option<String>, String> {
-    // gate on the logs-on marker; --log overrides, -n never reaches here
-    let Some(db) = db else { return Ok(None) };
+) -> Result<Option<StoredTurn>, String> {
+    // gate on the logs-on state; --log overrides, -n never reaches here
+    let Some(store) = store else { return Ok(None) };
     if !config::logs_on() && !log_override {
         return Ok(None);
     }
     if renderer.output.is_empty() {
         return Ok(None);
     }
-    let mut user_parts: Vec<Part> = vec![Part::Text(prompt.to_string())];
-    for attachment in attachments {
-        user_parts.push(Part::Attachment(attachment.stored()));
-    }
-    let input_messages = vec![Message {
-        role: "user".into(),
-        parts: user_parts,
-    }];
-
-    let id = logstore::log_completed_turn(
-        db,
-        &logstore::CompletedTurn {
-            conversation_id,
-            system: system.as_deref(),
-            input_messages: &input_messages,
-            reasoning: if renderer.reasoning.is_empty() {
-                None
-            } else {
-                Some(renderer.reasoning.as_str())
-            },
-            response_text: &renderer.output,
-            model: &model.qualified_id(),
-            options: &{
-                let mut o = model.options.clone();
-                o.push(("mode".to_string(), "prompt".to_string()));
-                o
-            },
-            schema,
-            usage: renderer.usage.map(|u| (u.input, u.output)),
-            duration_ms: start.elapsed().as_millis() as i64,
+    let turn = StoredTurn {
+        id: crate::core::db::ulid(),
+        ts: crate::core::db::now_turn_datetime(),
+        mode: "prompt".to_string(),
+        model: model.qualified_id(),
+        cwd: None,
+        system: system.clone(),
+        prompt: prompt.to_string(),
+        response: renderer.output.clone(),
+        reasoning: if renderer.reasoning.is_empty() {
+            None
+        } else {
+            Some(renderer.reasoning.clone())
         },
-    );
-    Ok(Some(id))
+        usage: renderer.usage.map(|u| (u.input, u.output)),
+        duration_ms: Some(start.elapsed().as_millis() as i64),
+        options: model.options.clone(),
+        schema: schema.cloned(),
+        tools: None,
+        messages: vec![StoredMsg::User {
+            text: prompt.to_string(),
+            attachments: attachments.iter().map(|a| a.stored()).collect(),
+        }],
+    };
+    let _ = store.append_turn(conversation_id, &turn)?;
+    Ok(Some(turn))
 }

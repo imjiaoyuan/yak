@@ -1,14 +1,42 @@
 //! Sub-agents: markdown-defined agents executed as child processes of this
 //! same binary (the reference's design — isolation for free, no shared state).
 
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use super::approval::Tier;
 use super::tools::{Tool, ToolOutput};
 use crate::yaml;
+
+/// Sub-agent conversations live in their own thread directory, so they
+/// never pollute the main `llm logs` list.
+pub fn subagents_dir() -> PathBuf {
+    crate::core::config::user_dir().join("subagents")
+}
+
+/// Live (backgrounded) sub-agent children, keyed by agent id. The Session
+/// owns this map; every tool in the spawn/wait family shares one handle.
+pub type LiveAgents = Arc<Mutex<HashMap<String, LiveAgent>>>;
+
+pub struct LiveAgent {
+    pub child: std::process::Child,
+    pub name: String,
+}
+
+/// Shared state behind the sub-agent lifecycle tools: the parent's model,
+/// the `[agent.roles]` map, the live-children table, and the sub-agent
+/// thread store (opened once).
+#[derive(Clone)]
+pub struct AgentRuntime {
+    pub parent_model: Option<String>,
+    pub roles: std::collections::BTreeMap<String, String>,
+    pub live: LiveAgents,
+    pub store: crate::core::threads::Store,
+}
 
 /// Children default to a read-only set; the `task` tool is only available to
 /// a child whose definition explicitly lists it.
@@ -410,6 +438,421 @@ impl Tool for TaskTool {
     }
 }
 
+/// The six sub-agent lifecycle operations, matching the reference's spawn/wait/
+/// followup/resume/list/interrupt surface. They share one [`AgentRuntime`]
+/// so the live-children table survives tool-registry rebuilds.
+#[derive(Clone, Copy)]
+pub enum AgentOp {
+    Spawn,
+    Wait,
+    Followup,
+    Resume,
+    List,
+    Interrupt,
+}
+
+pub struct AgentTool {
+    op: AgentOp,
+    rt: AgentRuntime,
+}
+
+impl AgentTool {
+    pub fn new(op: AgentOp, rt: AgentRuntime) -> AgentTool {
+        AgentTool { op, rt }
+    }
+
+    fn store(&self) -> &crate::core::threads::Store {
+        &self.rt.store
+    }
+
+    /// Read the last response of a sub-agent thread, if any.
+    fn thread_result(&self, agent_id: &str) -> Option<String> {
+        let turns = self.store().read_thread(agent_id).ok()?;
+        turns.last().map(|t| t.response.clone())
+    }
+
+    fn spawn_background(
+        &self,
+        def: &AgentDef,
+        task: &str,
+        cwd: &Path,
+    ) -> Result<String, ToolOutput> {
+        let depth: u32 = std::env::var("LLM_AGENT_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if depth >= MAX_DEPTH {
+            return Err(ToolOutput::err(format!(
+                "sub-agent nesting limit ({MAX_DEPTH}) reached"
+            )));
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return Err(ToolOutput::err("cannot resolve current executable"));
+        };
+        let tools_csv = if def.tools.is_empty() {
+            DEFAULT_CHILD_TOOLS.to_string()
+        } else {
+            def.tools.join(",")
+        };
+        let agent_id = crate::core::db::ulid();
+        // pre-create the thread file so `--session` resolves on first spawn;
+        // it also carries the sub-agent's tool set for later followups
+        let placeholder = crate::core::threads::StoredTurn {
+            id: agent_id.clone(),
+            ts: crate::core::db::now_turn_datetime(),
+            mode: "agent".to_string(),
+            model: String::new(),
+            cwd: None,
+            system: None,
+            prompt: String::new(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            schema: None,
+            tools: Some(
+                tools_csv
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            ),
+            messages: Vec::new(),
+        };
+        if let Err(e) = self.store().append_turn(Some(&agent_id), &placeholder) {
+            return Err(ToolOutput::err(format!(
+                "cannot create sub-agent thread: {e}"
+            )));
+        }
+        let mut cmd = build_child_command(
+            &exe,
+            &tools_csv,
+            &def.body,
+            self.rt.parent_model.as_deref(),
+            Some(&agent_id),
+            task,
+        );
+        cmd.current_dir(cwd)
+            .env("LLM_AGENT_DEPTH", (depth + 1).to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = cmd
+            .spawn()
+            .map_err(|e| ToolOutput::err(format!("cannot spawn sub-agent: {e}")))?;
+        self.rt
+            .live
+            .lock()
+            .map(|mut live| {
+                live.insert(
+                    agent_id.clone(),
+                    LiveAgent {
+                        child,
+                        name: def.name.clone(),
+                    },
+                );
+            })
+            .map_err(|_| ToolOutput::err("live-agent table poisoned".to_string()))?;
+        Ok(agent_id)
+    }
+
+    /// Block until the child finishes (or is interrupted/times out), then
+    /// read its thread's last response.
+    fn wait_child(&self, agent_id: &str, timeout: u64) -> Result<Option<ToolOutput>, ToolOutput> {
+        let mut live = self
+            .rt
+            .live
+            .lock()
+            .map_err(|_| ToolOutput::err("live-agent table poisoned".to_string()))?;
+        let Some(mut agent) = live.remove(agent_id) else {
+            // not live: already done (or never spawned) — return its result
+            return Ok(self.thread_result(agent_id).map(ToolOutput::ok));
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1));
+        loop {
+            match agent.child.try_wait() {
+                Ok(Some(status)) => {
+                    let result = self.thread_result(agent_id).unwrap_or_default();
+                    if result.trim().is_empty() {
+                        return Ok(Some(ToolOutput::err(format!(
+                            "sub-agent exited with {status} and no output"
+                        ))));
+                    }
+                    return Ok(Some(ToolOutput::ok(result)));
+                }
+                Ok(None) => {
+                    if crate::core::http::interrupted() {
+                        let _ = agent.child.kill();
+                        return Err(ToolOutput::err("sub-agent interrupted by user".to_string()));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = agent.child.kill();
+                        return Err(ToolOutput::err(format!(
+                            "sub-agent timed out after {timeout}s"
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return Err(ToolOutput::err(format!("sub-agent wait failed: {e}")));
+                }
+            }
+        }
+    }
+
+    fn spawn_sync(
+        &self,
+        def: &AgentDef,
+        task: &str,
+        cwd: &Path,
+        timeout: u64,
+        session: Option<&str>,
+    ) -> ToolOutput {
+        let depth: u32 = std::env::var("LLM_AGENT_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if depth >= MAX_DEPTH {
+            return ToolOutput::err(format!("sub-agent nesting limit ({MAX_DEPTH}) reached"));
+        }
+        let def = def.clone();
+        let task = task.to_string();
+        let session = session.map(str::to_string);
+        let model = self.rt.parent_model.clone();
+        run_one(
+            move |tx: &std::sync::mpsc::Sender<String>| {
+                run_child(
+                    &def,
+                    &task,
+                    cwd,
+                    depth,
+                    model.as_deref(),
+                    None,
+                    timeout,
+                    session.as_deref(),
+                    Some(tx),
+                )
+            },
+            &mut |_| {},
+        )
+    }
+}
+
+impl Tool for AgentTool {
+    fn name(&self) -> &str {
+        match self.op {
+            AgentOp::Spawn => "spawn_agent",
+            AgentOp::Wait => "wait_agent",
+            AgentOp::Followup => "followup_task",
+            AgentOp::Resume => "resume_agent",
+            AgentOp::List => "list_agents",
+            AgentOp::Interrupt => "interrupt_agent",
+        }
+    }
+    fn tier(&self) -> Tier {
+        Tier::Exec
+    }
+    fn preview(&self, args: &Value) -> String {
+        match self.op {
+            AgentOp::Spawn => format!(
+                "sub-agent '{}': {}",
+                args["agent"].as_str().unwrap_or("?"),
+                short(args["task"].as_str().unwrap_or(""))
+            ),
+            AgentOp::Wait | AgentOp::Followup | AgentOp::Resume | AgentOp::Interrupt => {
+                args["agent_id"].as_str().unwrap_or("?").to_string()
+            }
+            AgentOp::List => String::new(),
+        }
+    }
+    fn description(&self) -> &str {
+        match self.op {
+            AgentOp::Spawn => {
+                "Start a sub-agent in the background and return its agent_id. \
+                 Use wait_agent to collect its result; followup_task/resume_agent to continue it."
+            }
+            AgentOp::Wait => "Wait for a backgrounded sub-agent to finish and return its result.",
+            AgentOp::Followup => {
+                "Send another task to an existing sub-agent thread (continuing its \
+                 conversation where it left off)."
+            }
+            AgentOp::Resume => {
+                "Resume a finished sub-agent thread with a follow-up task (defaults to \
+                 asking it to continue)."
+            }
+            AgentOp::List => "List backgrounded and finished sub-agent threads.",
+            AgentOp::Interrupt => "Kill a backgrounded sub-agent.",
+        }
+    }
+    fn parameters(&self) -> Value {
+        match self.op {
+            AgentOp::Spawn => json!({
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Sub-agent name"},
+                    "task": {"type": "string", "description": "Task text"}
+                },
+                "required": ["agent", "task"]
+            }),
+            AgentOp::Wait => json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "agent_id from spawn_agent"},
+                    "timeout": {"type": "integer", "description": "Seconds to wait (default 600)"}
+                },
+                "required": ["agent_id"]
+            }),
+            AgentOp::Followup | AgentOp::Resume => json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "agent_id to continue"},
+                    "task": {"type": "string", "description": "Follow-up task text"}
+                },
+                "required": ["agent_id"]
+            }),
+            AgentOp::List => json!({"type": "object", "properties": {}}),
+            AgentOp::Interrupt => json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "agent_id to kill"}
+                },
+                "required": ["agent_id"]
+            }),
+        }
+    }
+    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+        match self.op {
+            AgentOp::Spawn => {
+                let Some(name) = args["agent"].as_str() else {
+                    return ToolOutput::err("provide agent+task");
+                };
+                let task = args["task"].as_str().unwrap_or("");
+                let defs = discover(&crate::core::config::user_dir(), cwd);
+                let def = match lookup_def(&defs, name) {
+                    Ok(d) => d,
+                    Err(e) => return e,
+                };
+                match self.spawn_background(&def, task, cwd) {
+                    Ok(id) => {
+                        log(&format!("{} · spawned as {id}", def.name));
+                        ToolOutput::ok(format!(
+                            "spawned '{name}' as agent_id {id} (use wait_agent to collect)"
+                        ))
+                    }
+                    Err(e) => e,
+                }
+            }
+            AgentOp::Wait => {
+                let Some(agent_id) = args["agent_id"].as_str() else {
+                    return ToolOutput::err("missing agent_id");
+                };
+                let timeout = args["timeout"].as_u64().unwrap_or(DEFAULT_TASK_TIMEOUT);
+                match self.wait_child(agent_id, timeout) {
+                    Ok(Some(out)) => out,
+                    Ok(None) => ToolOutput::err(format!(
+                        "agent {agent_id} not found (spawn it first, or check list_agents)"
+                    )),
+                    Err(e) => e,
+                }
+            }
+            AgentOp::Followup | AgentOp::Resume => {
+                let Some(agent_id) = args["agent_id"].as_str() else {
+                    return ToolOutput::err("missing agent_id");
+                };
+                let task = args["task"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Continue from where you left off.".to_string());
+                // continue the thread: resolve its definition is unknown, so
+                // reuse the stored thread's own system prompt
+                let store = self.store();
+                let turns = match store.read_thread(agent_id) {
+                    Ok(t) => t,
+                    Err(e) => return ToolOutput::err(e),
+                };
+                if turns.is_empty() {
+                    return ToolOutput::err(format!(
+                        "agent {agent_id} not found (spawn it first, or check list_agents)"
+                    ));
+                }
+                let body = turns
+                    .iter()
+                    .find_map(|t| t.system.clone())
+                    .unwrap_or_default();
+                // restore the sub-agent's original tool set from its spawn
+                // record (stored on the placeholder first turn)
+                let tools = turns
+                    .first()
+                    .and_then(|t| t.tools.clone())
+                    .unwrap_or_default();
+                let def = AgentDef {
+                    name: agent_id.to_string(),
+                    description: String::new(),
+                    model: None,
+                    tools,
+                    output_schema: None,
+                    body,
+                };
+                self.spawn_sync(&def, &task, cwd, DEFAULT_TASK_TIMEOUT, Some(agent_id))
+            }
+            AgentOp::List => {
+                let mut out = String::new();
+                if let Ok(live) = self.rt.live.lock()
+                    && !live.is_empty()
+                {
+                    out.push_str("running:\n");
+                    for (id, a) in live.iter() {
+                        out.push_str(&format!("  {id} · {} · running\n", a.name));
+                    }
+                }
+                let store = self.store();
+                let summaries = store.summaries();
+                let done: Vec<_> = summaries
+                    .iter()
+                    .filter(|s| s.turns > 1) // the pre-created placeholder turn doesn't count
+                    .collect();
+                if !done.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str("finished:\n");
+                    for s in done {
+                        let preview = s.last_prompt.chars().take(40).collect::<String>();
+                        out.push_str(&format!(
+                            "  {} · {} turns · {}\n",
+                            s.id,
+                            s.turns - 1,
+                            preview
+                        ));
+                    }
+                }
+                if out.is_empty() {
+                    ToolOutput::ok("no sub-agents yet".to_string())
+                } else {
+                    ToolOutput::ok(out)
+                }
+            }
+            AgentOp::Interrupt => {
+                let Some(agent_id) = args["agent_id"].as_str() else {
+                    return ToolOutput::err("missing agent_id");
+                };
+                let mut live = match self.rt.live.lock() {
+                    Ok(l) => l,
+                    Err(_) => return ToolOutput::err("live-agent table poisoned".to_string()),
+                };
+                match live.remove(agent_id) {
+                    Some(mut a) => {
+                        let _ = a.child.kill();
+                        ToolOutput::ok(format!("interrupted {agent_id}"))
+                    }
+                    None => ToolOutput::ok(format!("agent {agent_id} is not running")),
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn short(s: &str) -> String {
     let mut out = crate::core::text::truncate_chars(s, 60);
     if let Some(stripped) = out.strip_suffix("...") {
@@ -450,6 +893,7 @@ fn spawn_job(
             model.as_deref(),
             schema.as_ref(),
             timeout,
+            None,
             Some(tx),
         )
     }
@@ -503,6 +947,42 @@ fn schema_for(def: &AgentDef, call: &Value) -> Option<Value> {
     }
 }
 
+/// Build the shared `llm agent --mode json` child command for both the
+/// one-shot `task` tool and the lifecycle `spawn_agent`/`followup_task`
+/// family. `session` pins a thread (sub-agent continuation); None runs
+/// fresh with `--no-session`.
+fn build_child_command(
+    exe: &Path,
+    tools_csv: &str,
+    system: &str,
+    model: Option<&str>,
+    session: Option<&str>,
+    task: &str,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("agent")
+        .arg("--mode")
+        .arg("json")
+        .arg("--approval-mode")
+        .arg("yolo")
+        .arg("--tools")
+        .arg(tools_csv)
+        .arg("--system-prompt")
+        .arg(system);
+    if let Some(session_id) = session {
+        // continue a sub-agent thread: -d keeps it out of the main logs list
+        cmd.arg("-d").arg(subagents_dir());
+        cmd.arg("--session").arg(session_id);
+    } else {
+        cmd.arg("--no-session");
+    }
+    if let Some(model) = model {
+        cmd.arg("-m").arg(model);
+    }
+    cmd.arg(format!("Task: {task}"));
+    cmd
+}
+
 /// Spawn this binary as a headless sub-agent and collect its final text.
 /// The child's stdout is parsed on its own thread while this loop slices
 /// the wait, so esc interrupts and the wall-clock timeout both land
@@ -516,6 +996,7 @@ fn run_child(
     model: Option<&str>,
     schema: Option<&Value>,
     timeout: u64,
+    session: Option<&str>,
     progress: Progress<'_>,
 ) -> ToolOutput {
     let Ok(exe) = std::env::current_exe() else {
@@ -537,23 +1018,7 @@ fn run_child(
         ),
         None => def.body.clone(),
     };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args([
-        "agent",
-        "--mode",
-        "json",
-        "--no-session",
-        "--approval-mode",
-        "yolo",
-        "--tools",
-        &tools_csv,
-        "--system-prompt",
-        &system,
-    ]);
-    if let Some(model) = model {
-        cmd.arg("-m").arg(model);
-    }
-    cmd.arg(format!("Task: {task}"));
+    let mut cmd = build_child_command(&exe, &tools_csv, &system, model, session, task);
     cmd.current_dir(cwd)
         .env("LLM_AGENT_DEPTH", (depth + 1).to_string())
         .stdin(std::process::Stdio::null())

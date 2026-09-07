@@ -85,12 +85,20 @@ pub trait Tool: Send + Sync {
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
 }
 
-/// Same registry, but the task tool inherits the parent's model and the
-/// `[agent.roles]` map for sub-agent model selection.
+/// Same registry, but the task/lifecycle tools inherit the parent's model,
+/// the `[agent.roles]` map, and the shared live-children table.
 pub fn builtin_tools_configured(
     parent_model: Option<&str>,
     roles: &std::collections::BTreeMap<String, String>,
+    live: crate::agent::task::LiveAgents,
 ) -> Vec<Box<dyn Tool>> {
+    let rt = crate::agent::task::AgentRuntime {
+        parent_model: parent_model.map(str::to_string),
+        roles: roles.clone(),
+        live,
+        store: crate::core::threads::Store::open_path(&crate::agent::task::subagents_dir())
+            .expect("sub-agent store directory must be creatable"),
+    };
     vec![
         Box::new(ReadTool),
         Box::new(WriteTool),
@@ -99,13 +107,36 @@ pub fn builtin_tools_configured(
         Box::new(GrepTool),
         Box::new(GlobTool),
         Box::new(LsTool),
-        Box::new(RememberTool),
         Box::new(FetchTool),
         Box::new(PlanTool),
         Box::new(super::task::TaskTool {
-            parent_model: parent_model.map(str::to_string),
-            roles: roles.clone(),
+            parent_model: rt.parent_model.clone(),
+            roles: rt.roles.clone(),
         }),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::Spawn,
+            rt.clone(),
+        )),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::Wait,
+            rt.clone(),
+        )),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::Followup,
+            rt.clone(),
+        )),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::Resume,
+            rt.clone(),
+        )),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::List,
+            rt.clone(),
+        )),
+        Box::new(super::task::AgentTool::new(
+            super::task::AgentOp::Interrupt,
+            rt,
+        )),
     ]
 }
 
@@ -916,51 +947,6 @@ impl Tool for GlobTool {
         let mut out = hits.join("\n");
         out.push('\n');
         ToolOutput::ok(out)
-    }
-}
-
-/// The global-memory writer: when the user asks to remember/note something
-/// ("记住我喜欢..."), it lands as a dated line in ~/.llm/LLM.md and is
-/// injected into every future session's system prompt.
-struct RememberTool;
-
-impl Tool for RememberTool {
-    fn name(&self) -> &str {
-        "remember"
-    }
-    fn tier(&self) -> Tier {
-        Tier::Write
-    }
-    fn description(&self) -> &str {
-        "Save one durable fact to the user's global memory (LLM.md), injected \
-into every future session. Use it when the user asks you to remember or note \
-a preference, environment detail or long-term decision; skip it for \
-task-specific details."
-    }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "The fact to remember, one line"}
-            },
-            "required": ["text"]
-        })
-    }
-    fn preview(&self, args: &Value) -> String {
-        args["text"].as_str().unwrap_or("?").to_string()
-    }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        let text = args["text"].as_str().unwrap_or("").trim();
-        if text.is_empty() {
-            return ToolOutput::err("nothing to remember");
-        }
-        match crate::agent::memory::remember(text) {
-            Ok(true) => {
-                ToolOutput::ok("noted — it will apply from the next session on".to_string())
-            }
-            Ok(false) => ToolOutput::ok("already in memory"),
-            Err(e) => ToolOutput::err(format!("cannot write memory: {e}")),
-        }
     }
 }
 
