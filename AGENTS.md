@@ -23,14 +23,14 @@ python .github/ci_repl.py target/debug/llm   # CI interactive REPL over a real p
 ## Architecture that is not obvious from the tree
 
 - `src/main.rs` dispatches argv to one file per subcommand in `src/commands/` (`pub fn run(argv:
-  &[String]) -> i32`); `src/core/` (config.json, logs.db, http, rendering), `src/providers/`
+  &[String]) -> i32`); `src/core/` (config.json, thread-file store, http, rendering), `src/providers/`
   (unified `Msg` + one adapter per wire protocol + the provider catalog), `src/agent/` (loop, tools,
   sub-agents, approvals, REPL), `src/read/`, `src/platform/` + `src/term/` (raw-mode line editor,
   picker, spinner).
-- Hand-rolled instead of crate-ified, at `src/` root: `yaml.rs`, `b64.rs`, `hash.rs`, `blake2.rs`,
-  `gitignore.rs`, `jsonfmt.rs`. Deps are deliberately five (ureq, rusqlite, serde, serde_json,
-  unicode-width) and the code is synchronous — no async runtime. Add a crate only when it buys real
-  correctness or speed; otherwise extend the in-tree helper.
+- Hand-rolled instead of crate-ified, at `src/` root: `yaml.rs`, `b64.rs`, `gitignore.rs`,
+  `jsonfmt.rs`. Deps are deliberately four (ureq, serde, serde_json, unicode-width) and the code is
+  synchronous — no async runtime. Add a crate only when it buys real correctness or speed;
+  otherwise extend the in-tree helper.
 - Everything HTTP goes through `src/core/http.rs` `send_raw`/`get_with`. Gateway- or
   provider-required headers belong there via `identity_headers(url)`, never in an adapter: it sends
   a real `user-agent` (`llm/<version>`) and, for `opencode.ai` hosts, the `x-opencode-session`

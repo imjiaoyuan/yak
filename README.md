@@ -1,6 +1,6 @@
 # llm
 
-A single-binary, terminal-first AI hub in Rust. One executable covers the whole loop: one-shot prompts, a conversational mode, an agent with tools and sub-agents, custom subcommands, a searchable conversation store, and multimodal input and output (images in, image/TTS out). Everything is synchronous, the whole dependency set is five crates, all state lives under one user directory, and both the chat and agent REPLs share the same line editor, pickers, spinner and key bindings.
+A single-binary, terminal-first AI hub in Rust. One executable covers the whole loop: one-shot prompts, an agent with tools and sub-agents, custom subcommands, a thread-file conversation store, and multimodal input and output (images in, image/TTS out). Everything is synchronous, the whole dependency set is four crates, all state lives under one user directory, and the agent REPL shares the line editor, pickers, spinner and key bindings with the one-shot prompt.
 
 ## Install
 
@@ -88,7 +88,7 @@ llm models key deepseek sk-2 # set it directly (or --set for hidden input)
 Or skip the interactive commands entirely: put the provider block in `config.json` with an
 environment-variable key (see below).
 
-Data lives under the user directory, `~/.llm` by default: `logs.db` holds every conversation as a chain of content-addressed messages, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the plugin tables `tools`/`mcpServers`), and `commands/` the custom subcommands.
+Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the plugin tables `tools`/`mcpServers`), and `commands/` the custom subcommands.
 
 Providers are registered in `config.json` in that directory, alongside any other settings:
 
@@ -109,7 +109,7 @@ Providers are registered in `config.json` in that directory, alongside any other
 references at request time, so literal secrets and environment indirection live in the same field.
 
 `llm models` picks the default model and its thinking depth — one default shared by every mode
-(bare `llm`, agent and chat REPLs all start on it). Bare on a terminal it walks you through
+(bare `llm` and the agent REPL both start on it). Bare on a terminal it walks you through
 provider → model → thinking depth; the same subcommands take direct arguments:
 
 ```bash
@@ -124,7 +124,7 @@ It is all one `models` object in config.json (distinct from the nested `agent.mo
 context-window table): `default` is the shared model every mode starts on, `thinking` the
 reasoning depth riding it, and `options` per-model default options
 (`llm models options set MODEL KEY VALUE`). `-m` and `LLM_MODEL` stay per-invocation; the stored
-`thinking` loses only to `--thinking`. Legacy per-mode entries (`prompt`/`agent`/`chat` keys from
+`thinking` loses only to `--thinking`. Legacy per-mode entries (`prompt`/`agent` keys from
 older versions) migrate on first read: the prompt entry wins, and the next `models set` collapses
 the file onto the new shape. When the stored default no longer resolves (its provider was
 removed), commands warn and fall back.
@@ -247,8 +247,8 @@ system: You are a meticulous code reviewer.
 Review $input for correctness bugs and suggest minimal fixes.
 ```
 
-Inside either REPL the same file answers to `/review src/main.rs`, submitted as one task in the
-agent and as a message in chat. Names that collide with built-in commands keep the built-in, and a
+Inside the agent REPL the same file answers to `/review src/main.rs`, submitted as one task in the
+agent. Names that collide with built-in commands keep the built-in, and a
 word that merely looks like a typo still gets the did-you-mean guard before anything is looked up.
 
 ## Usage
@@ -266,7 +266,6 @@ Bare `llm "prompt"` runs the prompt command.
 
 Available commands:
   agent      Run an agentic task with tools
-  chat       Hold an ongoing conversation (tool-less agent session)
   login      Add a provider
   logs       Show past conversations
   logout     Remove a provider
@@ -290,15 +289,15 @@ Usage: llm prompt [OPTIONS] [PROMPT]
 Options:
   -s, --system TEXT             System prompt to use
   -m, --model MODEL             Model to use
-  -d, --database PATH           Path to log database
+  -d, --database PATH           Path to thread directory
   -a, --attachment ATTACHMENT   Attachment path or URL or -
       --at PATH MIMETYPE        Attachment with explicit mimetype
   -o, --option KEY=VALUE        key/value options for the model
       --schema SCHEMA           JSON schema, or a path to a schema file
   -p, --param KEY=VALUE         Parameters for a custom command's $variables
       --no-stream               Do not stream output
-  -n, --no-log                  Don't log to database
-      --log                     Log prompt and response to the database
+  -n, --no-log                  Don't log to the thread store
+      --log                     Log prompt and response to the thread store
   -R, --hide-reasoning          Hide reasoning output
       --thinking LEVEL          Reasoning effort: minimal, low, medium, high or xhigh
   -c, --continue                Continue the most recent conversation
@@ -311,29 +310,6 @@ Options:
       --voice VOICE             Voice for TTS models
       --size SIZE               Image size for image models
   -h, --help                    Show this message and exit
-```
-
-```
-Hold an ongoing conversation with a model (tool-less agent session)
-
-Usage: llm chat [OPTIONS] [PROMPT]
-
-Options:
-  -m, --model MODEL            Model to use
-  -o, --option KEY=VALUE       key/value options for the model
-  -s, --system-prompt TEXT     Replace the built-in system prompt
-      --thinking LEVEL         Reasoning effort: off, minimal, low, medium, high or xhigh
-  -c, --continue               Continue the most recent agent session
-      --session, --cid ID      Continue the session with the given ID
-      --fork                   Continue a session on a new branch (original untouched; combine with --session)
-  -a, --attachment ATTACHMENT  Attachment path or URL or -
-      --at PATH MIMETYPE       Attachment with explicit mimetype
-  -d, --database PATH          Path to log database
-      --no-stream              Do not stream output
-      --key KEY                API key to use
-  -h, --help                   Show this message and exit
-```
-
 ```
 Run an agentic task with tools (bare invocation opens an interactive session)
 
@@ -350,13 +326,13 @@ Options:
       --yolo                       Alias for --approval-mode yolo
       --max-turns N                Maximum agent turns per task (default 50)
       --mode MODE                  text (default) or json (one JSON event per line)
-      --no-session                 Don't log the conversation to the database
+      --no-session                 Don't log the conversation to the thread store
   -c, --continue                   Continue the most recent agent session
       --session, --cid ID          Continue the session with the given ID
       --fork                       Continue a session on a new branch (original untouched; combine with --session)
   -a, --attachment ATTACHMENT      Attachment path or URL or -
       --at PATH MIMETYPE           Attachment with explicit mimetype
-  -d, --database PATH              Path to log database
+  -d, --database PATH              Path to thread directory
       --no-stream                  Do not stream output
       --key KEY                    API key to use
   -h, --help                       Show this message and exit
@@ -365,18 +341,20 @@ Options:
 ### History
 
 ```
-Show recent logged prompts
+Show past conversations
 
-Usage: llm logs list [OPTIONS] [OPTIONS] 
+Commands:
+  list, path, status, on, off
+  or a mode: agent, prompt, all
+
+Usage: llm logs [OPTIONS] COMMAND [ARGS]... [OPTIONS] 
 
 Options:
-  -n, --count INTEGER           Number of entries to show
-  -d, --database PATH           Path to log database
+  -n, --count INTEGER           Number of threads to show
+  -d, --database PATH           Path to thread directory
   -m, --model MODEL             Filter by model or model alias
-  -q, --query QUERY             Search for logs matching this string
-  -c, --current                 Show the current conversation
+  -c, --current                 Show the most recent thread
       --conversation, --cid ID  Show the conversation with this ID
-  -l, --latest                  Sort by time (newest first), not relevance
       --full                    Show the full per-turn report (default is a compact list)
   -t, --truncate                Truncate long strings in output
   -u, --usage                   Include token usage
@@ -388,18 +366,16 @@ Options:
 ```
 
 ```
-Show recent logged prompts
+Show recent conversations
 
 Usage: llm logs list [OPTIONS] [OPTIONS] 
 
 Options:
-  -n, --count INTEGER           Number of entries to show
-  -d, --database PATH           Path to log database
+  -n, --count INTEGER           Number of threads to show
+  -d, --database PATH           Path to thread directory
   -m, --model MODEL             Filter by model or model alias
-  -q, --query QUERY             Search for logs matching this string
-  -c, --current                 Show the current conversation
+  -c, --current                 Show the most recent thread
       --conversation, --cid ID  Show the conversation with this ID
-  -l, --latest                  Sort by time (newest first), not relevance
       --full                    Show the full per-turn report (default is a compact list)
   -t, --truncate                Truncate long strings in output
   -u, --usage                   Include token usage
@@ -458,19 +434,19 @@ Asking is the default action, so `llm "explain ownership in rust"` streams an an
 
 Pick a model per call with `-m deepseek/deepseek-chat`, or fuzzily with `-q claude` when you cannot remember the full id. Model options ride along as `-o temperature=0.2 -o top_p=0.9`, and `-u` adds the exact token counts. Attach files or URLs with `-a shot.png`, force a mimetype with `--at image.png image/png`, and add a system prompt with `-s`; piped stdin can feed an attachment instead of the prompt, so `llm -a - "what is this" < shot.png` sends the image and the words together, images, PDFs, wav/mp3 clips and plain-text files (.txt, .md, .csv, source code) ride the same request as native content blocks: text attaches as a document block on anthropic models and as an extra text part elsewhere, and anything a model family cannot accept is refused before a request leaves the machine with the supported list named in the error. Structured output comes from `--schema`: inline JSON, the compact DSL (`"name, age int: years"`) or a file. `--schema-multi` wraps it for lists of results.
 
-Conversations continue with `llm -c "and in python?"` or `llm --cid 01ABC... "..."` (a short unambiguous prefix like `01m13d` works too), and every prompt lands in `logs.db` unless you pass `-n`. `llm logs list` groups conversations under mode sections (`agent`, `chat`, `prompt`), each row a six-character id, the model and the turn count, with previews truncated by display width so CJK prompts stay inside the margin. Bare `llm logs` on a terminal is interactive the way bare `llm models` is: one filterable list of recent conversations, each row tagged with its mode, and typing filters across mode, preview and id (fuzzy-filter style — `agent`, a model name or a phrase from the prompt all narrow it); enter opens the transcript and then offers to jump straight into the conversation (answering Y resumes it in the right session, chat threads in the chat preset, everything else in the agent); piped or flagged invocations keep printing the list. When a prompt is worth keeping, drop it in `~/.llm/commands/review.md`: the body is the prompt, `$input` receives whatever follows the command name, and `$name` / `${name}` variables fill from `-p lang=rust` on `llm review -p lang=rust`. Frontmatter can pin `model:` and `system:`, or declare `attachments` (a list of files, URLs or `-`) and `attachment_types` (a path to mimetype map) that ride along on every run, ahead of any `-a` entries.
+Conversations continue with `llm -c "and in python?"` or `llm --cid 01ABC... "..."` (a short unambiguous prefix like `01m13d` works too), and every prompt lands in `~/.llm/threads/` unless you pass `-n`. `llm logs list` groups conversations under mode sections (`agent`, `prompt`), each row a six-character id, the model and the turn count, with previews truncated by display width so CJK prompts stay inside the margin. Bare `llm logs` on a terminal is interactive the way bare `llm models` is: one filterable list of recent conversations, each row tagged with its mode, and typing filters across mode, preview and id (fuzzy-filter style — `agent`, a model name or a phrase from the prompt all narrow it); enter opens the transcript and then offers to jump straight into the conversation (answering Y resumes it in the agent session); piped or flagged invocations keep printing the list. When a prompt is worth keeping, drop it in `~/.llm/commands/review.md`: the body is the prompt, `$input` receives whatever follows the command name, and `$name` / `${name}` variables fill from `-p lang=rust` on `llm review -p lang=rust`. Frontmatter can pin `model:` and `system:`, or declare `attachments` (a list of files, URLs or `-`) and `attachment_types` (a path to mimetype map) that ride along on every run, ahead of any `-a` entries.
 
-Chat is the multi-turn form: `llm chat` opens the same line-editing REPL as the agent, minus the tools, starting on the shared default model (`llm models set ...`). It shares everything with the agent session: `/clear` starts fresh, `/mcp` reports servers, history and tab completion behave identically, and turns land in the same store tagged `chat`. Images join by pasting (ctrl+v pulls the clipboard image in as a file path) or by simply naming an image path in the message; both attach automatically. Bare `llm logs` on a terminal is the way back into any past conversation: pick one, read the transcript, answer the enter question and the session continues where it left off. Pressing ctrl+c once interrupts the running turn; a second press within two seconds leaves.
+The agent is the multi-turn form: `llm agent` opens the line-editing REPL with the tools mounted, starting on the shared default model (`llm models set ...`). Images join by pasting (ctrl+v pulls the clipboard image in as a file path) or by simply naming an image path in the message; both attach automatically. Bare `llm logs` on a terminal is the way back into any past conversation: pick one, read the transcript, answer the enter question and the session continues where it left off. Pressing ctrl+c once interrupts the running turn; a second press within two seconds leaves.
 
-Agent mode adds tools: `llm agent "fix the failing test"` runs a loop that can read, edit, search and run commands, pausing for approval on writes, commands and reads outside the working directory unless you pass `--yolo` or set `approval_mode = "yolo"` in config; file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. Bare `llm agent` on a terminal opens an interactive session on the shared default model (`llm models set ...`), with slash commands (`/skills`, `/memory`, `/compact`, `/status`, `/init`, `/mcp`, ...), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Past sessions reopen from `llm logs`: pick a conversation, answer the enter question. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm agent --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one. Delegation covers the rest of the reference's shape: the `task` tool runs sub-agents defined as markdown files (`~/.llm/agents/*.md` or `.llm/agents/`), one at a time, chained with `{previous}`, or fanned out with `tasks: [...]` where every running sub-agent streams a live `name · progress` line; definitions can declare a single-line `output_schema:` (or a call can pass `outputSchema`) and the child's final answer comes back validated as JSON.
+Agent mode adds tools: `llm agent "fix the failing test"` runs a loop that can read, edit, search and run commands, pausing for approval on writes, commands and reads outside the working directory unless you pass `--yolo` or set `approval_mode = "yolo"` in config; file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. Bare `llm agent` on a terminal opens an interactive session on the shared default model (`llm models set ...`), with slash commands (`/skills`, `/memory`, `/compact`, `/status`, `/init`, `/mcp`, ...), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Past sessions reopen from `llm logs`: pick a conversation, answer the enter question. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm agent --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one. Delegation covers the rest of the reference's shape: the `task` tool runs sub-agents defined as markdown files (`~/.llm/agents/*.md` or `.llm/agents/`), one at a time, chained with `{previous}`, or fanned out with `tasks: [...]` where every running sub-agent streams a live `name · progress` line; definitions can declare a single-line `output_schema:` (or a call can pass `outputSchema`) and the child's final answer comes back validated as JSON. Sub-agents also have a the reference shape lifecycle: `spawn_agent` starts one in the background and returns an agent id, `wait_agent` collects its result, `followup_task`/`resume_agent` continue its thread where it left off, `list_agents` shows running and finished sub-agents, and `interrupt_agent` kills a backgrounded one.
 
 Multimodal input reaches every mode the same way: `-a screenshot.png` rides the task's first message, and inside a session ctrl+v pastes the clipboard image as a temp-file path you can see and edit, while any local image path typed into a message attaches itself automatically (a dim note confirms each one). Limit the toolbox with `--tools read,grep`, the turn budget with `--max-turns`, and swap the system prompt with `-s` or `--append-system-prompt`. Sessions persist, so `llm agent -c "now run it"` picks up where the last one ended, `--no-session` opts out, and `--mode json` emits one JSON event per line for driving the agent from other programs.
 
 Binary formats stay outside the binary on purpose: the agent's read tool answers with a hint at local tooling instead of garbage bytes — `pdftotext` for PDFs, `samtools` for BAM and CRAM, `duckdb` for Parquet and HDF5, `libreoffice --headless --convert-to csv` for the legacy Office formats. Convert first, then feed the `.txt` to any command.
 
-Reasoning effort is a first-class dial on every entry point: `llm prompt --thinking high`, `llm chat --thinking medium`, and `llm agent --thinking high` map to `reasoning_effort` on OpenAI-compatible endpoints and a thinking budget on Anthropic ones; the default depth lives next to the default model in config.json (`llm models set MODEL --thinking LEVEL`; `off` omits the parameter entirely).
+Reasoning effort is a first-class dial on every entry point: `llm prompt --thinking high` and `llm agent --thinking high` map to `reasoning_effort` on OpenAI-compatible endpoints and a thinking budget on Anthropic ones; the default depth lives next to the default model in config.json (`llm models set MODEL --thinking LEVEL`; `off` omits the parameter entirely).
 
-Skills and memory live under the user directory. Skills are SKILL.md folders discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from the working directory (later wins by name, so packs installed by other tools keep working); clone or copy a folder into one of those and the agent picks it up, listing them via `/skills` and running one with `/skill:<name>`, and the model can pick skills itself from the system-prompt list (disabled per skill with `disable_model_invocation` or globally via `[agent] disabled_skills`). Global memory is a hand-editable `~/.llm/LLM.md` injected into the agent and chat system prompts: `/memory add` appends a line by hand, and when you tell the agent to remember something in conversation (`记住我喜欢简洁回复`), its `remember` tool notes it as a dated line that applies from the next session on. Model traffic goes through HTTP proxies from `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`) automatically
+Skills and memory live under the user directory. Skills are SKILL.md folders discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from the working directory (later wins by name, so packs installed by other tools keep working); clone or copy a folder into one of those and the agent picks it up, listing them via `/skills` and running one with `/skill:<name>`, and the model can pick skills itself from the system-prompt list (disabled per skill with `disable_model_invocation` or globally via `[agent] disabled_skills`). Global memory is a hand-editable `~/.llm/LLM.md` injected into the agent system prompt: `/memory add` appends a line by hand, and the agent reads it on the next session. (The agent `remember` tool was removed on purpose — memory is manual, not agent-written.) Model traffic goes through HTTP proxies from `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`) automatically
 
 Sub-agents are markdown files with frontmatter, discovered in `~/.llm/agents/` or the nearest `.llm/agents/` walking up from the working directory (the project copy wins by name). The model delegates through the `task` tool and each sub-agent runs as a headless child process:
 
@@ -483,9 +459,9 @@ tools: read, grep, glob      # default: read,grep,glob,ls
 You are a researcher. Answer with file:line references.
 ```
 
-History lives in `llm logs`. The default view is one line per turn grouped by conversation; `llm logs --full` prints the complete report with prompts, reasoning and responses, `llm logs -q "keyword"` searches full text with bm25 ranking, `-m` filters by model, `-c` selects the current conversation and `--cid` a specific one. Extraction shortcuts help scripting: `-r` prints just the last response, `-x` the first fenced code block, `--xl` the last, `--json` the stored row shape, and `--data` pulls rows out of a schema run.
+History lives in `llm logs`. The default view is one line per thread grouped by mode; `llm logs --full` prints the complete report with prompts, reasoning and responses, `-m` filters by model, `-c` selects the most recent thread and `--cid` a specific one. Extraction shortcuts help scripting: `-r` prints just the last response, `-x` the first fenced code block, `--xl` the last, and `--json` the stored turn shape.
 
-For image and audio models, `--out` writes media files directly: `llm -m openai-image/gpt-image-1 "cyberpunk street" --out street.png` saves one image under the exact name, while a directory target (`--out shots/`, created when missing) auto-names `image.png` or `speech.mp3` inside it. Ask for several images with `-o n=3` and every one lands on disk: a directory numbers them `image-1.png`, `image-2.png`, ..., an explicit file name becomes `street-1.png`, `street-2.png`, ..., each with the extension sniffed from its own bytes. TTS output follows `-o response_format` (mp3 by default, also opus, wav, aac or flac) for the extension, `--voice` picks the speaker and `--size` the image size. `--out -` streams the single result to stdout as raw bytes, and existing files are never overwritten silently: any collision, checked across all targets before the first byte lands, is an error. Media turns are not logged to the database.
+For image and audio models, `--out` writes media files directly: `llm -m openai-image/gpt-image-1 "cyberpunk street" --out street.png` saves one image under the exact name, while a directory target (`--out shots/`, created when missing) auto-names `image.png` or `speech.mp3` inside it. Ask for several images with `-o n=3` and every one lands on disk: a directory numbers them `image-1.png`, `image-2.png`, ..., an explicit file name becomes `street-1.png`, `street-2.png`, ..., each with the extension sniffed from its own bytes. TTS output follows `-o response_format` (mp3 by default, also opus, wav, aac or flac) for the extension, `--voice` picks the speaker and `--size` the image size. `--out -` streams the single result to stdout as raw bytes, and existing files are never overwritten silently: any collision, checked across all targets before the first byte lands, is an error. Media turns are not logged to the thread store.
 
 Agent behavior is tuned under the `"agent"` key of `config.json`:
 
@@ -504,11 +480,11 @@ kicks in; `tools` maps each tool to `allow`, `deny` or `prompt`.
 
 ## Outputs
 
-Every prompt, chat turn and agent session is written to `logs.db` as a chain of content-addressed messages: reasoning parts are stored next to the responses, tool calls and results ride along in agent sessions, and turns carry their options, schema and token usage. `llm logs backup /path/copy.db` takes a consistent snapshot, and a `logs-off` marker file in the user directory turns prompt logging off entirely.
+Every prompt and agent session is written to `~/.llm/threads/` as JSONL thread files: reasoning parts are stored next to the responses, tool calls and results ride along in agent sessions, and turns carry their model, options, schema and token usage. A `logs-off` marker file in the user directory turns prompt logging off entirely.
 
 ## Semantics
 
-Model ids are `provider/model` everywhere, with the `aliases` object in config.json mapping short names on top; `models set` and `models options` manage the mapping, and the `aliases` object is hand-edited config. Terminal rendering is enabled only on a TTY: prompts, chats and agent answers stream as markdown with a two-column margin, blank lines are dropped except around headings and code blocks, and piped output is the raw text. Reasoning is never dumped to the screen in any mode, one gray `thinking ... end` line records that it happened and `-R` hides even that. Approval tiers split agent tools into read, write and exec: reads run freely in ask mode, writes and exec-tier calls prompt with y/n/a, and root commands (sudo, doas, su, pkexec) are denied in every mode. Session ids are ULIDs, `-c` continues the newest session and `--cid` picks an exact one. Long lists in any picker scroll inside a bounded window instead of flooding the screen.
+Model ids are `provider/model` everywhere, with the `aliases` object in config.json mapping short names on top; `models set` and `models options` manage the mapping, and the `aliases` object is hand-edited config. Terminal rendering is enabled only on a TTY: prompts and agent answers stream as markdown with a two-column margin, blank lines are dropped except around headings and code blocks, and piped output is the raw text. Reasoning is never dumped to the screen in any mode, one gray `thinking ... end` line records that it happened and `-R` hides even that. Approval tiers split agent tools into read, write and exec: reads run freely in ask mode, writes and exec-tier calls prompt with y/n/a, and root commands (sudo, doas, su, pkexec) are denied in every mode. Session ids are ULIDs, `-c` continues the newest session and `--cid` picks an exact one. Long lists in any picker scroll inside a bounded window instead of flooding the screen.
 
 ## Development
 
