@@ -122,8 +122,18 @@ def main():
     send(fd, b"\r")              # enter submits
     time.sleep(1.0)
     prompts = seen.get("prompts") or []
-    assert prompts and prompts[0] == "line one\nline two\nline three", \
-        f"prompt on the wire: {prompts!r}"
+    if not (prompts and prompts[0] == "line one\nline two\nline three"):
+        # drain and show what the REPL actually drew, for cross-platform diagnosis
+        time.sleep(0.5)
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if r:
+            try:
+                OUT.extend(os.read(fd, 8192))
+            except OSError:
+                pass
+        raise AssertionError(
+            f"prompt on the wire: {prompts!r}; screen tail: {bytes(OUT[-600:])!r}"
+        )
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line one\\nline two\\nline three" in hist, f"history: {hist!r}"
 
