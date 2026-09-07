@@ -426,12 +426,50 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
     }
 }
 
+/// Client identity for every provider request: a real user agent (gateways
+/// triage abuse by client, and an HTTP-library default reads as a script), plus
+/// the stable conversation id OpenCode's Go/Zen gateway demands in
+/// `x-opencode-session` — without it every chat request is a 400
+/// `MissingSessionID`, and with it the gateway can pin routing and prompt cache.
+pub fn identity_headers(url: &str) -> Vec<(String, String)> {
+    let mut headers = vec![(
+        "user-agent".to_string(),
+        format!("llm/{}", env!("CARGO_PKG_VERSION")),
+    )];
+    if is_opencode(url) {
+        headers.push(("x-opencode-session".to_string(), session_id()));
+    }
+    headers
+}
+
+/// The opencode.ai host, wherever it sits in the URL (zen, go, a path prefix).
+fn is_opencode(url: &str) -> bool {
+    let authority = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    host.eq_ignore_ascii_case("opencode.ai") || host.ends_with(".opencode.ai")
+}
+
+/// One session id per process, so every turn and retry of a run shares it.
+/// `LLM_SESSION_ID` pins it across processes for a caller that keeps one
+/// conversation alive; otherwise a fresh ulid stands in for this run.
+pub fn session_id() -> String {
+    static SESSION: OnceLock<String> = OnceLock::new();
+    SESSION
+        .get_or_init(|| match std::env::var("LLM_SESSION_ID") {
+            Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => crate::core::db::ulid(),
+        })
+        .clone()
+}
+
 fn send_raw(
     agent: &ureq::Agent,
     req: &HttpRequest,
 ) -> Result<ureq::http::Response<ureq::Body>, HttpError> {
     let mut request = agent.post(&req.url);
-    for (k, v) in &req.headers {
+    for (k, v) in req.headers.iter().chain(identity_headers(&req.url).iter()) {
         request = request.header(k, v);
     }
     let response = request.send(&req.body).map_err(map_error)?;
@@ -483,8 +521,11 @@ pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
 
 /// One GET through `agent`: status check, whole body, content type.
 fn get_with(agent: &ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>), String> {
-    let resp = agent
-        .get(url)
+    let mut request = agent.get(url);
+    for (k, v) in identity_headers(url) {
+        request = request.header(k, v);
+    }
+    let resp = request
         .call()
         .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
     if resp.status().as_u16() >= 400 {
@@ -516,6 +557,34 @@ pub fn get_text_short(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_opencode_hosts_get_a_session_header() {
+        assert!(is_opencode(
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        ));
+        assert!(is_opencode("https://opencode.ai/zen/go/v1/messages"));
+        assert!(is_opencode("https://api.opencode.ai/v1"));
+        assert!(!is_opencode("https://opencode.ai.evil.test/v1"));
+        assert!(!is_opencode("https://evil.test/?u=opencode.ai"));
+        assert!(!is_opencode("https://api.deepseek.com/chat/completions"));
+    }
+
+    #[test]
+    fn identity_headers_name_the_client_and_gate_the_session() {
+        let go = identity_headers("https://opencode.ai/zen/go/v1/chat/completions");
+        assert_eq!(go[0].0, "user-agent");
+        assert!(go[0].1.starts_with("llm/"));
+        assert_eq!(go[1].0, "x-opencode-session");
+        assert!(!go[1].1.is_empty());
+        let other = identity_headers("https://api.openai.com/v1/chat/completions");
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn one_session_id_is_reused_for_the_whole_process() {
+        assert_eq!(session_id(), session_id());
+    }
 
     #[test]
     fn statuses_classify_into_retryable_and_fatal() {

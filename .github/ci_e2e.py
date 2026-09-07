@@ -105,6 +105,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         messages = body.get("messages", [])
         seen["auth"] = self.headers.get("Authorization")
+        seen["ua"] = self.headers.get("User-Agent")
         seen["model"] = body.get("model")
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
         if messages:
@@ -288,6 +289,8 @@ def main():
     assert p.returncode == 0, f"prompt rc={p.returncode} err={p.stderr[-500:]}"
     assert "ok from mock" in p.stdout, f"unexpected stdout: {p.stdout!r}"
     assert seen.get("auth") == "Bearer sk-ci", f"auth header: {seen.get('auth')!r}"
+    assert (seen.get("ua") or "").startswith("llm/"), \
+        f"user-agent must name this client, not ureq: {seen.get('ua')!r}"
     assert seen.get("model") == "m-a", f"model: {seen.get('model')!r}"
 
     # a bare multi-word prompt joins into one sentence, no word is dropped

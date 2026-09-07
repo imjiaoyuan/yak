@@ -45,7 +45,9 @@ Linux, macOS and Windows. The binary lands in:
 Put it on your `PATH` (e.g. `cp target/release/llm ~/.local/bin/` on Unix, or add the
 `target\release` directory to `Path` on Windows). State lives under `~/.llm` (Linux/macOS) or
 `%USERPROFILE%\.llm` (Windows); set `LLM_USER_PATH` to relocate it, handy for trying the tool out
-without touching the real user directory.
+without touching the real user directory. Requests to OpenCode's Go/Zen gateway carry a
+per-conversation `x-opencode-session` id; set `LLM_SESSION_ID` to pin one id across several `llm`
+invocations of the same conversation.
 
 ### Platform notes
 
