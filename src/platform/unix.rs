@@ -89,9 +89,10 @@ mod termios_impl {
     }
 
     pub fn rawify(b: &mut Buf, vtime: u8, vmin: u8) {
-        const ICANON: u64 = 0x2;
+        // macOS c_lflag bits (unlike Linux's: ICANON 0x2, ISIG 0x1)
+        const ICANON: u64 = 0x100;
         const ECHO: u64 = 0x8;
-        const ISIG: u64 = 0x1;
+        const ISIG: u64 = 0x80;
         // keep CR/LF untranslated: Enter stays \r, ctrl+j stays \n
         const ICRNL: u64 = 0x100;
         const INLCR: u64 = 0x40;
