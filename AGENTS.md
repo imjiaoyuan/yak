@@ -1,26 +1,47 @@
 # Repository Guidelines
 
-Contributor guide for `llm`, a single-binary, terminal-first AI hub written in Rust (edition 2024).
+`llm` is a single-binary, terminal-first AI hub in Rust (edition 2024). `CLAUDE.md` is the
+authoritative architecture reference — read the matching paragraph before touching a layer.
 
-## Build, Test, Run
+## Commands
 
-- `cargo build` — debug binary; `cargo build --release` for `target/release/llm`.
-- `cargo test [name]` — run inline unit tests (optionally filtered).
-- `LLM_USER_PATH=/tmp/x cargo run -- "prompt"` — smoke-test against a hermetic user directory.
-- `cargo fmt` before committing; keep `cargo clippy` clean.
-- `README.md` embeds every command's full `-h` output byte-identically; refresh it when flags or help text change.
-- Keep `cargo clippy --all-targets` at zero warnings before committing.
+```bash
+cargo build / cargo build --release          # target/(release/)llm
+cargo test <name>                            # inline #[cfg(test)] modules only
+cargo fmt && cargo clippy --all-targets      # both must be clean before committing
+LLM_USER_PATH=/tmp/x cargo run -- "prompt"   # hermetic smoke test
+python .github/ci_e2e.py target/debug/llm    # CI end-to-end (mock SSE server)
+python .github/ci_repl.py target/debug/llm   # CI interactive REPL over a real pty
+```
 
-## Architecture (one line)
+- CI (`.github/workflows/ci.yml`) runs test → build → `ci_e2e.py` → `ci_repl.py` on ubuntu, macOS
+  and windows-latest; the two Python scripts are CI-local harnesses, not shipped code. `ci_repl.py`
+  skips itself on Windows, so run it on Unix to exercise the terminal paths.
+- `README.md` embeds every command's full `-h` output **byte-identically**; refresh the block when
+  flags or help text change.
 
-`src/main.rs` dispatches argv to one file per subcommand in `src/commands/`, each `pub fn run(argv: &[String]) -> i32`, on top of shared kernels: `src/core/` (logs.db, config.json, HTTP, rendering, templates, JSON/YAML helpers), `src/providers/` (unified `Msg` model + streaming adapters), `src/agent/` (agent loop, tools, sub-agents, approvals, REPL), `src/read/` (streaming text-file windows), `src/platform/` and `src/term/` (raw-mode line editor, picker, spinner). Handwritten helpers we refused to crate-ify live at `src/` root: `yaml.rs`, `b64.rs`, `hash.rs`, `blake2.rs`, `gitignore.rs`, `jsonfmt.rs`. `.reference/` is a read-only behavioral spec — never edit or build it; `CLAUDE.md` is the authoritative architecture reference.
+## Architecture that is not obvious from the tree
 
-State lives under `~/.llm` (override with `LLM_USER_PATH`); `LLM_SHELL` overrides the shell on all platforms.
+- `src/main.rs` dispatches argv to one file per subcommand in `src/commands/` (`pub fn run(argv:
+  &[String]) -> i32`); `src/core/` (config.json, logs.db, http, rendering), `src/providers/`
+  (unified `Msg` + one adapter per wire protocol + the provider catalog), `src/agent/` (loop, tools,
+  sub-agents, approvals, REPL), `src/read/`, `src/platform/` + `src/term/` (raw-mode line editor,
+  picker, spinner).
+- Hand-rolled instead of crate-ified, at `src/` root: `yaml.rs`, `b64.rs`, `hash.rs`, `blake2.rs`,
+  `gitignore.rs`, `jsonfmt.rs`. Deps are deliberately five (ureq, rusqlite, serde, serde_json,
+  unicode-width) and the code is synchronous — no async runtime. Add a crate only when it buys real
+  correctness or speed; otherwise extend the in-tree helper.
+- Everything HTTP goes through `src/core/http.rs` `send_raw`/`get_with`. Gateway- or
+  provider-required headers belong there via `identity_headers(url)`, never in an adapter: it sends
+  a real `user-agent` (`llm/<version>`) and, for `opencode.ai` hosts, the `x-opencode-session`
+  conversation id that OpenCode Go/Zen otherwise rejects with `400 MissingSessionID` (one ulid per
+  process; `LLM_SESSION_ID` pins it across invocations).
+- `LLM_USER_PATH` relocates `~/.llm` (also `LLM_SHELL` for the shell). Session ids are ULIDs from
+  `core::db::ulid()`; never hand-roll another id or RNG.
 
-## Conventions
+## Workflow
 
-- Synchronous code only (no async runtime); a small, deliberate dep set — five today: ureq, rusqlite, serde/serde_json, and unicode-width (real terminal cell widths). Add a crate only when it materially buys correctness or efficiency (unicode-width did); otherwise extend the in-tree helpers. One command per file.
-- Idiomatic Rust naming (`snake_case` items, `CamelCase` types), 4-space indentation.
-- Unit tests are inline `#[cfg(test)]` modules next to the code they cover; one behavior per test, descriptive names.
-- Commits: imperative, lowercase, prefix-free ("add interactive agent repl with slash commands"); one focused change per commit. PRs target `main`; releases are cut from `v*` tags by `.github/workflows/release.yml`.
-- Consult `CLAUDE.md` (authoritative architecture reference) before structural changes; check `.reference/` when behavior is unclear.
+- Commits: imperative, lowercase, no prefix ("add interactive agent repl with slash commands"), one
+  focused change each. PRs target `main`; releases are cut from `v*` tags by
+  `.github/workflows/release.yml`.
+- 
