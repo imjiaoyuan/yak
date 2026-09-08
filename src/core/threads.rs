@@ -97,13 +97,11 @@ pub struct StoredTurn {
     pub messages: Vec<StoredMsg>,
 }
 
-/// One row of the logs list: enough for the compact index and the browser.
+/// One row of the browser list.
 pub struct ThreadSummary {
     pub id: String,
     pub turns: usize,
     pub last: String,
-    pub model: String,
-    pub mode: String,
     pub last_prompt: String,
 }
 
@@ -118,14 +116,6 @@ impl Store {
     /// The default store under the user directory.
     pub fn open() -> Result<Store, String> {
         Store::open_path(&config::threads_dir())
-    }
-
-    /// `-d` selects an explicit directory; None falls back to the default.
-    pub fn open_from_arg(opt: Option<&str>) -> Result<Store, String> {
-        match opt {
-            Some(p) => Store::open_path(Path::new(p)),
-            None => Store::open(),
-        }
     }
 
     pub fn open_path(path: &Path) -> Result<Store, String> {
@@ -262,8 +252,6 @@ impl Store {
             id: id.to_string(),
             turns,
             last: last.ts,
-            model: last.model,
-            mode: last.mode,
             last_prompt: last.prompt,
         })
     }
@@ -278,13 +266,6 @@ impl Store {
         let dst = self.thread_path(&new_id);
         fs::copy(&src, &dst).map_err(|e| format!("cannot fork thread {source}: {e}"))?;
         Ok(Some(new_id))
-    }
-
-    /// (threads, turns) counts for `llm logs status`.
-    pub fn counts(&self) -> (usize, usize) {
-        let summaries = self.summaries();
-        let turns = summaries.iter().map(|s| s.turns).sum();
-        (summaries.len(), turns)
     }
 
     fn entries(&self) -> Result<Vec<fs::DirEntry>, String> {

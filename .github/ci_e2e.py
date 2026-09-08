@@ -85,6 +85,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
         if messages:
             seen["last_prompt"] = messages[-1].get("content", "")
+            seen.setdefault("prompts", []).append(messages[-1].get("content", ""))
         if body.get("model") == "m-trunc":
             # a stream that closes without [DONE]: a truncation, not a success
             self.send_response(200)
@@ -250,7 +251,7 @@ def main():
 
     p = run([binary, "hi"], env, stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"prompt rc={p.returncode} err={p.stderr[-500:]}"
-    assert "ok from mock" in p.stdout, f"unexpected stdout: {p.stdout!r}"
+    assert "final answer after tool" in p.stdout, f"unexpected stdout: {p.stdout!r}"
     assert seen.get("auth") == "Bearer sk-ci", f"auth header: {seen.get('auth')!r}"
     assert (seen.get("ua") or "").startswith("llm/"), \
         f"user-agent must name this client, not ureq: {seen.get('ua')!r}"
@@ -259,18 +260,18 @@ def main():
     # a bare multi-word prompt joins into one sentence, no word is dropped
     mw = run([binary, "two", "words", "here"], env, stdin=subprocess.DEVNULL)
     assert mw.returncode == 0, f"multi-word rc={mw.returncode} err={mw.stderr[-300:]}"
-    assert seen.get("last_prompt") == "two words here", \
-        f"joined prompt: {seen.get('last_prompt')!r}"
+    assert "two words here" in (seen.get("prompts") or []), \
+        f"joined prompt: {seen.get('prompts')!r}"
 
-    # continuing a conversation under -n is refused, never silently logged
-    nl = run([binary, "prompt", "-n", "-c", "x"], env, stdin=subprocess.DEVNULL)
+    # resuming under --no-session is refused, never silently logged
+    nl = run([binary, "--no-session", "--session", "x", "hi"], env, stdin=subprocess.DEVNULL)
     out = nl.stdout + nl.stderr
-    assert nl.returncode == 1 and "logging is disabled (-n)" in out, \
-        f"-n -c refusal: rc={nl.returncode} out={out[-300:]!r}"
+    assert nl.returncode == 1 and "requires a store" in out, \
+        f"--no-session --session refusal: rc={nl.returncode} out={out[-300:]!r}"
 
     # a stream that closes without [DONE] is a truncation error, never a
     # silently completed turn
-    tr = run([binary, "prompt", "-m", "mock/m-trunc", "x"], env, stdin=subprocess.DEVNULL)
+    tr = run([binary, "-m", "mock/m-trunc", "x"], env, stdin=subprocess.DEVNULL)
     tout = tr.stdout + tr.stderr
     assert tr.returncode == 1 and "completion marker" in tout, \
         f"truncated stream: rc={tr.returncode} out={tout[-300:]!r}"
@@ -291,7 +292,7 @@ def main():
     # plugin lane: the agent mounts the script tool and the MCP server,
     # the model calls mcp__fake__echo, the fake server logs the call and
     # the second round returns the final answer
-    a = run([binary, "agent", "--yolo", "--no-session",
+    a = run([binary, "--yolo", "--no-session",
              "use the echo tool with text 'hi from model'"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert a.returncode == 0, f"agent rc={a.returncode} err={a.stderr[-800:]}"
@@ -307,7 +308,7 @@ def main():
     # builtin-tool lane: the model writes a real file through the write
     # tool; round 2 must carry the tool result back as a role:"tool"
     # message paired with the assistant tool_calls turn
-    w = run([binary, "agent", "--yolo", "--no-session", "-m", "mock-write/m-write",
+    w = run([binary, "--yolo", "--no-session", "-m", "mock-write/m-write",
              "create hello.txt"], env, cwd=work, stdin=subprocess.DEVNULL)
     assert w.returncode == 0, f"write agent rc={w.returncode} err={w.stderr[-800:]}"
     hello = os.path.join(work, "hello.txt")
@@ -327,7 +328,7 @@ def main():
     # agent round pins tools+system behind one cache_control marker and
     # leaves a first-round prompt unmarked; the continued prompt marks the
     # conversation tip once history exists
-    an = run([binary, "agent", "--yolo", "--no-session", "-m", "mock-ant/m-ant",
+    an = run([binary, "--yolo", "--no-session", "-m", "mock-ant/m-ant",
               "hi"], env, stdin=subprocess.DEVNULL)
     assert an.returncode == 0 and "ant ok" in an.stdout + an.stderr, \
         f"anthropic agent rc={an.returncode} err={an.stderr[-300:]!r}"
@@ -358,22 +359,21 @@ def main():
     assert not any("cache_control" in json.dumps(m) for m in msgs[:-1]), \
         f"marker leaked onto earlier turns: {json.dumps(msgs)[:300]}"
 
-    # commands dir: llm hello-cmd world expands $input through the prompt path
-    c = run([binary, "hello-cmd", "world"], env, stdin=subprocess.DEVNULL)
-    assert c.returncode == 0, f"command rc={c.returncode} err={c.stderr[-500:]}"
-    assert seen.get("last_prompt") == "Say hello to world", f"expanded prompt: {seen.get('last_prompt')!r}"
-
-    # chat preset: the tool-less session stamps mode "chat" and logs there
+    # unknown words are agent tasks now, and the agent always sends tools
     ch = run([binary, "chat", "hi"], env, stdin=subprocess.DEVNULL)
-    assert ch.returncode == 0 and "ok from mock" in ch.stdout + ch.stderr, \
+    assert ch.returncode == 0 and "final answer after tool" in ch.stdout + ch.stderr, \
         f"chat rc={ch.returncode} err={ch.stderr[-300:]!r}"
-    assert seen.get("tools") == [], f"chat must not send tools: {seen.get('tools')}"
-    lg = run([binary, "logs"], env, stdin=subprocess.DEVNULL)
-    assert "chat" in lg.stdout + lg.stderr, f"chat section missing: {(lg.stdout + lg.stderr)[:300]!r}"
+    assert "read" in (seen.get("tools") or []), f"agent must send tools: {seen.get('tools')}"
+
+    # sessions land as thread files in the store
+    lg = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
+    assert lg.returncode == 0
+    assert any(f.endswith(".jsonl") for f in os.listdir(os.path.join(user, "threads"))), \
+        f"no thread files: {os.listdir(os.path.join(user, 'threads'))}"
 
     # piped stdin is the task; the REPL is never entered without a tty
     import io
-    piped = subprocess.run([binary, "agent", "--yolo", "--no-session"],
+    piped = subprocess.run([binary, "--yolo", "--no-session"],
                            input="piped task text", capture_output=True, text=True,
                            env=env, timeout=120)
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
@@ -403,10 +403,6 @@ def main():
     assert r.returncode == 0 and "cleared the default model" in r.stderr, f"remove clearing: {r.stderr!r}"
     g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
     assert "(unset" in g.stdout, f"defaults survived removal: {g.stdout!r}"
-
-    # the typo guard keeps precedence over command/prompt fallback
-    t = run([binary, "lgos", "x"], env, stdin=subprocess.DEVNULL)
-    assert t.returncode == 2 and "closest match" in t.stderr, f"typo guard: {t.returncode} {t.stderr!r}"
 
     print("e2e smoke passed")
     return 0

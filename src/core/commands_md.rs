@@ -9,12 +9,7 @@ use crate::core::config::user_dir;
 
 #[derive(Clone, Debug)]
 pub struct CommandMd {
-    pub model: Option<String>,
     pub system: Option<String>,
-    /// files/URLs attached ahead of any -a entries on every run
-    pub attachments: Vec<String>,
-    /// explicit path → mimetype map for the attachments above
-    pub attachment_types: std::collections::BTreeMap<String, String>,
     pub body: String,
 }
 
@@ -22,34 +17,17 @@ pub struct CommandMd {
 /// (whole body is the prompt); frontmatter the YAML subset cannot parse
 /// degrades to empty metadata — never lose a usable command.
 pub fn parse(text: &str) -> CommandMd {
-    let mut model = None;
     let mut system = None;
-    let mut attachments = Vec::new();
-    let mut attachment_types = std::collections::BTreeMap::new();
     let mut body = text.trim().to_string();
     if let Some((fm, after)) = crate::yaml::split_frontmatter(text) {
-        if let Ok(y) = crate::yaml::parse(fm) {
-            if let Some(map) = y.as_map() {
-                model = map.get("model").filter(|m| !m.is_empty()).cloned();
-                system = map.get("system").filter(|s| !s.is_empty()).cloned();
-            }
-            attachments = y
-                .get("attachments")
-                .and_then(|v| v.as_str_list())
-                .unwrap_or_default();
-            if let Some(types) = y.get("attachment_types").and_then(|v| v.as_map()) {
-                attachment_types = types;
-            }
+        if let Ok(y) = crate::yaml::parse(fm)
+            && let Some(map) = y.as_map()
+        {
+            system = map.get("system").filter(|s| !s.is_empty()).cloned();
         }
         body = after.trim_start_matches('\n').trim().to_string();
     }
-    CommandMd {
-        model,
-        system,
-        attachments,
-        attachment_types,
-        body,
-    }
+    CommandMd { system, body }
 }
 
 /// Command names share the plugin-name rules; rejecting anything else is
@@ -84,13 +62,6 @@ pub fn template(cmd: &CommandMd) -> crate::core::templates::Template {
     crate::core::templates::Template {
         prompt: Some(cmd.body.clone()),
         system: cmd.system.clone(),
-        model: cmd.model.clone(),
-        attachments: cmd.attachments.clone(),
-        attachment_types: cmd
-            .attachment_types
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
     }
 }
 
@@ -114,7 +85,6 @@ mod tests {
     fn parses_frontmatter_and_body() {
         let text = "---\nmodel: mock/big\nsystem: Be terse\n---\nReview this: $input";
         let cmd = parse(text);
-        assert_eq!(cmd.model.as_deref(), Some("mock/big"));
         assert_eq!(cmd.system.as_deref(), Some("Be terse"));
         assert_eq!(cmd.body, "Review this: $input");
     }
@@ -123,7 +93,6 @@ mod tests {
     fn body_without_frontmatter_is_still_a_command() {
         let cmd = parse("Just a prompt body");
         assert_eq!(cmd.body, "Just a prompt body");
-        assert!(cmd.model.is_none());
         assert!(cmd.system.is_none());
     }
 
@@ -131,7 +100,7 @@ mod tests {
     fn unparseable_frontmatter_degrades_to_empty_metadata() {
         let cmd = parse("---\n: : bad yaml [\n---\nbody here");
         assert_eq!(cmd.body, "body here");
-        assert!(cmd.model.is_none());
+        assert!(cmd.system.is_none());
     }
 
     #[test]

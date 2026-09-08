@@ -4,8 +4,6 @@
 
 use std::io::{IsTerminal, Read};
 
-use crate::core::threads::StoredAttachment;
-
 /// The wire form of an attachment, carried on user messages and tool
 /// results: mime, base64 bytes and a display name. `path`/`url` ride along
 /// as storage provenance (where the bytes came from) — the provider
@@ -42,15 +40,6 @@ impl Loaded {
             filename: self.file_name(),
             path: self.path.clone(),
             url: self.url.clone(),
-        }
-    }
-
-    pub fn stored(&self) -> StoredAttachment {
-        StoredAttachment {
-            path: self.path.clone(),
-            url: self.url.clone(),
-            mime_type: self.mime_type.clone(),
-            base64: Some(crate::b64::encode(&self.content)),
         }
     }
 

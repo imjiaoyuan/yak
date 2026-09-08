@@ -57,24 +57,6 @@ pub fn config_path() -> PathBuf {
     user_dir().join("config.json")
 }
 
-/// Prompt logging switch: the "logging" boolean in config.json (absent =
-/// on).
-pub fn logs_on() -> bool {
-    read_root()
-        .ok()
-        .and_then(|root| root.get("logging").and_then(|v| v.as_bool()))
-        .unwrap_or(true)
-}
-
-pub fn set_logs_enabled(on: bool) {
-    let _ = edit_root(|root| {
-        if let Some(map) = root.as_object_mut() {
-            map.insert("logging".to_string(), serde_json::json!(on));
-        }
-        Ok(())
-    });
-}
-
 pub fn threads_dir() -> PathBuf {
     user_dir().join("threads")
 }
@@ -363,15 +345,6 @@ pub fn unset_default() -> std::io::Result<()> {
             }
         }
     })
-}
-
-/// Read-modify-write the whole config object, preserving every key.
-fn edit_root(
-    edit: impl FnOnce(&mut serde_json::Value) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let mut root = read_root()?;
-    edit(&mut root)?;
-    write_root(&root)
 }
 
 /// Read-modify-write the models table, preserving every other config key.

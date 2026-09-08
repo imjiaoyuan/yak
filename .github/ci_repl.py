@@ -105,7 +105,7 @@ def main():
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(work)
-        os.execve(binary, [binary, "agent", "--yolo", "--no-session"], env)
+        os.execve(binary, [binary, "--yolo", "--no-session"], env)
 
     # a bare pty.fork pty reports a 0x0 window; give it a real one
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))

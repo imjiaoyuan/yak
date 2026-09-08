@@ -6,11 +6,8 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Default, Clone)]
 pub struct Template {
-    pub model: Option<String>,
     pub prompt: Option<String>,
     pub system: Option<String>,
-    pub attachments: Vec<String>,
-    pub attachment_types: Vec<(String, String)>,
 }
 
 /// Collect `$var` / `${var}` names used in a template body.

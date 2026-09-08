@@ -80,7 +80,7 @@ const SPECS: &[OptSpec] = &[
         "ATTACHMENT"
     ),
     crate::two_value_spec!("at", "Attachment with explicit mimetype", "PATH MIMETYPE"),
-    value_spec!("database", Some('d'), "Path to thread directory", "PATH"),
+    flag_spec!("resume", Some('r'), "Browse past sessions and continue one"),
     flag_spec!("no-stream", None, "Do not stream output"),
     value_spec!("key", None, "API key to use", "KEY"),
     flag_spec!("help", Some('h'), "Show this message and exit"),
@@ -88,7 +88,7 @@ const SPECS: &[OptSpec] = &[
 
 fn help() -> String {
     render_help(
-        "llm agent",
+        "llm",
         "Run an agentic task with tools (bare invocation opens an interactive session)",
         SPECS,
         &[(
@@ -111,6 +111,9 @@ pub fn run(argv: &[String]) -> i32 {
 }
 
 fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
+    if args.flag(&["resume"]) {
+        return Ok(crate::commands::logs::browse());
+    }
     let mut prompt = args.positionals.join(" ");
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task
     prompt = crate::core::attachments::read_piped_prompt(args, prompt)?;
@@ -335,12 +338,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Open the thread store unless --no-session; -d picks a custom directory.
+/// Open the thread store unless --no-session.
 fn open_store(args: &ParsedArgs) -> Result<Option<threads::Store>, String> {
     if args.flag(&["no-session"]) {
         return Ok(None);
     }
-    Ok(Some(threads::Store::open_from_arg(
-        args.opt(&["database"]),
-    )?))
+    Ok(Some(threads::Store::open()?))
 }

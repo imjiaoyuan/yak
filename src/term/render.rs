@@ -18,9 +18,6 @@ pub struct Renderer {
     pub output: String,
     /// accumulated reasoning output
     pub reasoning: String,
-    pub usage: Option<Usage>,
-    /// suppress streaming output to stdout (--json / -x modes buffer instead)
-    quiet: bool,
     /// live block streaming (terminal modes opt in via terminal_md): the
     /// answer flows verbatim inside a left-margin block, hard-wrapped at
     /// the terminal width so continuation rows keep the margin
@@ -39,8 +36,6 @@ impl Renderer {
         Renderer {
             output: String::new(),
             reasoning: String::new(),
-            usage: None,
-            quiet: false,
             md: None,
             pending: String::new(),
             dangling: false,
@@ -52,18 +47,13 @@ impl Renderer {
         }
     }
 
-    /// Suppress (or re-enable) streaming output; set before any delta.
-    pub fn set_quiet(&mut self, on: bool) {
-        self.quiet = on;
-    }
-
     /// Terminal live-stream mode, TTY-gated: pipes and quiet mode keep raw
     /// output. The answer streams verbatim with a left margin on each of the
     /// model's own lines; rows hard-wrap at the terminal width so wrapped
     /// continuation rows carry the margin too (the width is re-read at every
     /// line start, so a resize applies from the next row on).
     pub fn terminal_md(&mut self, indent: usize) -> bool {
-        if self.quiet || !std::io::stdout().is_terminal() {
+        if !std::io::stdout().is_terminal() {
             return false;
         }
         let mut md = crate::core::render_md::BlockStream::indented(indent);
@@ -73,13 +63,9 @@ impl Renderer {
     }
 
     /// Append answer text, printing it (hard-wrapped inside the block when
-    /// streaming) unless quiet. Output is written at most once per
-    /// FLUSH_INTERVAL.
+    /// streaming). Output is written at most once per FLUSH_INTERVAL.
     pub fn push_delta(&mut self, text: &str) {
         self.output.push_str(text);
-        if self.quiet {
-            return;
-        }
         if let Some(md) = self.md.as_mut() {
             md.push_delta(text, &mut self.pending);
         } else {
@@ -127,41 +113,6 @@ impl Renderer {
             }
         }
         self.flush_pending();
-    }
-
-    /// newline after stream if anything was printed
-    pub fn finish(&mut self) {
-        self.finish_stream();
-        if self.md.is_none() && !self.output.is_empty() {
-            println!();
-        }
-    }
-}
-
-/// Extract the nth fenced code block from markdown text.
-pub fn extract_fenced(text: &str, last: bool) -> Option<String> {
-    let mut blocks: Vec<String> = Vec::new();
-    let mut current: Option<String> = None;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if current.is_none() && trimmed.starts_with("```") {
-            current = Some(String::new());
-        } else if let Some(block) = current.take() {
-            if trimmed.starts_with("```") {
-                blocks.push(block);
-                current = None;
-            } else {
-                let mut b = block;
-                b.push_str(line);
-                b.push('\n');
-                current = Some(b);
-            }
-        }
-    }
-    if last {
-        blocks.pop()
-    } else {
-        blocks.into_iter().next()
     }
 }
 
@@ -229,10 +180,6 @@ impl TaskView {
     }
 
     /// -R: keep buffering reasoning but never print the trace line.
-    pub fn set_show_trace(&mut self, on: bool) {
-        self.show_trace = on;
-    }
-
     fn stop_ticker(&mut self) {
         if let Some(mut t) = self.ticker.take() {
             t.stop();
@@ -361,16 +308,6 @@ impl TaskView {
         self.relabel(&self.label.clone());
     }
 
-    /// Usage from a plain Done event (prompt/chat single round).
-    pub fn done(&mut self, usage: Option<Usage>) {
-        self.renderer.usage = usage;
-        if let Some(u) = usage {
-            self.total_in += u.input;
-            self.total_out += u.output;
-            self.total_cached += u.cached;
-        }
-    }
-
     /// Cleanup without the footer (provider error, interrupt).
     pub fn abort(&mut self) {
         self.stop_ticker();
@@ -405,13 +342,5 @@ impl TaskView {
         } else {
             eprintln!("\x1b[90m{pad}{secs:.1}s\x1b[0m");
         }
-    }
-
-    /// End of a task: cleanup, the renderer's trailing newline, the footer.
-    pub fn finish(&mut self, secs: f64) {
-        self.stop_ticker();
-        self.close_thinking();
-        self.renderer.finish();
-        self.footer(secs);
     }
 }

@@ -17,6 +17,7 @@ pub enum Yaml {
 }
 
 impl Yaml {
+    #[cfg(test)]
     pub fn get(&self, key: &str) -> Option<&Yaml> {
         match self {
             Yaml::Map(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -53,6 +54,7 @@ impl Yaml {
         }
     }
 
+    #[cfg(test)]
     pub fn as_str_list(&self) -> Option<Vec<String>> {
         match self {
             Yaml::List(items) => Some(
