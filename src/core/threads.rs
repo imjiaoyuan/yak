@@ -93,10 +93,6 @@ pub struct StoredTurn {
     pub duration_ms: Option<i64>,
     #[serde(default)]
     pub options: Vec<(String, String)>,
-    /// the tool names mounted on the session that wrote this turn (used by
-    /// followup_task/resume_agent to rebuild the same sub-agent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<String>>,
     /// the full wire messages of the round (agent replay fidelity)
     pub messages: Vec<StoredMsg>,
 }
@@ -334,7 +330,6 @@ mod tests {
             usage: None,
             duration_ms: None,
             options: Vec::new(),
-            tools: None,
             messages: vec![StoredMsg::User {
                 text: prompt.to_string(),
                 attachments: Vec::new(),

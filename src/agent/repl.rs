@@ -9,7 +9,6 @@ use crate::term::render::humanize_tokens;
 
 pub fn repl(
     mut session: crate::agent::session::Session,
-    agents: Vec<crate::agent::task::AgentDef>,
     mut skills: Vec<crate::agent::skills::SkillDef>,
     mut attachments: Vec<crate::providers::Attachment>,
 ) -> Result<i32, String> {
@@ -19,7 +18,7 @@ pub fn repl(
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
 
-    print_banner(&session, &agents);
+    print_banner(&session);
     render_history(&session.seed);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
@@ -34,7 +33,7 @@ pub fn repl(
             continue;
         }
         let prompt = "\x1b[1m>\x1b[0m ";
-        let help = repl_help(&session, &agents);
+        let help = repl_help(&session);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let mode = session.approval.mode;
         let cwd = session.cwd.display().to_string();
@@ -206,7 +205,7 @@ fn abbrev_home(path: &str) -> String {
 }
 
 /// Full help page shown on ctrl+o.
-fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> String {
+fn repl_help(session: &Session) -> String {
     let mut h = String::from(
         "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
@@ -226,7 +225,7 @@ fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> Stri
         switches.join(" "),
         session.approval.mode.label()
     ));
-    h.push_str(&info_rows(session, agents, "    "));
+    h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", session.model.qualified_id()),
         None => session.model.qualified_id(),
@@ -236,9 +235,9 @@ fn repl_help(session: &Session, agents: &[crate::agent::task::AgentDef]) -> Stri
     h
 }
 
-/// The context/agents/session rows shared by the banner and the ctrl+o page.
+/// The context/session rows shared by the banner and the ctrl+o page.
 /// `pad` widens the label to match the surrounding layout.
-fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &str) -> String {
+fn info_rows(session: &Session, pad: &str) -> String {
     let mut rows = String::new();
     // project instructions directly in the working directory, file name only
     let context = ["CLAUDE.md", "AGENTS.md"]
@@ -250,10 +249,6 @@ fn info_rows(session: &Session, agents: &[crate::agent::task::AgentDef], pad: &s
         "work{pad}{} · context {context}\n",
         abbrev_home(&session.cwd.display().to_string())
     ));
-    if !agents.is_empty() {
-        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-        rows.push_str(&format!("agents {pad} {}\n", names.join(", ")));
-    }
     if let Some(cid) = &session.conversation_id {
         rows.push_str(&format!("session{pad}{cid}\n"));
     }
@@ -277,7 +272,7 @@ fn slash_hint(word: &str) -> Option<String> {
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
-fn print_banner(session: &Session, agents: &[crate::agent::task::AgentDef]) {
+fn print_banner(session: &Session) {
     let thinking = session
         .thinking
         .as_deref()
@@ -290,7 +285,7 @@ fn print_banner(session: &Session, agents: &[crate::agent::task::AgentDef]) {
         thinking,
         session.approval.mode.label()
     );
-    eprint!("\x1b[2m{}\x1b[0m", info_rows(session, agents, " "));
+    eprint!("\x1b[2m{}\x1b[0m", info_rows(session, " "));
 }
 
 /// Replay the loaded conversation on resume, so the user actually sees what
@@ -555,14 +550,12 @@ fn repl_command(
             session.clear();
             eprint!("\x1b[2J\x1b[H");
             let _ = std::io::stderr().flush();
-            let agents =
-                crate::agent::task::discover(&crate::core::config::user_dir(), &session.cwd);
             *skills = crate::agent::skills::discover(
                 &crate::core::config::user_dir(),
                 &session.cwd,
                 &settings.disabled_skills,
             );
-            print_banner(session, &agents);
+            print_banner(session);
         }
         "/status" => {
             let used = crate::agent::compact::estimate_tokens(&session.seed, None);

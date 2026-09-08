@@ -14,7 +14,6 @@ pub struct AgentSettings {
     pub reserve_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
-    pub roles: std::collections::BTreeMap<String, String>,
     pub model_windows: std::collections::BTreeMap<String, u64>,
     pub disabled_skills: Vec<String>,
 }
@@ -65,13 +64,6 @@ pub fn parse(raw: &str) -> AgentSettings {
             }
         }
     }
-    if let Some(roles) = agent.get("roles").and_then(|v| v.as_object()) {
-        for (role, model) in roles {
-            if let Some(m) = model.as_str() {
-                s.roles.insert(role.clone(), m.to_string());
-            }
-        }
-    }
     if let Some(models) = agent.get("models").and_then(|v| v.as_object()) {
         for (model, table) in models {
             if let Some(w) = table.get("context_window").and_then(|v| v.as_u64()) {
@@ -110,7 +102,6 @@ mod agent_settings_tests {
     "keep_recent_tokens": 100,
     "disabled_skills": ["old-thing"],
     "tools": {"bash": "prompt"},
-    "roles": {"task": "mock/m1"},
     "models": {"mock/m1": {"context_window": 9000}}
   }
 }"#;
@@ -123,7 +114,6 @@ mod agent_settings_tests {
             s.tool_policies.get("bash").map(String::as_str),
             Some("prompt")
         );
-        assert_eq!(s.roles.get("task").map(String::as_str), Some("mock/m1"));
         assert_eq!(s.model_windows.get("mock/m1"), Some(&9000));
         assert_eq!(s.disabled_skills, vec!["old-thing".to_string()]);
     }

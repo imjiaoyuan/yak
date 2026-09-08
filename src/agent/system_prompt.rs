@@ -40,7 +40,6 @@ pub fn build_system_prompt(
     replace: Option<&str>,
     append: Option<&str>,
     stored: Option<&str>,
-    agents: &[crate::agent::task::AgentDef],
     skills: &[crate::agent::skills::SkillDef],
 ) -> Option<String> {
     let continuation = replace.is_none() && stored.is_some();
@@ -97,16 +96,6 @@ pub fn build_system_prompt(
             out.push_str("\n\n");
             out.push_str(&ctx);
         }
-        if !agents.is_empty() {
-            out.push_str("\n\nAvailable sub-agents (delegate via the task tool):");
-            for a in agents {
-                if a.description.is_empty() {
-                    out.push_str(&format!("\n- {}", a.name));
-                } else {
-                    out.push_str(&format!("\n- {}: {}", a.name, a.description));
-                }
-            }
-        }
         if let Some(block) = crate::agent::skills::skills_block(skills) {
             out.push_str("\n\n");
             out.push_str(&block);
@@ -138,14 +127,14 @@ mod tests {
         let cwd = std::path::Path::new("/tmp/proj");
         let stored = "base\n\n<project_instructions path=\"/x\">\nnotes\n</project_instructions>\
                       \n\nCurrent working directory: /old/dir";
-        let out = build_system_prompt(cwd, None, None, Some(stored), &[], &[]).unwrap();
+        let out = build_system_prompt(cwd, None, None, Some(stored), &[]).unwrap();
         assert_eq!(
             out,
             "base\n\n<project_instructions path=\"/x\">\nnotes\n</project_instructions>\
              \n\nCurrent working directory: /tmp/proj"
         );
         // resuming the resumed prompt must be a fixed point: no compounding
-        let again = build_system_prompt(cwd, None, None, Some(&out), &[], &[]).unwrap();
+        let again = build_system_prompt(cwd, None, None, Some(&out), &[]).unwrap();
         assert_eq!(again, out);
     }
 }

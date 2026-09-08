@@ -5,7 +5,6 @@ then exercises the plugin surfaces (script tool, MCP server over stdio,
 a commands-dir subcommand). Exit code is nonzero on any assertion
 failure."""
 
-import base64
 import http.server
 import json
 import os
@@ -61,13 +60,6 @@ with open(sys.argv[1], "a") as f:
 """
 
 
-# one 8x8 red-channel PNG used for every generated image
-TINY_PNG = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29dc"
-    "0000001d4944415478da63f8cfc0f01f0005000106a2a261646265846261640000"
-    "000049454e44ae426082"
-)
-
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -85,23 +77,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         if self.path.endswith("/v1/messages"):
             self.handle_anthropic(body)
-            return
-        if self.path.endswith("/images/generations"):
-            seen["image_prompt"] = body.get("prompt")
-            seen["image_n"] = body.get("n")
-            n = int(body.get("n", 1))
-            data = {"data": [{"b64_json": base64.b64encode(TINY_PNG).decode()} for _ in range(n)]}
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
-            return
-        if self.path.endswith("/audio/speech"):
-            seen["speech_input"] = body.get("input")
-            self.send_response(200)
-            self.send_header("Content-Type", "audio/mpeg")
-            self.end_headers()
-            self.wfile.write(b"fake-speech-bytes")
             return
         messages = body.get("messages", [])
         seen["auth"] = self.headers.get("Authorization")
@@ -242,18 +217,6 @@ def main():
                         "base_url": f"http://127.0.0.1:{PORT}",
                         "api_key": "sk-ci",
                         "models": ["m-ant"],
-                    },
-                    "openai-image": {
-                        "kind": "image",
-                        "base_url": f"http://127.0.0.1:{PORT}/v1",
-                        "api_key": "sk-ci",
-                        "models": ["img-1"],
-                    },
-                    "openai-tts": {
-                        "kind": "tts",
-                        "base_url": f"http://127.0.0.1:{PORT}/v1",
-                        "api_key": "sk-ci",
-                        "models": ["voice-1"],
                     },
                 },
                 "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
@@ -415,36 +378,6 @@ def main():
                            env=env, timeout=120)
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
         f"piped agent rc={piped.returncode} out={piped.stdout[-200:]!r} err={piped.stderr[-200:]!r}"
-
-    # media: images land as numbered files, tts as speech.mp3, overwrite is refused
-    med = os.path.join(work, "media")
-    img = run([binary, "-m", "openai-image/img-1", "-o", "n=2", "a cat", "--out", med + "/"],
-              env, stdin=subprocess.DEVNULL)
-    assert img.returncode == 0, f"image rc={img.returncode} err={img.stderr[-400:]}"
-    assert os.path.exists(os.path.join(med, "image-1.png")) \
-        and os.path.exists(os.path.join(med, "image-2.png")), f"dir images: {sorted(os.listdir(med))}"
-    assert seen.get("image_n") == 2, f"n not sent: {seen.get('image_n')!r}"
-
-    one = run([binary, "-m", "openai-image/img-1", "a cat", "--out", os.path.join(work, "cat.png")],
-              env, stdin=subprocess.DEVNULL)
-    assert one.returncode == 0 and os.path.exists(os.path.join(work, "cat.png"))
-    dup = run([binary, "-m", "openai-image/img-1", "a cat", "--out", os.path.join(work, "cat.png")],
-              env, stdin=subprocess.DEVNULL)
-    assert dup.returncode == 1 and "refusing to overwrite" in dup.stderr, \
-        f"overwrite not refused: rc={dup.returncode} err={dup.stderr[-200:]!r}"
-
-    so = subprocess.run(
-        [binary, "-m", "openai-image/img-1", "a cat", "--out", "-"],
-        capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=120,
-    )
-    assert so.returncode == 0 and so.stdout == TINY_PNG, \
-        f"stdout image bytes differ: {so.stdout[:20]!r}"
-
-    sp = run([binary, "-m", "openai-tts/voice-1", "say it", "--out", med + "/"],
-             env, stdin=subprocess.DEVNULL)
-    assert sp.returncode == 0 and os.path.exists(os.path.join(med, "speech.mp3")), \
-        f"tts rc={sp.returncode} err={sp.stderr[-300:]}"
-    assert open(os.path.join(med, "speech.mp3"), "rb").read() == b"fake-speech-bytes"
 
     # options take bare model names: the table is keyed qualified
     o = run([binary, "models", "options", "set", "m-b", "temperature", "0.3"], env,

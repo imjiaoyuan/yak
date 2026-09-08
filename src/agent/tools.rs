@@ -85,20 +85,8 @@ pub trait Tool: Send + Sync {
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
 }
 
-/// Same registry, but the task/lifecycle tools inherit the parent's model,
-/// the `[agent.roles]` map, and the shared live-children table.
-pub fn builtin_tools_configured(
-    parent_model: Option<&str>,
-    roles: &std::collections::BTreeMap<String, String>,
-    live: crate::agent::task::LiveAgents,
-) -> Vec<Box<dyn Tool>> {
-    let rt = crate::agent::task::AgentRuntime {
-        parent_model: parent_model.map(str::to_string),
-        roles: roles.clone(),
-        live,
-        store: crate::core::threads::Store::open_path(&crate::agent::task::subagents_dir())
-            .expect("sub-agent store directory must be creatable"),
-    };
+/// The built-in tool registry: eight handwritten tools.
+pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadTool),
         Box::new(WriteTool),
@@ -108,34 +96,6 @@ pub fn builtin_tools_configured(
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
-        Box::new(super::task::TaskTool {
-            parent_model: rt.parent_model.clone(),
-            roles: rt.roles.clone(),
-        }),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::Spawn,
-            rt.clone(),
-        )),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::Wait,
-            rt.clone(),
-        )),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::Followup,
-            rt.clone(),
-        )),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::Resume,
-            rt.clone(),
-        )),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::List,
-            rt.clone(),
-        )),
-        Box::new(super::task::AgentTool::new(
-            super::task::AgentOp::Interrupt,
-            rt,
-        )),
     ]
 }
 
@@ -1182,6 +1142,26 @@ fn html_to_text(html: &str) -> String {
         clean.push('\n');
     }
     clean.trim().to_string()
+}
+
+/// Truncate to 60 chars with a single ellipsis glyph (the plugin preview
+/// shape, now shared by script/MCP tool chrome).
+pub(crate) fn short(s: &str) -> String {
+    let mut out = crate::core::text::truncate_chars(s, 60);
+    if let Some(stripped) = out.strip_suffix("...") {
+        // truncate_chars appends "..." but the preview surface has always
+        // used the single ellipsis glyph; keep the bytes it renders today.
+        out = format!("{stripped}…");
+    }
+    out
+}
+
+/// `{prefix} {args-as-json-truncated}` — the preview line for plugin tools.
+pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
+    format!(
+        "{prefix} {}",
+        short(&serde_json::to_string(args).unwrap_or_default())
+    )
 }
 
 /// Display verb for the `$` chrome line: tool ids read as actions.

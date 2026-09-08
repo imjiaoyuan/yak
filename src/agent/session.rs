@@ -19,7 +19,6 @@ pub struct Session {
     pub max_turns: usize,
     pub stream: bool,
     pub compact: CompactConfig,
-    pub json_mode: bool,
     pub no_session: bool,
     pub store: Option<threads::Store>,
     pub approval: ApprovalConfig,
@@ -37,24 +36,10 @@ pub struct Session {
     /// without orphaning the child processes (they die with the Session,
     /// RAII kill on drop); an empty registry when none are configured
     pub mcp: std::sync::Arc<crate::agent::mcp::McpRegistry>,
-    /// backgrounded sub-agent children (spawn_agent family), RAII-killed on
-    /// drop so a session exit never orphans a running child
-    pub live_agents: crate::agent::task::LiveAgents,
     /// cumulative input/output tokens across the session (for the status line)
     pub tokens: (u64, u64),
     /// cumulative input tokens served from the provider prompt cache
     pub tokens_cached: u64,
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // backgrounded sub-agents die with the session
-        if let Ok(mut live) = self.live_agents.lock() {
-            for (_, mut agent) in live.drain() {
-                let _ = agent.child.kill();
-            }
-        }
-    }
 }
 
 impl Session {
@@ -85,12 +70,8 @@ impl Session {
     /// Rebuild the tool registry: built-ins plus the session's plugin tools
     /// (script tools and mounted MCP tools); called once at startup, and
     /// again on a model switch.
-    pub fn rebuild_tools(&mut self, roles: &std::collections::BTreeMap<String, String>) {
-        let mut tools = crate::agent::tools::builtin_tools_configured(
-            Some(&self.model.qualified_id()),
-            roles,
-            self.live_agents.clone(),
-        );
+    pub fn rebuild_tools(&mut self) {
+        let mut tools = crate::agent::tools::builtin_tools();
         // drop-ins win over same-named config-table tools (the nearer the
         // home, the more specific), and a name never mounts twice
         let mut specs = crate::agent::user_tools::discover(&self.cwd);
@@ -120,14 +101,12 @@ impl Session {
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
         };
-        let json_mode = self.json_mode;
         let model_id = self.model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
         // trace and footer (indent 2); tool chrome stays local
         // shared behind a RefCell so the approval callback can pause the
         // spinner before printing its banner (otherwise they race mid-line)
-        let view =
-            std::cell::RefCell::new(crate::term::render::TaskView::new(2, &model_id, !json_mode));
+        let view = std::cell::RefCell::new(crate::term::render::TaskView::new(2, &model_id, true));
         view.borrow_mut().renderer_mut().terminal_md(2);
         let task_start = std::time::Instant::now();
         // an approval prompt already echoed the command; the matching
@@ -145,65 +124,42 @@ impl Session {
         let mut on_update = |u: AgentUpdate| {
             match u {
                 AgentUpdate::Delta(text) => {
-                    if json_mode {
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "delta", "text": text}),
-                        );
-                    } else {
-                        view.borrow_mut().delta(&text);
-                    }
+                    view.borrow_mut().delta(&text);
                 }
                 AgentUpdate::ReasoningDelta(text) => {
-                    if json_mode {
-                        view.borrow_mut()
-                            .renderer_mut()
-                            .push_reasoning_buffered(&text);
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "reasoning_delta", "text": text}),
-                        );
-                    } else {
-                        view.borrow_mut().reasoning_delta(&text);
-                    }
+                    view.borrow_mut().reasoning_delta(&text);
                 }
                 AgentUpdate::ToolStart {
                     name,
                     preview,
                     diff,
                 } => {
-                    if json_mode {
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "tool_start", "name": name, "preview": preview, "diff": diff}),
+                    view.borrow_mut().tool_started();
+                    streamed.set(false);
+                    logged.set(0);
+                    // the approval prompt already echoed this exact call
+                    let dup = approved_echo
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(n, p)| n == &name && p == &preview);
+                    approved_echo.borrow_mut().take();
+                    if !dup {
+                        crate::agent::tools::print_action_line(
+                            crate::agent::tools::display_verb(&name),
+                            &preview,
+                            diff.as_deref(),
                         );
-                    } else {
-                        view.borrow_mut().tool_started();
-                        streamed.set(false);
-                        logged.set(0);
-                        // the approval prompt already echoed this exact call
-                        let dup = approved_echo
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|(n, p)| n == &name && p == &preview);
-                        approved_echo.borrow_mut().take();
-                        if !dup {
-                            crate::agent::tools::print_action_line(
-                                crate::agent::tools::display_verb(&name),
-                                &preview,
-                                diff.as_deref(),
-                            );
-                        }
-                        view.borrow_mut().resume_running();
                     }
+                    view.borrow_mut().resume_running();
                 }
                 AgentUpdate::ToolReceiving => {
-                    if !json_mode {
-                        // show a plain "running" status; the live argument
-                        // size was confusing and the `$ run <cmd>` chrome
-                        // line already shows the command
-                        view.borrow_mut().receiving("running");
-                    }
+                    // show a plain "running" status; the live argument
+                    // size was confusing and the `$ run <cmd>` chrome
+                    // line already shows the command
+                    view.borrow_mut().receiving("running");
                 }
                 AgentUpdate::ToolLog(line) => {
-                    if !json_mode {
+                    {
                         streamed.set(true);
                         let n = logged.get() + 1;
                         logged.set(n);
@@ -226,16 +182,8 @@ impl Session {
                         }
                     }
                 }
-                AgentUpdate::ToolEnd {
-                    name,
-                    summary,
-                    is_error,
-                } => {
-                    if json_mode {
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "tool_end", "name": name, "summary": summary, "is_error": is_error}),
-                        );
-                    } else {
+                AgentUpdate::ToolEnd { summary, is_error } => {
+                    {
                         view.borrow_mut().pause();
                         if streamed.get() && !is_error {
                             // close the live counter line, if one is open
@@ -262,32 +210,19 @@ impl Session {
                         view.borrow_mut().resume_wait();
                     }
                 }
-                AgentUpdate::TurnEnd {
-                    usage, elapsed_ms, ..
-                } => {
+                AgentUpdate::TurnEnd { usage, .. } => {
                     if let Some(u) = usage {
                         total_in += u.input;
                         total_out += u.output;
                         total_cached += u.cached;
                     }
-                    if json_mode {
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "turn_end", "usage": usage.map(|u| serde_json::json!([u.input, u.output, u.cached])), "elapsed_ms": elapsed_ms}),
-                        );
-                    } else {
-                        view.borrow_mut().turn_end(usage);
-                    }
+                    view.borrow_mut().turn_end(usage);
                 }
                 AgentUpdate::Compacted { removed } => {
-                    if json_mode {
-                        crate::agent::emit_json(
-                            &serde_json::json!({"type": "compacted", "removed": removed}),
-                        );
-                    } else {
-                        // settle the streaming partial line; auto-compaction is
-                        // silent on the terminal (only json_mode reports it)
-                        view.borrow_mut().pause();
-                    }
+                    let _ = removed;
+                    // settle the streaming partial line; auto-compaction is
+                    // silent on the terminal
+                    view.borrow_mut().pause();
                 }
             }
         };
@@ -303,7 +238,7 @@ impl Session {
             // silence the spinner and close the thinking trace so the
             // banner lands on a clean line
             view.borrow_mut().pause();
-            let answer = approval::prompt_approval(&req, json_mode, pre);
+            let answer = approval::prompt_approval(&req, pre);
             if !matches!(answer, ApprovalResponse::Deny) {
                 *approved_echo.borrow_mut() = Some((req.tool.to_string(), req.preview.to_string()));
             }
@@ -345,7 +280,7 @@ impl Session {
                 // wall time, right before the prompt returns. A user-initiated
                 // interrupt already shows its own "interrupted" line and
                 // should not dump a long-running elapsed/footer after it.
-                if !json_mode && !outcome.interrupted {
+                if !outcome.interrupted {
                     view.borrow_mut().footer(task_start.elapsed().as_secs_f64());
                 }
                 // the history moves into the seed (no clone of the whole
@@ -448,7 +383,6 @@ impl Session {
             usage: outcome.usage.map(|u| (u.input, u.output)),
             duration_ms: Some(start.elapsed().as_millis() as i64),
             options: turn_options,
-            tools: None,
             messages: new_messages,
         };
         let thread_id = store
@@ -650,7 +584,6 @@ mod tests {
             usage: None,
             duration_ms: None,
             options: Vec::new(),
-            tools: None,
             messages: vec![
                 StoredMsg::User {
                     text: "look at this".into(),

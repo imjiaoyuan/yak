@@ -12,7 +12,6 @@ pub mod session;
 pub mod settings;
 pub mod skills;
 pub mod system_prompt;
-pub mod task;
 pub mod tools;
 pub mod user_tools;
 
@@ -37,13 +36,11 @@ pub enum AgentUpdate {
     /// a plain "running" status while it arrives
     ToolReceiving,
     ToolEnd {
-        name: String,
         summary: String,
         is_error: bool,
     },
     TurnEnd {
         usage: Option<Usage>,
-        elapsed_ms: u128,
     },
     /// history prefix was replaced by a compaction summary
     Compacted {
@@ -203,7 +200,6 @@ pub fn run_agent(
         let mut acc = ToolCallAccumulator::default();
         let mut usage = None;
         let mut stop = StopReason::default();
-        let turn_start = std::time::Instant::now();
         let stream_result = model.stream(&input, opts.stream, &mut |event| match event {
             crate::core::http::Event::Delta(t) => {
                 text.push_str(&t);
@@ -251,10 +247,7 @@ pub fn run_agent(
         });
         final_text = text;
         last_usage = usage;
-        on_update(AgentUpdate::TurnEnd {
-            usage,
-            elapsed_ms: turn_start.elapsed().as_millis(),
-        });
+        on_update(AgentUpdate::TurnEnd { usage });
 
         // compaction check after each completed turn; the usage report
         // covered everything except the assistant we just pushed
@@ -320,7 +313,6 @@ pub fn run_agent(
                 }
             };
             on_update(AgentUpdate::ToolEnd {
-                name: call.name.clone(),
                 summary: summarize(&out.content),
                 is_error: out.is_error,
             });
@@ -466,25 +458,13 @@ fn gate_call<'a>(
     })
 }
 
-use std::io::Write;
-
-/// Print one `--mode json` event line.
-pub(crate) fn emit_json(value: &serde_json::Value) {
-    println!("{value}");
-    let _ = std::io::stdout().flush();
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     #[test]
     fn danger_commands_ask_in_yolo_and_always_is_one_shot() {
-        let tools = tools::builtin_tools_configured(
-            None,
-            &std::collections::BTreeMap::new(),
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        );
+        let tools = tools::builtin_tools();
         let rm = ToolCall {
             id: "t1".into(),
             name: "bash".into(),

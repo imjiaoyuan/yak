@@ -368,7 +368,6 @@ fn log_turn(
         usage: renderer.usage.map(|u| (u.input, u.output)),
         duration_ms: Some(start.elapsed().as_millis() as i64),
         options: model.options.clone(),
-        tools: None,
         messages: vec![StoredMsg::User {
             text: prompt.to_string(),
             attachments: attachments.iter().map(|a| a.stored()).collect(),

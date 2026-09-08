@@ -344,18 +344,7 @@ pub fn critical_reason(command: &str) -> Option<&'static str> {
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
 /// terminal is available.
-pub fn prompt_approval(req: &ApprovalRequest, json_mode: bool, pre: Vec<u8>) -> ApprovalResponse {
-    if json_mode {
-        crate::agent::emit_json(&serde_json::json!({
-            "type": "approval_request",
-            "tool": req.tool,
-            "tier": format!("{:?}", req.tier),
-            "preview": req.preview,
-            "diff": req.diff,
-            "reason": req.reason,
-            "critical": req.critical,
-        }));
-    }
+pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse {
     let verb = crate::agent::tools::display_verb(req.tool);
     // the same activity line the tool log prints (bold $, command in green)
     crate::agent::tools::print_action_line(verb, req.preview, req.diff);

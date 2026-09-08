@@ -1,5 +1,5 @@
 //! `llm agent` — interactive CLI agent (terminal-agent style) plus its one-shot
-//! (`llm agent "task"`) and JSONL (`--mode json`) forms.
+//! (`llm agent "task"`) form.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -50,12 +50,6 @@ const SPECS: &[OptSpec] = &[
         None,
         "Maximum agent turns per task (default 50)",
         "N"
-    ),
-    value_spec!(
-        "mode",
-        None,
-        "text (default) or json (one JSON event per line)",
-        "MODE"
     ),
     flag_spec!(
         "no-session",
@@ -220,12 +214,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         .map_err(|e| format!("invalid --max-turns: {e}"))?
         .unwrap_or(50);
 
-    let json_mode = match args.opt(&["mode"]) {
-        Some("json") => true,
-        Some("text") | None => false,
-        Some(m) => return Err(format!("invalid --mode '{m}' (text or json)")),
-    };
-
     // reasoning effort: CLI > the stored global; invalid values are a hard
     // error on the CLI and a warning from config
     let thinking: Option<String> = match args.opt(&["thinking"]) {
@@ -249,9 +237,8 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     // plugin tools: script tools from the config `tools` table and MCP
     // servers from `mcpServers`. Connecting spawns every configured
-    // server, so a --tools subset with no mcp__ names skips it entirely
-    // (sub-agents pass exactly such subsets); a failed server warns and
-    // mounts nothing, never aborting the session
+    // server, so a --tools subset with no mcp__ names skips it entirely;
+    // a failed server warns and mounts nothing, never aborting the session
     let script_specs = crate::agent::script_tool::load();
     let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
         csv.split(',')
@@ -276,7 +263,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     } else {
         std::sync::Arc::new(crate::agent::mcp::McpRegistry::empty())
     };
-    let agents = crate::agent::task::discover(&crate::core::config::user_dir(), &cwd);
     let skills = crate::agent::skills::discover(
         &crate::core::config::user_dir(),
         &cwd,
@@ -287,7 +273,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         args.opt(&["system-prompt"]),
         args.opt(&["append-system-prompt"]),
         conv_system.as_deref(),
-        &agents,
         &skills,
     );
 
@@ -299,7 +284,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         cwd,
         max_turns,
         stream: !args.flag(&["no-stream"]),
-        json_mode,
         no_session: args.flag(&["no-session"]),
         store,
         approval: approval_cfg,
@@ -309,14 +293,13 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         script_tools: script_specs,
         mcp,
-        live_agents: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         tokens: (0, 0),
         tokens_cached: 0,
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;
     // --tools filters the combined registry by name
-    session.rebuild_tools(&settings.roles);
+    session.rebuild_tools();
     if let Some(wanted) = &wanted {
         let available: Vec<String> = session.tools.iter().map(|t| t.name().to_string()).collect();
         for want in wanted {
@@ -334,10 +317,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     }
 
     // bare invocation on a terminal → interactive REPL; piped stdin without
-    // a task stays an error; --mode json always requires a task
+    // a task stays an error
     if prompt.trim().is_empty() {
-        if std::io::stdin().is_terminal() && !json_mode {
-            return crate::agent::repl::repl(session, agents, skills, attachments);
+        if std::io::stdin().is_terminal() {
+            return crate::agent::repl::repl(session, skills, attachments);
         }
         eprintln!(
             "Error: no task provided (pass an argument, pipe stdin, or run bare for interactive mode)"
@@ -345,17 +328,8 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         return Ok(2);
     }
 
-    let (outcome, _reasoning) = session.run_task(&prompt, attachments)?;
-    if session.json_mode {
-        crate::agent::emit_json(&serde_json::json!({
-            "type": "done",
-            "text": outcome.final_text,
-            "usage": outcome.usage.map(|u| serde_json::json!([u.input, u.output, u.cached])),
-        }));
-    }
-    if !session.json_mode
-        && let Some(cid) = &session.conversation_id
-    {
+    let (_outcome, _reasoning) = session.run_task(&prompt, attachments)?;
+    if let Some(cid) = &session.conversation_id {
         eprintln!("\x1b[2mSession: {cid}\x1b[0m");
     }
     Ok(0)

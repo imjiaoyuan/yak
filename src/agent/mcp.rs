@@ -683,7 +683,7 @@ impl Tool for McpTool {
         self.schema.clone()
     }
     fn preview(&self, args: &Value) -> String {
-        super::task::args_preview(&self.mounted, args)
+        super::tools::args_preview(&self.mounted, args)
     }
     fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
         let params = json!({"name": self.tool_name, "arguments": args});

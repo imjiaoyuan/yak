@@ -1,5 +1,5 @@
 //! Shared directory-walk helpers: the `.llm/<name>` discovery walks that
-//! skills, sub-agents, commands and drop-in tools all share.
+//! skills, prompts/commands and drop-in tools all share.
 
 use std::path::{Path, PathBuf};
 

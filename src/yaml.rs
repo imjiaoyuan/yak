@@ -136,7 +136,7 @@ fn parse_scalar(raw: &str) -> Yaml {
 /// Parse a YAML subset document.
 /// Split `---\n` yaml frontmatter from the body that follows the closing
 /// `\n---`: returns (frontmatter, rest-after-the-delimiter). Shared by the
-/// markdown-carried definitions (skills, sub-agents, user commands).
+/// markdown-carried definitions (skills, user prompts/commands).
 pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     // tolerate CRLF files (Windows editors): both delimiter spellings
     let rest = text

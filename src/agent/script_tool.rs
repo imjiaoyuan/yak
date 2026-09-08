@@ -18,21 +18,7 @@ pub const DEFAULT_TIMEOUT: u64 = 60;
 /// Built-in tool names; script tools must not shadow these. Tied to the
 /// actual registry by a test.
 pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
-    "read",
-    "write",
-    "edit",
-    "bash",
-    "grep",
-    "glob",
-    "ls",
-    "webfetch",
-    "task",
-    "spawn_agent",
-    "wait_agent",
-    "followup_task",
-    "resume_agent",
-    "list_agents",
-    "interrupt_agent",
+    "read", "write", "edit", "bash", "grep", "glob", "ls", "webfetch",
 ];
 
 #[derive(Clone, Debug)]
@@ -137,7 +123,7 @@ impl Tool for ScriptTool {
         self.spec.schema.clone()
     }
     fn preview(&self, args: &Value) -> String {
-        super::task::args_preview(&self.spec.command, args)
+        super::tools::args_preview(&self.spec.command, args)
     }
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
         let mut command = std::process::Command::new(&self.spec.command);
@@ -178,14 +164,10 @@ mod tests {
 
     #[test]
     fn builtin_names_const_matches_registry() {
-        let registry: Vec<String> = super::super::tools::builtin_tools_configured(
-            None,
-            &Default::default(),
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        )
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
+        let registry: Vec<String> = super::super::tools::builtin_tools()
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
         assert_eq!(registry, BUILTIN_TOOL_NAMES);
     }
 
