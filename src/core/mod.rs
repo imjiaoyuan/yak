@@ -14,7 +14,6 @@ pub mod db;
 pub mod http;
 pub mod paths;
 pub mod render_md;
-pub mod schemas;
 pub mod templates;
 pub mod text;
 pub mod threads;

@@ -285,8 +285,6 @@ pub struct ResolvedModel {
     pub model_id: String,
     /// -o key=value options (temperature, max_tokens, top_p, ...)
     pub options: Vec<(String, String)>,
-    /// --schema structured output (openai-compat only)
-    pub schema: Option<serde_json::Value>,
 }
 
 /// Borrowed request inputs: history and tools stay owned by the caller so a
@@ -353,7 +351,6 @@ impl ResolvedModel {
             api_key,
             model_id: model_id.to_string(),
             options: Vec::new(),
-            schema: None,
         }
     }
 
@@ -474,7 +471,6 @@ pub(crate) mod testutil {
             api_key: None,
             model_id: "m1".into(),
             options: Vec::new(),
-            schema: None,
         }
     }
 

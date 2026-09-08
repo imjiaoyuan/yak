@@ -142,12 +142,6 @@ pub fn build_body(
     if stream {
         body["stream_options"] = json!({"include_usage": true});
     }
-    if let Some(schema) = &m.schema {
-        body["response_format"] = json!({
-            "type": "json_schema",
-            "json_schema": {"name": "output", "schema": schema},
-        });
-    }
     if !input.tools.is_empty() {
         body["tools"] = Value::Array(
             input.tools

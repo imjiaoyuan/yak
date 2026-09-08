@@ -293,7 +293,6 @@ Options:
   -a, --attachment ATTACHMENT   Attachment path or URL or -
       --at PATH MIMETYPE        Attachment with explicit mimetype
   -o, --option KEY=VALUE        key/value options for the model
-      --schema SCHEMA           JSON schema, or a path to a schema file
   -p, --param KEY=VALUE         Parameters for a custom command's $variables
       --no-stream               Do not stream output
   -n, --no-log                  Don't log to the thread store

@@ -448,7 +448,6 @@ impl Session {
             usage: outcome.usage.map(|u| (u.input, u.output)),
             duration_ms: Some(start.elapsed().as_millis() as i64),
             options: turn_options,
-            schema: None,
             tools: None,
             messages: new_messages,
         };
@@ -651,7 +650,6 @@ mod tests {
             usage: None,
             duration_ms: None,
             options: Vec::new(),
-            schema: None,
             tools: None,
             messages: vec![
                 StoredMsg::User {

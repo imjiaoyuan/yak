@@ -510,7 +510,6 @@ impl AgentTool {
             usage: None,
             duration_ms: None,
             options: Vec::new(),
-            schema: None,
             tools: Some(
                 tools_csv
                     .split(',')

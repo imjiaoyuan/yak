@@ -447,37 +447,20 @@ fn markdown_output(turns: &[StoredTurn], args: &ParsedArgs) {
             }
             previous_system = Some(system);
         }
-        if let Some(schema) = &turn.schema {
-            println!(
-                "\n## Schema\n\n```json\n{}\n```",
-                crate::jsonfmt::dumps_indent(schema, 2)
-            );
-        }
         if let Some(reasoning) = turn.reasoning.as_deref().filter(|r| !r.is_empty()) {
             println!("\n## Reasoning\n\n{}", cut(reasoning, 100));
         }
         println!("\n## Response\n");
-        let mut pretty = None;
-        if turn.schema.is_some()
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&turn.response)
-        {
-            pretty = Some(crate::jsonfmt::dumps_indent(&parsed, 2));
-        }
-        match pretty {
-            Some(json) => println!("```json\n{json}\n```"),
-            None => {
-                if truncate {
-                    println!("{}", cut(&turn.response, 100));
-                } else if std::io::stdout().is_terminal() {
-                    let shown = crate::core::render_md::render_once(&turn.response, 2);
-                    print!("{shown}");
-                    if !shown.ends_with('\n') {
-                        println!();
-                    }
-                } else {
-                    println!("{}", turn.response);
-                }
+        if truncate {
+            println!("{}", cut(&turn.response, 100));
+        } else if std::io::stdout().is_terminal() {
+            let shown = crate::core::render_md::render_once(&turn.response, 2);
+            print!("{shown}");
+            if !shown.ends_with('\n') {
+                println!();
             }
+        } else {
+            println!("{}", turn.response);
         }
         if args.flag(&["usage"])
             && let Some((input, output)) = turn.usage

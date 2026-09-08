@@ -26,12 +26,6 @@ const SPECS: &[OptSpec] = &[
         "KEY=VALUE"
     ),
     value_spec!(
-        "schema",
-        None,
-        "JSON schema, or a path to a schema file",
-        "SCHEMA"
-    ),
-    multi_spec!(
         "param",
         Some('p'),
         "Parameters for a custom command's $variables",
@@ -225,25 +219,13 @@ fn execute(
     }
 
     // resolve model: -m/LLM_MODEL > template.model > conversation's model > default
-    let mut model = crate::providers::resolve_run_model(
+    let model = crate::providers::resolve_run_model(
         args,
         template
             .as_ref()
             .and_then(|t| t.model.clone())
             .or_else(|| conv_model.clone()),
     )?;
-
-    // --schema resolution (CLI beats the template's schema)
-    let schema = match args.opt(&["schema"]) {
-        Some(schema_input) => Some(crate::core::schemas::resolve_schema(schema_input)?),
-        None => None,
-    };
-    if let Some(schema) = &schema {
-        if model.kind != "openai-compat" {
-            return Err(format!("{} does not support schemas", model.qualified_id()));
-        }
-        model.schema = Some(schema.clone());
-    }
 
     // system: explicit -s > template system > conversation's first system
     let system = args
@@ -304,7 +286,6 @@ fn execute(
             start,
             conversation_id.as_deref(),
             &attachments,
-            schema.as_ref(),
             args.flag(&["log"]),
         )?;
         if let Some(turn) = turn {
@@ -345,7 +326,6 @@ fn execute(
         start,
         conversation_id.as_deref(),
         &attachments,
-        schema.as_ref(),
         args.flag(&["log"]),
     )?;
     Ok(exit)
@@ -361,7 +341,6 @@ fn log_turn(
     start: std::time::Instant,
     conversation_id: Option<&str>,
     attachments: &[LoadedAttachment],
-    schema: Option<&serde_json::Value>,
     log_override: bool,
 ) -> Result<Option<StoredTurn>, String> {
     // gate on the logs-on state; --log overrides, -n never reaches here
@@ -389,7 +368,6 @@ fn log_turn(
         usage: renderer.usage.map(|u| (u.input, u.output)),
         duration_ms: Some(start.elapsed().as_millis() as i64),
         options: model.options.clone(),
-        schema: schema.cloned(),
         tools: None,
         messages: vec![StoredMsg::User {
             text: prompt.to_string(),
