@@ -6,6 +6,29 @@ pub mod lineedit;
 pub mod render;
 pub mod ticker;
 
+/// Shared screen state between the render thread (TaskView, the only writer)
+/// and the steer watcher reading input mid-task. The watcher may not erase or
+/// print over a partial answer row, and its `queued:` notice must be printed
+/// by the render thread once the row is settled — otherwise the notice's
+/// `\r\x1b[2K` tears the streamed text apart and the continuation lands at
+/// column 0 (the "text lost its indentation" bug).
+pub struct Screen {
+    /// the answer left a partial row on screen; a spinner frame or a watche-r
+    /// erase would retract it
+    pub dangling: std::sync::atomic::AtomicBool,
+    /// `queued:` notice lines the watcher deferred; drained by the render
+    /// thread at the next settle point
+    pub notices: std::sync::Mutex<Vec<String>>,
+}
+
+pub fn screen() -> &'static Screen {
+    static SCREEN: std::sync::OnceLock<Screen> = std::sync::OnceLock::new();
+    SCREEN.get_or_init(|| Screen {
+        dangling: std::sync::atomic::AtomicBool::new(false),
+        notices: std::sync::Mutex::new(Vec::new()),
+    })
+}
+
 /// Hidden input, backed by the platform console implementation. Falling back
 /// to visible input is preserved as a non-platform I/O mode.
 pub fn read_hidden(prompt: &str) -> std::io::Result<String> {

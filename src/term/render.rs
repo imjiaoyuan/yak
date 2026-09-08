@@ -85,6 +85,9 @@ impl Renderer {
             let out = std::mem::take(&mut self.pending);
             print!("{out}");
             self.dangling = !out.ends_with('\n');
+            crate::term::screen()
+                .dangling
+                .store(self.dangling, std::sync::atomic::Ordering::Relaxed);
         }
         let _ = std::io::stdout().flush();
         self.last_flush = std::time::Instant::now();
@@ -228,6 +231,24 @@ impl TaskView {
         }
     }
 
+    /// Print the steer watcher's deferred `queued:` notices: the watcher
+    /// defers when the answer owns the current row; here the row can be
+    /// settled first, so the notice lands on its own line instead of
+    /// tearing the streamed text apart.
+    fn flush_notices(&mut self) {
+        let notices: Vec<String> = match crate::term::screen().notices.lock() {
+            Ok(mut n) => std::mem::take(&mut *n),
+            Err(_) => return,
+        };
+        if notices.is_empty() {
+            return;
+        }
+        self.pause();
+        for line in notices {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        }
+    }
+
     pub fn delta(&mut self, text: &str) {
         // providers emit empty content deltas between thinking bursts;
         // treating one as "the answer started" killed the spinner and reset
@@ -235,6 +256,7 @@ impl TaskView {
         if text.is_empty() {
             return;
         }
+        self.flush_notices();
         self.stop_ticker();
         self.close_thinking();
         self.streamed_any = true;
@@ -295,6 +317,7 @@ impl TaskView {
     /// A model round ended: accumulate usage, close the trace, terminate a
     /// partial markdown line so the next chrome row starts on its own line.
     pub fn turn_end(&mut self, usage: Option<Usage>) {
+        self.flush_notices();
         if let Some(u) = usage {
             self.total_in += u.input;
             self.total_out += u.output;

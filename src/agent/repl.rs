@@ -224,7 +224,7 @@ fn repl_help(session: &Session) -> String {
         "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /export /clear /compact /init /settings /reload /exit · !cmd runs shell");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /compact /status /reload /exit · !cmd runs shell");
     // only the switch away from the current mode is worth showing
     let switches: Vec<&str> = [
         ("/ask", approval::Mode::AlwaysAsk),
@@ -274,11 +274,8 @@ const SLASH_COMMANDS: &[&str] = &[
     "/clear",
     "/yolo",
     "/skills",
-    "/memory",
     "/compact",
-    "/init",
     "/status",
-    "/tools",
     "/exit",
     "/model",
     "/thinking",
@@ -286,8 +283,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/logout",
     "/resume",
     "/tree",
-    "/export",
-    "/settings",
     "/reload",
 ];
 
@@ -387,51 +382,6 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     Ok(())
 }
 
-/// `/export [file]`: dump this session's turns as markdown (default) or
-/// JSONL (a `.jsonl` target). Written relative to the working directory.
-fn export_session(session: &Session, arg: &str) -> Result<(), String> {
-    let Some(cid) = session.conversation_id.clone() else {
-        eprintln!("\x1b[2mno session yet — nothing to export\x1b[0m");
-        return Ok(());
-    };
-    let store = crate::core::threads::Store::open()?;
-    let turns = store.read_thread(&cid)?;
-    let path = if arg.is_empty() {
-        let cwd = session.cwd.display().to_string();
-        std::path::PathBuf::from(format!("{}/session-{}.md", cwd, &cid[..cid.len().min(6)]))
-    } else {
-        std::path::PathBuf::from(arg)
-    };
-    let content = if path.extension().is_some_and(|e| e == "jsonl") {
-        let mut out = String::new();
-        for turn in &turns {
-            out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
-            out.push('\n');
-        }
-        out
-    } else {
-        let mut out = String::new();
-        for turn in &turns {
-            out.push_str(&format!("# {}\n\n", turn.ts));
-            if !turn.prompt.is_empty() {
-                out.push_str(&format!("## Prompt\n\n{}\n\n", turn.prompt));
-            }
-            if !turn.response.is_empty() {
-                out.push_str(&format!("## Response\n\n{}\n\n", turn.response));
-            }
-        }
-        out
-    };
-    std::fs::write(&path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    eprintln!(
-        "\x1b[2mexported {} turn{} → {}\x1b[0m",
-        turns.len(),
-        if turns.len() == 1 { "" } else { "s" },
-        path.display()
-    );
-    Ok(())
-}
-
 /// Startup banner: bold identity line, then dim label-aligned rows.
 fn print_banner(session: &Session) {
     let thinking = session
@@ -504,17 +454,6 @@ fn render_history(seed: &[crate::providers::Msg]) {
         }
     }
 }
-
-const INIT_TASK: &str = "Create or update AGENTS.md at the repository root, quickly — the \
-                         AGENTS.md is this project's agent convention file (write CLAUDE.md only \
-                         if the repo already has one and no AGENTS.md). Do one bounded scan and \
-                         stop — do NOT read source files or work through a checklist. Run at \
-                         most: `ls` the repo root, then read up to three of README* / AGENTS.md / \
-                         CLAUDE.md / Cargo.toml / package.json / pyproject.toml / Makefile / \
-                         go.mod (the ones that exist). Write it in the repository's existing doc \
-                         language and shape. Keep it to a few short sections: build/test/run \
-                         commands, a one-line architecture note, and conventions. Do not try to \
-                         verify every claim; be brief and factual.";
 
 fn completions(buf: &str, skill_names: &[String], cwd: &str) -> Vec<String> {
     if let Some(rest) = buf.strip_prefix('!') {
@@ -678,11 +617,9 @@ fn repl_command(
         "/help" => {
             eprintln!("\x1b[2m  /model        switch model        /thinking  effort level");
             eprintln!("  /login        add a provider      /logout  remove one");
-            eprintln!("  /clear        fresh session       /skills  list skills");
-            eprintln!("  /skill:name   run one             /memory  global memory");
-            eprintln!("  /yolo         toggle approvals    /status  usage stats");
-            eprintln!("  /compact      condense history    /init    write an AGENTS.md");
-            eprintln!("  /tools        plugin tools        /mcp     mcp server status");
+            eprintln!("  /clear        fresh session       /resume  load a past one");
+            eprintln!("  /skills       list skills         /yolo    toggle approvals");
+            eprintln!("  /status       usage + extensions  /compact condense history");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!(
@@ -826,6 +763,10 @@ fn repl_command(
                 session.tools.len(),
                 session.thinking.as_deref().unwrap_or("(model default)")
             );
+            let rows = session.extensions.rows().len();
+            if rows > 0 {
+                eprintln!("  \x1b[2mplugins \x1b[0m{rows} extension(s) · /reload re-reads them");
+            }
         }
         "/skills" => {
             if skills.is_empty() {
@@ -850,66 +791,6 @@ fn repl_command(
             );
         }
 
-        "/tools" => {
-            for tool in &session.tools {
-                eprintln!("\x1b[2m  {}\x1b[0m", tool.name());
-            }
-            let rows = session.extensions.rows();
-            if rows.is_empty() {
-                eprintln!(
-                    "\x1b[2mno extensions — drop executables into ~/.llm/extensions/ or .llm/extensions/\x1b[0m"
-                );
-            }
-            for (name, target, tools, commands, reason) in rows {
-                if reason.is_empty() {
-                    eprintln!(
-                        "\x1b[2m  {name} — {target} · {tools} tool(s), {commands} command(s)\x1b[0m"
-                    );
-                } else {
-                    eprintln!("\x1b[2m  {name} — {target} · failed: {reason}\x1b[0m");
-                    let tail = session.extensions.tail_lines(&name);
-                    for line in tail.iter().skip(tail.len().saturating_sub(3)) {
-                        eprintln!("\x1b[2m    {line}\x1b[0m");
-                    }
-                }
-            }
-        }
-        "/memory" => {
-            let path = crate::agent::memory::memory_path();
-            let (sub, rest) = match arg.split_once(' ') {
-                Some((s, r)) => (s, r.trim()),
-                None => (arg, ""),
-            };
-            match sub {
-                "" => {
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-                    eprintln!("\x1b[2m{} · {} lines\x1b[0m", path.display(), lines);
-                    for l in text.lines().filter(|l| !l.trim().is_empty()).take(3) {
-                        eprintln!("\x1b[2m  {l}\x1b[0m");
-                    }
-                }
-                "add" => {
-                    if rest.is_empty() {
-                        eprintln!("usage: /memory add <one line>");
-                    } else if let Err(e) = crate::agent::memory::add_manual_line(rest) {
-                        eprintln!("Error: {e}");
-                    } else {
-                        eprintln!("\x1b[2mnoted\x1b[0m");
-                    }
-                }
-                "edit" => {
-                    let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-                    if !path.exists() {
-                        let _ = std::fs::write(&path, "# Global memory\n");
-                    }
-                    let editor = std::env::var("EDITOR")
-                        .unwrap_or_else(|_| crate::platform::default_editor().to_string());
-                    let _ = std::process::Command::new(editor).arg(&path).status();
-                }
-                other => eprintln!("unknown subcommand '{other}' (add, edit)"),
-            }
-        }
         "/compact" => {
             // manual compaction: summarize everything older than the
             // keep-recent window, same as the automatic path
@@ -940,11 +821,6 @@ fn repl_command(
                 None => eprintln!("  \x1b[2mnothing to compact yet\x1b[0m"),
             }
         }
-        "/init" => {
-            if let Err(e) = session.run_task(INIT_TASK, Vec::new()) {
-                eprintln!("Error: {e}");
-            }
-        }
         "/resume" => {
             if let Err(e) = resume_pick(session) {
                 eprintln!("Error: {e}");
@@ -954,21 +830,6 @@ fn repl_command(
             if let Err(e) = tree_jump(session) {
                 eprintln!("Error: {e}");
             }
-        }
-        "/export" => {
-            if let Err(e) = export_session(session, arg) {
-                eprintln!("Error: {e}");
-            }
-        }
-        "/settings" => {
-            let path = crate::core::config::config_path();
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-            if !path.exists() {
-                let _ = std::fs::write(&path, "{}\n");
-            }
-            let editor = std::env::var("EDITOR")
-                .unwrap_or_else(|_| crate::platform::default_editor().to_string());
-            let _ = std::process::Command::new(editor).arg(&path).status();
         }
         "/reload" => {
             *skills = crate::agent::skills::discover(
@@ -1065,6 +926,25 @@ mod tests {
         // empty base lists every visible entry (gamma is empty here)
         assert_eq!(path_files("gamma/", &cwd), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slash_commands_are_the_pruned_set() {
+        let names: Vec<&str> = SLASH_COMMANDS
+            .iter()
+            .map(|c| c.strip_prefix('/').unwrap())
+            .collect();
+        for gone in [
+            "memory", "init", "export", "settings", "tools", "ask", "quit", "mcp",
+        ] {
+            assert!(!names.contains(&gone), "{gone} should be gone");
+        }
+        for kept in [
+            "model", "thinking", "login", "logout", "resume", "clear", "compact", "status",
+            "reload", "skills", "yolo", "tree", "help", "exit",
+        ] {
+            assert!(names.contains(&kept), "{kept} should be listed");
+        }
     }
 
     #[test]

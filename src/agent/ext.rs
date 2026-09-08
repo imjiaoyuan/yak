@@ -391,15 +391,6 @@ impl Extensions {
             })
             .collect()
     }
-
-    /// Diagnostics tail for one extension.
-    pub fn tail_lines(&self, name: &str) -> Vec<String> {
-        self.exts
-            .iter()
-            .find(|e| e.name == name)
-            .map(|ext| lock(&ext.tail).iter().cloned().collect())
-            .unwrap_or_default()
-    }
 }
 
 fn failed(name: &str, reason: String) -> Arc<Ext> {

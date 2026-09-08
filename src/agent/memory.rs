@@ -35,25 +35,8 @@ fn section_at(path: &std::path::Path) -> Option<String> {
     ))
 }
 
-/// Append one line to the memory file (creating it when absent).
-pub fn add_manual_line(line: &str) -> Result<(), String> {
-    add_manual_line_at(&memory_path(), line)
-}
-
-fn add_manual_line_at(path: &std::path::Path, line: &str) -> Result<(), String> {
-    let mut text = std::fs::read_to_string(path).unwrap_or_default();
-    // a legacy auto block from older versions rides below the manual text
-    // and is left untouched
-    let line = line.trim_end();
-    if !line.is_empty() {
-        text.push_str(line);
-        text.push('\n');
-    }
-    std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
-}
-
-// The agent-facing `remember` tool was removed: memory is hand-edited only.
+// The agent-facing `remember` tool and the `/memory` command were removed:
+// memory is hand-edited only (~/.llm/LLM.md).
 #[cfg(test)]
 mod tests {
     use super::*;

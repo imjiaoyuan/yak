@@ -1491,10 +1491,24 @@ impl KeyWatcher {
                                 if let Ok(mut q) = queue.lock() {
                                     q.push(line.clone());
                                 }
-                                // clear the spinner frame first so the
-                                // notice lands on its own line
-                                eprint!("\r\x1b[2K");
-                                eprintln!("\x1b[2mqueued: {line}\x1b[0m");
+                                if super::screen()
+                                    .dangling
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                {
+                                    // the answer owns the current row: erasing it
+                                    // would tear the streamed text apart and the
+                                    // continuation would land at column 0 — defer
+                                    // the notice to the render thread, which
+                                    // prints it once the row is settled
+                                    if let Ok(mut n) = super::screen().notices.lock() {
+                                        n.push(format!("queued: {line}"));
+                                    }
+                                } else {
+                                    // clear the spinner frame first so the
+                                    // notice lands on its own line
+                                    eprint!("\r\x1b[2K");
+                                    eprintln!("\x1b[2mqueued: {line}\x1b[0m");
+                                }
                             }
                             buf.clear();
                         }
