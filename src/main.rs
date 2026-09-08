@@ -33,7 +33,19 @@ Flags:
 
 fn main() {
     crate::platform::init_console();
-    restore_sigpipe_default();
+    // SIGPIPE stays ignored (the std default): a broken pipe or socket — a
+    // dead extension child, a provider that hung up, `llm logs | head` —
+    // surfaces as a write error instead of killing the process silently.
+    // The one user-visible case, output into a closed shell pipe, panics
+    // inside print!/eprint!; the hook below exits quietly on it, which is
+    // what a SIGPIPE death used to do.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.to_string().contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let code = dispatch(&argv);
     crate::platform::restore_console();
@@ -58,21 +70,3 @@ fn dispatch(argv: &[String]) -> i32 {
         _ => commands::agent::run(argv),
     }
 }
-
-/// Restore SIG_DFL for SIGPIPE so `llm --help | head` exits cleanly instead
-/// of panicking on a broken pipe. Links the libc symbol directly — no libc
-/// crate.
-#[cfg(unix)]
-fn restore_sigpipe_default() {
-    unsafe extern "C" {
-        fn signal(signum: i32, handler: usize) -> usize;
-    }
-    const SIGPIPE: i32 = 13;
-    const SIG_DFL: usize = 0;
-    unsafe {
-        signal(SIGPIPE, SIG_DFL);
-    }
-}
-
-#[cfg(not(unix))]
-fn restore_sigpipe_default() {}

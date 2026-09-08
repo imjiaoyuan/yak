@@ -135,7 +135,7 @@ fn install(argv: &[String]) -> i32 {
     };
     let name = url
         .trim_end_matches('/')
-        .rsplit('/')
+        .rsplit(['/', '\\'])
         .next()
         .map(|n| n.trim_end_matches(".git"))
         .unwrap_or("package")

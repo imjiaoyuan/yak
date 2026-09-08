@@ -629,7 +629,12 @@ fn reader_loop(
             }
         }
     }
+    // the process is gone: fail everything still waiting (the pending map
+    // holds a sender clone, so waiters alone would never see a disconnect)
     dead.store(true, Ordering::Relaxed);
+    for (_, tx) in lock(pending).drain() {
+        let _ = tx.send(Err("extension closed its stdout".to_string()));
+    }
 }
 
 // ============================================================================
