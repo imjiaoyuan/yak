@@ -20,9 +20,11 @@ Access Large Language Models from the command-line
 Usage:
   llm [flags] [PROMPT]
 
-
 Bare `llm` opens an interactive agent session; `llm \"task\"` runs the
 agent once with tools.
+
+Available commands:
+  install    Install a git package (also: remove, list)
 
 Flags:
   -h, --help      Show this message and exit

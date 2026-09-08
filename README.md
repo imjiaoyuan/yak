@@ -194,7 +194,6 @@ Access Large Language Models from the command-line
 Usage:
   llm [flags] [PROMPT]
 
-
 Bare `llm` opens an interactive agent session; `llm "task"` runs the
 agent once with tools.
 
@@ -206,25 +205,34 @@ Flags:
   -v, --version   Show the version number
 ```
 
+### Packages
+
 ```
-Access Large Language Models from the command-line
+Clone a package into the pkg directory (re-run to refresh)
 
-Usage:
-  llm [flags] [PROMPT]
+Usage: llm install git:github.com/user/repo[@ref] [OPTIONS] SOURCE
 
-Bare `llm` opens an interactive agent session; `llm "task"` runs the
-agent once with tools.
+Options:
+  -l, --local           Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)
+  -h, --help            Show this message and exit
+```
 
-Available commands:
-  models     Pick the default model and its thinking level
-  login      Add a provider
-  logout     Remove a provider
+```
+Delete an installed package
 
-Use "llm [command] --help" for more information about a command.
+Usage: llm remove NAME [OPTIONS] 
 
-Flags:
-  -h, --help      Show this message and exit
-  -v, --version   Show the version number
+Options:
+  -h, --help            Show this message and exit
+```
+
+```
+List installed packages and what they carry
+
+Usage: llm list [OPTIONS] 
+
+Options:
+  -h, --help            Show this message and exit
 ```
 
 ## Examples
