@@ -3,7 +3,7 @@
 
 use crate::agent::approval;
 use crate::agent::session::Session;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use crate::term::render::humanize_tokens;
 
@@ -256,8 +256,21 @@ fn info_rows(session: &Session, pad: &str) -> String {
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/clear", "/ask", "/yolo", "/skills", "/memory", "/compact", "/init", "/status",
-    "/mcp", "/tools", "/exit",
+    "/help",
+    "/clear",
+    "/yolo",
+    "/skills",
+    "/memory",
+    "/compact",
+    "/init",
+    "/status",
+    "/mcp",
+    "/tools",
+    "/exit",
+    "/model",
+    "/thinking",
+    "/login",
+    "/logout",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -519,17 +532,88 @@ fn repl_command(
     };
     match cmd {
         "/help" => {
-            eprintln!("\x1b[2m  /clear        fresh session       /skills  list skills");
+            eprintln!("\x1b[2m  /model        switch model        /thinking  effort level");
+            eprintln!("  /login        add a provider      /logout  remove one");
+            eprintln!("  /clear        fresh session       /skills  list skills");
             eprintln!("  /skill:name   run one             /memory  global memory");
             eprintln!("  /yolo         toggle approvals    /status  usage stats");
-            eprintln!("  /ask          approvals always on /compact condense history");
-            eprintln!("  /init         write an AGENTS.md   /mcp     mcp server status");
+            eprintln!("  /compact      condense history    /init    write an AGENTS.md");
+            eprintln!("  /tools        plugin tools        /mcp     mcp server status");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!(
-                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR"
+                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR\x1b[0m"
             );
-            eprintln!("  llm models picks the default; llm login adds providers\x1b[0m");
+        }
+        "/model" => {
+            let current = session.model.qualified_id();
+            let Some(choice) = crate::commands::models::cascade_model_picker(
+                &current,
+                session.thinking.as_deref(),
+            ) else {
+                return false;
+            };
+            match session.switch_model(&choice.model) {
+                Ok(()) => {
+                    eprintln!("\x1b[2mmodel → {}\x1b[0m", session.model.qualified_id());
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return false;
+                }
+            }
+            if let Some(thinking) = choice.thinking {
+                session.thinking = thinking.clone();
+                if let Err(e) = crate::core::config::try_set_default_thinking(thinking.as_deref()) {
+                    eprintln!("Warning: could not save thinking: {e}");
+                }
+            }
+            // the picked model becomes the startup default (the old wizard
+            // behavior): the REPL always starts on the stored default
+            if let Err(e) = crate::core::config::try_set_default_model(&choice.model) {
+                eprintln!("Warning: could not save the default: {e}");
+            }
+        }
+        "/thinking" => {
+            if let Some(level) =
+                crate::commands::models::thinking_picker(session.thinking.as_deref())
+            {
+                session.thinking = level.clone();
+                if let Err(e) = crate::core::config::try_set_default_thinking(level.as_deref()) {
+                    eprintln!("Warning: could not save thinking: {e}");
+                }
+                eprintln!(
+                    "\x1b[2mthinking → {}\x1b[0m",
+                    session.thinking.as_deref().unwrap_or("(model default)")
+                );
+            }
+        }
+        "/login" => {
+            if !std::io::stdin().is_terminal() {
+                eprintln!("\x1b[2m/login needs a terminal\x1b[0m");
+                return false;
+            }
+            match crate::commands::login::wizard() {
+                Ok(()) => eprintln!("\x1b[2mrun /model to pick its models\x1b[0m"),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+        "/logout" => {
+            if !std::io::stdin().is_terminal() {
+                eprintln!("\x1b[2m/logout needs a terminal\x1b[0m");
+                return false;
+            }
+            if let Err(e) = crate::commands::login::logout_picker() {
+                eprintln!("Error: {e}");
+            }
+            // the default may have been cleared with it: re-resolve lazily on
+            // the next task, but warn now if the session model is orphaned
+            let qualified = session.model.qualified_id();
+            if crate::providers::resolve_model_by_id(&qualified).is_err() {
+                eprintln!(
+                    "\x1b[2mcurrent model {qualified} no longer resolves — run /model\x1b[0m"
+                );
+            }
         }
         "/ask" | "/yolo" => {
             // match on the command word: an argument ("/ask always confirm

@@ -243,10 +243,6 @@ pub const ALL: &[Entry] = &[
     e("vllm", "openai-compat", "http://localhost:8000/v1", ""),
 ];
 
-pub fn by_id(id: &str) -> Option<&'static Entry> {
-    ALL.iter().find(|e| e.id == id)
-}
-
 /// The `/models` endpoint a provider kind serves. Anthropic mounts it under
 /// `/v1/models`; the openai-compat half talks to bare `/models`.
 pub fn models_url(kind: &str, base_url: &str) -> String {

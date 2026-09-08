@@ -35,10 +35,6 @@ impl ParsedArgs {
             .flat_map(|n| self.multi.get(*n).cloned().unwrap_or_default())
             .collect()
     }
-
-    pub fn first_positional(&self) -> Option<&str> {
-        self.positionals.first().map(|s| s.as_str())
-    }
 }
 
 /// Spec for one option, used for parsing and `--help` generation.
@@ -329,15 +325,6 @@ pub fn render_help(
         s.push_str(&format!("  {:<width$}  {}\n", left, help, width = width));
     }
     s
-}
-
-/// Split argv for a click-style DefaultGroup: if the first token starts with
-/// `-` it is an option, so the default subcommand applies to the whole argv.
-pub fn split_subcommand<'a>(argv: &'a [String], default: &'a str) -> (&'a str, &'a [String]) {
-    match argv.first() {
-        Some(first) if !first.starts_with('-') => (first.as_str(), &argv[1..]),
-        _ => (default, argv),
-    }
 }
 
 #[cfg(test)]

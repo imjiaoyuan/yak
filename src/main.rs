@@ -20,15 +20,9 @@ Access Large Language Models from the command-line
 Usage:
   llm [flags] [PROMPT]
 
+
 Bare `llm` opens an interactive agent session; `llm \"task\"` runs the
 agent once with tools.
-
-Available commands:
-  models     Pick the default model and its thinking level
-  login      Add a provider
-  logout     Remove a provider
-
-Use \"llm [command] --help\" for more information about a command.
 
 Flags:
   -h, --help      Show this message and exit
@@ -54,10 +48,6 @@ fn dispatch(argv: &[String]) -> i32 {
             print!("{ABOUT}");
             0
         }
-        // the provider lifecycle keeps CLI forms until the REPL owns it
-        Some("models") => commands::models::run(&argv[1..]),
-        Some("login") => commands::login::run_login(&argv[1..]),
-        Some("logout") => commands::login::run_logout(&argv[1..]),
         // anything else (flags or plain text) is the agent: bare `llm` on a
         // terminal is the interactive REPL, text and pipes are one-shot tasks
         _ => commands::agent::run(argv),

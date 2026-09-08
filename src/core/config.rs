@@ -175,22 +175,6 @@ fn write_root(root: &serde_json::Value) -> std::io::Result<()> {
 
 // model aliases — the hand-edited "aliases" object in config.json
 
-/// Read the alias map from config.json.
-pub fn load_aliases() -> BTreeMap<String, String> {
-    let Ok(root) = read_root() else {
-        return BTreeMap::new();
-    };
-    let mut map = BTreeMap::new();
-    if let Some(existing) = root.get("aliases").and_then(|v| v.as_object()) {
-        for (k, v) in existing {
-            if let Some(id) = v.as_str() {
-                map.insert(k.clone(), id.to_string());
-            }
-        }
-    }
-    map
-}
-
 pub fn save(config: &Config) -> std::io::Result<()> {
     fs::create_dir_all(user_dir())?;
     // merge into the existing file so hand-added keys ("agent" etc.) survive
@@ -332,21 +316,6 @@ fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
     }
 }
 
-/// Remove the default entry entirely (`llm models unset`).
-pub fn unset_default() -> std::io::Result<()> {
-    edit_mode_default(|root| {
-        if let Some(models) = root.as_object_mut().and_then(|m| m.get_mut("models"))
-            && let Some(map) = models.as_object_mut()
-        {
-            map.remove("default");
-            map.remove("thinking");
-            for mode in ["prompt", "agent"] {
-                map.remove(mode);
-            }
-        }
-    })
-}
-
 /// Read-modify-write the models table, preserving every other config key.
 fn edit_mode_default(edit: impl FnOnce(&mut serde_json::Value)) -> std::io::Result<()> {
     fs::create_dir_all(user_dir())?;
@@ -376,17 +345,6 @@ fn options_from(value: &serde_json::Value) -> Option<BTreeMap<String, BTreeMap<S
     serde_json::from_value(value.get("models")?.get("options")?.clone()).ok()
 }
 
-fn set_options_in(
-    value: &mut serde_json::Value,
-    options: &BTreeMap<String, BTreeMap<String, String>>,
-) {
-    let models = models_map_mut(value);
-    models.insert(
-        "options".to_string(),
-        serde_json::to_value(options).expect("options serialize"),
-    );
-}
-
 // model settings — every mode's default
 // per-model option table, all under config.json's "models" object
 
@@ -396,12 +354,6 @@ pub fn load_model_options() -> BTreeMap<String, BTreeMap<String, String>> {
         .ok()
         .and_then(|root| options_from(&root))
         .unwrap_or_default()
-}
-
-pub fn save_model_options(
-    options: &BTreeMap<String, BTreeMap<String, String>>,
-) -> std::io::Result<()> {
-    edit_mode_default(|root| set_options_in(root, options))
 }
 
 /// Remember a provider model seen in the wild (e.g. picked from a live
@@ -473,14 +425,6 @@ impl Config {
             Some(expanded)
         }
     }
-
-    /// All known model ids, qualified as provider/model.
-    pub fn all_models(&self) -> Vec<(String, Vec<String>)> {
-        self.providers
-            .iter()
-            .map(|(name, p)| (name.clone(), p.models.clone()))
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -516,23 +460,6 @@ mod default_model_tests {
         assert_eq!(v["models"]["default"], json!("a/b"));
         set_default_thinking_in(&mut v, None);
         assert!(v["models"].get("thinking").is_none());
-    }
-
-    #[test]
-    fn test_options_table_round_trips() {
-        let mut v = json!({"models": {"agent": {"model": "x/y"}}});
-        let mut options = BTreeMap::new();
-        let mut inner = BTreeMap::new();
-        inner.insert("temperature".to_string(), "0.3".to_string());
-        options.insert("x/y".to_string(), inner);
-        set_options_in(&mut v, &options);
-        assert_eq!(options_from(&v), Some(options));
-        assert_eq!(v["models"]["agent"]["model"], json!("x/y"), "sibling kept");
-    }
-
-    #[test]
-    fn test_options_from_absent_is_none() {
-        assert_eq!(options_from(&json!({})), None);
     }
 
     #[test]

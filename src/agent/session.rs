@@ -57,6 +57,15 @@ impl Session {
         self.tokens_cached = 0;
     }
 
+    /// Switch the session's model (the `/model` command): re-resolve,
+    /// keep history, rebuild the tool registry.
+    pub fn switch_model(&mut self, qualified: &str) -> Result<(), String> {
+        let model = crate::providers::resolve_model_by_id(qualified)?;
+        self.model = model;
+        self.rebuild_tools();
+        Ok(())
+    }
+
     /// Replace the oldest `cut` messages with one summary, keeping the tail
     /// and turning the conversation into `[summary, ...tail]`.
     pub fn compact_prefix(&mut self, summary: String, cut: usize) {

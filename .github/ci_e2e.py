@@ -276,18 +276,11 @@ def main():
     assert tr.returncode == 1 and "completion marker" in tout, \
         f"truncated stream: rc={tr.returncode} out={tout[-300:]!r}"
 
-    s = run([binary, "models", "set", "mock/m-b", "--thinking", "high"], env,
-            stdin=subprocess.DEVNULL)
-    assert s.returncode == 0, f"models set rc={s.returncode} err={s.stderr[-500:]}"
-
-    g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
-    assert "mock/m-b" in g.stdout and "high" in g.stdout, f"get: {g.stdout!r}"
-
-    # a legacy per-mode config migrates: the stored default is read from it
-    # (the config above writes the new shape via `models set`)
-
-    k = run([binary, "models", "key", "mock"], env, stdin=subprocess.DEVNULL)
-    assert k.stdout.strip() == "sk-ci", f"key: {k.stdout!r}"
+    # the stored default is config: the REPL /model writes the same shape
+    cfgpath = os.path.join(user, "config.json")
+    cfg = json.load(open(cfgpath))
+    cfg["models"] = {"default": "mock/m-b", "thinking": "high"}
+    json.dump(cfg, open(cfgpath, "w"))
 
     # plugin lane: the agent mounts the script tool and the MCP server,
     # the model calls mcp__fake__echo, the fake server logs the call and
@@ -366,8 +359,6 @@ def main():
     assert "read" in (seen.get("tools") or []), f"agent must send tools: {seen.get('tools')}"
 
     # sessions land as thread files in the store
-    lg = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
-    assert lg.returncode == 0
     assert any(f.endswith(".jsonl") for f in os.listdir(os.path.join(user, "threads"))), \
         f"no thread files: {os.listdir(os.path.join(user, 'threads'))}"
 
@@ -378,31 +369,6 @@ def main():
                            env=env, timeout=120)
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
         f"piped agent rc={piped.returncode} out={piped.stdout[-200:]!r} err={piped.stderr[-200:]!r}"
-
-    # options take bare model names: the table is keyed qualified
-    o = run([binary, "models", "options", "set", "m-b", "temperature", "0.3"], env,
-            stdin=subprocess.DEVNULL)
-    assert o.returncode == 0, f"options set rc={o.returncode} err={o.stderr[-300:]}"
-    lst = run([binary, "models", "options", "list"], env, stdin=subprocess.DEVNULL)
-    assert "mock/m-b" in lst.stdout, f"options key not qualified: {lst.stdout!r}"
-
-    # login builds a custom provider from --base-url: the models list
-    # comes back through the /models endpoint
-    lo = run([binary, "login", "mockx", "--base-url", f"http://127.0.0.1:{PORT}/v1",
-              "--kind", "openai-compat", "sk-ci"], env, stdin=subprocess.DEVNULL)
-    assert lo.returncode == 0, f"login rc={lo.returncode} err={lo.stderr[-400:]}"
-    lst = run([binary, "models", "list"], env, stdin=subprocess.DEVNULL)
-    assert "mockx/m-a" in lst.stdout and "mockx/m-b" in lst.stdout, \
-        f"custom provider models: {lst.stdout!r}"
-
-    # removing a provider clears the default that pointed at it
-    w = run([binary, "logout", "mock-write"], env, stdin=subprocess.DEVNULL)
-    assert w.returncode == 0 and "cleared" not in w.stderr, \
-        f"unreferenced remove must clear nothing: {w.stderr!r}"
-    r = run([binary, "logout", "mock"], env, stdin=subprocess.DEVNULL)
-    assert r.returncode == 0 and "cleared the default model" in r.stderr, f"remove clearing: {r.stderr!r}"
-    g = run([binary, "models", "get"], env, stdin=subprocess.DEVNULL)
-    assert "(unset" in g.stdout, f"defaults survived removal: {g.stdout!r}"
 
     print("e2e smoke passed")
     return 0

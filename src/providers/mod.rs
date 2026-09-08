@@ -60,6 +60,31 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
 /// model or the conversation's last model) > the stored default. A
 /// dangling default warns and drops out instead of erroring. Saved
 /// per-model options ride under CLI `-o` pairs.
+pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
+    use crate::core::config;
+    let cfg = config::load();
+    let (name, provider, model_id) = match cfg.resolve_model(query) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Err(format!(
+                "Invalid model: {query}. Add it to {} or check spelling.",
+                config::config_path().display()
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    let api_key = cfg.api_key(provider);
+    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
+    let qualified = model.qualified_id();
+    let saved = config::load_model_options();
+    model.options = saved
+        .get(&qualified)
+        .or_else(|| saved.get(&model_id))
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    Ok(model)
+}
+
 pub fn resolve_run_model(
     args: &crate::core::args::ParsedArgs,
     context: Option<String>,
