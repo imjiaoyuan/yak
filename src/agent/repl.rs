@@ -35,9 +35,8 @@ pub fn repl(
         let prompt = "\x1b[1m>\x1b[0m ";
         let help = repl_help(&session);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-        let mode = session.approval.mode;
         let cwd = session.cwd.display().to_string();
-        let completer = move |buf: &str| completions(buf, &skill_names, mode, &cwd);
+        let completer = move |buf: &str| completions(buf, &skill_names, &cwd);
         let line = match editor.read_line(prompt, &help, &completer) {
             crate::term::lineedit::LineResult::Line(l) => l,
             crate::term::lineedit::LineResult::Eof => break,
@@ -210,7 +209,7 @@ fn repl_help(session: &Session) -> String {
         "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /help /clear /init /mcp /exit · !cmd runs shell");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /export /clear /compact /init /settings /reload /mcp /exit · !cmd runs shell");
     // only the switch away from the current mode is worth showing
     let switches: Vec<&str> = [
         ("/ask", approval::Mode::AlwaysAsk),
@@ -271,6 +270,11 @@ const SLASH_COMMANDS: &[&str] = &[
     "/thinking",
     "/login",
     "/logout",
+    "/resume",
+    "/tree",
+    "/export",
+    "/settings",
+    "/reload",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -282,6 +286,136 @@ fn slash_hint(word: &str) -> Option<String> {
         .map(|c| c.strip_prefix('/').unwrap_or(c))
         .collect();
     crate::core::text::closest_name(word, &names).map(|n| format!("/{n}"))
+}
+
+/// `/resume`: pick a past conversation and load it into this session —
+/// history replays, the next task appends to the same thread.
+fn resume_pick(session: &mut Session) -> Result<(), String> {
+    let store = crate::core::threads::Store::open()?;
+    let threads = store.recent_threads(30);
+    if threads.is_empty() {
+        eprintln!("\x1b[2mno conversations yet\x1b[0m");
+        return Ok(());
+    }
+    let now = crate::core::db::now_turn_datetime();
+    let items: Vec<String> = threads
+        .iter()
+        .map(|t| {
+            let preview: String = t.last_prompt.chars().take(40).collect::<String>();
+            let preview = preview.replace('\n', " ");
+            format!(
+                "{} · {} turn{} · \"{}\" · {}",
+                &t.id[..t.id.len().min(6)],
+                t.turns,
+                if t.turns == 1 { "" } else { "s" },
+                preview,
+                crate::core::db::short_time(&now, &t.last)
+            )
+        })
+        .collect();
+    let Some(i) = crate::term::lineedit::pick("resume:", &items, false) else {
+        return Ok(());
+    };
+    let cid = threads[i].id.clone();
+    let (msgs, system) = crate::agent::session::rebuild_thread(&store, &cid);
+    session.seed = msgs;
+    session.system = system;
+    session.conversation_id = Some(cid);
+    render_history(&session.seed);
+    Ok(())
+}
+
+/// `/tree`: jump to any past turn of this session — the seed and the thread
+/// file are truncated to just before the picked turn, and the next task
+/// continues from there.
+fn tree_jump(session: &mut Session) -> Result<(), String> {
+    let Some(cid) = session.conversation_id.clone() else {
+        eprintln!("\x1b[2mno session yet — /tree needs a saved conversation\x1b[0m");
+        return Ok(());
+    };
+    let store = crate::core::threads::Store::open()?;
+    let turns = store.read_thread(&cid)?;
+    if turns.is_empty() {
+        eprintln!("\x1b[2mempty session\x1b[0m");
+        return Ok(());
+    }
+    let items: Vec<String> = turns
+        .iter()
+        .map(|t| {
+            let preview: String = t.prompt.chars().take(50).collect::<String>();
+            let preview = preview.replace('\n', " ");
+            format!(
+                "{} · \"{}\"",
+                &t.ts[..t.ts.len().min(19)],
+                if preview.trim().is_empty() {
+                    "--"
+                } else {
+                    &preview
+                }
+            )
+        })
+        .collect();
+    let Some(i) = crate::term::lineedit::pick(
+        "jump to turn (everything after it is dropped):",
+        &items,
+        true,
+    ) else {
+        return Ok(());
+    };
+    // the wire messages of the kept turns are the new seed
+    let cut: usize = turns[..i].iter().map(|t| t.messages.len()).sum();
+    session.seed.truncate(cut);
+    store.truncate_thread(&cid, i)?;
+    eprintln!(
+        "\x1b[2mrewound to turn {} — type the next task\x1b[0m",
+        i + 1
+    );
+    Ok(())
+}
+
+/// `/export [file]`: dump this session's turns as markdown (default) or
+/// JSONL (a `.jsonl` target). Written relative to the working directory.
+fn export_session(session: &Session, arg: &str) -> Result<(), String> {
+    let Some(cid) = session.conversation_id.clone() else {
+        eprintln!("\x1b[2mno session yet — nothing to export\x1b[0m");
+        return Ok(());
+    };
+    let store = crate::core::threads::Store::open()?;
+    let turns = store.read_thread(&cid)?;
+    let path = if arg.is_empty() {
+        let cwd = session.cwd.display().to_string();
+        std::path::PathBuf::from(format!("{}/session-{}.md", cwd, &cid[..cid.len().min(6)]))
+    } else {
+        std::path::PathBuf::from(arg)
+    };
+    let content = if path.extension().is_some_and(|e| e == "jsonl") {
+        let mut out = String::new();
+        for turn in &turns {
+            out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
+            out.push('\n');
+        }
+        out
+    } else {
+        let mut out = String::new();
+        for turn in &turns {
+            out.push_str(&format!("# {}\n\n", turn.ts));
+            if !turn.prompt.is_empty() {
+                out.push_str(&format!("## Prompt\n\n{}\n\n", turn.prompt));
+            }
+            if !turn.response.is_empty() {
+                out.push_str(&format!("## Response\n\n{}\n\n", turn.response));
+            }
+        }
+        out
+    };
+    std::fs::write(&path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    eprintln!(
+        "\x1b[2mexported {} turn{} → {}\x1b[0m",
+        turns.len(),
+        if turns.len() == 1 { "" } else { "s" },
+        path.display()
+    );
+    Ok(())
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
@@ -368,7 +502,7 @@ const INIT_TASK: &str = "Create or update AGENTS.md at the repository root, quic
                          commands, a one-line architecture note, and conventions. Do not try to \
                          verify every claim; be brief and factual.";
 
-fn completions(buf: &str, skill_names: &[String], mode: approval::Mode, cwd: &str) -> Vec<String> {
+fn completions(buf: &str, skill_names: &[String], cwd: &str) -> Vec<String> {
     if let Some(rest) = buf.strip_prefix('!') {
         return shell_completions(rest, cwd);
     }
@@ -394,10 +528,6 @@ fn completions(buf: &str, skill_names: &[String], mode: approval::Mode, cwd: &st
         return SLASH_COMMANDS
             .iter()
             .filter(|c| c.starts_with(buf))
-            .filter(|c| match mode {
-                approval::Mode::AlwaysAsk => **c != "/ask",
-                approval::Mode::Yolo => **c != "/yolo",
-            })
             .map(|c| c.to_string())
             .collect();
     }
@@ -615,17 +745,15 @@ fn repl_command(
                 );
             }
         }
-        "/ask" | "/yolo" => {
-            // match on the command word: an argument ("/ask always confirm
-            // with me") must not flip the branch to yolo
-            let mode = if cmd == "/ask" {
-                approval::Mode::AlwaysAsk
-            } else {
-                approval::Mode::Yolo
+        "/yolo" => {
+            // a toggle: the way back to ask mode is the same command
+            let mode = match session.approval.mode {
+                approval::Mode::Yolo => approval::Mode::AlwaysAsk,
+                approval::Mode::AlwaysAsk => approval::Mode::Yolo,
             };
             session.approval.mode = mode;
             let note = match mode {
-                approval::Mode::Yolo => " · everything auto-approved (rm and friends still ask)",
+                approval::Mode::Yolo => " · everything auto-approved",
                 approval::Mode::AlwaysAsk => " · only in-directory reads auto",
             };
             eprintln!("\x1b[2mapproval → {}{note}\x1b[0m", mode.label());
@@ -804,7 +932,13 @@ fn repl_command(
             match crate::agent::compact::find_cut(&session.seed, cfg.keep_recent_tokens) {
                 Some(cut) => {
                     eprintln!("  \x1b[2mcompacting …\x1b[0m");
-                    match crate::agent::compact::summarize(&session.model, &session.seed[..cut]) {
+                    // the `/compact <prompt>` argument rides along as extra
+                    // instructions for the summarizer
+                    match crate::agent::compact::summarize_with(
+                        &session.model,
+                        &session.seed[..cut],
+                        arg,
+                    ) {
                         Ok(summary) if !summary.is_empty() => {
                             session.compact_prefix(summary, cut);
                             let now = crate::agent::compact::estimate_tokens(&session.seed, None);
@@ -825,7 +959,43 @@ fn repl_command(
                 eprintln!("Error: {e}");
             }
         }
-        "/exit" | "/quit" => return true,
+        "/resume" => {
+            if let Err(e) = resume_pick(session) {
+                eprintln!("Error: {e}");
+            }
+        }
+        "/tree" => {
+            if let Err(e) = tree_jump(session) {
+                eprintln!("Error: {e}");
+            }
+        }
+        "/export" => {
+            if let Err(e) = export_session(session, arg) {
+                eprintln!("Error: {e}");
+            }
+        }
+        "/settings" => {
+            let path = crate::core::config::config_path();
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            if !path.exists() {
+                let _ = std::fs::write(&path, "{}\n");
+            }
+            let editor = std::env::var("EDITOR")
+                .unwrap_or_else(|_| crate::platform::default_editor().to_string());
+            let _ = std::process::Command::new(editor).arg(&path).status();
+        }
+        "/reload" => {
+            *skills = crate::agent::skills::discover(
+                &crate::core::config::user_dir(),
+                &session.cwd,
+                &settings.disabled_skills,
+            );
+            session.script_tools = crate::agent::script_tool::load();
+            *settings = crate::agent::settings::load();
+            session.rebuild_tools();
+            eprintln!("\x1b[2mreloaded skills, plugin tools and settings\x1b[0m");
+        }
+        "/exit" => return true,
         other => {
             // unknown /name falls back to the commands dir: the file's body
             // (plus any trailing words) becomes one agent task

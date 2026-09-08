@@ -268,6 +268,22 @@ impl Store {
         Ok(Some(new_id))
     }
 
+    /// Keep only the first `keep` turns of a thread (the `/tree` jump):
+    /// the file is rewritten, so the dropped turns are gone for good.
+    pub fn truncate_thread(&self, id: &str, keep: usize) -> Result<(), String> {
+        let turns = self.read_thread(id)?;
+        if keep >= turns.len() {
+            return Ok(());
+        }
+        let mut out = String::new();
+        for turn in &turns[..keep] {
+            out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
+            out.push('\n');
+        }
+        let path = self.thread_path(id);
+        fs::write(&path, out).map_err(|e| format!("cannot rewrite thread {id}: {e}"))
+    }
+
     fn entries(&self) -> Result<Vec<fs::DirEntry>, String> {
         let rd = fs::read_dir(&self.dir)
             .map_err(|e| format!("cannot list {}: {e}", self.dir.display()))?;

@@ -152,8 +152,23 @@ pub fn summarize(
     model: &crate::providers::ResolvedModel,
     prefix: &[Msg],
 ) -> Result<String, String> {
+    summarize_with(model, prefix, "")
+}
+
+/// Summarize with the caller's extra instructions appended to the template
+/// (the `/compact <prompt>` argument).
+pub fn summarize_with(
+    model: &crate::providers::ResolvedModel,
+    prefix: &[Msg],
+    extra: &str,
+) -> Result<String, String> {
+    let extra = if extra.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nAdditional instructions: {}", extra.trim())
+    };
     let prompt = format!(
-        "{TEMPLATE}\n\n<conversation>\n{}</conversation>",
+        "{TEMPLATE}{extra}\n\n<conversation>\n{}</conversation>",
         serialize_prefix(prefix)
     );
     let input = PromptInput {
