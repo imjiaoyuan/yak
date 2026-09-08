@@ -61,20 +61,6 @@ pub const ALL: &[Entry] = &[
         "https://api.openai.com/v1",
         "OPENAI_API_KEY",
     ),
-    // the media halves of the same endpoint: image generation and TTS ride
-    // --out instead of the chat stream, so they are their own kinds
-    e(
-        "openai-image",
-        "image",
-        "https://api.openai.com/v1",
-        "OPENAI_API_KEY",
-    ),
-    e(
-        "openai-tts",
-        "tts",
-        "https://api.openai.com/v1",
-        "OPENAI_API_KEY",
-    ),
     // OpenCode's Go (and Zen) subscription gateway: one key, two wire
     // formats. Most models ride the OpenAI /chat/completions path; a few
     // (MiniMax and friends) speak the Anthropic /v1/messages shape, so the

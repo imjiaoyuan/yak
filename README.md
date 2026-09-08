@@ -129,7 +129,7 @@ older versions) migrate on first read: the prompt entry wins, and the next `mode
 the file onto the new shape. When the stored default no longer resolves (its provider was
 removed), commands warn and fall back.
 
-A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, Cerebras, NVIDIA, Hugging Face, Together, Baseten, Fireworks, xAI, OpenRouter, Moonshot, Kimi, Z.ai, Qwen token plans, Xiaomi MiMo, MiniMax, Vercel AI Gateway, SiliconFlow, Zhipu, and the local runtimes Ollama, LM Studio, llama.cpp, vLLM, plus `openai-image`/`openai-tts` entries whose `image` and `tts` kinds drive `--out`) carries canonical endpoints and env var names, and `llm login` builds its wizard picker straight from it:
+A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, Cerebras, NVIDIA, Hugging Face, Together, Baseten, Fireworks, xAI, OpenRouter, Moonshot, Kimi, Z.ai, Qwen token plans, Xiaomi MiMo, MiniMax, Vercel AI Gateway, SiliconFlow, Zhipu, and the local runtimes Ollama, LM Studio, llama.cpp, vLLM) carries canonical endpoints and env var names, and `llm login` builds its wizard picker straight from it:
 
 ```bash
 llm login                                  # provider wizard (catalog + templates)
@@ -306,9 +306,6 @@ Options:
   -x, --extract                 Extract first fenced code block
       --extract-last            Extract last fenced code block
       --json                    Output the response as JSON, same format as llm logs --json
-      --out PATH                Write media (image/audio) output to this file
-      --voice VOICE             Voice for TTS models
-      --size SIZE               Image size for image models
   -h, --help                    Show this message and exit
 ```
 Run an agentic task with tools (bare invocation opens an interactive session)
@@ -460,8 +457,6 @@ You are a researcher. Answer with file:line references.
 ```
 
 History lives in `llm logs`. The default view is one line per thread grouped by mode; `llm logs --full` prints the complete report with prompts, reasoning and responses, `-m` filters by model, `-c` selects the most recent thread and `--cid` a specific one. Extraction shortcuts help scripting: `-r` prints just the last response, `-x` the first fenced code block, `--xl` the last, and `--json` the stored turn shape.
-
-For image and audio models, `--out` writes media files directly: `llm -m openai-image/gpt-image-1 "cyberpunk street" --out street.png` saves one image under the exact name, while a directory target (`--out shots/`, created when missing) auto-names `image.png` or `speech.mp3` inside it. Ask for several images with `-o n=3` and every one lands on disk: a directory numbers them `image-1.png`, `image-2.png`, ..., an explicit file name becomes `street-1.png`, `street-2.png`, ..., each with the extension sniffed from its own bytes. TTS output follows `-o response_format` (mp3 by default, also opus, wav, aac or flac) for the extension, `--voice` picks the speaker and `--size` the image size. `--out -` streams the single result to stdout as raw bytes, and existing files are never overwritten silently: any collision, checked across all targets before the first byte lands, is an error. Media turns are not logged to the thread store.
 
 Agent behavior is tuned under the `"agent"` key of `config.json`:
 

@@ -2,7 +2,6 @@
 
 pub mod anthropic;
 pub mod catalog;
-pub mod media;
 pub mod message;
 pub mod openai_compat;
 
@@ -420,10 +419,7 @@ impl ResolvedModel {
         match self.kind.as_str() {
             "openai-compat" => openai_compat::run(self, input, stream, on_event),
             "anthropic" => anthropic::run(self, input, stream, on_event),
-            // media kinds never stream chat events; callers use the media API
-            other => Err(format!(
-                "Unknown provider kind: {other} (use --out for media kinds)"
-            )),
+            other => Err(format!("Unknown provider kind: {other}")),
         }
     }
 }

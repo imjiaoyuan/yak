@@ -67,14 +67,6 @@ const SPECS: &[OptSpec] = &[
         None,
         "Output the response as JSON, same format as llm logs --json"
     ),
-    value_spec!(
-        "out",
-        None,
-        "Write media (image/audio) output to this file",
-        "PATH"
-    ),
-    value_spec!("voice", None, "Voice for TTS models", "VOICE"),
-    value_spec!("size", None, "Image size for image models", "SIZE"),
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
 
@@ -273,36 +265,6 @@ fn execute(
         tools: &[],
         reasoning: reasoning_level.as_deref(),
     };
-
-    // media generation: image / tts kinds write files (or stdout) via --out
-    if let Some(out_path) = args.opt(&["out"]) {
-        use crate::providers::media::MediaOutcome;
-        match crate::providers::media::generate_and_write(
-            &model,
-            &prompt_text,
-            out_path,
-            args.opt(&["size"]),
-            args.opt(&["voice"]),
-        ) {
-            Ok(MediaOutcome::Stdout(bytes)) => {
-                use std::io::Write;
-                std::io::stdout()
-                    .write_all(&bytes)
-                    .map_err(|e| format!("write failed: {e}"))?;
-                return Ok(0);
-            }
-            Ok(MediaOutcome::Files(written)) => {
-                for (path, n) in written {
-                    println!("Wrote {n} bytes to {}", path.display());
-                }
-                return Ok(0);
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                return Ok(1);
-            }
-        }
-    }
 
     // extract flags force non-streaming, like the original
     let extract_mode = args.flag(&["extract"]) || args.flag(&["extract-last"]);
