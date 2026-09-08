@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-`llm` is a single-binary, terminal-first AI hub in Rust (edition 2024). `CLAUDE.md` is the
+`llm` is a single-binary, terminal-first coding agent in Rust (edition 2024), the reference-shaped. `CLAUDE.md` is the
 authoritative architecture reference — read the matching paragraph before touching a layer.
 
 ## Commands
@@ -9,7 +9,7 @@ authoritative architecture reference — read the matching paragraph before touc
 cargo build / cargo build --release          # target/(release/)llm
 cargo test <name>                            # inline #[cfg(test)] modules only
 cargo fmt && cargo clippy --all-targets      # both must be clean before committing
-LLM_USER_PATH=/tmp/x cargo run -- "prompt"   # hermetic smoke test
+LLM_USER_PATH=/tmp/x cargo run -- "task"     # hermetic smoke test
 python .github/ci_e2e.py target/debug/llm    # CI end-to-end (mock SSE server)
 python .github/ci_repl.py target/debug/llm   # CI interactive REPL over a real pty
 ```
@@ -22,11 +22,12 @@ python .github/ci_repl.py target/debug/llm   # CI interactive REPL over a real p
 
 ## Architecture that is not obvious from the tree
 
-- `src/main.rs` dispatches argv to one file per subcommand in `src/commands/` (`pub fn run(argv:
-  &[String]) -> i32`); `src/core/` (config.json, thread-file store, http, rendering), `src/providers/`
-  (unified `Msg` + one adapter per wire protocol + the provider catalog), `src/agent/` (loop, tools,
-  sub-agents, approvals, REPL), `src/read/`, `src/platform/` + `src/term/` (raw-mode line editor,
-  picker, spinner).
+- `src/main.rs` dispatches argv to the agent by default (`llm` bare = the REPL, text = a one-shot
+  task) and to one file per subcommand in `src/commands/` (only the package commands remain:
+  `pub fn run(argv: &[String]) -> i32`); `src/core/` (config.json, thread-file store, http,
+  rendering), `src/providers/` (unified `Msg` + one adapter per wire protocol + the provider
+  catalog), `src/agent/` (loop, tools, approvals, extension host, REPL), `src/read/`,
+  `src/platform/` + `src/term/` (raw-mode line editor, picker, spinner).
 - Hand-rolled instead of crate-ified, at `src/` root: `yaml.rs`, `b64.rs`, `gitignore.rs`,
   `jsonfmt.rs`. Deps are deliberately four (ureq, serde, serde_json, unicode-width) and the code is
   synchronous — no async runtime. Add a crate only when it buys real correctness or speed;

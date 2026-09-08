@@ -156,7 +156,6 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("\x1b[2m{name} is pinned — re-run with @ref to move it\x1b[0m");
             return 0;
         }
-        let work = target.parent().unwrap_or(&target).to_path_buf();
         if let Err(e) = git(&["fetch", "--tags", "origin"], &target).and_then(|_| {
             let to = ref_.clone().unwrap_or_else(|| "origin/HEAD".to_string());
             git(&["reset", "--hard", &to], &target).map(|_| ())
@@ -164,7 +163,6 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("Error: refresh failed: {e}");
             return 1;
         }
-        let _ = work;
         eprintln!("\x1b[2mupdated {name}\x1b[0m");
     } else {
         let _ = std::fs::create_dir_all(&root);
