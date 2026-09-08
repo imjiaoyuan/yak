@@ -37,6 +37,8 @@ use super::tools::{MAX_BYTES, MAX_LINES, Tool, ToolOutput, truncate_tail};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-tool-call timeout (config `extensions.tool_timeout` overrides).
 const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Event-hook timeout: extensions must be quick at turn boundaries.
+const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// stderr lines kept for diagnostics.
 const TAIL_LINES: usize = 20;
 /// `recv_timeout` slice; keeps ctrl+c responsive while waiting.
@@ -121,6 +123,7 @@ pub struct ExtState {
     /// advertised tools, commands and event subscriptions
     tools: Vec<ToolMeta>,
     commands: Vec<String>,
+    events: Vec<String>,
     /// how long tool calls wait before the extension is dropped
     tool_timeout: Duration,
 }
@@ -222,6 +225,45 @@ impl Ext {
             None => String::new(),
         })
     }
+
+    /// Run one extension-registered slash command; the reply prints.
+    pub fn run_command(&self, name: &str, args: &str) -> Result<String, String> {
+        let result = self.request(
+            &json!({"id": next_id(), "type": "run_command", "name": name, "args": args}),
+            TOOL_TIMEOUT,
+        )?;
+        Ok(result
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Fire an event hook. `tool_call` expects a reply — the extension may
+    /// deny the call (`{"decision":"deny","reason":..}`) or rewrite its
+    /// arguments (`{"args":{..}}`); every other event is fire-and-forget.
+    pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
+        let subscribed = lock(&self.state)
+            .as_ref()
+            .is_ok_and(|s| s.events.iter().any(|e| e == name));
+        if !subscribed {
+            return Ok(None);
+        }
+        let result = self.request(
+            &json!({"id": next_id(), "type": "event", "name": name, "params": params}),
+            EVENT_TIMEOUT,
+        )?;
+        Ok(result.get("result").cloned())
+    }
+
+    /// A dim diagnostics line (extension errors at event boundaries).
+    fn note(&self, line: String) {
+        let mut tail = lock(&self.tail);
+        if tail.len() >= TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
 }
 
 // ============================================================================
@@ -280,6 +322,53 @@ impl Extensions {
                 }));
             }
         }
+    }
+
+    /// Fire an event on every extension subscribed to it. `tool_call` may
+    /// deny (Err carries the reason) or rewrite the arguments (Ok(Some)).
+    pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
+        let mut outcome: Option<Value> = None;
+        for ext in &self.exts {
+            match ext.fire(name, params) {
+                Ok(reply) => {
+                    if let Some(reply) = reply {
+                        if reply.get("decision").and_then(Value::as_str) == Some("deny") {
+                            let reason = reply
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("denied by extension");
+                            return Err(reason.to_string());
+                        }
+                        if let Some(args) = reply.get("args") {
+                            outcome = Some(args.clone());
+                        }
+                    }
+                }
+                Err(e) => ext.note(e),
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// The extension that registered a slash command, if any.
+    pub fn command_owner(&self, name: &str) -> Option<Arc<Ext>> {
+        self.exts
+            .iter()
+            .find(|ext| {
+                lock(&ext.state)
+                    .as_ref()
+                    .is_ok_and(|s| s.commands.iter().any(|c| c == name))
+            })
+            .cloned()
+    }
+
+    /// Every slash command any ready extension registered, for completion.
+    pub fn command_names(&self) -> Vec<String> {
+        self.exts
+            .iter()
+            .filter_map(|ext| lock(&ext.state).as_ref().ok().map(|s| s.commands.clone()))
+            .flatten()
+            .collect()
     }
 
     /// Listing for `/tools`: (name, target, tools, commands, reason).
@@ -371,10 +460,21 @@ impl Ext {
                         .collect()
                 })
                 .unwrap_or_default();
+            let events = result
+                .get("events")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             let tool_timeout = crate::core::config::extension_tool_timeout();
             *lock(&self.state) = Ok(ExtState {
                 tools,
                 commands,
+                events,
                 tool_timeout,
             });
             Ok(())

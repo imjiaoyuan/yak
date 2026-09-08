@@ -95,6 +95,7 @@ impl Session {
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
+            hooks: Some(&self.extensions),
         };
         let model_id = self.model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking

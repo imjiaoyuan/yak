@@ -36,7 +36,22 @@ pub fn repl(
         let help = repl_help(&session);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let cwd = session.cwd.display().to_string();
-        let completer = move |buf: &str| completions(buf, &skill_names, &cwd);
+        let command_names = session.extensions.command_names();
+        let completer = move |buf: &str| {
+            let mut out = completions(buf, &skill_names, &cwd);
+            if let Some(arg) = buf.strip_prefix('/')
+                && !arg.contains(' ')
+            {
+                for name in &command_names {
+                    if name.starts_with(arg) {
+                        out.push(format!("/{name}"));
+                    }
+                }
+                out.sort();
+                out.dedup();
+            }
+            out
+        };
         let line = match editor.read_line(prompt, &help, &completer) {
             crate::term::lineedit::LineResult::Line(l) => l,
             crate::term::lineedit::LineResult::Eof => break,
@@ -968,11 +983,25 @@ fn repl_command(
         }
         "/exit" => return true,
         other => {
-            // unknown /name falls back to the commands dir: the file's body
-            // (plus any trailing words) becomes one agent task
-            if let Some(name) = other.strip_prefix('/')
-                && let Some(cmd) = crate::core::commands_md::find(name)
+            let name = other.strip_prefix('/').unwrap_or(other);
+            // an extension-registered command runs out-of-process and its
+            // reply prints
+            if other.starts_with('/')
+                && let Some(ext) = session.extensions.command_owner(name)
             {
+                match ext.run_command(name, arg) {
+                    Ok(text) => {
+                        for line in text.lines() {
+                            eprintln!("  \x1b[2m{text}\x1b[0m", text = line);
+                        }
+                    }
+                    Err(e) => eprintln!("Error: {e}"),
+                }
+                return false;
+            }
+            // otherwise a commands-dir prompt template: the file's body
+            // (plus any trailing words) becomes one agent task
+            if let Some(cmd) = crate::core::commands_md::find(name) {
                 let input = arg.trim();
                 let prompt = if input.is_empty() {
                     cmd.body.clone()

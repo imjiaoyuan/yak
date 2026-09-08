@@ -15,6 +15,7 @@ pub mod tools;
 
 use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};
+use serde_json::json;
 
 /// Progress events surfaced by the loop; `llm agent` renders these as text
 /// or JSONL depending on --mode.
@@ -73,6 +74,23 @@ pub struct AgentOptions<'a> {
     pub compact: Option<compact::CompactConfig>,
     /// reasoning effort level; None sends no parameter
     pub reasoning: Option<String>,
+    /// the extension host, when extensions exist; event hooks fire at turn
+    /// and tool boundaries (None when nothing was discovered)
+    pub hooks: Option<&'a crate::agent::ext::Extensions>,
+}
+
+/// Fire an event on the host, swallowing failures into the extension's
+/// diagnostics tail (events never abort a run; only `tool_call` denials
+/// surface, as an error tool result).
+fn fire(
+    hooks: Option<&crate::agent::ext::Extensions>,
+    name: &str,
+    params: serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    match hooks {
+        Some(host) => host.fire(name, &params),
+        None => Ok(None),
+    }
 }
 
 pub struct AgentOutcome {
@@ -152,6 +170,11 @@ pub fn run_agent(
     let mut final_text = String::new();
     let mut interrupted = false;
 
+    let _ = fire(
+        opts.hooks,
+        "agent_start",
+        json!({"cwd": opts.cwd.display().to_string(), "task": prompt}),
+    );
     let mut turn = 0;
     loop {
         turn += 1;
@@ -172,6 +195,19 @@ pub fn run_agent(
 
         // steering: queued mid-run input lands before the next model call
         pending = merge_steering(pending.take(), steer());
+        let _ = fire(opts.hooks, "turn_start", json!({"turn": turn}));
+        if let Some(Msg::User { text, attachments }) = pending.as_ref() {
+            let _ = fire(
+                opts.hooks,
+                "input",
+                json!({
+                    "text": text,
+                    "attachments": attachments.iter().map(|a| json!({
+                        "path": a.path, "url": a.url, "mime_type": a.mime_type,
+                    })).collect::<Vec<_>>(),
+                }),
+            );
+        }
 
         let (pending_prompt, pending_attachments): (&str, &[crate::providers::Attachment]) =
             match pending.as_ref() {
@@ -244,6 +280,14 @@ pub fn run_agent(
         final_text = text;
         last_usage = usage;
         on_update(AgentUpdate::TurnEnd { usage });
+        let _ = fire(
+            opts.hooks,
+            "turn_end",
+            json!({
+                "turn": turn,
+                "usage": usage.map(|u| json!([u.input, u.output, u.cached])),
+            }),
+        );
 
         // compaction check after each completed turn; the usage report
         // covered everything except the assistant we just pushed
@@ -284,7 +328,7 @@ pub fn run_agent(
         if stop != StopReason::ToolUse || tool_calls.is_empty() {
             break;
         }
-        for call in tool_calls {
+        for mut call in tool_calls {
             if crate::core::http::interrupted() {
                 interrupted = true;
                 history.push(Msg::ToolResult {
@@ -296,18 +340,58 @@ pub fn run_agent(
                 });
                 continue;
             }
-            let out = match gate_call(&call, tools, &opts.cwd, approval, on_approval) {
-                Err(denied) => tools::ToolOutput::err(denied),
-                Ok(cleared) => {
-                    on_update(AgentUpdate::ToolStart {
-                        name: call.name.clone(),
-                        preview: cleared.preview,
-                        diff: cleared.diff,
-                    });
-                    let mut log = |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
-                    cleared.tool.execute(&call.arguments, &opts.cwd, &mut log)
+            // extension gate: a subscribed tool_call may deny or rewrite the
+            // arguments before the approval matrix even sees them
+            let mut denied: Option<String> = None;
+            match fire(
+                opts.hooks,
+                "tool_call",
+                json!({"tool": call.name, "args": call.arguments}),
+            ) {
+                Err(reason) => denied = Some(reason),
+                Ok(Some(rewritten)) => call.arguments = rewritten,
+                Ok(None) => {}
+            }
+            let out = if let Some(reason) = denied {
+                Err(reason)
+            } else {
+                match gate_call(&call, tools, &opts.cwd, approval, on_approval) {
+                    Err(denied) => Err(denied),
+                    Ok(cleared) => {
+                        on_update(AgentUpdate::ToolStart {
+                            name: call.name.clone(),
+                            preview: cleared.preview,
+                            diff: cleared.diff,
+                        });
+                        let mut log =
+                            |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
+                        let out = cleared.tool.execute(&call.arguments, &opts.cwd, &mut log);
+                        let _ = fire(
+                            opts.hooks,
+                            "tool_result",
+                            json!({
+                                "tool": call.name,
+                                "summary": summarize(&out.content),
+                                "is_error": out.is_error,
+                            }),
+                        );
+                        Ok(out)
+                    }
                 }
             };
+            let out = match out {
+                Err(denied) => tools::ToolOutput::err(denied),
+                Ok(out) => out,
+            };
+            let _ = fire(
+                opts.hooks,
+                "tool_result",
+                json!({
+                    "tool": call.name,
+                    "summary": summarize(&out.content),
+                    "is_error": out.is_error,
+                }),
+            );
             on_update(AgentUpdate::ToolEnd {
                 summary: summarize(&out.content),
                 is_error: out.is_error,
@@ -325,6 +409,11 @@ pub fn run_agent(
         }
     }
 
+    let _ = fire(
+        opts.hooks,
+        "agent_end",
+        json!({"final_text": final_text, "interrupted": interrupted}),
+    );
     Ok(AgentOutcome {
         history,
         final_text,
