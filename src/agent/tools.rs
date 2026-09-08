@@ -108,7 +108,6 @@ pub fn builtin_tools_configured(
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
-        Box::new(PlanTool),
         Box::new(super::task::TaskTool {
             parent_model: rt.parent_model.clone(),
             roles: rt.roles.clone(),
@@ -1103,61 +1102,6 @@ fn extract_title(html: &str) -> Option<String> {
         .replace("&amp;", "&");
     let title = title.trim().to_string();
     (!title.is_empty()).then_some(title)
-}
-
-struct PlanTool;
-
-impl Tool for PlanTool {
-    fn name(&self) -> &str {
-        "update_plan"
-    }
-    fn tier(&self) -> Tier {
-        Tier::Read
-    }
-    fn description(&self) -> &str {
-        "Update the task plan. Provide an optional explanation and a list of plan items, each \
-         with a step and a status (pending, in_progress, completed). At most one step can be \
-         in_progress at a time. Keep a step-by-step plan for a multi-step task and update it \
-         after each step you finish."
-    }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "explanation": {"type": "string", "description": "Optional explanation for this plan update"},
-                "plan": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step": {"type": "string", "description": "Task step text"},
-                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
-                        },
-                        "required": ["step", "status"]
-                    }
-                }
-            },
-            "required": ["plan"]
-        })
-    }
-    fn preview(&self, args: &Value) -> String {
-        let n = args["plan"].as_array().map(|a| a.len()).unwrap_or(0);
-        format!("{n} step(s)")
-    }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        let Some(plan) = args["plan"].as_array() else {
-            return ToolOutput::err("missing 'plan' array");
-        };
-        if plan.is_empty() {
-            return ToolOutput::err("plan must not be empty");
-        }
-        for item in plan {
-            if item["step"].as_str().is_none() || item["status"].as_str().is_none() {
-                return ToolOutput::err("each plan item needs 'step' and 'status'");
-            }
-        }
-        ToolOutput::ok("plan updated")
-    }
 }
 
 /// Strip markup down to readable text without pulling in an HTML parser:

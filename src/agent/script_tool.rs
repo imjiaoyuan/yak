@@ -26,7 +26,6 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "glob",
     "ls",
     "webfetch",
-    "update_plan",
     "task",
     "spawn_agent",
     "wait_agent",

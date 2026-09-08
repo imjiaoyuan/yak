@@ -69,10 +69,6 @@ pub fn build_system_prompt(
                        not dump whole files or walk the whole tree.\n\
                      - Do not re-read files or re-run commands you have already run this task.\n\
                      \n\
-                     Planning\n\
-                     - For a multi-step task, call `update_plan` with a short list of steps (each a \
-                       few words) and a status (pending / in_progress / completed); update it after \
-                       each step you finish. Skip planning for trivial one-liners.\n\
                      \n\
                      Changing files\n\
                      - For changing files, prefer the edit tool (a small, surgical diff) over the \
