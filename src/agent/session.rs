@@ -29,13 +29,9 @@ pub struct Session {
     /// steering lines typed mid-run; shared with the KeyWatcher, drained by
     /// the agent loop at tool-round boundaries and by the REPL afterwards
     pub steer_queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// script tools from the config `tools` table; re-mounted by
-    /// [`Session::rebuild_tools`] on every registry rebuild
-    pub script_tools: Vec<crate::agent::script_tool::ScriptToolSpec>,
-    /// live MCP clients; held in an Arc so the registry outlives rebuilds
-    /// without orphaning the child processes (they die with the Session,
-    /// RAII kill on drop); an empty registry when none are configured
-    pub mcp: std::sync::Arc<crate::agent::mcp::McpRegistry>,
+    /// the extension host: user executables registering tools (and, later,
+    /// commands and event hooks); re-mounted by [`Session::rebuild_tools`]
+    pub extensions: crate::agent::ext::Extensions,
     /// cumulative input/output tokens across the session (for the status line)
     pub tokens: (u64, u64),
     /// cumulative input tokens served from the provider prompt cache
@@ -76,22 +72,12 @@ impl Session {
         self.seed.extend(tail);
     }
 
-    /// Rebuild the tool registry: built-ins plus the session's plugin tools
-    /// (script tools and mounted MCP tools); called once at startup, and
-    /// again on a model switch.
+    /// Rebuild the tool registry: built-ins plus extension-registered
+    /// tools; called once at startup, and again on a model switch or
+    /// `/reload`.
     pub fn rebuild_tools(&mut self) {
         let mut tools = crate::agent::tools::builtin_tools();
-        // drop-ins win over same-named config-table tools (the nearer the
-        // home, the more specific), and a name never mounts twice
-        let mut specs = crate::agent::user_tools::discover(&self.cwd);
-        for cfg in &self.script_tools {
-            match specs.iter_mut().find(|s| s.name == cfg.name) {
-                Some(hit) => *hit = cfg.clone(),
-                None => specs.push(cfg.clone()),
-            }
-        }
-        tools.extend(specs.iter().map(crate::agent::script_tool::mount));
-        self.mcp.mount_tools(&mut tools);
+        self.extensions.mount_tools(&mut tools);
         self.tools = tools;
     }
 

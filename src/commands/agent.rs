@@ -238,34 +238,16 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
 
-    // plugin tools: script tools from the config `tools` table and MCP
-    // servers from `mcpServers`. Connecting spawns every configured
-    // server, so a --tools subset with no mcp__ names skips it entirely;
-    // a failed server warns and mounts nothing, never aborting the session
-    let script_specs = crate::agent::script_tool::load();
+    // extensions: user executables registering tools (and, later, commands
+    // and event hooks). A failed extension warns and mounts nothing, never
+    // aborting the session
     let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
         csv.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect()
     });
-    let need_mcp = wanted
-        .as_ref()
-        .is_none_or(|w| w.iter().any(|n| n.starts_with("mcp__")));
-    let mcp = if need_mcp {
-        let registry = crate::agent::mcp::McpRegistry::connect(&crate::agent::mcp::load(), &cwd);
-        for row in registry.rows() {
-            if !row.ready {
-                eprintln!(
-                    "\x1b[2mmcp server '{}' failed: {} (its tools are not mounted)\x1b[0m",
-                    row.name, row.reason
-                );
-            }
-        }
-        std::sync::Arc::new(registry)
-    } else {
-        std::sync::Arc::new(crate::agent::mcp::McpRegistry::empty())
-    };
+    let extensions = crate::agent::ext::Extensions::connect(&cwd);
     let skills = crate::agent::skills::discover(
         &crate::core::config::user_dir(),
         &cwd,
@@ -294,8 +276,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         seed,
         thinking,
         steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        script_tools: script_specs,
-        mcp,
+        extensions,
         tokens: (0, 0),
         tokens_cached: 0,
     };

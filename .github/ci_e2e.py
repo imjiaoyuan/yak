@@ -1,9 +1,8 @@
 """Cross-platform end-to-end smoke for CI: an OpenAI-style SSE mock runs
 in-process, the freshly built binary resolves a provider from a scratch
 config.json, streams a prompt, switches a mode default and reads it back,
-then exercises the plugin surfaces (script tool, MCP server over stdio,
-a commands-dir subcommand). Exit code is nonzero on any assertion
-failure."""
+then exercises the extension host (a user extension registering a tool).
+Exit code is nonzero on any assertion failure."""
 
 import http.server
 import json
@@ -16,50 +15,34 @@ import threading
 PORT = 8123
 seen = {}
 
-FAKE_MCP = r'''#!/usr/bin/env python3
+# one extension: the host protocol (initialize handshake, one tool)
+ECHO_EXT = r"""#!/usr/bin/env python3
 import json, sys, os
-log = os.environ["FAKE_LOG"]
+log = os.environ["ECHO_LOG"]
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     req = json.loads(line)
-    rid = req.get("id")
-    if req.get("method") == "initialize":
-        result = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "fake"}}
-    elif req.get("method") == "tools/list":
-        result = {"tools": [{"name": "echo", "description": "Echo text",
-                             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
-    elif req.get("method") == "tools/call":
+    if req.get("type") == "initialize":
+        reply({"id": req["id"], "result": {"tools": [
+            {"name": "echo", "description": "Echo the given text",
+             "parameters": {"type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"]}}],
+            "commands": [], "events": []}})
+    elif req.get("type") == "call_tool":
         with open(log, "a") as f:
-            f.write(json.dumps(req["params"]) + "\n")
-        result = {"content": [{"type": "text", "text": "echo: " + req["params"]["arguments"]["text"]}]}
-    else:
-        continue
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
-    sys.stdout.flush()
-'''
-
-SCRIPT_TOOL = """import json, sys
-args = json.loads(sys.stdin.readline())
-print("script-tool saw: " + args.get("value", "?"))
+            f.write(json.dumps(req["args"]) + "\n")
+        reply({"id": req["id"], "result": "echo: " + req["args"].get("text", "")})
+    elif req.get("type") == "shutdown":
+        break
 """
-
-DROPIN_TOOL = """#!/usr/bin/env python3
-# --- llm-tool: dropper ---
-# description: drop the given word twice
-# args: word (string) the word to drop
-import json, sys
-args = json.loads(sys.stdin.readline())
-print(json.dumps({"dropped": args.get("word", "") * 2}))
-"""
-
-HOOK_APPEND = """import sys
-with open(sys.argv[1], "a") as f:
-    f.write(sys.stdin.read() + "\\n")
-"""
-
-
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -102,7 +85,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             chunks = [
                 {"choices": [{"index": 0, "delta": {"tool_calls": [
                     {"index": 0, "id": "call_1", "type": "function",
-                     "function": {"name": "mcp__fake__echo",
+                     "function": {"name": "echo",
                                   "arguments": '{"text": "hi from model"}'}}]}}]},
                 {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
             ]
@@ -189,12 +172,6 @@ def main():
 
     user = tempfile.mkdtemp()
     work = tempfile.mkdtemp()
-    fake_mcp = os.path.join(work, "fake_mcp.py")
-    with open(fake_mcp, "w") as f:
-        f.write(FAKE_MCP)
-    script_tool = os.path.join(work, "script_tool.py")
-    with open(script_tool, "w") as f:
-        f.write(SCRIPT_TOOL)
     fake_log = os.path.join(work, "fake.log")
 
     with open(os.path.join(user, "config.json"), "w") as f:
@@ -221,33 +198,16 @@ def main():
                     },
                 },
                 "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
-                "tools": {
-                    "shout": {
-                        "description": "Shout a value",
-                        "command": sys.executable,
-                        "args": [script_tool],
-                    }
-                },
-                "mcpServers": {
-                    "fake": {
-                        "command": sys.executable,
-                        "args": [fake_mcp],
-                        "env": {"FAKE_LOG": fake_log},
-                    }
-                },
             },
             f,
         )
-    os.makedirs(os.path.join(user, "commands"))
-    with open(os.path.join(user, "commands", "hello-cmd.md"), "w") as f:
-        f.write("---\nmodel: mock/m-a\n---\nSay hello to $input")
-    os.makedirs(os.path.join(work, ".llm", "tools"), exist_ok=True)
-    dropin = os.path.join(work, ".llm", "tools", "dropper")
-    with open(dropin, "w") as f:
-        f.write(DROPIN_TOOL)
-    os.chmod(dropin, 0o755)
+    os.makedirs(os.path.join(user, "extensions"))
+    echo_ext = os.path.join(user, "extensions", "echo_ext")
+    with open(echo_ext, "w") as f:
+        f.write(ECHO_EXT)
+    os.chmod(echo_ext, 0o755)
 
-    env = dict(os.environ, LLM_USER_PATH=user)
+    env = dict(os.environ, LLM_USER_PATH=user, ECHO_LOG=fake_log)
 
     p = run([binary, "hi"], env, stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"prompt rc={p.returncode} err={p.stderr[-500:]}"
@@ -282,19 +242,15 @@ def main():
     cfg["models"] = {"default": "mock/m-b", "thinking": "high"}
     json.dump(cfg, open(cfgpath, "w"))
 
-    # plugin lane: the agent mounts the script tool and the MCP server,
-    # the model calls mcp__fake__echo, the fake server logs the call and
-    # the second round returns the final answer
+    # extension lane: the host spawns the extension, mounts its tool, the
+    # model calls it, and the second round returns the final answer
     a = run([binary, "--yolo", "--no-session",
              "use the echo tool with text 'hi from model'"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert a.returncode == 0, f"agent rc={a.returncode} err={a.stderr[-800:]}"
-    assert "shout" in (seen.get("tools") or []), f"script tool not mounted: {seen.get('tools')}"
-    assert "mcp__fake__echo" in (seen.get("tools") or []), f"mcp tool not mounted: {seen.get('tools')}"
-    assert "dropper" in (seen.get("tools") or []), \
-        f"drop-in tool not discovered: {seen.get('tools')}"
+    assert "echo" in (seen.get("tools") or []), f"extension tool not mounted: {seen.get('tools')}"
     assert os.path.exists(fake_log) and "hi from model" in open(fake_log).read(), \
-        f"mcp call never reached the server: {open(fake_log).read() if os.path.exists(fake_log) else 'no log'}"
+        f"extension call never ran: {open(fake_log).read() if os.path.exists(fake_log) else 'no log'}"
     assert "final answer after tool" in a.stdout + a.stderr, \
         f"final answer missing: {(a.stdout + a.stderr)[-300:]!r}"
 

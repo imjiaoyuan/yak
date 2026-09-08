@@ -26,12 +26,3 @@ pub fn nearest_dir_up(cwd: &Path, dir: &str, stop_at_git_root: bool) -> Option<P
     }
     None
 }
-
-/// Every directory named `<dir>` from `cwd` upward, nearest first — the
-/// base for precedence rules where nearer entries override farther ones.
-pub fn dirs_up(cwd: &Path, dir: &str) -> Vec<PathBuf> {
-    ancestors(cwd)
-        .map(|d| d.join(dir))
-        .filter(|p| p.is_dir())
-        .collect()
-}

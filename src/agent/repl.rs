@@ -209,7 +209,7 @@ fn repl_help(session: &Session) -> String {
         "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /export /clear /compact /init /settings /reload /mcp /exit · !cmd runs shell");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /export /clear /compact /init /settings /reload /exit · !cmd runs shell");
     // only the switch away from the current mode is worth showing
     let switches: Vec<&str> = [
         ("/ask", approval::Mode::AlwaysAsk),
@@ -263,7 +263,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/compact",
     "/init",
     "/status",
-    "/mcp",
     "/tools",
     "/exit",
     "/model",
@@ -837,53 +836,25 @@ fn repl_command(
         }
 
         "/tools" => {
-            let specs = crate::agent::user_tools::discover(&session.cwd);
-            let mut count = 0;
-            for s in &specs {
-                eprintln!("\x1b[2m  {} — {}\x1b[0m", s.name, s.description);
-                count += 1;
+            for tool in &session.tools {
+                eprintln!("\x1b[2m  {}\x1b[0m", tool.name());
             }
-            for row in session.mcp.rows() {
-                let state = if row.ready {
-                    format!("{} tools", row.tools)
-                } else {
-                    format!("failed: {}", row.reason)
-                };
-                eprintln!(
-                    "\x1b[2m  {} (mcp) — {} · {}\x1b[0m",
-                    row.name, row.target, state
-                );
-                count += 1;
-            }
-            if count == 0 {
-                eprintln!(
-                    "\x1b[2mno plugin tools — drop scripts into ~/.llm/tools/ or .llm/tools/, or configure mcpServers\x1b[0m"
-                );
-            }
-        }
-        "/mcp" => {
-            let registry = &session.mcp;
-            let rows = registry.rows();
+            let rows = session.extensions.rows();
             if rows.is_empty() {
                 eprintln!(
-                    "\x1b[2mno mcp servers configured — add them to config.json under \"mcpServers\"\x1b[0m"
+                    "\x1b[2mno extensions — drop executables into ~/.llm/extensions/ or .llm/extensions/\x1b[0m"
                 );
-                return false;
             }
-            for row in rows {
-                if row.ready {
+            for (name, target, tools, commands, reason) in rows {
+                if reason.is_empty() {
                     eprintln!(
-                        "\x1b[2m{} — {} · ready ({} tools)\x1b[0m",
-                        row.name, row.target, row.tools
+                        "\x1b[2m  {name} — {target} · {tools} tool(s), {commands} command(s)\x1b[0m"
                     );
                 } else {
-                    eprintln!(
-                        "\x1b[0m{}\x1b[2m — {} · failed: {}\x1b[0m",
-                        row.name, row.target, row.reason
-                    );
-                    let tail = registry.tail_lines(&row.name);
+                    eprintln!("\x1b[2m  {name} — {target} · failed: {reason}\x1b[0m");
+                    let tail = session.extensions.tail_lines(&name);
                     for line in tail.iter().skip(tail.len().saturating_sub(3)) {
-                        eprintln!("\x1b[2m  {line}\x1b[0m");
+                        eprintln!("\x1b[2m    {line}\x1b[0m");
                     }
                 }
             }
@@ -990,8 +961,8 @@ fn repl_command(
                 &session.cwd,
                 &settings.disabled_skills,
             );
-            session.script_tools = crate::agent::script_tool::load();
             *settings = crate::agent::settings::load();
+            session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
             session.rebuild_tools();
             eprintln!("\x1b[2mreloaded skills, plugin tools and settings\x1b[0m");
         }

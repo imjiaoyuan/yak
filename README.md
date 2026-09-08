@@ -71,7 +71,7 @@ a provider and clears the default if it pointed there.
 Or skip the wizard entirely: put the provider block in `config.json` with an
 environment-variable key (see below).
 
-Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the plugin tables `tools`/`mcpServers`), and `commands/` the prompt templates.
+Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the `extensions` table), `extensions/` the code-bearing plugins, and `commands/` the prompt templates.
 
 Providers are registered in `config.json` in that directory, alongside any other settings:
 
@@ -106,117 +106,67 @@ A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, 
 
 ## Plugins
 
-The quickest plugin is a drop-in tool: any executable with a manifest header, dropped into `~/.llm/tools/` or the project's `.llm/tools/` (the project copy wins by name). One file is one tool, any language — the header declares it, the file itself runs, receiving the tool arguments as one JSON line on stdin and answering on stdout:
+Extensions are the plugin system, the reference-shaped: anything the core skips, you build yourself as an
+extension — an executable in `~/.llm/extensions/` or the project's `.llm/extensions/` (the project
+copy wins by name), in any language the shebang decides. One file is one extension, and it stays
+running for the whole session, speaking one JSON message per line over stdio:
 
-```bash
-#!/usr/bin/env python3
-# --- llm-tool: wordcount ---
-# description: count characters in the text
-# args: text (string) the text to count
-import json, sys
-args = json.loads(sys.stdin.readline())
-print(len(args["text"]))
+```text
+→ {"id":1,"type":"initialize","params":{"version":..,"cwd":..}}
+← {"id":1,"result":{"tools":[..],"commands":[..],"events":[..]}}
+→ {"id":2,"type":"call_tool","name":..,"args":{..}}    ← {"id":2,"result":..}
+→ {"id":3,"type":"run_command","name":..,"args":".."}  ← {"id":3,"result":".."}
+→ {"id":4,"type":"event","name":..,"params":{..}}      ← {"id":4,"result":{..}}
 ```
 
-`args:` lines build the input schema (string, int, float, bool); the tool mounts automatically at startup, `/tools` in the agent REPL lists everything (drop-ins, config-table tools and MCP servers together). A `name.json` manifest beside a script points at an external command instead — same fields as the config `tools` table, as a file. Everything runs at the exec approval tier, so a plugin asks before it runs.
+The `initialize` handshake advertises the extension's tools (JSON Schema parameters), slash
+commands and event subscriptions; the host then routes `call_tool` when the model invokes one,
+`run_command` when the user types a matching `/command`, and `event` at turn and tool boundaries
+(`tool_call` may deny or rewrite a call — permission gates and path protection live here).
+Extension tools are exec-tier: the approval matrix asks by default (`Allow? [Y/n/a]`, remembered
+per session with `a`), `[agent] tools` policies still win, and `--tools` picks a subset.
+`extensions.disabled` in config.json skips one by name, `/reload` respawns everything, and a
+slow or broken extension warns dimly and mounts nothing — it never blocks a session. Tool calls
+time out after 120s (config `extensions.tool_timeout`), events after 5s.
 
-The extension surfaces follow one rule: files declare, processes compute, the binary itself never
-recompiles. Aliases, commands and skills were always files; what follows adds the three
-code-bearing surfaces, all declared in config.json or dropped in as files.
-
-When you want a tool that needs no shebang of its own, declare it in config instead — same spawn
-model (one process per call, arguments as a JSON line on stdin, stdout is the result, nonzero exit
-reports as an error). Say you keep tickets in a file and want the agent to look them up:
-
-```python
-# ~/.llm/scripts/ticket.py
-import json, sys
-args = json.loads(sys.stdin.readline())
-print(f"ticket {args['id']}: see ~/.llm/notes")
-```
-
-```json
-"tools": {
-  "ticket": {
-    "description": "Look up a ticket by id",
-    "command": "python3",
-    "args": ["~/.llm/scripts/ticket.py"],
-    "schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-    "timeout": 30
-  }
-}
-```
-
-That whole entry is the plugin. `description` tells the model what the tool does, `schema` is a
-JSON Schema for the arguments (default `{"type": "object"}`), `timeout` bounds each call in seconds
-(default 60), and `${ENV_VAR}` expands in `command` and `args`. Both kinds — drop-in and declared —
-mount under their own name next to the built-ins, ask approval like any exec-tier tool
-(`Allow? [Y/n/a]`, remembered per session with `a`), obey `[agent] tools` policies, and can be
-picked with `--tools ticket,bash`.
-Sub-agents default to the built-in tool set (`read,grep,glob,ls`); name plugin tools in an agent
-definition's `tools:` list to hand them through.
-
-For the wider ecosystem the same config holds MCP servers, the standard tool protocol of 2026. Any
-stdio MCP server mounts its tools as `mcp__<server>__<tool>`, which usually means one line of
-config and nothing to install:
-
-```json
-"mcpServers": {
-  "fetch":  {"command": "uvx", "args": ["mcp-server-fetch"]},
-  "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
-             "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}}
-}
-```
-
-Servers connect in parallel when a session starts (a slow or broken one warns dimly and mounts
-nothing, it never blocks), children die with the session, and `env` entries expand `${ENV_VAR}`
-over the inherited environment. The agent REPL's `/mcp` lists every server with its health and
-tool count. On Windows `npx` is a `.cmd` shim, so spell it
-`{"command": "cmd", "args": ["/c", "npx", ...]}` until a PATHEXT probe lands.
-
-Writing a server for yourself needs no SDK, the protocol is one JSON-RPC message per line over
-stdio:
+A minimal tool extension, complete in thirty lines of Python:
 
 ```python
 #!/usr/bin/env python3
-# a complete MCP server: initialize, tools/list, tools/call
+# ~/.llm/extensions/deploy
 import json, sys
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
 for line in sys.stdin:
     req = json.loads(line)
-    rid = req.get("id")
-    if req.get("method") == "initialize":
-        result = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "mine"}}
-    elif req.get("method") == "tools/list":
-        result = {"tools": [{"name": "hello", "description": "Say hello",
-                             "inputSchema": {"type": "object", "properties": {"who": {"type": "string"}}}}]}
-    elif req.get("method") == "tools/call":
-        result = {"content": [{"type": "text", "text": "hello " + req["params"]["arguments"].get("who", "")}]}
-    else:
-        continue
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
-    sys.stdout.flush()
+    if req.get("type") == "initialize":
+        reply({"id": req["id"], "result": {"tools": [
+            {"name": "deploy", "description": "Deploy the current tree",
+             "parameters": {"type": "object", "properties": {}}}],
+            "commands": [], "events": []}})
+    elif req.get("type") == "call_tool":
+        import subprocess
+        out = subprocess.run(["deploy.sh"], capture_output=True, text=True)
+        reply({"id": req["id"], "result": out.stdout or out.stderr})
+    elif req.get("type") == "shutdown":
+        break
 ```
 
-The official TypeScript and Python SDKs (`@modelcontextprotocol/sdk`, the `mcp` package with
-FastMCP) wrap all of this if you would rather not handle the loop yourself.
-
-Finally, `~/.llm/commands/*.md` turns a prompt you keep retyping into a subcommand, with the
-nearest `.llm/commands/` winning for project-specific variants. The body is the prompt,
-frontmatter may pin `model` and `system`, and `$input` receives everything after the name, so
-`llm review src/main.rs` runs the template with `src/main.rs` as input while every prompt flag
-(`-m`, `-o`, `-p`, `-a`, ...) still applies:
+Prompt templates are the data-only surface: `~/.llm/commands/*.md` (or the nearest
+`.llm/commands/`, project wins) turns a prompt you keep retyping into `/name`. The body is the
+prompt, frontmatter may pin `system`, and `$input` receives everything after the command name,
+so `/review src/main.rs` runs the template with `src/main.rs` as input, submitted as one task
+in the agent session:
 
 ```markdown
 ---
-model: zai/glm-5.2
 system: You are a meticulous code reviewer.
 ---
 Review $input for correctness bugs and suggest minimal fixes.
 ```
-
-Inside the agent REPL the same file answers to `/review src/main.rs`, submitted as one task in the
-agent. Names that collide with built-in commands keep the built-in, and a
-word that merely looks like a typo still gets the did-you-mean guard before anything is looked up.
 
 ## Usage
 

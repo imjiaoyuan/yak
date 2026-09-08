@@ -4,16 +4,14 @@
 
 pub mod approval;
 pub mod compact;
-pub mod mcp;
+pub mod ext;
 pub mod memory;
 pub mod repl;
-pub mod script_tool;
 pub mod session;
 pub mod settings;
 pub mod skills;
 pub mod system_prompt;
 pub mod tools;
-pub mod user_tools;
 
 use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};

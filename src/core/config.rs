@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -119,13 +120,41 @@ pub fn load() -> Config {
     config
 }
 
-/// One silently-degrading read of a top-level config table (the plugin
-/// tables `tools`/`mcpServers`): a missing file, unparsable JSON or
-/// a missing key all yield None — optional tables are never fatal.
-pub fn table(key: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let raw = fs::read_to_string(config_path()).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    value.get(key)?.as_object().cloned()
+/// One silently-degrading read of a config value: a missing file, unparsable
+/// JSON or a missing key all yield None — optional tables are never fatal.
+/// Extension names come from the config `extensions.disabled` list.
+pub fn disabled_extensions() -> Vec<String> {
+    let raw = match fs::read_to_string(config_path()) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("extensions")
+        .and_then(|e| e.get("disabled"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Per-tool-call timeout for extension tools (config
+/// `extensions.tool_timeout`, seconds; default 120).
+pub fn extension_tool_timeout() -> Duration {
+    let secs = fs::read_to_string(config_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("extensions")
+                .and_then(|e| e.get("tool_timeout"))
+                .and_then(|t| t.as_u64())
+        });
+    Duration::from_secs(secs.unwrap_or(120).max(1))
 }
 
 /// Read config.json as an object for a merge-preserving rewrite: a missing
