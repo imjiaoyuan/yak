@@ -48,6 +48,9 @@ fn dispatch(argv: &[String]) -> i32 {
             print!("{ABOUT}");
             0
         }
+        Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
+            commands::pkg::run(argv)
+        }
         // anything else (flags or plain text) is the agent: bare `llm` on a
         // terminal is the interactive REPL, text and pipes are one-shot tasks
         _ => commands::agent::run(argv),

@@ -254,6 +254,27 @@ def main():
     assert "final answer after tool" in a.stdout + a.stderr, \
         f"final answer missing: {(a.stdout + a.stderr)[-300:]!r}"
 
+    # package lane: a local git repo installs into .llm/pkg (project), its
+    # extension mounts, list/remove work
+    pkgrepo = os.path.join(work, "pkgrepo")
+    os.makedirs(os.path.join(pkgrepo, "extensions"))
+    with open(os.path.join(pkgrepo, "extensions", "hello"), "w") as f:
+        f.write(ECHO_EXT)
+    os.chmod(os.path.join(pkgrepo, "extensions", "hello"), 0o755)
+    subprocess.run(["git", "init", "-q", pkgrepo], check=True)
+    subprocess.run(["git", "-C", pkgrepo, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", pkgrepo, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-qm", "pkg"], check=True)
+    p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
+            stdin=subprocess.DEVNULL)
+    assert p.returncode == 0, f"install rc={p.returncode} err={p.stderr[-400:]}"
+    assert os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo", "extensions", "hello"))
+    ls = run([binary, "list"], env, cwd=work, stdin=subprocess.DEVNULL)
+    assert "pkgrepo" in ls.stdout + ls.stderr, f"list: {(ls.stdout + ls.stderr)[-300:]!r}"
+    p = run([binary, "remove", "pkgrepo"], env, cwd=work, stdin=subprocess.DEVNULL)
+    assert p.returncode == 0 and not os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo")), \
+        f"remove rc={p.returncode}"
+
     # builtin-tool lane: the model writes a real file through the write
     # tool; round 2 must carry the tool result back as a role:"tool"
     # message paired with the assistant tool_calls turn

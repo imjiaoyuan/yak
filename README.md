@@ -71,7 +71,7 @@ a provider and clears the default if it pointed there.
 Or skip the wizard entirely: put the provider block in `config.json` with an
 environment-variable key (see below).
 
-Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the `extensions` table), `extensions/` the code-bearing plugins, and `commands/` the prompt templates.
+Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family, the `agent` section, the `extensions` table), `extensions/` the code-bearing plugins, `pkg/` the installed packages, and `commands/` the prompt templates.
 
 Providers are registered in `config.json` in that directory, alongside any other settings:
 
@@ -168,6 +168,22 @@ system: You are a meticulous code reviewer.
 Review $input for correctness bugs and suggest minimal fixes.
 ```
 
+Packages bundle all three (extensions, skills, prompt templates) into one git repository and
+share it as a unit: `llm install git:github.com/user/repo[@ref]` clones into `~/.llm/pkg/<name>`
+(`-l` installs project-local into `.llm/pkg/`, project winning over user), and its
+`extensions/`, `skills/` and `commands/` directories mount into the normal discovery walks.
+Re-running `install` refreshes a clone (`git fetch` + reset); a pinned `@ref` clone moves only
+via `install repo@new-ref`. `llm list` shows what each package carries, `llm remove NAME`
+deletes it. There is no npm lane — git only. Review any third-party package before installing:
+extensions run with full system access.
+
+```bash
+llm install git:github.com/user/llm-deploy    # → ~/.llm/pkg/llm-deploy
+llm install git:github.com/user/llm-deploy@v2 # pinned
+llm list
+llm remove llm-deploy
+```
+
 ## Usage
 
 The top-level help:
@@ -181,6 +197,9 @@ Usage:
 
 Bare `llm` opens an interactive agent session; `llm "task"` runs the
 agent once with tools.
+
+Available commands:
+  install    Install a git package (also: remove, list)
 
 Flags:
   -h, --help      Show this message and exit

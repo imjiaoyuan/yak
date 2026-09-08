@@ -58,6 +58,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// from cwd) then user. Same name in both → project wins.
 pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    // packages: project pkg first, then user pkg (the same nearest-wins
+    // ordering the home directories below use)
+    dirs.extend(crate::commands::pkg::extension_dirs(true));
+    dirs.extend(crate::commands::pkg::extension_dirs(false));
     if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/extensions", true) {
         dirs.push(d);
     }

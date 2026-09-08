@@ -94,6 +94,12 @@ fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
 /// dirs beat the interop dirs). `disabled` drops entries by name.
 pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDef> {
     let mut defs: Vec<SkillDef> = Vec::new();
+    for d in crate::commands::pkg::skill_dirs(true) {
+        load_dir(&d, &mut defs);
+    }
+    for d in crate::commands::pkg::skill_dirs(false) {
+        load_dir(&d, &mut defs);
+    }
     load_dir(
         &user_dir.parent().unwrap_or(user_dir).join(".agents/skills"),
         &mut defs,
