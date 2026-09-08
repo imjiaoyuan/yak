@@ -16,7 +16,6 @@ import json
 import os
 import pty
 import re
-import select
 import struct
 import tempfile
 import termios
@@ -45,20 +44,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 OUT = bytearray()
+OUT_lock = threading.Lock()
+OUT_DONE = threading.Event()
+
+
+def drain_reader(fd):
+    """Read the pty master forever. The REPL redraws on every keystroke and
+    macOS's small tty queues block a child whose reader (this script) falls
+    behind — a background drain keeps the smoke's own reads from ever
+    starving the child's writes."""
+    while True:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        with OUT_lock:
+            OUT.extend(data)
+    OUT_DONE.set()
+
+
+def out_bytes():
+    with OUT_lock:
+        return bytes(OUT)
 
 
 def read_until(fd, pattern, timeout=15.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if re.search(pattern, bytes(OUT)):
-            return bytes(OUT)
-        r, _, _ = select.select([fd], [], [], 0.2)
-        if r:
-            try:
-                OUT.extend(os.read(fd, 4096))
-            except OSError:
-                break
-    raise AssertionError(f"pattern {pattern!r} not seen; tail: {bytes(OUT[-400:])!r}")
+        if re.search(pattern, out_bytes()):
+            return out_bytes()
+        if OUT_DONE.is_set():
+            break
+        time.sleep(0.05)
+    raise AssertionError(f"pattern {pattern!r} not seen; tail: {out_bytes()[-400:]!r}")
 
 
 def send(fd, data):
@@ -109,6 +129,7 @@ def main():
 
     # a bare pty.fork pty reports a 0x0 window; give it a real one
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
 
     # -- multiline: ctrl+j, shift+enter bytes, submit ----------------------
     read_until(fd, rb"\x1b\[>1u")  # the kitty push ships with the prompt
@@ -127,16 +148,10 @@ def main():
             break
     prompts = seen.get("prompts") or []
     if not (prompts and prompts[0] == "line one\nline two\nline three"):
-        # drain and show what the REPL actually drew, for cross-platform diagnosis
+        # the drain thread keeps the screen current; show what the REPL drew
         time.sleep(0.5)
-        r, _, _ = select.select([fd], [], [], 0.5)
-        if r:
-            try:
-                OUT.extend(os.read(fd, 8192))
-            except OSError:
-                pass
         raise AssertionError(
-            f"prompt on the wire: {prompts!r}; screen tail: {bytes(OUT[-800:])!r}"
+            f"prompt on the wire: {prompts!r}; screen tail: {out_bytes()[-800:]!r}"
         )
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line one\\nline two\\nline three" in hist, f"history: {hist!r}"
@@ -220,15 +235,8 @@ def main():
     time.sleep(0.2)
     send(fd, b"\x03")
     time.sleep(0.5)
-    try:
-        while True:
-            r, _, _ = select.select([fd], [], [], 0.3)
-            if not r:
-                break
-            if not os.read(fd, 4096):
-                break
-    except OSError:
-        pass
+    if not OUT_DONE.wait(3.0):
+        OUT_DONE.wait(2.0)
     read_until(fd, rb"\x1b\[<u")  # popped on exit
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0, f"exit code {status}"

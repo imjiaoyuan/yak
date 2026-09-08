@@ -281,7 +281,8 @@ def main():
     p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"install rc={p.returncode} err={p.stderr[-400:]}"
-    assert os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo", "extensions", "hello"))
+    ext_name = "hello.cmd" if sys.platform == "win32" else "hello"
+    assert os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo", "extensions", ext_name))
     ls = run([binary, "list"], env, cwd=work, stdin=subprocess.DEVNULL)
     assert "pkgrepo" in ls.stdout + ls.stderr, f"list: {(ls.stdout + ls.stderr)[-300:]!r}"
     p = run([binary, "remove", "pkgrepo"], env, cwd=work, stdin=subprocess.DEVNULL)
