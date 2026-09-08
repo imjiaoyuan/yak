@@ -1,7 +1,7 @@
 """Cross-platform end-to-end smoke for CI: an OpenAI-style SSE mock runs
 in-process, the freshly built binary resolves a provider from a scratch
-config.json, streams a prompt, switches a mode default and reads it back,
-then exercises the extension host (a user extension registering a tool).
+config.json, runs one-shot agent tasks, then exercises the extension host
+(a user extension registering a tool) and the package commands.
 Exit code is nonzero on any assertion failure."""
 
 import http.server
@@ -43,6 +43,24 @@ for line in sys.stdin:
     elif req.get("type") == "shutdown":
         break
 """
+
+def write_extension(dir_path, name):
+    """Write one extension entry into dir_path. Windows has no shebang
+    execution or exec bits, so the entry is a .cmd shim over the python
+    script there; the stem stays the extension's name either way."""
+    if sys.platform == "win32":
+        script = os.path.join(dir_path, name + ".py")
+        with open(script, "w") as f:
+            f.write(ECHO_EXT)
+        exe = os.path.join(dir_path, name + ".cmd")
+        with open(exe, "w") as f:
+            f.write(f'@"{sys.executable}" "{script}" %*\r\n')
+    else:
+        exe = os.path.join(dir_path, name)
+        with open(exe, "w") as f:
+            f.write(ECHO_EXT)
+        os.chmod(exe, 0o755)
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -202,10 +220,7 @@ def main():
             f,
         )
     os.makedirs(os.path.join(user, "extensions"))
-    echo_ext = os.path.join(user, "extensions", "echo_ext")
-    with open(echo_ext, "w") as f:
-        f.write(ECHO_EXT)
-    os.chmod(echo_ext, 0o755)
+    write_extension(os.path.join(user, "extensions"), "echo_ext")
 
     env = dict(os.environ, LLM_USER_PATH=user, ECHO_LOG=fake_log)
 
@@ -258,9 +273,7 @@ def main():
     # extension mounts, list/remove work
     pkgrepo = os.path.join(work, "pkgrepo")
     os.makedirs(os.path.join(pkgrepo, "extensions"))
-    with open(os.path.join(pkgrepo, "extensions", "hello"), "w") as f:
-        f.write(ECHO_EXT)
-    os.chmod(os.path.join(pkgrepo, "extensions", "hello"), 0o755)
+    write_extension(os.path.join(pkgrepo, "extensions"), "hello")
     subprocess.run(["git", "init", "-q", pkgrepo], check=True)
     subprocess.run(["git", "-C", pkgrepo, "add", "-A"], check=True)
     subprocess.run(["git", "-C", pkgrepo, "-c", "user.email=t@t", "-c",
