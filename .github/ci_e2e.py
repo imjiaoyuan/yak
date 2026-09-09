@@ -252,6 +252,9 @@ def main():
     # manifest script tool: a plain python file with a comment header; the
     # host spawns it per call and feeds the single argument as argv[1]
     wc = os.path.join(user, "extensions", "wordcount")
+    # unix runs the file through its shebang; windows has no shebang
+    # execution, so the manifest declares the interpreter explicitly
+    interp = "# interpreter: python\n" if sys.platform == "win32" else ""
     with open(wc, "w") as f:
         f.write(
             "#!/usr/bin/env python3\n"
@@ -259,10 +262,12 @@ def main():
             "# description: count characters in a text\n"
             "# args: text (string) the text\n"
             "# arg-mode: argv\n"
+            + interp +
             "import sys\n"
             "print(len(sys.argv[1]) if len(sys.argv) > 1 else 0)\n"
         )
-    os.chmod(wc, 0o755)
+    if sys.platform != "win32":
+        os.chmod(wc, 0o755)
 
     env = dict(os.environ, LLM_USER_PATH=user, ECHO_LOG=fake_log)
 
