@@ -62,16 +62,6 @@ impl Session {
         Ok(())
     }
 
-    /// Replace the oldest `cut` messages with one summary, keeping the tail
-    /// and turning the conversation into `[summary, ...tail]`.
-    pub fn compact_prefix(&mut self, summary: String, cut: usize) {
-        let tail = self.seed.split_off(cut);
-        self.seed.clear();
-        self.seed
-            .push(crate::providers::Msg::Summary { text: summary });
-        self.seed.extend(tail);
-    }
-
     /// Rebuild the tool registry: built-ins plus extension-registered
     /// tools; called once at startup, and again on a model switch or
     /// `/reload`.

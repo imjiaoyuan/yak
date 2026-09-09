@@ -257,7 +257,7 @@ fn repl_help(session: &Session) -> String {
         p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /compact /status /yolo /reload /exit · !cmd runs shell · /help lists all");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /yolo /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", session.model.qualified_id()),
@@ -292,7 +292,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/clear",
     "/yolo",
-    "/compact",
     "/status",
     "/exit",
     "/model",
@@ -675,7 +674,6 @@ fn repl_command(
                 "/resume        load a past session",
                 "/tree          jump between branches of this session",
                 "/clear         fresh session",
-                "/compact       condense history now (also runs automatically)",
                 "/status        usage, context and plugins",
                 "/yolo          toggle auto-approval",
                 "/reload        reload skills/extensions",
@@ -882,50 +880,6 @@ fn repl_command(
                 );
             }
         }
-        "/compact" => {
-            // manual compaction: summarize everything older than the
-            // keep-recent window, same as the automatic path
-            let cfg = session.compact.clone();
-            let estimate = crate::agent::compact::estimate_tokens(&session.seed, None);
-            match crate::agent::compact::find_cut(&session.seed, cfg.keep_recent_tokens) {
-                Some(cut) => {
-                    eprintln!(
-                        "  {}compacting …{}",
-                        crate::theme::err().dim,
-                        crate::theme::err().reset
-                    );
-                    // the `/compact <prompt>` argument rides along as extra
-                    // instructions for the summarizer
-                    match crate::agent::compact::summarize_with(
-                        &session.model,
-                        &session.seed[..cut],
-                        arg,
-                    ) {
-                        Ok(summary) if !summary.is_empty() => {
-                            session.compact_prefix(summary, cut);
-                            let now = crate::agent::compact::estimate_tokens(&session.seed, None);
-                            eprintln!(
-                                "  {}compacted {} → {}{}",
-                                crate::theme::err().dim,
-                                crate::term::render::humanize_tokens(estimate),
-                                crate::term::render::humanize_tokens(now),
-                                crate::theme::err().reset
-                            );
-                        }
-                        _ => eprintln!(
-                            "  {}compaction failed; history kept as-is{}",
-                            crate::theme::err().dim,
-                            crate::theme::err().reset
-                        ),
-                    }
-                }
-                None => eprintln!(
-                    "  {}nothing to compact yet{}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                ),
-            }
-        }
         "/resume" => {
             if let Err(e) = resume_pick(session) {
                 eprintln!("Error: {e}");
@@ -1053,13 +1007,13 @@ mod tests {
             .collect();
         for gone in [
             "memory", "init", "export", "settings", "tools", "ask", "quit", "mcp", "trust",
-            "skills",
+            "skills", "compact",
         ] {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
-            "model", "thinking", "login", "logout", "resume", "clear", "compact", "status",
-            "reload", "yolo", "tree", "help", "exit",
+            "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "yolo",
+            "tree", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }
