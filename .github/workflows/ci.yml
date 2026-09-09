@@ -19,6 +19,6 @@ jobs:
       - run: cargo test
       - run: cargo build --release
       - name: End-to-end smoke
-        run: python .github/ci_e2e.py target/debug/llm${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+        run: python .github/ci_e2e.py target/release/llm${{ matrix.os == 'windows-latest' && '.exe' || '' }}
       - name: Interactive REPL smoke
-        run: python .github/ci_repl.py target/debug/llm${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+        run: python .github/ci_repl.py target/release/llm${{ matrix.os == 'windows-latest' && '.exe' || '' }}
