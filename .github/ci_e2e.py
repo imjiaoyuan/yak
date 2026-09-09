@@ -7,6 +7,7 @@ Exit code is nonzero on any assertion failure."""
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if messages:
             seen["last_prompt"] = messages[-1].get("content", "")
             seen.setdefault("prompts", []).append(messages[-1].get("content", ""))
+        if seen.get("tools") and any(
+            t.get("function", {}).get("name") == "wordcount"
+            for t in body.get("tools", [])
+        ) and body.get("model") == "m-wc":
+            messages = body.get("messages", [])
+            if any(m.get("role") == "tool" for m in messages):
+                seen["wc_result"] = messages
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "counted"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_wc", "type": "function",
+                         "function": {"name": "wordcount",
+                                      "arguments": '{"text": "four"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
+            return
         if body.get("model") == "m-trunc":
             # a stream that closes without [DONE]: a truncation, not a success
             self.send_response(200)
@@ -214,6 +236,12 @@ def main():
                         "api_key": "sk-ci",
                         "models": ["m-ant"],
                     },
+                    "mock-wc": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-ci",
+                        "models": ["m-wc"],
+                    },
                 },
                 "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
             },
@@ -221,6 +249,20 @@ def main():
         )
     os.makedirs(os.path.join(user, "extensions"))
     write_extension(os.path.join(user, "extensions"), "echo_ext")
+    # manifest script tool: a plain python file with a comment header; the
+    # host spawns it per call and feeds the single argument as argv[1]
+    wc = os.path.join(user, "extensions", "wordcount")
+    with open(wc, "w") as f:
+        f.write(
+            "#!/usr/bin/env python3\n"
+            "# --- llm-tool: wordcount\n"
+            "# description: count characters in a text\n"
+            "# args: text (string) the text\n"
+            "# arg-mode: argv\n"
+            "import sys\n"
+            "print(len(sys.argv[1]) if len(sys.argv) > 1 else 0)\n"
+        )
+    os.chmod(wc, 0o755)
 
     env = dict(os.environ, LLM_USER_PATH=user, ECHO_LOG=fake_log)
 
@@ -268,6 +310,34 @@ def main():
         f"extension call never ran: {open(fake_log).read() if os.path.exists(fake_log) else 'no log'}"
     assert "final answer after tool" in a.stdout + a.stderr, \
         f"final answer missing: {(a.stdout + a.stderr)[-300:]!r}"
+
+    # manifest script tool lane: the host mounts the header-declared tool
+    # and runs the script per call (single argument rides as argv[1])
+    w = run([binary, "--yolo", "--no-session", "-m", "mock-wc/m-wc",
+             "count the text"], env, cwd=work, stdin=subprocess.DEVNULL)
+    assert w.returncode == 0, f"wc agent rc={w.returncode} err={w.stderr[-800:]}"
+    assert "wordcount" in (seen.get("tools") or []), \
+        f"manifest tool not mounted: {seen.get('tools')}"
+    round2 = seen.get("wc_result") or []
+    tool_msgs = [m for m in round2 if m.get("role") == "tool"]
+    assert tool_msgs and "4" in tool_msgs[0].get("content", ""), \
+        f"script tool result missing: {json.dumps(round2)[-300:]!r}"
+    assert "counted" in w.stdout + w.stderr, \
+        f"final answer missing: {(w.stdout + w.stderr)[-300:]!r}"
+
+    # the reference-template lane: the node template in examples/extensions speaks the
+    # protocol natively (initialize -> advertised tools), so the reference-style
+    # extensions can ride the same host
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tpl = os.path.join(root, "examples", "extensions", "template.js")
+    if shutil.which("node"):
+        out = subprocess.run(
+            ["node", tpl],
+            input='{"id":1,"type":"initialize","params":{}}\n',
+            capture_output=True, text=True, timeout=30,
+        )
+        assert '"tools"' in out.stdout and '"now"' in out.stdout, \
+            f"the reference template handshake broke: {out.stdout[:200]!r} {out.stderr[:200]!r}"
 
     # package lane: a local git repo installs into .llm/pkg (project), its
     # extension mounts, list/remove work

@@ -107,9 +107,27 @@ A built-in catalog of 30+ providers (Anthropic, OpenAI, DeepSeek, Google, Groq, 
 ## Plugins
 
 Extensions are the plugin system, the reference-shaped: anything the core skips, you build yourself as an
-extension — an executable in `~/.llm/extensions/` or the project's `.llm/extensions/` (the project
-copy wins by name), in any language the shebang decides. One file is one extension, and it stays
-running for the whole session, speaking one JSON message per line over stdio:
+extension in `~/.llm/extensions/` or the project's `.llm/extensions/` (the project copy wins by
+name). One directory, one mental model: drop an executable in, restart or `/reload`. Three forms,
+from thinnest up:
+
+**Script tools — any language, three comment lines.** A plain script with a manifest header is a
+tool; the host spawns it per call, feeds the arguments (a single declared argument rides as plain
+`argv[1]`, no JSON), collects stdout as the result, and owns timeout, size cap and approval. Python,
+shell, R, anything with an interpreter:
+
+```python
+#!/usr/bin/env python3
+# --- llm-tool: wordcount
+# description: count characters in a text
+# args: text (string) the text
+import sys
+print(len(sys.argv[1]))
+```
+
+**Resident extensions — tools, commands and event hooks.** For hooks (a `tool_call` gate, command
+handlers) a file without a manifest header is spawned once per session and speaks one JSON message
+per line over stdio:
 
 ```text
 → {"id":1,"type":"initialize","params":{"version":..,"cwd":..}}
@@ -129,7 +147,14 @@ per session with `a`), `[agent] tools` policies still win, and `--tools` picks a
 slow or broken extension warns dimly and mounts nothing — it never blocks a session. Tool calls
 time out after 120s (config `extensions.tool_timeout`), events after 5s.
 
-A minimal tool extension, complete in thirty lines of Python:
+Two self-contained templates ship in `examples/extensions/`: `template.js` (a **the reference-compatible
+runtime** — the user section is written in the extension API, `host.registerTool` /
+`host.registerCommand` / `ext.on("tool_call", ...)`, so most tool/command/hook extensions written for
+paste straight in; APIs that need the process (UI, editors, hotkeys) raise with a clear
+message) and `template.py` (the same shape in Python). Copy one into the extensions directory and
+edit its user section.
+
+A minimal resident extension, complete in thirty lines of Python:
 
 ```python
 #!/usr/bin/env python3

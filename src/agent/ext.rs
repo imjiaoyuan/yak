@@ -69,18 +69,30 @@ pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Executable files in the home directories; project wins by name.
-pub fn discover(cwd: &Path) -> Vec<PathBuf> {
+/// Discovered extension entries, split by form: resident executables
+/// (spawned once, speaking the protocol) and manifest script tools (one
+/// comment header on any script in any language; the host runs the
+/// protocol around each call). Project wins by stem name across both.
+pub struct Discovered {
+    pub resident: Vec<PathBuf>,
+    pub script_tools: Vec<crate::agent::ext::ExecToolSpec>,
+}
+
+/// Scan the home directories for extension files.
+pub fn discover(cwd: &Path) -> Discovered {
     let disabled = crate::core::config::disabled_extensions();
     let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
+    let mut out = Discovered {
+        resident: Vec::new(),
+        script_tools: Vec::new(),
+    };
     for dir in discover_dirs(cwd) {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
             let path = entry.path();
-            if !path.is_file() || !is_executable(&path) {
+            if !path.is_file() {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -89,10 +101,144 @@ pub fn discover(cwd: &Path) -> Vec<PathBuf> {
             if disabled.iter().any(|d| d == stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
-            out.push(path);
+            // a `--- llm-tool:` manifest header makes any script a tool —
+            // no exec bit needed (the host runs it through the declared
+            // interpreter), which also makes the form work on Windows
+            if let Some(spec) = exec_tool_manifest(&path) {
+                out.script_tools.push(spec);
+            } else if is_executable(&path) {
+                out.resident.push(path);
+            }
         }
     }
     out
+}
+
+/// A `--- llm-tool:` manifest parsed from a script's leading comment block.
+#[derive(Clone, Debug)]
+pub struct ExecToolSpec {
+    pub path: PathBuf,
+    pub name: String,
+    pub description: String,
+    pub schema: Value,
+    /// single-argument form: the one declared argument arrives as argv[1]
+    /// (plain text, no JSON) — shell scripts never need to parse stdin
+    pub arg_mode_argv: bool,
+    /// explicit interpreter (`# interpreter: python`); None = the file runs
+    /// itself (shebang / exec bit / Windows association)
+    pub interpreter: Option<String>,
+    pub timeout: u64,
+}
+
+/// Parse the manifest header off a script. A manifest starts at a comment
+/// line carrying `--- llm-tool: <name>` (`#` or `//` prefix) and extends
+/// over the following comment lines; the first non-comment line ends it.
+/// Fields: `description:`, `args: name (type) desc` (repeatable),
+/// `arg-mode: argv`, `interpreter: <prog>`, `timeout: <secs>`.
+pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
+    let mut name: Option<String> = None;
+    let mut description = String::new();
+    let mut properties = serde_json::Map::new();
+    let mut required: Vec<Value> = Vec::new();
+    let mut arg_mode_argv = false;
+    let mut interpreter: Option<String> = None;
+    let mut timeout: Option<u64> = None;
+    let mut in_header = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        let comment = trimmed
+            .strip_prefix('#')
+            .or_else(|| trimmed.strip_prefix("//"))
+            .map(str::trim);
+        let Some(comment) = comment else {
+            if in_header {
+                break; // first non-comment line ends the header
+            }
+            continue;
+        };
+        if !in_header {
+            // lines before the marker (shebang, license header) are skipped,
+            // not fatal — only a non-comment line ends the scan
+            let Some(rest) = comment.strip_prefix("--- llm-tool:") else {
+                continue;
+            };
+            name = Some(rest.trim().to_string());
+            in_header = true;
+            continue;
+        }
+        if let Some(rest) = comment.strip_prefix("description:") {
+            description = rest.trim().to_string();
+        } else if let Some(rest) = comment.strip_prefix("args:") {
+            parse_arg_field(rest, &mut properties, &mut required);
+        } else if matches!(comment.strip_prefix("arg-mode:"), Some(v) if v.trim() == "argv") {
+            arg_mode_argv = true;
+        } else if let Some(rest) = comment.strip_prefix("interpreter:") {
+            let prog = rest.trim();
+            if !prog.is_empty() {
+                interpreter = Some(crate::core::config::expand_env(prog));
+            }
+        } else if let Some(rest) = comment.strip_prefix("timeout:") {
+            timeout = rest.trim().parse::<u64>().ok().filter(|t| *t > 0);
+        }
+    }
+    Some(ExecToolSpec {
+        path: path.to_path_buf(),
+        name: name?,
+        description,
+        schema: json!({
+            "type": "object",
+            "properties": Value::Object(properties),
+            "required": required,
+        }),
+        arg_mode_argv,
+        interpreter,
+        timeout: timeout.unwrap_or_else(|| crate::core::config::extension_tool_timeout().as_secs()),
+    })
+}
+
+/// `args: name (type) the description` → one schema property + required.
+fn parse_arg_field(
+    rest: &str,
+    properties: &mut serde_json::Map<String, Value>,
+    required: &mut Vec<Value>,
+) {
+    let Some((name, rest)) = rest.trim().split_once(char::is_whitespace) else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let (type_, description) = match rest.trim().split_once(char::is_whitespace) {
+        Some((t, d)) if t.starts_with('(') && t.ends_with(')') => {
+            (&t[1..t.len() - 1], d.trim().to_string())
+        }
+        _ => ("string", rest.trim().to_string()),
+    };
+    let type_ = match type_ {
+        "int" | "integer" => "integer",
+        "number" | "float" => "number",
+        "bool" | "boolean" => "boolean",
+        "list" | "array" => "array",
+        _ => "string",
+    };
+    let mut prop = serde_json::Map::new();
+    prop.insert("type".to_string(), json!(type_));
+    if !description.is_empty() {
+        prop.insert("description".to_string(), json!(description));
+    }
+    properties.insert(name.to_string(), Value::Object(prop));
+    required.push(json!(name));
+}
+
+/// Read a file's head and parse its manifest, if it carries one.
+fn exec_tool_manifest(path: &Path) -> Option<ExecToolSpec> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 4096];
+    let n = f.read(&mut head).unwrap_or(0);
+    let text = String::from_utf8_lossy(&head[..n]);
+    parse_tool_manifest(&text, path).filter(|s| !s.name.is_empty())
 }
 
 #[cfg(unix)]
@@ -220,7 +366,7 @@ impl Ext {
             Err(_) => TOOL_TIMEOUT,
         };
         let result = self.request(
-            &json!({"id": next_id(), "type": "call_tool", "name": name, "args": args}),
+            &json!({"id": next_id(), "type": "call_tool", "v": 1, "name": name, "args": args}),
             timeout,
         )?;
         Ok(match result.get("result") {
@@ -233,7 +379,7 @@ impl Ext {
     /// Run one extension-registered slash command; the reply prints.
     pub fn run_command(&self, name: &str, args: &str) -> Result<String, String> {
         let result = self.request(
-            &json!({"id": next_id(), "type": "run_command", "name": name, "args": args}),
+            &json!({"id": next_id(), "type": "run_command", "v": 1, "name": name, "args": args}),
             TOOL_TIMEOUT,
         )?;
         Ok(result
@@ -254,7 +400,7 @@ impl Ext {
             return Ok(None);
         }
         let result = self.request(
-            &json!({"id": next_id(), "type": "event", "name": name, "params": params}),
+            &json!({"id": next_id(), "type": "event", "v": 1, "name": name, "params": params}),
             EVENT_TIMEOUT,
         )?;
         Ok(result.get("result").cloned())
@@ -276,6 +422,7 @@ impl Ext {
 
 pub struct Extensions {
     exts: Vec<Arc<Ext>>,
+    script_tools: Vec<ExecToolSpec>,
 }
 
 impl Extensions {
@@ -283,9 +430,10 @@ impl Extensions {
     /// or broken one costs at most `CONNECT_TIMEOUT` and never aborts the
     /// others — it lands in the list as Failed with a reason.
     pub fn connect(cwd: &Path) -> Extensions {
-        let paths = discover(cwd);
+        let found = discover(cwd);
         let exts = std::thread::scope(|scope| {
-            let handles: Vec<_> = paths
+            let handles: Vec<_> = found
+                .resident
                 .iter()
                 .map(|p| scope.spawn(|| connect_one(p)))
                 .collect();
@@ -303,11 +451,26 @@ impl Extensions {
                 eprintln!("\x1b[2mextension '{}' failed: {reason}\x1b[0m", ext.name);
             }
         }
-        Extensions { exts }
+        Extensions {
+            exts,
+            script_tools: found.script_tools,
+        }
     }
 
-    /// Append one `ExtTool` per tool of every ready extension.
+    /// Append one `ExtTool` per tool of every ready extension, plus one
+    /// `ScriptTool` per manifest-carrying script.
     pub fn mount_tools(&self, out: &mut Vec<Box<dyn Tool>>) {
+        for spec in &self.script_tools {
+            let description = if spec.description.is_empty() {
+                format!("Script tool {}", spec.name)
+            } else {
+                spec.description.clone()
+            };
+            out.push(Box::new(ScriptTool {
+                spec: spec.clone(),
+                description,
+            }));
+        }
         for ext in &self.exts {
             let Ok(state) = &*lock(&ext.state) else {
                 continue;
@@ -431,6 +594,7 @@ impl Ext {
                 &json!({
                     "id": next_id(),
                     "type": "initialize",
+                    "v": 1,
                     "params": {
                         "version": env!("CARGO_PKG_VERSION"),
                         "cwd": std::env::current_dir()
@@ -570,6 +734,84 @@ fn parse_tools(result: &Value) -> Vec<ToolMeta> {
         .unwrap_or_default()
 }
 
+/// One manifest-carrying script mounted as a tool: the host runs the
+/// protocol around each call (spawn, feed arguments, collect output,
+/// timeout), the script itself only prints its result.
+struct ScriptTool {
+    spec: ExecToolSpec,
+    description: String,
+}
+
+impl Tool for ScriptTool {
+    fn name(&self) -> &str {
+        &self.spec.name
+    }
+    fn tier(&self) -> Tier {
+        Tier::Exec
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters(&self) -> Value {
+        self.spec.schema.clone()
+    }
+    fn preview(&self, args: &Value) -> String {
+        super::tools::args_preview(&self.spec.name, args)
+    }
+    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+        let mut command = match self.spec.interpreter.as_deref() {
+            Some(prog) => {
+                let mut c = std::process::Command::new(prog);
+                c.arg(&self.spec.path);
+                c
+            }
+            None => std::process::Command::new(&self.spec.path),
+        };
+        command
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // argv mode: the single declared argument rides as plain argv[1],
+        // so shell scripts never need to parse JSON
+        let stdin_payload = if self.spec.arg_mode_argv {
+            let value = args
+                .as_object()
+                .and_then(|o| o.values().next())
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => crate::jsonfmt::dumps_indent(other, 0),
+                })
+                .unwrap_or_default();
+            command.arg(value);
+            None
+        } else {
+            Some(format!(
+                "{}\n",
+                serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string())
+            ))
+        };
+        let outcome = crate::platform::run_with_progress(
+            command,
+            stdin_payload.as_deref(),
+            self.spec.timeout,
+            crate::core::http::interrupt_flag(),
+            log,
+        );
+        if outcome.interrupted {
+            return ToolOutput::err("script tool interrupted");
+        }
+        if outcome.timed_out {
+            return ToolOutput::err(format!(
+                "script tool timed out after {}s: {}",
+                self.spec.timeout,
+                self.spec.path.display()
+            ));
+        }
+        super::tools::finish_process_output(outcome.stdout, outcome.stderr, outcome.code)
+    }
+}
+
 // ============================================================================
 // IO loops (the MCP client's shape)
 // ============================================================================
@@ -669,5 +911,27 @@ impl Tool for ExtTool {
             }
             Err(e) => ToolOutput::err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_python_manifest_header() {
+        let text = "#!/usr/bin/env python3\n# --- llm-tool: wordcount\n# description: count characters\n# args: text (string) the text\n# arg-mode: argv\n# interpreter: python\nimport sys\n";
+        let spec = parse_tool_manifest(text, Path::new("/x/wordcount")).expect("manifest");
+        assert_eq!(spec.name, "wordcount");
+        assert_eq!(spec.description, "count characters");
+        assert!(spec.arg_mode_argv);
+        assert_eq!(spec.interpreter.as_deref(), Some("python"));
+        assert_eq!(spec.schema["properties"]["text"]["type"], json!("string"));
+        assert_eq!(spec.schema["required"][0], json!("text"));
+    }
+
+    #[test]
+    fn plain_scripts_have_no_manifest() {
+        assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s")).is_none());
     }
 }
