@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -155,6 +155,63 @@ pub fn extension_tool_timeout() -> Duration {
                 .and_then(|t| t.as_u64())
         });
     Duration::from_secs(secs.unwrap_or(120).max(1))
+}
+
+// project trust — projects the user has accepted automatic (yolo) approval
+// in; stored as absolute canonical paths, nearest-ancestor matching
+
+fn trust_path() -> PathBuf {
+    user_dir().join("trust.json")
+}
+
+/// The trusted project directories, canonical absolute paths.
+pub fn trusted_projects() -> Vec<PathBuf> {
+    let raw = match fs::read_to_string(trust_path()) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("trusted")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when `cwd` itself or any of its ancestors is trusted (the nearest
+/// saved decision applies, like the reference's trust.json).
+pub fn project_trusted(cwd: &Path) -> bool {
+    let trusted = trusted_projects();
+    let mut cur = Some(cwd);
+    while let Some(dir) = cur {
+        if trusted.iter().any(|t| t == dir) {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
+/// Toggle trust for a directory; returns the new state.
+pub fn set_project_trusted(dir: &Path, trusted: bool) -> std::io::Result<bool> {
+    fs::create_dir_all(user_dir())?;
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut list: Vec<PathBuf> = trusted_projects()
+        .into_iter()
+        .filter(|t| *t != canonical)
+        .collect();
+    if trusted {
+        list.push(canonical);
+    }
+    let value = serde_json::json!({ "trusted": list });
+    fs::write(trust_path(), jsonfmt::dumps_indent(&value, 2))?;
+    Ok(trusted)
 }
 
 /// Read config.json as an object for a merge-preserving rewrite: a missing

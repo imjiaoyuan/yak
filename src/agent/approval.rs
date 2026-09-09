@@ -79,13 +79,22 @@ pub enum Decision {
     Deny(String),
 }
 
-/// Resolve whether a tool call may run. Precedence follows oh-my-the reference:
-/// explicit policy (deny/prompt/allow) > yolo short-circuit > mode-vs-tier.
-/// Explicit prompts and denies hold even in yolo mode.
+/// Resolve whether a tool call may run. Precedence: explicit policy
+/// (deny/prompt/allow) > yolo short-circuit > tier gate. Explicit prompts
+/// and denies hold even in yolo mode.
 ///
-/// `escapes_cwd` marks a path argument that leaves the working directory;
-/// Linux-style gate: reads inside the tree are free, everything else asks.
-pub fn resolve(name: &str, tier: Tier, escapes_cwd: bool, cfg: &ApprovalConfig) -> Decision {
+/// The gate is directory-scoped: reads inside the working directory run free,
+/// reads outside it and any file write ask, and a bash command runs free
+/// only when every command it would start is on the read-only whitelist —
+/// writes, deletes, network fetches, interpreters and anything unrecognized
+/// ask. `bash_command` is the raw command line for exec-tier tools.
+pub fn resolve(
+    name: &str,
+    tier: Tier,
+    escapes_cwd: bool,
+    cfg: &ApprovalConfig,
+    bash_command: Option<&str>,
+) -> Decision {
     match cfg.tool_policies.get(name) {
         Some(Policy::Deny) => {
             return Decision::Deny(format!("tool '{name}' is denied by configuration"));
@@ -102,8 +111,11 @@ pub fn resolve(name: &str, tier: Tier, escapes_cwd: bool, cfg: &ApprovalConfig) 
     match (tier, escapes_cwd) {
         (Tier::Read, false) => Decision::Auto,
         (Tier::Read, true) => Decision::Ask("reading outside the working directory".to_string()),
-        (Tier::Write, _) => Decision::Ask("modifying files requires approval".to_string()),
-        (Tier::Exec, _) => Decision::Ask("running commands requires approval".to_string()),
+        (Tier::Write, _) => Decision::Ask("writing files requires approval".to_string()),
+        (Tier::Exec, _) if bash_command.is_some_and(readonly_command) => Decision::Auto,
+        (Tier::Exec, _) => {
+            Decision::Ask("running a non-read-only command requires approval".to_string())
+        }
     }
 }
 
@@ -131,6 +143,227 @@ fn normalize(p: &std::path::Path) -> std::path::PathBuf {
         }
     }
     out
+}
+
+/// Split a command line into segments on `&&`, `||`, `;`, `|`, `&` and
+/// newlines, respecting single/double quotes.
+fn split_compound(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                current.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    current.push(c);
+                }
+                '\n' | ';' => {
+                    segments.push(std::mem::take(&mut current));
+                }
+                '&' => {
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                    }
+                    segments.push(std::mem::take(&mut current));
+                }
+                '|' => {
+                    if chars.peek() == Some(&'|') {
+                        chars.next();
+                    }
+                    segments.push(std::mem::take(&mut current));
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Whitespace tokens of a segment with surrounding quotes stripped, so a
+/// `bash -c 'git status'` payload reads as its own command line.
+fn tokens(seg: &str) -> Vec<String> {
+    seg.split_whitespace()
+        .map(|t| t.trim_matches(['\'', '"']).to_string())
+        .collect()
+}
+
+/// Programs that only ever run another command: whatever follows them (past
+/// their own flags and argument) is a command position too.
+const WRAPPERS: &[&str] = &[
+    "xargs", "nohup", "setsid", "stdbuf", "nice", "ionice", "time", "watch", "env", "timeout",
+    "command", "exec",
+];
+
+/// Shells whose `-c` argument is a full command line of its own.
+const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
+
+/// Every token of a segment that starts a command: the first word (past any
+/// leading env assignments), whatever a wrapper runs next, and `shell -c`
+/// payloads recursed one level. `xargs rm`, `env git push` and
+/// `bash -c 'git status'` all surface their inner command; a bare argument
+/// like the `rm` in `grep rm notes.txt` never does.
+fn command_positions(seg: &str, depth: usize) -> Vec<String> {
+    let toks = tokens(seg);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() && toks[i].contains('=') {
+        i += 1;
+    }
+    while i < toks.len() {
+        let t = toks[i].as_str();
+        if SHELLS.contains(&t)
+            && matches!(
+                toks.get(i + 1).map(String::as_str),
+                Some("-c") | Some("-lc")
+            )
+            && i + 2 < toks.len()
+        {
+            if depth < 2 {
+                out.extend(command_positions(&toks[i + 2..].join(" "), depth + 1));
+            }
+            return out;
+        }
+        out.push(t.to_string());
+        if WRAPPERS.contains(&t) {
+            i += 1;
+            while i < toks.len() && toks[i].starts_with('-') {
+                i += 1;
+            }
+            if t == "timeout" && i < toks.len() && !toks[i].contains('=') {
+                i += 1; // the duration word
+            }
+            continue;
+        }
+        return out;
+    }
+    out
+}
+
+/// Read-only commands a bash call may start without asking. Deliberately
+/// conservative: anything that can write, delete, fetch, interpret code or
+/// is simply unknown asks. `git push` is as far from this list as it gets.
+const READONLY_COMMANDS: &[&str] = &[
+    // file inspection
+    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "readlink", "dirname",
+    "basename", "realpath", "tree", // search
+    "grep", "egrep", "fgrep", "rg", "ripgrep", "findstr",
+    // text processing (no -i, no output redirection — checked separately)
+    "sort", "uniq", "diff", "comm", "cmp", "cut", "column", "jq",
+    // process / system inspection
+    "ps", "pgrep", "uname", "whoami", "hostname", "date", "which", "type", "whereis", "echo",
+    "printf", "true", "false", "test",
+    "[",
+    // git read-only subcommands are matched specially below
+];
+
+/// cargo subcommands that only touch the build cache and read the project
+/// (the agent's core workflow; `cargo run`/`install`/`publish` stay gated).
+const READONLY_CARGO: &[&str] = &[
+    "build",
+    "test",
+    "check",
+    "tree",
+    "clippy",
+    "metadata",
+    "version",
+    "locate-project",
+    "pkgid",
+    "rustc-version",
+];
+
+/// git subcommands that never mutate anything.
+const READONLY_GIT: &[&str] = &[
+    "status",
+    "log",
+    "diff",
+    "show",
+    "branch",
+    "remote",
+    "blame",
+    "shortlog",
+    "describe",
+    "ls-files",
+    "ls-remote",
+    "rev-parse",
+    "reflog",
+    "grep",
+    "cat-file",
+    "config",
+];
+
+/// True when every command a bash call would start is on the read-only
+/// whitelist. Overrides checked separately: output redirection (a write in
+/// disguise), `find` with `-delete`/`-exec` (whitelisted word, mutating
+/// flags), and `git` subcommands.
+pub fn readonly_command(command: &str) -> bool {
+    if command.contains('>') {
+        return false;
+    }
+    for seg in split_compound(command) {
+        let positions = command_positions(&seg, 0);
+        if positions.is_empty() {
+            return false;
+        }
+        let mut rest = positions.iter();
+        let first = rest.next().unwrap().as_str();
+        // `git` is whitelisted only for its read-only subcommands (the
+        // positions list stops at the command word, so the subcommand comes
+        // from the segment tokens, past global flags like -C)
+        if first == "git" {
+            let toks = tokens(&seg);
+            let sub = toks
+                .iter()
+                // skip "git" itself (the positions list already ends there
+                // for direct calls; a `bash -c 'git status'` payload keeps
+                // the whole line in tokens)
+                .skip_while(|t| t.as_str() != "git")
+                .skip(1)
+                .find(|t| !t.starts_with('-'))
+                .map(String::as_str)
+                .unwrap_or("");
+            if !READONLY_GIT.contains(&sub) {
+                return false;
+            }
+            continue;
+        }
+        if first == "cargo" {
+            let toks = tokens(&seg);
+            let sub = toks
+                .iter()
+                .skip(1)
+                .find(|t| !t.starts_with('-'))
+                .map(String::as_str)
+                .unwrap_or("");
+            if !READONLY_CARGO.contains(&sub) {
+                return false;
+            }
+            continue;
+        }
+        if first == "find"
+            && tokens(&seg)
+                .iter()
+                .any(|t| matches!(t.as_str(), "-delete" | "-exec" | "-execdir" | "-ok"))
+        {
+            return false;
+        }
+        if !READONLY_COMMANDS.contains(&first) {
+            return false;
+        }
+    }
+    true
 }
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
@@ -176,18 +409,93 @@ mod tests {
 
     #[test]
     fn mode_tier_matrix() {
-        let read = resolve("read", Tier::Read, false, &cfg(Mode::AlwaysAsk, &[]));
+        let read = resolve("read", Tier::Read, false, &cfg(Mode::AlwaysAsk, &[]), None);
         assert_eq!(read, Decision::Auto);
-        let read_out = resolve("read", Tier::Read, true, &cfg(Mode::AlwaysAsk, &[]));
+        let read_out = resolve("read", Tier::Read, true, &cfg(Mode::AlwaysAsk, &[]), None);
         assert!(matches!(read_out, Decision::Ask(_)));
-        let write = resolve("write", Tier::Write, false, &cfg(Mode::AlwaysAsk, &[]));
+        let write = resolve(
+            "write",
+            Tier::Write,
+            false,
+            &cfg(Mode::AlwaysAsk, &[]),
+            None,
+        );
         assert!(matches!(write, Decision::Ask(_)));
-        let exec = resolve("bash", Tier::Exec, false, &cfg(Mode::AlwaysAsk, &[]));
+        let exec = resolve("bash", Tier::Exec, false, &cfg(Mode::AlwaysAsk, &[]), None);
         assert!(matches!(exec, Decision::Ask(_)));
         assert_eq!(
-            resolve("bash", Tier::Exec, true, &cfg(Mode::Yolo, &[])),
+            resolve("bash", Tier::Exec, true, &cfg(Mode::Yolo, &[]), None),
             Decision::Auto
         );
+    }
+
+    #[test]
+    fn readonly_bash_commands_run_free() {
+        for cmd in [
+            "ls -la",
+            "git status",
+            "git diff HEAD~1",
+            "git log --oneline | head -5",
+            "cat a.txt b.txt",
+            "rg pattern src/",
+            "cargo test --lib",
+            "ps aux | grep llm",
+            "bash -c 'git status'",
+        ] {
+            let d = resolve(
+                "bash",
+                Tier::Exec,
+                false,
+                &cfg(Mode::AlwaysAsk, &[]),
+                Some(cmd),
+            );
+            assert_eq!(d, Decision::Auto, "{cmd} should run free");
+        }
+    }
+
+    #[test]
+    fn dangerous_bash_commands_ask() {
+        for cmd in [
+            "rm -rf build",
+            "git push origin main",
+            "git commit -m x",
+            "git checkout -b feat",
+            "curl https://x",
+            "python script.py",
+            "node build.js",
+            "cat a.txt > b.txt",
+            "sed -i 's/a/b/' f.txt",
+            "find . -name x -delete",
+            "find . -name x -exec rm {} ;",
+            "echo hi | sudo tee /etc/hosts",
+            "bash -c 'git push'",
+            "npm install",
+            "chmod +x run.sh",
+        ] {
+            let d = resolve(
+                "bash",
+                Tier::Exec,
+                false,
+                &cfg(Mode::AlwaysAsk, &[]),
+                Some(cmd),
+            );
+            assert!(matches!(d, Decision::Ask(_)), "{cmd} should ask");
+        }
+    }
+
+    #[test]
+    fn writes_always_ask_in_ask_mode() {
+        let d = resolve(
+            "write",
+            Tier::Write,
+            false,
+            &cfg(Mode::AlwaysAsk, &[]),
+            None,
+        );
+        assert!(matches!(d, Decision::Ask(_)));
+        // an extension allow skips the ask at the gate, not here
+        let yolo = resolve("write", Tier::Write, false, &cfg(Mode::Yolo, &[]), None);
+        assert_eq!(yolo, Decision::Auto);
     }
 
     #[test]
@@ -209,6 +517,7 @@ mod tests {
             Tier::Exec,
             false,
             &cfg(Mode::Yolo, &[("bash", Policy::Deny)]),
+            None,
         );
         assert!(matches!(deny, Decision::Deny(_)));
         let allow = resolve(
@@ -216,6 +525,7 @@ mod tests {
             Tier::Exec,
             false,
             &cfg(Mode::AlwaysAsk, &[("bash", Policy::Allow)]),
+            None,
         );
         assert_eq!(allow, Decision::Auto);
         let prompt = resolve(
@@ -223,6 +533,7 @@ mod tests {
             Tier::Read,
             false,
             &cfg(Mode::Yolo, &[("read", Policy::Prompt)]),
+            None,
         );
         assert!(matches!(prompt, Decision::Ask(_)));
     }

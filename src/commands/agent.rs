@@ -237,6 +237,12 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     };
 
     let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
+    // a trusted project runs with automatic approval (the reference's trust.json idea,
+    // applied to tool execution); /trust toggles it per directory
+    if approval_cfg.mode == approval::Mode::AlwaysAsk && config::project_trusted(&cwd) {
+        approval_cfg.mode = approval::Mode::Yolo;
+        eprintln!("\x1b[2mtrusted project — running in yolo mode (/trust to revoke)\x1b[0m");
+    }
 
     // extensions: user executables registering tools (and, later, commands
     // and event hooks). A failed extension warns and mounts nothing, never

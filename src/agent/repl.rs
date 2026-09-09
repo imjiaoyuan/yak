@@ -284,6 +284,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/resume",
     "/tree",
     "/reload",
+    "/trust",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -620,6 +621,8 @@ fn repl_command(
             eprintln!("  /clear        fresh session       /resume  load a past one");
             eprintln!("  /skills       list skills         /yolo    toggle approvals");
             eprintln!("  /status       usage + extensions  /compact condense history");
+            eprintln!("  /reload       reload skills/extensions");
+            eprintln!("  /trust        toggle auto-approve for this project");
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!(
@@ -829,6 +832,28 @@ fn repl_command(
         "/tree" => {
             if let Err(e) = tree_jump(session) {
                 eprintln!("Error: {e}");
+            }
+        }
+        "/trust" => {
+            // toggle automatic approval for this project directory
+            let trusted = crate::core::config::project_trusted(&session.cwd);
+            match crate::core::config::set_project_trusted(&session.cwd, !trusted) {
+                Ok(now_trusted) => {
+                    session.approval.mode = if now_trusted {
+                        approval::Mode::Yolo
+                    } else {
+                        approval::Mode::AlwaysAsk
+                    };
+                    if now_trusted {
+                        eprintln!(
+                            "\x1b[2mtrusted {} — automatic approval in this project\x1b[0m",
+                            session.cwd.display()
+                        );
+                    } else {
+                        eprintln!("\x1b[2mtrust revoked — non-read-only commands ask again\x1b[0m");
+                    }
+                }
+                Err(e) => eprintln!("Error: {e}"),
             }
         }
         "/reload" => {

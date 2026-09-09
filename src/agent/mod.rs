@@ -340,22 +340,38 @@ pub fn run_agent(
                 });
                 continue;
             }
-            // extension gate: a subscribed tool_call may deny or rewrite the
-            // arguments before the approval matrix even sees them
+            // extension gate: a subscribed tool_call may deny, rewrite the
+            // arguments, or allow (skip the built-in approval) before the
+            // matrix even sees them
             let mut denied: Option<String> = None;
+            let mut extension_allowed = false;
             match fire(
                 opts.hooks,
                 "tool_call",
                 json!({"tool": call.name, "args": call.arguments}),
             ) {
                 Err(reason) => denied = Some(reason),
-                Ok(Some(rewritten)) => call.arguments = rewritten,
+                Ok(Some(reply)) => {
+                    if reply.get("decision").and_then(serde_json::Value::as_str) == Some("allow") {
+                        extension_allowed = true;
+                    }
+                    if let Some(rewritten) = reply.get("args") {
+                        call.arguments = rewritten.clone();
+                    }
+                }
                 Ok(None) => {}
             }
             let out = if let Some(reason) = denied {
                 Err(reason)
             } else {
-                match gate_call(&call, tools, &opts.cwd, approval, on_approval) {
+                match gate_call(
+                    &call,
+                    tools,
+                    &opts.cwd,
+                    approval,
+                    on_approval,
+                    extension_allowed,
+                ) {
                     Err(denied) => Err(denied),
                     Ok(cleared) => {
                         on_update(AgentUpdate::ToolStart {
@@ -468,6 +484,7 @@ fn gate_call<'a>(
     cwd: &std::path::Path,
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    extension_allowed: bool,
 ) -> Result<ClearedCall<'a>, String> {
     let Some(tool) = tools.iter().find(|t| t.name() == call.name) else {
         return Err(format!("tool '{}' not found", call.name));
@@ -484,14 +501,20 @@ fn gate_call<'a>(
         .get("path")
         .and_then(|p| p.as_str())
         .is_some_and(|p| approval::escapes_cwd(cwd, p));
-    let (ask, reason) = match approval::resolve(tool.name(), tool.tier(), escapes, approval) {
-        approval::Decision::Deny(r) => return Err(format!("denied: {r}")),
-        approval::Decision::Ask(r) => (true, r),
-        approval::Decision::Auto => (false, String::new()),
+    let bash_command = if tool.name() == "bash" {
+        Some(call.arguments["command"].as_str().unwrap_or(""))
+    } else {
+        None
     };
+    let (ask, reason) =
+        match approval::resolve(tool.name(), tool.tier(), escapes, approval, bash_command) {
+            approval::Decision::Deny(r) => return Err(format!("denied: {r}")),
+            approval::Decision::Ask(r) => (true, r),
+            approval::Decision::Auto => (false, String::new()),
+        };
     let preview = tool.preview(&call.arguments);
     let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
-    if ask {
+    if ask && !extension_allowed {
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),
             tier: tool.tier(),
