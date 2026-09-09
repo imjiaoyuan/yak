@@ -32,7 +32,8 @@ pub fn repl(
             }
             continue;
         }
-        let prompt = "\x1b[1m>\x1b[0m ";
+        let p = crate::theme::err();
+        let prompt = format!("{}>{} ", p.bold, p.reset);
         let help = repl_help(&session);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let cwd = session.cwd.display().to_string();
@@ -52,7 +53,7 @@ pub fn repl(
             }
             out
         };
-        let line = match editor.read_line(prompt, &help, &completer) {
+        let line = match editor.read_line(&prompt, &help, &completer) {
             crate::term::lineedit::LineResult::Line(l) => l,
             crate::term::lineedit::LineResult::Eof => break,
             crate::term::lineedit::LineResult::Interrupt => {
@@ -75,7 +76,12 @@ pub fn repl(
             match status {
                 Ok(s) => {
                     if !s.success() {
-                        eprintln!("\x1b[2m(exited {})\x1b[0m", s.code().unwrap_or(-1));
+                        eprintln!(
+                            "{}(exited {}){}",
+                            crate::theme::err().dim,
+                            s.code().unwrap_or(-1),
+                            crate::theme::err().reset
+                        );
                     }
                 }
                 Err(e) => eprintln!("Error: {e}"),
@@ -108,7 +114,11 @@ pub fn repl(
                 break;
             }
             for line in leftover {
-                eprintln!("\x1b[2m→ {line}\x1b[0m");
+                eprintln!(
+                    "{}→ {line}{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
                 run_task_logged(&mut session, &line, &mut Vec::new());
             }
         }
@@ -146,7 +156,13 @@ fn attach_local_files(
         };
         if let Ok(loaded) = crate::core::attachments::load(token, Some(mime)) {
             let req = loaded.request();
-            eprintln!("\x1b[2m→ attached {} ({})\x1b[0m", token, req.mime_type);
+            eprintln!(
+                "{}→ attached {} ({}){}",
+                crate::theme::err().dim,
+                token,
+                req.mime_type,
+                crate::theme::err().reset
+            );
             queue.push(req);
         }
     }
@@ -162,9 +178,11 @@ fn run_task_logged(
     crate::core::http::clear_interrupt();
     if !attachments.is_empty() {
         eprintln!(
-            "\x1b[2m→ {} attachment{} ride this task\x1b[0m",
+            "{}→ {} attachment{} ride this task{}",
+            crate::theme::err().dim,
             attachments.len(),
-            if attachments.len() == 1 { "" } else { "s" }
+            if attachments.len() == 1 { "" } else { "s" },
+            crate::theme::err().reset
         );
     }
     // cloned in, cleared on success: a failed task keeps them queued
@@ -175,7 +193,11 @@ fn run_task_logged(
                 if !outcome.final_text.is_empty() && !outcome.final_text.ends_with('\n') {
                     println!();
                 }
-                eprintln!("\x1b[2minterrupted\x1b[0m");
+                eprintln!(
+                    "{}interrupted{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
             }
         }
         Err(e) => {
@@ -188,11 +210,20 @@ fn run_task_logged(
 /// `/skill:name` — load the skill file and submit it as one task.
 fn run_skill(session: &mut Session, skills: &[crate::agent::skills::SkillDef], name: &str) {
     let Some(skill) = skills.iter().find(|s| s.name == name) else {
-        eprintln!("\x1b[2munknown skill '{name}' (try /skills)\x1b[0m");
+        eprintln!(
+            "{}unknown skill '{name}' (try /skills){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return;
     };
     let Ok(body) = std::fs::read_to_string(&skill.path) else {
-        eprintln!("\x1b[2mcannot read {}\x1b[0m", skill.path.display());
+        eprintln!(
+            "{}cannot read {}{}",
+            crate::theme::err().dim,
+            skill.path.display(),
+            crate::theme::err().reset
+        );
         return;
     };
     let prompt = format!(
@@ -220,8 +251,10 @@ fn abbrev_home(path: &str) -> String {
 
 /// Full help page shown on ctrl+o.
 fn repl_help(session: &Session) -> String {
-    let mut h = String::from(
-        "\x1b[2mkeys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
+    let p = crate::theme::err();
+    let mut h = format!(
+        "{}keys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
+        p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
     h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /compact /status /reload /exit · !cmd runs shell");
@@ -245,7 +278,7 @@ fn repl_help(session: &Session) -> String {
         None => session.model.qualified_id(),
     };
     h.push_str(&format!("model      {model}\n"));
-    h.push_str("\x1b[0m");
+    h.push_str(p.reset.as_str());
     h
 }
 
@@ -304,7 +337,11 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     let store = crate::core::threads::Store::open()?;
     let threads = store.recent_threads(30);
     if threads.is_empty() {
-        eprintln!("\x1b[2mno conversations yet\x1b[0m");
+        eprintln!(
+            "{}no conversations yet{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     }
     let now = crate::core::db::now_turn_datetime();
@@ -340,13 +377,21 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
 /// continues from there.
 fn tree_jump(session: &mut Session) -> Result<(), String> {
     let Some(cid) = session.conversation_id.clone() else {
-        eprintln!("\x1b[2mno session yet — /tree needs a saved conversation\x1b[0m");
+        eprintln!(
+            "{}no session yet — /tree needs a saved conversation{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     };
     let store = crate::core::threads::Store::open()?;
     let turns = store.read_thread(&cid)?;
     if turns.is_empty() {
-        eprintln!("\x1b[2mempty session\x1b[0m");
+        eprintln!(
+            "{}empty session{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     }
     let items: Vec<String> = turns
@@ -377,8 +422,10 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     session.seed.truncate(cut);
     store.truncate_thread(&cid, i)?;
     eprintln!(
-        "\x1b[2mrewound to turn {} — type the next task\x1b[0m",
-        i + 1
+        "{}rewound to turn {} — type the next task{}",
+        crate::theme::err().dim,
+        i + 1,
+        crate::theme::err().reset
     );
     Ok(())
 }
@@ -390,14 +437,19 @@ fn print_banner(session: &Session) {
         .as_deref()
         .map(|l| format!(" {l}"))
         .unwrap_or_default();
+    let p = crate::theme::err();
     eprintln!(
-        "\x1b[1mllm agent\x1b[0m \x1b[2mv{} ·\x1b[0m \x1b[1m{}{}\x1b[0m \x1b[2m· {}\x1b[0m",
-        crate::VERSION,
-        session.model.qualified_id(),
-        thinking,
-        session.approval.mode.label()
+        "{p0}llm agent{r} {d}v{v} ·{r} {b}{m}{t}{r} {d}· {a}{r}",
+        p0 = p.bold,
+        r = p.reset,
+        d = p.dim,
+        b = p.bold,
+        v = crate::VERSION,
+        m = session.model.qualified_id(),
+        t = thinking,
+        a = session.approval.mode.label()
     );
-    eprint!("\x1b[2m{}\x1b[0m", info_rows(session, " "));
+    eprint!("{}{}{}", p.dim, info_rows(session, " "), p.reset);
 }
 
 /// Replay the loaded conversation on resume, so the user actually sees what
@@ -410,13 +462,21 @@ fn render_history(seed: &[crate::providers::Msg]) {
     }
     let skip = seed.len().saturating_sub(CAP);
     if skip > 0 {
-        eprintln!("\x1b[2m── {skip} earlier message(s) omitted ──\x1b[0m");
+        eprintln!(
+            "{}── {skip} earlier message(s) omitted ──{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
     }
     for m in &seed[skip..] {
         match m {
             Msg::User { text, .. } => {
                 for line in text.split('\n') {
-                    eprintln!("\x1b[1m>\x1b[0m {line}");
+                    eprintln!(
+                        "{}>{} {line}",
+                        crate::theme::err().bold,
+                        crate::theme::err().reset
+                    );
                 }
             }
             Msg::Assistant { text, tool_calls } => {
@@ -427,8 +487,10 @@ fn render_history(seed: &[crate::providers::Msg]) {
                 }
                 for c in tool_calls {
                     eprintln!(
-                        "\x1b[2m  [tool: {}]\x1b[0m {}",
+                        "{}  [tool: {}]{} {}",
+                        crate::theme::err().dim,
                         c.name,
+                        crate::theme::err().reset,
                         crate::core::text::truncate_chars(&c.arguments.to_string(), 80)
                     );
                 }
@@ -442,13 +504,17 @@ fn render_history(seed: &[crate::providers::Msg]) {
                 let first = content.lines().next().unwrap_or("");
                 let flag = if *is_error { " ✗" } else { "" };
                 eprintln!(
-                    "\x1b[2m  [result{flag} · {name}]\x1b[0m {}",
+                    "{}  [result{flag} · {name}]{} {}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset,
                     crate::core::text::truncate_chars(first, 100)
                 );
             }
             Msg::Summary { text } => {
                 eprintln!(
-                    "\x1b[2m  <summary>\x1b[0m {}",
+                    "{}  <summary>{} {}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset,
                     crate::core::text::truncate_chars(text, 120)
                 );
             }
@@ -616,7 +682,10 @@ fn repl_command(
     };
     match cmd {
         "/help" => {
-            eprintln!("\x1b[2m  /model        switch model        /thinking  effort level");
+            eprintln!(
+                "{}  /model        switch model        /thinking  effort level",
+                crate::theme::err().dim
+            );
             eprintln!("  /login        add a provider      /logout  remove one");
             eprintln!("  /clear        fresh session       /resume  load a past one");
             eprintln!("  /skills       list skills         /yolo    toggle approvals");
@@ -626,7 +695,8 @@ fn repl_command(
             eprintln!("  /exit         quit");
             eprintln!("  paste an image with ctrl+v, or just type its path");
             eprintln!(
-                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR\x1b[0m"
+                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR{}",
+                crate::theme::err().reset
             );
         }
         "/model" => {
@@ -639,7 +709,12 @@ fn repl_command(
             };
             match session.switch_model(&choice.model) {
                 Ok(()) => {
-                    eprintln!("\x1b[2mmodel → {}\x1b[0m", session.model.qualified_id());
+                    eprintln!(
+                        "{}model → {}{}",
+                        crate::theme::err().dim,
+                        session.model.qualified_id(),
+                        crate::theme::err().reset
+                    );
                 }
                 Err(e) => {
                     eprintln!("Error: {e}");
@@ -667,24 +742,38 @@ fn repl_command(
                     eprintln!("Warning: could not save thinking: {e}");
                 }
                 eprintln!(
-                    "\x1b[2mthinking → {}\x1b[0m",
-                    session.thinking.as_deref().unwrap_or("(model default)")
+                    "{}thinking → {}{}",
+                    crate::theme::err().dim,
+                    session.thinking.as_deref().unwrap_or("(model default)"),
+                    crate::theme::err().reset
                 );
             }
         }
         "/login" => {
             if !std::io::stdin().is_terminal() {
-                eprintln!("\x1b[2m/login needs a terminal\x1b[0m");
+                eprintln!(
+                    "{}/login needs a terminal{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
                 return false;
             }
             match crate::commands::login::wizard() {
-                Ok(()) => eprintln!("\x1b[2mrun /model to pick its models\x1b[0m"),
+                Ok(()) => eprintln!(
+                    "{}run /model to pick its models{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                ),
                 Err(e) => eprintln!("Error: {e}"),
             }
         }
         "/logout" => {
             if !std::io::stdin().is_terminal() {
-                eprintln!("\x1b[2m/logout needs a terminal\x1b[0m");
+                eprintln!(
+                    "{}/logout needs a terminal{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
                 return false;
             }
             if let Err(e) = crate::commands::login::logout_picker() {
@@ -695,7 +784,9 @@ fn repl_command(
             let qualified = session.model.qualified_id();
             if crate::providers::resolve_model_by_id(&qualified).is_err() {
                 eprintln!(
-                    "\x1b[2mcurrent model {qualified} no longer resolves — run /model\x1b[0m"
+                    "{}current model {qualified} no longer resolves — run /model{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
                 );
             }
         }
@@ -710,7 +801,8 @@ fn repl_command(
                 approval::Mode::Yolo => " · everything auto-approved",
                 approval::Mode::AlwaysAsk => " · only in-directory reads auto",
             };
-            eprintln!("\x1b[2mapproval → {}{note}\x1b[0m", mode.label());
+            let p = crate::theme::err();
+            eprintln!("{}approval → {}{note}{}", p.dim, mode.label(), p.reset);
         }
         "/clear" => {
             session.clear();
@@ -724,29 +816,37 @@ fn repl_command(
             print_banner(session);
         }
         "/status" => {
+            let p = crate::theme::err();
             let used = crate::agent::compact::estimate_tokens(&session.seed, None);
             let window = session.compact.context_window;
             let pct = (used * 100).checked_div(window).unwrap_or(0);
             eprintln!(
-                "  \x1b[2mmodel   \x1b[0m\x1b[1m{}\x1b[0m",
-                session.model.qualified_id()
+                "  {d}model   {r}{b}{}{r}",
+                session.model.qualified_id(),
+                d = p.dim,
+                r = p.reset,
+                b = p.bold
             );
             eprintln!(
-                "  \x1b[2msession \x1b[0m{}",
+                "  {d}session {r}{}",
                 session
                     .conversation_id
                     .as_deref()
-                    .unwrap_or("new (not logged yet)")
+                    .unwrap_or("new (not logged yet)"),
+                d = p.dim,
+                r = p.reset
             );
             eprintln!(
-                "  \x1b[2mcontext \x1b[0m{} / {} ({}%) · {} messages",
+                "  {d}context {r}{} / {} ({}%) · {} messages",
                 humanize_tokens(used),
                 humanize_tokens(window),
                 pct,
-                session.seed.len()
+                session.seed.len(),
+                d = p.dim,
+                r = p.reset
             );
             eprintln!(
-                "  \x1b[2mtokens  \x1b[0m↑{} ↓{}{} · approval {} · tools {} · thinking {}",
+                "  {d}tokens  {r}↑{} ↓{}{} · approval {} · tools {} · thinking {}",
                 humanize_tokens(session.tokens.0),
                 humanize_tokens(session.tokens.1),
                 if session.tokens_cached > 0 {
@@ -764,17 +864,25 @@ fn repl_command(
                 },
                 session.approval.mode.label(),
                 session.tools.len(),
-                session.thinking.as_deref().unwrap_or("(model default)")
+                session.thinking.as_deref().unwrap_or("(model default)"),
+                d = p.dim,
+                r = p.reset
             );
             let rows = session.extensions.rows().len();
             if rows > 0 {
-                eprintln!("  \x1b[2mplugins \x1b[0m{rows} extension(s) · /reload re-reads them");
+                eprintln!(
+                    "  {}plugins {}{rows} extension(s) · /reload re-reads them",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
             }
         }
         "/skills" => {
+            let p = crate::theme::err();
             if skills.is_empty() {
                 eprintln!(
-                    "\x1b[2m  no skills found — drop SKILL.md folders into ~/.llm/skills/ or .llm/skills/\x1b[0m"
+                    "{}  no skills found — drop SKILL.md folders into ~/.llm/skills/ or .llm/skills/{}",
+                    p.dim, p.reset
                 );
                 return false;
             }
@@ -782,15 +890,19 @@ fn repl_command(
                 let hidden = if s.model_invocation { "" } else { " · hidden" };
                 let desc = crate::core::text::truncate_chars(&s.description, 72);
                 eprintln!(
-                    "  \x1b[2m/skill:{}{hidden}\x1b[0m\x1b[2m — {desc}\x1b[0m",
-                    s.name
+                    "  {d}/skill:{s0}{hidden}{r}{d} — {desc}{r}",
+                    s0 = s.name,
+                    d = p.dim,
+                    r = p.reset
                 );
             }
             eprintln!(
-                "  \x1b[2mskills live in ~/.llm/skills, ~/.agents/skills (shared) and .llm/skills (project);\x1b[0m"
+                "{}  skills live in ~/.llm/skills, ~/.agents/skills (shared) and .llm/skills (project);{}",
+                p.dim, p.reset
             );
             eprintln!(
-                "  \x1b[2mdelete a folder to remove one, or list it under [agent] disabled_skills in config.json\x1b[0m"
+                "{}  delete a folder to remove one, or list it under [agent] disabled_skills in config.json{}",
+                p.dim, p.reset
             );
         }
 
@@ -801,7 +913,11 @@ fn repl_command(
             let estimate = crate::agent::compact::estimate_tokens(&session.seed, None);
             match crate::agent::compact::find_cut(&session.seed, cfg.keep_recent_tokens) {
                 Some(cut) => {
-                    eprintln!("  \x1b[2mcompacting …\x1b[0m");
+                    eprintln!(
+                        "  {}compacting …{}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
+                    );
                     // the `/compact <prompt>` argument rides along as extra
                     // instructions for the summarizer
                     match crate::agent::compact::summarize_with(
@@ -813,15 +929,25 @@ fn repl_command(
                             session.compact_prefix(summary, cut);
                             let now = crate::agent::compact::estimate_tokens(&session.seed, None);
                             eprintln!(
-                                "  \x1b[2mcompacted {} → {}\x1b[0m",
+                                "  {}compacted {} → {}{}",
+                                crate::theme::err().dim,
                                 crate::term::render::humanize_tokens(estimate),
-                                crate::term::render::humanize_tokens(now)
+                                crate::term::render::humanize_tokens(now),
+                                crate::theme::err().reset
                             );
                         }
-                        _ => eprintln!("  \x1b[2mcompaction failed; history kept as-is\x1b[0m"),
+                        _ => eprintln!(
+                            "  {}compaction failed; history kept as-is{}",
+                            crate::theme::err().dim,
+                            crate::theme::err().reset
+                        ),
                     }
                 }
-                None => eprintln!("  \x1b[2mnothing to compact yet\x1b[0m"),
+                None => eprintln!(
+                    "  {}nothing to compact yet{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                ),
             }
         }
         "/resume" => {
@@ -846,11 +972,17 @@ fn repl_command(
                     };
                     if now_trusted {
                         eprintln!(
-                            "\x1b[2mtrusted {} — automatic approval in this project\x1b[0m",
-                            session.cwd.display()
+                            "{}trusted {} — automatic approval in this project{}",
+                            crate::theme::err().dim,
+                            session.cwd.display(),
+                            crate::theme::err().reset
                         );
                     } else {
-                        eprintln!("\x1b[2mtrust revoked — non-read-only commands ask again\x1b[0m");
+                        eprintln!(
+                            "{}trust revoked — non-read-only commands ask again{}",
+                            crate::theme::err().dim,
+                            crate::theme::err().reset
+                        );
                     }
                 }
                 Err(e) => eprintln!("Error: {e}"),
@@ -865,7 +997,11 @@ fn repl_command(
             *settings = crate::agent::settings::load();
             session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
             session.rebuild_tools();
-            eprintln!("\x1b[2mreloaded skills, plugin tools and settings\x1b[0m");
+            eprintln!(
+                "{}reloaded skills, plugin tools and settings{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            );
         }
         "/exit" => return true,
         other => {
@@ -878,7 +1014,11 @@ fn repl_command(
                 match ext.run_command(name, arg) {
                     Ok(text) => {
                         for line in text.lines() {
-                            eprintln!("  \x1b[2m{text}\x1b[0m", text = line);
+                            eprintln!(
+                                "  {}{line}{}",
+                                crate::theme::err().dim,
+                                crate::theme::err().reset
+                            );
                         }
                     }
                     Err(e) => eprintln!("Error: {e}"),
@@ -901,7 +1041,11 @@ fn repl_command(
             // (covers path-looking words like "/home/me/shot.jpg 看看?").
             // A near miss of a known command only hints — no model call.
             if let Some(name) = slash_hint(other) {
-                eprintln!("\x1b[2mdid you mean {name}? (nothing was sent)\x1b[0m");
+                eprintln!(
+                    "{}did you mean {name}? (nothing was sent){}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
                 return false;
             }
             run_task_logged(session, text, &mut Vec::new());

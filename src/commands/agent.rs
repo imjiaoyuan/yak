@@ -176,9 +176,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             .fork_thread(&source)?
             .ok_or_else(|| format!("cannot fork session {source}"))?;
         eprintln!(
-            "\x1b[2mforked {} → {}\x1b[0m",
+            "{}forked {} → {}{}",
+            crate::theme::err().dim,
             &source[..source.len().min(10)],
-            &forked[..forked.len().min(10)]
+            &forked[..forked.len().min(10)],
+            crate::theme::err().reset
         );
         conversation_id = Some(forked);
     }
@@ -241,7 +243,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     // applied to tool execution); /trust toggles it per directory
     if approval_cfg.mode == approval::Mode::AlwaysAsk && config::project_trusted(&cwd) {
         approval_cfg.mode = approval::Mode::Yolo;
-        eprintln!("\x1b[2mtrusted project — running in yolo mode (/trust to revoke)\x1b[0m");
+        eprintln!(
+            "{}trusted project — running in yolo mode (/trust to revoke){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
     }
 
     // extensions: user executables registering tools (and, later, commands
@@ -320,7 +326,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let (_outcome, _reasoning) = session.run_task(&prompt, attachments)?;
     if let Some(cid) = &session.conversation_id {
-        eprintln!("\x1b[2mSession: {cid}\x1b[0m");
+        eprintln!(
+            "{}Session: {cid}{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
     }
     Ok(0)
 }

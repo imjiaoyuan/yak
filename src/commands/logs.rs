@@ -16,7 +16,11 @@ pub fn browse() -> i32 {
     };
     let threads = store.recent_threads(30);
     if threads.is_empty() {
-        eprintln!("\x1b[2mno conversations yet\x1b[0m");
+        eprintln!(
+            "{}no conversations yet{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return 0;
     }
     let now = crate::core::db::now_turn_datetime();
@@ -40,7 +44,11 @@ pub fn browse() -> i32 {
     };
     let t = &threads[i];
     show_transcript(&store, &t.id);
-    eprint!("\x1b[2menter this conversation? [Y/n]\x1b[0m ");
+    eprint!(
+        "{}enter this conversation? [Y/n]{} ",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
     match crate::term::lineedit::read_approval_key(Vec::new()) {
         Some(crate::term::lineedit::ApprovalKey::Yes)
         | Some(crate::term::lineedit::ApprovalKey::Always) => {
@@ -65,10 +73,11 @@ pub fn show_transcript(store: &Store, cid: &str) -> i32 {
         println!("conversation: {} · {}", cid, first.model);
     }
     for turn in &turns {
-        println!("\x1b[2m{} \x1b[0m", turn.ts);
+        let p = crate::theme::out();
+        println!("{}{} {}", p.dim, turn.ts, p.reset);
         if !turn.prompt.is_empty() {
             for line in turn.prompt.lines() {
-                println!("\x1b[1m>\x1b[0m {line}");
+                println!("{}>{} {line}", p.bold, p.reset);
             }
         }
         if !turn.response.is_empty() {

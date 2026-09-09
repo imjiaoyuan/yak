@@ -52,16 +52,17 @@ impl ToolOutput {
 const DIFF_MAX_LINES: usize = 30;
 
 /// Print a diff block from `change_hunks` under a `$` action line: wrapped
-/// to the terminal, near-monochrome — additions default, deletions gray,
-/// headers and context dim.
+/// to the terminal: additions green, deletions red, hunk headers and
+/// context gray (the reference's toolDiff colors).
 pub fn print_diff_block(diff: &str) {
     let width = crate::term::columns().max(20);
+    let p = crate::theme::err();
     for line in diff.split('\n') {
         let wrapped = crate::core::render_md::wrap_block(line, width, 2);
         let styled = match line.chars().next() {
-            Some('+') => format!("  {wrapped}"),
-            Some('-') => format!("\x1b[90m  {wrapped}\x1b[0m"),
-            _ => format!("\x1b[2m  {wrapped}\x1b[0m"),
+            Some('+') => format!("{}  {wrapped}{}", p.diff_add, p.reset),
+            Some('-') => format!("{}  {wrapped}{}", p.diff_del, p.reset),
+            _ => format!("{}  {wrapped}{}", p.diff_ctx, p.reset),
         };
         eprintln!("{styled}");
     }
@@ -144,7 +145,11 @@ pub(crate) fn print_action_line(verb: &str, preview: &str, diff: Option<&str>) {
     let vis = 2 + verb.chars().count() + 1;
     let wrapped = crate::core::render_md::wrap_plain(preview, width.saturating_sub(vis), 2);
     // same shape as the tool activity line: bold $, the command in green
-    eprintln!("\x1b[1m$\x1b[0m {verb} \x1b[1m\x1b[32m{wrapped}\x1b[0m");
+    let p = crate::theme::err();
+    eprintln!(
+        "{}${} {verb} {}{}{}{}",
+        p.bold, p.reset, p.bold, p.green, wrapped, p.reset
+    );
     if let Some(diff) = diff {
         print_diff_block(diff);
     }

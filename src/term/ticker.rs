@@ -28,13 +28,14 @@ impl Ticker {
                 .checked_sub(TICK_INTERVAL)
                 .unwrap_or_else(std::time::Instant::now); // draw frame zero at once
             let mut frame = 0usize;
+            let p = crate::theme::err();
             while !f2.load(std::sync::atomic::Ordering::Relaxed) {
                 if last_draw.elapsed() >= TICK_INTERVAL {
                     let secs = t0.elapsed().as_secs_f32();
                     let spin = SPINNER[frame % SPINNER.len()];
                     frame += 1;
                     let phase = phase_text.lock().map(|p| p.clone()).unwrap_or_default();
-                    eprint!("\r\x1b[2K\x1b[90m{spin} {secs:.0}s · {phase}\x1b[0m");
+                    eprint!("\r\x1b[2K{}{spin} {secs:.0}s · {phase}{}", p.dim, p.reset);
                     let _ = std::io::stderr().flush();
                     last_draw = std::time::Instant::now();
                 }

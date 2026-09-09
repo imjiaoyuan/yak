@@ -185,7 +185,9 @@ impl LineEditor {
                     line.settle(&mut out, prompt, &buf);
                     let _ = writeln!(
                         out,
-                        "\x1b[2m(editing in $EDITOR — save and exit to return)\x1b[0m"
+                        "{}(editing in $EDITOR — save and exit to return){}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
                     );
                     // hand the terminal back: guards off, cooked mode on
                     drop(kitty.take());
@@ -251,13 +253,23 @@ impl LineEditor {
                                 }
                             }
                             None => {
-                                let _ = writeln!(out, "\x1b[2m(no image on the clipboard)\x1b[0m");
+                                let _ = writeln!(
+                                    out,
+                                    "{}(no image on the clipboard){}",
+                                    crate::theme::err().dim,
+                                    crate::theme::err().reset
+                                );
                                 line.rows = 0;
                                 line.draw(&mut out, prompt, &buf, cursor);
                             }
                         },
                         None => {
-                            let _ = writeln!(out, "\x1b[2m(no image on the clipboard)\x1b[0m");
+                            let _ = writeln!(
+                                out,
+                                "{}(no image on the clipboard){}",
+                                crate::theme::err().dim,
+                                crate::theme::err().reset
+                            );
                             line.rows = 0;
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
@@ -416,7 +428,13 @@ impl LineEditor {
                                 .map(|s| s.as_str())
                                 .take(LISTING_LIMIT)
                                 .collect();
-                            let _ = writeln!(out, "\x1b[2m  {}\x1b[0m", listing.join("  "));
+                            let _ = writeln!(
+                                out,
+                                "{}  {}{}",
+                                crate::theme::err().dim,
+                                listing.join("  "),
+                                crate::theme::err().reset
+                            );
                             line.rows = 0; // the region restarts below the listing
                             line.draw(&mut out, prompt, &buf, cursor);
                         }
@@ -1028,7 +1046,8 @@ impl InputLine {
         // from ordinary task text
         let style = |s: &str| {
             if buf.starts_with('/') || buf.starts_with('!') {
-                format!("\x1b[1m{s}\x1b[0m")
+                let p = crate::theme::err();
+                format!("{}{s}{}", p.bold, p.reset)
             } else {
                 s.to_string()
             }
@@ -1075,7 +1094,8 @@ impl InputLine {
         }
         for (i, r) in rows.iter().enumerate() {
             if i > 0 {
-                let _ = write!(out, "\n\x1b[2m>\x1b[0m ");
+                let p = crate::theme::err();
+                let _ = write!(out, "\n{}>{} ", p.dim, p.reset);
             }
             let _ = write!(out, "{}", style(r));
         }
@@ -1301,12 +1321,19 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
         if matched.is_empty() {
             let _ = writeln!(
                 out,
-                "\x1b[90m  (no matches — keep typing or backspace)\x1b[0m"
+                "{}  (no matches — keep typing or backspace){}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
             );
             printed += 1;
         } else {
             if top > 0 {
-                let _ = writeln!(out, "\x1b[90m  · {top} more ↑\x1b[0m");
+                let _ = writeln!(
+                    out,
+                    "{}  · {top} more ↑{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
                 printed += 1;
             }
             for (r, idx) in matched[top..top + visible].iter().enumerate() {
@@ -1316,15 +1343,19 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
             if matched.len() > top + visible {
                 let _ = writeln!(
                     out,
-                    "\x1b[90m  · {} more ↓\x1b[0m",
-                    matched.len() - top - visible
+                    "{}  · {} more ↓{}",
+                    crate::theme::err().dim,
+                    matched.len() - top - visible,
+                    crate::theme::err().reset
                 );
                 printed += 1;
             }
         }
         let _ = writeln!(
             out,
-            "\x1b[90mfilter: {query}▏  (enter select · ↑↓ move · esc cancel)\x1b[0m"
+            "{}filter: {query}▏  (enter select · ↑↓ move · esc cancel){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
         );
         let _ = out.flush();
         printed + 1
@@ -1355,7 +1386,13 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 }
                 erase(&mut out, printed, true);
                 if echo {
-                    let _ = writeln!(out, "\x1b[2m{title}\x1b[0m {}", items[matched[sel]]);
+                    let _ = writeln!(
+                        out,
+                        "{}{title}{} {}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset,
+                        items[matched[sel]]
+                    );
                 }
                 return Some(matched[sel]);
             }
@@ -1423,9 +1460,11 @@ fn row_body(item: &str, selected: bool) -> String {
     let width = crate::term::columns().saturating_sub(1);
     let shown = crate::core::render_md::truncate_cells(item, width.saturating_sub(2));
     if selected {
-        format!("\x1b[1m❯ {shown}\x1b[0m")
+        let p = crate::theme::err();
+        format!("{}❯ {shown}{}", p.bold, p.reset)
     } else {
-        format!("\x1b[2m  {shown}\x1b[0m")
+        let p = crate::theme::err();
+        format!("{}  {shown}{}", p.dim, p.reset)
     }
 }
 
@@ -1507,7 +1546,11 @@ impl KeyWatcher {
                                     // clear the spinner frame first so the
                                     // notice lands on its own line
                                     eprint!("\r\x1b[2K");
-                                    eprintln!("\x1b[2mqueued: {line}\x1b[0m");
+                                    eprintln!(
+                                        "{}queued: {line}{}",
+                                        crate::theme::err().dim,
+                                        crate::theme::err().reset
+                                    );
                                 }
                             }
                             buf.clear();

@@ -448,7 +448,12 @@ impl Extensions {
         });
         for ext in &exts {
             if let Err(reason) = &*lock(&ext.state) {
-                eprintln!("\x1b[2mextension '{}' failed: {reason}\x1b[0m", ext.name);
+                eprintln!(
+                    "{}extension '{}' failed: {reason}{}",
+                    crate::theme::err().dim,
+                    ext.name,
+                    crate::theme::err().reset
+                );
             }
         }
         Extensions {

@@ -14,14 +14,22 @@ use crate::core::config::{self, Provider};
 fn remove_provider(cfg: &mut config::Config, name: &str) -> Result<(), String> {
     config::save(cfg).map_err(|e| e.to_string())?;
     eprintln!(
-        "\x1b[2mremoved provider '{name}' (and its key) from {}\x1b[0m",
-        config::config_path().display()
+        "{}removed provider '{name}' (and its key) from {}{}",
+        crate::theme::err().dim,
+        config::config_path().display(),
+        crate::theme::err().reset
     );
     match config::clear_default_for(name) {
-        Ok(true) => eprintln!("\x1b[2mcleared the default model (pointed at {name})\x1b[0m"),
+        Ok(true) => eprintln!(
+            "{}cleared the default model (pointed at {name}){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        ),
         Ok(false) => {}
         Err(e) => eprintln!(
-            "\x1b[2mWarning: could not clear the default model pointed at {name}: {e}\x1b[0m"
+            "{}Warning: could not clear the default model pointed at {name}: {e}{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
         ),
     }
     Ok(())
@@ -84,7 +92,11 @@ fn presets() -> Vec<Preset> {
 pub(crate) fn logout_picker() -> Result<(), String> {
     let mut cfg = config::load();
     if cfg.providers.is_empty() {
-        eprintln!("\x1b[2mno providers configured (llm login)\x1b[0m");
+        eprintln!(
+            "{}no providers configured (llm login){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     }
     let items: Vec<String> = cfg
@@ -93,7 +105,11 @@ pub(crate) fn logout_picker() -> Result<(), String> {
         .map(|(n, p)| format!("{:<11} {} ({} models)", n, p.base_url, p.models.len()))
         .collect();
     let Some(i) = crate::term::lineedit::pick("remove provider:", &items, true) else {
-        eprintln!("\x1b[2maborted\x1b[0m");
+        eprintln!(
+            "{}aborted{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     };
     let name = cfg
@@ -138,7 +154,11 @@ pub(crate) fn wizard() -> Result<(), String> {
         .collect();
     items.push("custom".to_string());
     let Some(idx) = crate::term::lineedit::pick("Add a provider:", &items, true) else {
-        eprintln!("\x1b[2maborted\x1b[0m");
+        eprintln!(
+            "{}aborted{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return Ok(());
     };
     let (preset, preset_name): (Option<&Preset>, String) = if idx == list.len() {
@@ -303,7 +323,11 @@ pub(crate) fn wizard() -> Result<(), String> {
         };
         if let Some(m) = chosen {
             match config::try_set_default_model(&format!("{name}/{m}")) {
-                Ok(()) => eprintln!("\x1b[2mdefault model: {name}/{m}\x1b[0m"),
+                Ok(()) => eprintln!(
+                    "{}default model: {name}/{m}{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                ),
                 Err(e) => eprintln!("Warning: failed to save default model: {e}"),
             }
         }

@@ -257,9 +257,11 @@ fn next_delay(retry: &mut Retry, e: &HttpError) -> Option<Duration> {
     let delay = retry.next(e)?;
     if delay >= Duration::from_secs(2) {
         eprintln!(
-            "\x1b[2mretrying in {}s ({})\x1b[0m",
+            "{}retrying in {}s ({}){}",
+            crate::theme::err().dim,
             delay.as_secs_f32().ceil() as u64,
-            e.class().label()
+            e.class().label(),
+            crate::theme::err().reset
         );
     }
     Some(delay)

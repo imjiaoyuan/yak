@@ -20,7 +20,11 @@ pub struct ModelChoice {
 pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Option<ModelChoice> {
     let cfg = config::load();
     if cfg.providers.is_empty() {
-        eprintln!("\x1b[2mno models available (run /login)\x1b[0m");
+        eprintln!(
+            "{}no models available (run /login){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return None;
     }
     let current_provider = current.split_once('/').map(|(p, _)| p);
@@ -46,7 +50,11 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
         (pname.clone(), provider)
     };
     // step 2: the provider's configured models merged with its live list
-    eprintln!("\x1b[2mfetching models from {pname} …\x1b[0m");
+    eprintln!(
+        "{}fetching models from {pname} …{}",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
     let key = cfg.api_key(provider).unwrap_or_default();
     let live =
         crate::providers::catalog::try_fetch_models(&provider.kind, &provider.base_url, &key);
@@ -59,7 +67,11 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        eprintln!("\x1b[2mno models available (run /login)\x1b[0m");
+        eprintln!(
+            "{}no models available (run /login){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         return None;
     }
     let current_model = current.split_once('/').map(|(_, m)| m);

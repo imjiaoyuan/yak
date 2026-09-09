@@ -373,10 +373,22 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
     // the same activity line the tool log prints (bold $, command in green)
     crate::agent::tools::print_action_line(verb, req.preview, req.diff);
     if !req.reason.is_empty() {
-        eprintln!("\x1b[2m  {reason}\x1b[0m", reason = req.reason);
+        eprintln!(
+            "{}  {}{}",
+            crate::theme::err().dim,
+            req.reason,
+            crate::theme::err().reset
+        );
     }
     use crate::term::lineedit::{ApprovalKey, read_approval_key};
-    eprint!("  \x1b[1m\x1b[36mAllow?\x1b[0m \x1b[1m[Y/n/a]\x1b[0m ");
+    eprint!(
+        "  {}{}Allow?{} {}[Y/n/a]{} ",
+        crate::theme::err().bold,
+        crate::theme::err().cyan,
+        crate::theme::err().reset,
+        crate::theme::err().bold,
+        crate::theme::err().reset
+    );
     let _ = std::io::stderr().flush();
     match read_approval_key(pre) {
         Some(ApprovalKey::Yes) => ApprovalResponse::Allow,

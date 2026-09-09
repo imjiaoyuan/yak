@@ -153,7 +153,11 @@ fn install(argv: &[String]) -> i32 {
             .ok()
             .is_some_and(|p| !p.trim().is_empty() && ref_.as_deref() != Some(p.trim()));
         if pinned && ref_.is_none() {
-            eprintln!("\x1b[2m{name} is pinned — re-run with @ref to move it\x1b[0m");
+            eprintln!(
+                "{}{name} is pinned — re-run with @ref to move it{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            );
             return 0;
         }
         if let Err(e) = git(&["fetch", "--tags", "origin"], &target).and_then(|_| {
@@ -163,7 +167,11 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("Error: refresh failed: {e}");
             return 1;
         }
-        eprintln!("\x1b[2mupdated {name}\x1b[0m");
+        eprintln!(
+            "{}updated {name}{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
     } else {
         let _ = std::fs::create_dir_all(&root);
         let mut clone = vec!["clone".to_string(), "--depth".to_string(), "1".to_string()];
@@ -186,7 +194,12 @@ fn install(argv: &[String]) -> i32 {
                 &target,
             );
         }
-        eprintln!("\x1b[2minstalled {name} → {}\x1b[0m", target.display());
+        eprintln!(
+            "{}installed {name} → {}{}",
+            crate::theme::err().dim,
+            target.display(),
+            crate::theme::err().reset
+        );
     }
     for (dir, label) in [
         ("skills", "skill(s)"),
@@ -197,7 +210,11 @@ fn install(argv: &[String]) -> i32 {
             .map(|rd| rd.flatten().count())
             .unwrap_or(0);
         if count > 0 {
-            eprintln!("\x1b[2m  {count} {label}\x1b[0m");
+            eprintln!(
+                "{}  {count} {label}{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            );
         }
     }
     0
@@ -225,8 +242,10 @@ fn remove(argv: &[String]) -> i32 {
                 .map_err(|e| eprintln!("Error: cannot remove {}: {e}", target.display()))
                 .unwrap_or(());
             eprintln!(
-                "\x1b[2mremoved {name} ({})\x1b[0m",
-                pkg_root(local).display()
+                "{}removed {name} ({}){}",
+                crate::theme::err().dim,
+                pkg_root(local).display(),
+                crate::theme::err().reset
             );
             removed = true;
         }
@@ -264,8 +283,11 @@ fn list(argv: &[String]) -> i32 {
             any = true;
             let scope = if local { "project" } else { "user" };
             eprintln!(
-                "\x1b[1m{name}\x1b[0m \x1b[2m({scope} · {})\x1b[0m",
-                path.display()
+                "{b}{name}{r} {d}({scope} · {}){r}",
+                path.display(),
+                b = crate::theme::err().bold,
+                r = crate::theme::err().reset,
+                d = crate::theme::err().dim
             );
             for (dir, label) in [
                 ("skills", "skills"),
@@ -280,13 +302,22 @@ fn list(argv: &[String]) -> i32 {
                     })
                     .unwrap_or_default();
                 if !items.is_empty() {
-                    eprintln!("  \x1b[2m{label}: {}\x1b[0m", items.join(", "));
+                    eprintln!(
+                        "  {}{label}: {}{}",
+                        crate::theme::err().dim,
+                        items.join(", "),
+                        crate::theme::err().reset
+                    );
                 }
             }
         }
     }
     if !any {
-        eprintln!("\x1b[2mno packages — llm install git:github.com/user/repo\x1b[0m");
+        eprintln!(
+            "{}no packages — llm install git:github.com/user/repo{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
     }
     0
 }

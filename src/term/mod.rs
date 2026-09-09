@@ -55,7 +55,11 @@ impl DoubleInterrupt {
             return true;
         }
         self.0 = Some(now);
-        eprintln!("\x1b[2m(ctrl-c again to exit)\x1b[0m");
+        eprintln!(
+            "{}(ctrl-c again to exit){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
         false
     }
 

@@ -166,13 +166,15 @@ impl Session {
                             if n == 1 {
                                 view.borrow_mut().spin_pause();
                             }
+                            let p = crate::theme::err();
                             eprint!("\r\x1b[2K");
                             let width = crate::term::columns().max(20);
                             let wrapped = crate::core::render_md::wrap_block(&line, width, 2);
-                            eprintln!("\x1b[90m{wrapped}\x1b[0m");
+                            eprintln!("{}{wrapped}{}", p.dim, p.reset);
                         } else {
                             // beyond the head: one line, rewritten in place
-                            eprint!("\r\x1b[2K\x1b[90m  … +{n} lines\x1b[0m      ");
+                            let p = crate::theme::err();
+                            eprint!("\r\x1b[2K{}  … +{n} lines{}      ", p.dim, p.reset);
                             use std::io::Write;
                             let _ = std::io::stderr().flush();
                         }
@@ -187,18 +189,20 @@ impl Session {
                                 eprintln!();
                             }
                         } else if is_error {
+                            let p = crate::theme::err();
                             for (i, line) in summary.lines().enumerate() {
                                 if i == 0 {
-                                    eprintln!("\x1b[2m\x1b[31m  ✗ {line}\x1b[0m");
+                                    eprintln!("{}{}  ✗ {line}{}", p.bold, p.red, p.reset);
                                 } else {
-                                    eprintln!("\x1b[31m  {line}\x1b[0m");
+                                    eprintln!("{}  {line}{}", p.red, p.reset);
                                 }
                             }
                         } else {
+                            let p = crate::theme::err();
                             let width = crate::term::columns().max(20);
                             for line in summary.lines() {
                                 let wrapped = crate::core::render_md::wrap_block(line, width, 2);
-                                eprintln!("\x1b[90m{wrapped}\x1b[0m");
+                                eprintln!("{}{wrapped}{}", p.dim, p.reset);
                             }
                         }
                         // the next model round is awaited right after: spin,
