@@ -11,6 +11,8 @@ use crate::gitignore::{collect_files, parse_pattern, pattern_matches_path, scope
 pub(crate) const MAX_LINES: usize = 2000;
 pub(crate) const MAX_BYTES: usize = 50 * 1024;
 pub(crate) const GREP_LINE_LIMIT: usize = 500;
+/// Max files one `read` call may batch.
+pub(crate) const READ_MAX_FILES: usize = 5;
 /// The read tool serves one window at a time; bash/grep keep MAX_LINES.
 /// the reference's value: 2000 lines under the same 50KB cap — one call covers a whole
 /// typical source file, so the model spends fewer round trips paging.
@@ -210,26 +212,84 @@ impl Tool for ReadTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Read a file. Text files return lines with line numbers optionally sliced by \
-         offset/limit; image files (png/jpg/gif/webp/bmp) are sent to the model as a vision \
-         attachment. Other binary formats are refused with a hint at local tooling \
-         (pdftotext, samtools, ...)."
+        "Read text files. Pass `path` for one file, or `paths` (up to 5) to read several in one \
+         call — prefer batching over repeated single reads. Text files return lines with line \
+         numbers optionally sliced by offset/limit; image files (png/jpg/gif/webp/bmp) are sent \
+         to the model as a vision attachment. Other binary formats are refused with a hint at \
+         local tooling (pdftotext, samtools, ...)."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, relative to the working directory"},
-                "offset": {"type": "integer", "description": "1-based line to start from"},
-                "limit": {"type": "integer", "description": "Maximum number of lines to return"},
+                "path": {"type": "string", "description": "Single file path, relative to the working directory"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Several file paths (max 5) read in one call"},
+                "offset": {"type": "integer", "description": "1-based line to start from (applies to each file)"},
+                "limit": {"type": "integer", "description": "Maximum number of lines to return per file"},
             },
-            "required": ["path"]
+            "required": []
         })
     }
     fn preview(&self, args: &Value) -> String {
+        if let Some(list) = args["paths"].as_array().filter(|a| !a.is_empty()) {
+            let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+            return names.join(", ");
+        }
         args["path"].as_str().unwrap_or("?").to_string()
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+        let multi: Vec<String> = match args["paths"].as_array() {
+            Some(list) => list
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            None => Vec::new(),
+        };
+        if multi.is_empty() {
+            if args["path"].as_str().is_none() {
+                return ToolOutput::err("read: pass `path` (one file) or `paths` (several)");
+            }
+            return self.read_one(args, cwd);
+        }
+        if multi.len() > READ_MAX_FILES {
+            return ToolOutput::err(format!(
+                "read: at most {READ_MAX_FILES} files per call, got {} — split the work",
+                multi.len()
+            ));
+        }
+        // one slice for every file: offset/limit apply uniformly
+        let mut combined = String::new();
+        let mut attachments = Vec::new();
+        let mut ok = 0usize;
+        for p in &multi {
+            let mut one = json!({"path": p});
+            if let Some(o) = args.get("offset") {
+                one["offset"] = o.clone();
+            }
+            if let Some(l) = args.get("limit") {
+                one["limit"] = l.clone();
+            }
+            let out = self.read_one(&one, cwd);
+            combined.push_str(&out.content);
+            combined.push('\n');
+            attachments.extend(out.attachments);
+            if !out.is_error {
+                ok += 1;
+            }
+        }
+        if ok == 0 {
+            ToolOutput::err(combined.trim_end().to_string())
+        } else {
+            let mut out = ToolOutput::ok(combined.trim_end().to_string());
+            out.attachments = attachments;
+            out
+        }
+    }
+}
+
+impl ReadTool {
+    /// The single-file body both call shapes share.
+    fn read_one(&self, args: &Value, cwd: &Path) -> ToolOutput {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
         if let Some(mime) = image_mime(&path) {
             let bytes = match std::fs::read(&path) {
@@ -1673,6 +1733,31 @@ mod tests {
         assert!(out.content.contains("· 10 lines ·"), "{}", out.content);
         assert!(!out.content.contains("Use offset="), "{}", out.content);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_paths_batches_several_files_in_one_call() {
+        let dir = std::env::temp_dir().join(format!("llm-readmulti-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.join("b.md"), "# b\nbody").unwrap();
+        let out = read_execute(&dir, json!({"paths": ["a.rs", "b.md", "nope.txt"]}));
+        assert!(!out.is_error, "two of three files read fine");
+        assert!(out.content.contains("a.rs ·"), "{}", out.content);
+        assert!(out.content.contains("1: fn a() {}"), "{}", out.content);
+        assert!(out.content.contains("b.md ·"), "{}", out.content);
+        // the missing file errors inline without failing the whole call
+        assert!(out.content.contains("nope.txt"), "{}", out.content);
+        // neither field → a clear usage error
+        let none = read_execute(&dir, json!({}));
+        assert!(none.is_error);
+        assert!(none.content.contains("`paths`"));
+        // over the batch cap → refused up front
+        let six: Vec<String> = (0..6).map(|i| format!("f{i}.txt")).collect();
+        let over = read_execute(&dir, json!({"paths": six}));
+        assert!(over.is_error);
+        assert!(over.content.contains("at most 5"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
