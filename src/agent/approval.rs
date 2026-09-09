@@ -21,9 +21,10 @@ pub enum Tier {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     /// reads inside the working directory auto, everything else prompts
-    #[default]
     AlwaysAsk,
-    /// everything auto; the danger table still forces a one-shot prompt
+    /// everything auto; the destructive-command list still forces a
+    /// one-shot prompt
+    #[default]
     Yolo,
 }
 
@@ -80,8 +81,9 @@ pub enum Decision {
 }
 
 /// Resolve whether a tool call may run. Precedence: explicit policy
-/// (deny/prompt/allow) > yolo short-circuit > tier gate. Explicit prompts
-/// and denies hold even in yolo mode.
+/// (deny/prompt/allow) > yolo short-circuit (a short destructive-command
+/// list still asks once) > tier gate. Explicit prompts and denies hold even
+/// in yolo mode.
 ///
 /// The gate is directory-scoped: reads inside the working directory run free,
 /// reads outside it and any file write ask, and a bash command runs free
@@ -106,7 +108,12 @@ pub fn resolve(
         _ => {}
     }
     if cfg.mode == Mode::Yolo {
-        return Decision::Auto;
+        return match (tier, bash_command) {
+            (Tier::Exec, Some(cmd)) if dangerous_command(cmd) => Decision::Ask(
+                "destructive command — one-shot approval required even in yolo".to_string(),
+            ),
+            _ => Decision::Auto,
+        };
     }
     match (tier, escapes_cwd) {
         (Tier::Read, false) => Decision::Auto,
@@ -312,6 +319,11 @@ pub fn readonly_command(command: &str) -> bool {
     if command.contains('>') {
         return false;
     }
+    // command substitution smuggles any program past a whitelisted command
+    // word (`echo $(rm -rf x)`) — reject it outright
+    if command.contains("$(") || command.contains('`') {
+        return false;
+    }
     for seg in split_compound(command) {
         let positions = command_positions(&seg, 0);
         if positions.is_empty() {
@@ -337,6 +349,25 @@ pub fn readonly_command(command: &str) -> bool {
             if !READONLY_GIT.contains(&sub) {
                 return false;
             }
+            // `git branch x`, `git remote add x y` and `git config k v` all
+            // mutate: these three subcommands are read-only only in their
+            // bare, flag-only form (config additionally in its one-argument
+            // `git config key` read form)
+            if matches!(sub, "branch" | "remote" | "config") {
+                let non_flag = toks
+                    .iter()
+                    .skip_while(|t| t.as_str() != "git")
+                    .skip(2) // "git" and the subcommand itself
+                    .filter(|t| !t.starts_with('-'))
+                    .count();
+                let read = match sub {
+                    "config" => non_flag <= 1,
+                    _ => non_flag == 0,
+                };
+                if !read {
+                    return false;
+                }
+            }
             continue;
         }
         if first == "cargo" {
@@ -352,18 +383,66 @@ pub fn readonly_command(command: &str) -> bool {
             }
             continue;
         }
-        if first == "find"
-            && tokens(&seg)
+        // `sort -o f` and `date -s ...` write through flags instead of `>`
+        let flags_write = match first {
+            "sort" => tokens(&seg)
                 .iter()
-                .any(|t| matches!(t.as_str(), "-delete" | "-exec" | "-execdir" | "-ok"))
-        {
+                .any(|t| t == "-o" || t.starts_with("--output")),
+            "date" => tokens(&seg).iter().any(|t| t == "-s" || t == "--set"),
+            _ => false,
+        };
+        if flags_write {
             return false;
         }
+        // `find` is deliberately absent from the whitelist: its mutating
+        // forms (-delete/-exec) hide behind a read-only-looking command word
         if !READONLY_COMMANDS.contains(&first) {
             return false;
         }
     }
     true
+}
+
+/// Commands that stay behind a one-shot prompt even in yolo mode: deleting
+/// files, privilege escalation and anything that can destroy a filesystem
+/// or take the machine down. yolo auto-approves everything else; these ask
+/// once (`Y` clears the one call, `a` the rest of the session).
+const DANGEROUS_COMMANDS: &[&str] = &[
+    "rm",
+    "sudo",
+    "su",
+    "doas",
+    "mkfs",
+    "mkfs.ext2",
+    "mkfs.ext4",
+    "mkfs.xfs",
+    "mkfs.btrfs",
+    "mkfs.vfat",
+    "dd",
+    "shred",
+    "wipefs",
+    "fdisk",
+    "sfdisk",
+    "cfdisk",
+    "parted",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "halt",
+    "init",
+];
+
+/// True when a bash call would start a command on the destructive list, or
+/// carries a raw destruction pattern (fork bomb, redirect into a device).
+pub fn dangerous_command(command: &str) -> bool {
+    if command.contains(":(){") || command.contains(">/dev/") || command.contains("> /dev/") {
+        return true;
+    }
+    split_compound(command).iter().any(|seg| {
+        command_positions(seg, 0)
+            .first()
+            .is_some_and(|first| DANGEROUS_COMMANDS.contains(&first.as_str()))
+    })
 }
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
@@ -421,6 +500,7 @@ mod tests {
 
     #[test]
     fn mode_tier_matrix() {
+        assert_eq!(Mode::default(), Mode::Yolo);
         let read = resolve("read", Tier::Read, false, &cfg(Mode::AlwaysAsk, &[]), None);
         assert_eq!(read, Decision::Auto);
         let read_out = resolve("read", Tier::Read, true, &cfg(Mode::AlwaysAsk, &[]), None);
@@ -492,6 +572,60 @@ mod tests {
                 Some(cmd),
             );
             assert!(matches!(d, Decision::Ask(_)), "{cmd} should ask");
+        }
+    }
+
+    #[test]
+    fn yolo_still_prompts_once_for_destructive_commands() {
+        for cmd in [
+            "rm -rf build",
+            "rm notes.txt",
+            "sudo apt install x",
+            "mkfs.ext4 /dev/sda1",
+            "dd if=img of=/dev/sdb",
+            "shutdown now",
+            "reboot",
+            "echo hi | sudo tee /etc/hosts",
+        ] {
+            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
+            assert!(matches!(d, Decision::Ask(_)), "{cmd} must prompt in yolo");
+        }
+        // everything else stays automatic
+        for cmd in ["ls", "git status", "cargo test", "git push origin main"] {
+            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} should stay auto in yolo");
+        }
+    }
+
+    #[test]
+    fn readonly_list_rejects_command_substitution_and_flag_writes() {
+        for cmd in [
+            "echo $(rm -rf x)",
+            "cat `rm -rf x`",
+            "echo hi | sort -o /tmp/f",
+            "date -s 2030-01-01",
+        ] {
+            assert!(!readonly_command(cmd), "{cmd} is not read-only");
+        }
+        // bare and flag-only listing forms stay read-only
+        assert!(readonly_command("git branch"));
+        assert!(readonly_command("git branch -a"));
+        assert!(readonly_command("git config user.name"));
+        assert!(readonly_command("git remote -v"));
+        assert!(readonly_command("sort input.txt"));
+    }
+
+    #[test]
+    fn mutating_git_forms_are_not_readonly() {
+        for cmd in [
+            "git branch -D feat",
+            "git branch new",
+            "git remote add origin url",
+            "git remote remove origin",
+            "git config user.email a@b.c",
+            "git config --global user.name n",
+        ] {
+            assert!(!readonly_command(cmd), "{cmd} must not run free");
         }
     }
 
