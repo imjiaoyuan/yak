@@ -211,7 +211,7 @@ fn run_task_logged(
 fn run_skill(session: &mut Session, skills: &[crate::agent::skills::SkillDef], name: &str) {
     let Some(skill) = skills.iter().find(|s| s.name == name) else {
         eprintln!(
-            "{}unknown skill '{name}' (try /skills){}",
+            "{}unknown skill '{name}' (see /help){}",
             crate::theme::err().dim,
             crate::theme::err().reset
         );
@@ -257,21 +257,7 @@ fn repl_help(session: &Session) -> String {
         p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /compact /status /reload /exit · !cmd runs shell");
-    // only the switch away from the current mode is worth showing
-    let switches: Vec<&str> = [
-        ("/ask", approval::Mode::AlwaysAsk),
-        ("/yolo", approval::Mode::Yolo),
-    ]
-    .into_iter()
-    .filter(|(_, m)| *m != session.approval.mode)
-    .map(|(cmd, _)| cmd)
-    .collect();
-    h.push_str(&format!(
-        "\nmodes     {} (current: {})\n",
-        switches.join(" "),
-        session.approval.mode.label()
-    ));
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /compact /status /yolo /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", session.model.qualified_id()),
@@ -306,7 +292,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/clear",
     "/yolo",
-    "/skills",
     "/compact",
     "/status",
     "/exit",
@@ -317,7 +302,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/resume",
     "/tree",
     "/reload",
-    "/trust",
 ];
 
 /// A near miss of a known slash command ("/clea"), mirroring main.rs's
@@ -682,22 +666,43 @@ fn repl_command(
     };
     match cmd {
         "/help" => {
-            eprintln!(
-                "{}  /model        switch model        /thinking  effort level",
-                crate::theme::err().dim
-            );
-            eprintln!("  /login        add a provider      /logout  remove one");
-            eprintln!("  /clear        fresh session       /resume  load a past one");
-            eprintln!("  /skills       list skills         /yolo    toggle approvals");
-            eprintln!("  /status       usage + extensions  /compact condense history");
-            eprintln!("  /reload       reload skills/extensions");
-            eprintln!("  /trust        toggle auto-approve for this project");
-            eprintln!("  /exit         quit");
-            eprintln!("  paste an image with ctrl+v, or just type its path");
-            eprintln!(
-                "  multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR{}",
-                crate::theme::err().reset
-            );
+            // one command per line, scannable while the picker is open
+            for line in [
+                "/model         switch model",
+                "/thinking      reasoning effort",
+                "/login         add a provider",
+                "/logout        remove one",
+                "/resume        load a past session",
+                "/tree          jump between branches of this session",
+                "/clear         fresh session",
+                "/compact       condense history now (also runs automatically)",
+                "/status        usage, context and plugins",
+                "/yolo          toggle auto-approval",
+                "/reload        reload skills/extensions",
+                "/exit          quit",
+                "paste an image with ctrl+v, or just type its path",
+                "multi-line: ctrl+j / alt+enter / \\ at end newline · ctrl+g edits in $EDITOR",
+            ] {
+                eprintln!(
+                    "{}  {line}{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
+            }
+            // skills are commands (/skill:<name>): they live on the same
+            // slash plane, so /help lists them where the commands are
+            if !skills.is_empty() {
+                let p = crate::theme::err();
+                eprintln!(
+                    "{}  skills — run one with /skill:<name> (tab completes):{}",
+                    p.dim, p.reset
+                );
+                for s in skills.iter() {
+                    let hidden = if s.model_invocation { "" } else { " · hidden" };
+                    let desc = crate::core::text::truncate_chars(&s.description, 64);
+                    eprintln!("{}  /skill:{}{hidden} — {desc}{}", p.dim, s.name, p.reset);
+                }
+            }
         }
         "/model" => {
             let current = session.model.qualified_id();
@@ -877,35 +882,6 @@ fn repl_command(
                 );
             }
         }
-        "/skills" => {
-            let p = crate::theme::err();
-            if skills.is_empty() {
-                eprintln!(
-                    "{}  no skills found — drop SKILL.md folders into ~/.llm/skills/ or .llm/skills/{}",
-                    p.dim, p.reset
-                );
-                return false;
-            }
-            for s in skills.iter() {
-                let hidden = if s.model_invocation { "" } else { " · hidden" };
-                let desc = crate::core::text::truncate_chars(&s.description, 72);
-                eprintln!(
-                    "  {d}/skill:{s0}{hidden}{r}{d} — {desc}{r}",
-                    s0 = s.name,
-                    d = p.dim,
-                    r = p.reset
-                );
-            }
-            eprintln!(
-                "{}  skills live in ~/.llm/skills, ~/.agents/skills (shared) and .llm/skills (project);{}",
-                p.dim, p.reset
-            );
-            eprintln!(
-                "{}  delete a folder to remove one, or list it under [agent] disabled_skills in config.json{}",
-                p.dim, p.reset
-            );
-        }
-
         "/compact" => {
             // manual compaction: summarize everything older than the
             // keep-recent window, same as the automatic path
@@ -958,34 +934,6 @@ fn repl_command(
         "/tree" => {
             if let Err(e) = tree_jump(session) {
                 eprintln!("Error: {e}");
-            }
-        }
-        "/trust" => {
-            // toggle automatic approval for this project directory
-            let trusted = crate::core::config::project_trusted(&session.cwd);
-            match crate::core::config::set_project_trusted(&session.cwd, !trusted) {
-                Ok(now_trusted) => {
-                    session.approval.mode = if now_trusted {
-                        approval::Mode::Yolo
-                    } else {
-                        approval::Mode::AlwaysAsk
-                    };
-                    if now_trusted {
-                        eprintln!(
-                            "{}trusted {} — automatic approval in this project{}",
-                            crate::theme::err().dim,
-                            session.cwd.display(),
-                            crate::theme::err().reset
-                        );
-                    } else {
-                        eprintln!(
-                            "{}trust revoked — non-read-only commands ask again{}",
-                            crate::theme::err().dim,
-                            crate::theme::err().reset
-                        );
-                    }
-                }
-                Err(e) => eprintln!("Error: {e}"),
             }
         }
         "/reload" => {
@@ -1104,13 +1052,14 @@ mod tests {
             .map(|c| c.strip_prefix('/').unwrap())
             .collect();
         for gone in [
-            "memory", "init", "export", "settings", "tools", "ask", "quit", "mcp",
+            "memory", "init", "export", "settings", "tools", "ask", "quit", "mcp", "trust",
+            "skills",
         ] {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
             "model", "thinking", "login", "logout", "resume", "clear", "compact", "status",
-            "reload", "skills", "yolo", "tree", "help", "exit",
+            "reload", "yolo", "tree", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }

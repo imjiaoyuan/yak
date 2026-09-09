@@ -185,7 +185,9 @@ pub fn trusted_projects() -> Vec<PathBuf> {
 }
 
 /// True when `cwd` itself or any of its ancestors is trusted (the nearest
-/// saved decision applies, like the reference's trust.json).
+/// saved decision applies, like the reference's trust.json). Legacy state: written only
+/// by older builds (the `/trust` command was folded into `/yolo`); still
+/// honored on startup.
 pub fn project_trusted(cwd: &Path) -> bool {
     let trusted = trusted_projects();
     let mut cur = Some(cwd);
@@ -196,22 +198,6 @@ pub fn project_trusted(cwd: &Path) -> bool {
         cur = dir.parent();
     }
     false
-}
-
-/// Toggle trust for a directory; returns the new state.
-pub fn set_project_trusted(dir: &Path, trusted: bool) -> std::io::Result<bool> {
-    fs::create_dir_all(user_dir())?;
-    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let mut list: Vec<PathBuf> = trusted_projects()
-        .into_iter()
-        .filter(|t| *t != canonical)
-        .collect();
-    if trusted {
-        list.push(canonical);
-    }
-    let value = serde_json::json!({ "trusted": list });
-    fs::write(trust_path(), jsonfmt::dumps_indent(&value, 2))?;
-    Ok(trusted)
 }
 
 /// Read config.json as an object for a merge-preserving rewrite: a missing
