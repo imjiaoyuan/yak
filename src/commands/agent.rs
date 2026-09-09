@@ -37,7 +37,7 @@ const SPECS: &[OptSpec] = &[
         "Comma-separated tool subset (default: all)",
         "NAMES"
     ),
-    value_spec!("approval-mode", None, "ask or yolo", "MODE"),
+    value_spec!("approval-mode", None, "ask or yolo (default: yolo)", "MODE"),
     value_spec!(
         "thinking",
         None,
@@ -188,14 +188,14 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     // model resolution: -m > LLM_MODEL > session's model > the default
     let model = crate::providers::resolve_run_model(args, conv_model.clone())?;
 
-    // approval config: CLI > [agent] settings > defaults
+    // approval config: CLI > [agent] settings > yolo default
     let mode_str = if args.flag(&["yolo"]) {
         "yolo".to_string()
     } else {
         args.opt(&["approval-mode"])
             .map(str::to_string)
             .or_else(|| settings.approval_mode.clone())
-            .unwrap_or_else(|| "always-ask".to_string())
+            .unwrap_or_else(|| "yolo".to_string())
     };
     let mode = approval::Mode::parse(&mode_str)
         .ok_or_else(|| format!("invalid --approval-mode '{mode_str}' (ask or yolo)"))?;
@@ -239,16 +239,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     };
 
     let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
-    // a trusted project runs with automatic approval (the reference's trust.json idea,
-    // applied to tool execution); /trust toggles it per directory
-    if approval_cfg.mode == approval::Mode::AlwaysAsk && config::project_trusted(&cwd) {
-        approval_cfg.mode = approval::Mode::Yolo;
-        eprintln!(
-            "{}trusted project — running in yolo mode (/trust to revoke){}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-    }
 
     // extensions: user executables registering tools (and, later, commands
     // and event hooks). A failed extension warns and mounts nothing, never
