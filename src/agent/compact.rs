@@ -18,7 +18,7 @@ impl Default for CompactConfig {
         CompactConfig {
             context_window: 128_000,
             reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
+            keep_recent_tokens: 32_000,
         }
     }
 }
@@ -153,6 +153,92 @@ pub fn summarize(
     prefix: &[Msg],
 ) -> Result<String, String> {
     summarize_with(model, prefix, "")
+}
+
+const TASK_MARK: &str = "# Original task\n";
+const SUMMARY_MARK: &str = "\n# Summary\n";
+
+/// Compose the stored summary text: the original task verbatim on top, the
+/// compressive summary below. Long-running work must not drift from what
+/// was actually asked — the summary compresses, the task never does.
+pub fn compose_summary(task: Option<&str>, summary: &str) -> String {
+    match task.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(task) => format!("{TASK_MARK}{task}{SUMMARY_MARK}\n{summary}"),
+        None => summary.to_string(),
+    }
+}
+
+/// Pull the preserved original task back out of a stored summary (the
+/// re-compaction path: the first user message is long gone by then).
+pub fn extract_original_task(summary: &str) -> Option<String> {
+    let rest = summary.strip_prefix(TASK_MARK)?;
+    let end = rest.find(SUMMARY_MARK)?;
+    Some(rest[..end].to_string())
+}
+
+/// How many of the most recent attachment-bearing messages keep their
+/// images/documents. Multimodal blocks are the most expensive context
+/// there is and the worst-cached; old screenshots rarely matter to the
+/// current work, so everything older than the last few becomes a note.
+pub const KEEP_ATTACHMENT_MESSAGES: usize = 2;
+
+/// Replace attachments older than the last [`KEEP_ATTACHMENT_MESSAGES`]
+/// attachment-bearing messages with a textual note (name + mime). The
+/// saved input tokens apply to every subsequent request; the one-time
+/// prefix shift costs a single cache miss. Idempotent: trimmed messages
+/// carry no attachments, so a second pass changes nothing.
+pub fn trim_old_attachments(history: &mut [Msg]) {
+    let with_attachments: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| match m {
+            Msg::User { attachments, .. } | Msg::ToolResult { attachments, .. } => {
+                !attachments.is_empty()
+            }
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let keep: std::collections::HashSet<usize> = with_attachments[with_attachments
+        .len()
+        .saturating_sub(KEEP_ATTACHMENT_MESSAGES)..]
+        .iter()
+        .copied()
+        .collect();
+    for (i, msg) in history.iter_mut().enumerate() {
+        if keep.contains(&i) {
+            continue;
+        }
+        let (text, attachments): (&mut String, &mut Vec<crate::providers::Attachment>) = match msg {
+            Msg::User { text, attachments } => (text, attachments),
+            Msg::ToolResult {
+                content,
+                attachments,
+                ..
+            } => (content, attachments),
+            _ => continue,
+        };
+        if attachments.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = attachments
+            .iter()
+            .map(|a| {
+                let name = a
+                    .filename
+                    .clone()
+                    .or_else(|| a.path.clone())
+                    .or_else(|| a.url.clone())
+                    .unwrap_or_else(|| "unnamed".to_string());
+                format!("{name} ({})", a.mime_type)
+            })
+            .collect();
+        attachments.clear();
+        text.push_str(&format!(
+            "\n\n[earlier attachments dropped from context: {}]",
+            names.join(", ")
+        ));
+    }
 }
 
 /// Summarize with the caller's extra instructions appended to the template
@@ -292,6 +378,70 @@ mod tests {
         assert!(!should_compact(500, &cfg));
         assert!(should_compact(901, &cfg));
         assert!(should_compact(10_000, &cfg));
+    }
+
+    #[test]
+    fn summary_composes_and_extracts_the_original_task() {
+        let s = compose_summary(Some("fix the login bug"), "## Goal\nfix login");
+        assert!(s.starts_with("# Original task\nfix the login bug\n# Summary\n"));
+        assert_eq!(
+            extract_original_task(&s).as_deref(),
+            Some("fix the login bug"),
+            "re-compaction recovers the task verbatim"
+        );
+        // no task → bare summary; garbage → None
+        assert_eq!(compose_summary(None, "just summary"), "just summary");
+        assert_eq!(compose_summary(Some("  "), "s"), "s");
+        assert_eq!(extract_original_task("no marks here"), None);
+    }
+
+    #[test]
+    fn old_attachments_become_notes_and_it_stays_done() {
+        let att = || crate::providers::Attachment {
+            mime_type: "image/png".to_string(),
+            base64_data: String::new(),
+            filename: Some("shot.png".to_string()),
+            path: None,
+            url: None,
+        };
+        let mut history = vec![
+            Msg::user_with("first", vec![att()]),
+            Msg::assistant("a"),
+            Msg::user_with("second", vec![att()]),
+            Msg::assistant("b"),
+            Msg::user_with("third", vec![att()]),
+            Msg::user_with("fourth", vec![att()]),
+        ];
+        trim_old_attachments(&mut history);
+        let count = |h: &[Msg]| {
+            h.iter()
+                .filter(|m| match m {
+                    Msg::User { attachments, .. } | Msg::ToolResult { attachments, .. } => {
+                        !attachments.is_empty()
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        assert_eq!(
+            count(&history),
+            KEEP_ATTACHMENT_MESSAGES,
+            "only the tail keeps images"
+        );
+        match &history[0] {
+            Msg::User { text, attachments } => {
+                assert!(attachments.is_empty());
+                assert!(
+                    text.contains("shot.png (image/png)"),
+                    "the note names what was dropped"
+                );
+            }
+            _ => panic!("expected a user message"),
+        }
+        // idempotent: a second pass changes nothing (the note is not doubled)
+        let before = format!("{:?}", history);
+        trim_old_attachments(&mut history);
+        assert_eq!(before, format!("{:?}", history));
     }
 
     #[test]

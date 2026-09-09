@@ -96,6 +96,8 @@ pub fn build_system_prompt(
             out.push_str("\n\n");
             out.push_str(&ctx);
         }
+        out.push_str("\n\n");
+        out.push_str(&environment_line(cwd));
         if let Some(block) = crate::agent::skills::skills_block(skills) {
             out.push_str("\n\n");
             out.push_str(&block);
@@ -107,6 +109,33 @@ pub fn build_system_prompt(
     }
     out.push_str(&format!("\n\nCurrent working directory: {}", cwd.display()));
     Some(out)
+}
+
+/// One stable line of environment facts: platform, shell, VCS, project
+/// type with its verify command. Keeps the model from guessing
+/// (PowerShell-isms on Linux, npm test in a cargo project, ...). Built
+/// once per session, so the system prompt stays byte-identical across
+/// rounds (the prefix cache depends on it).
+fn environment_line(cwd: &Path) -> String {
+    let mut parts = vec![std::env::consts::OS.to_string()];
+    parts.push(crate::platform::shell_spec().program);
+    if crate::core::paths::nearest_dir_up(cwd, ".git", true).is_some() {
+        parts.push("git repository".to_string());
+    }
+    let hints: &[(&str, &str)] = &[
+        ("Cargo.toml", "Rust project — verify with `cargo test`"),
+        ("go.mod", "go project — verify with `go test ./...`"),
+        ("package.json", "node project — verify with `npm test`"),
+        ("pyproject.toml", "python project — verify with `pytest`"),
+        ("requirements.txt", "python project — verify with `pytest`"),
+    ];
+    for (marker, hint) in hints {
+        if cwd.join(marker).is_file() {
+            parts.push((*hint).to_string());
+            break;
+        }
+    }
+    format!("Environment: {}.", parts.join(" · "))
 }
 
 /// Drop the trailing cwd line a previously assembled prompt ends with, so a
@@ -136,5 +165,22 @@ mod tests {
         // resuming the resumed prompt must be a fixed point: no compounding
         let again = build_system_prompt(cwd, None, None, Some(&out), &[]).unwrap();
         assert_eq!(again, out);
+    }
+
+    #[test]
+    fn fresh_prompt_carries_the_environment_line() {
+        let dir = std::env::temp_dir().join(format!("llm-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        let out = build_system_prompt(&dir, None, None, None, &[]).unwrap();
+        assert!(out.contains("Environment: "), "{}", out);
+        assert!(
+            out.contains("cargo test`"),
+            "a cargo project names its verify command: {out}"
+        );
+        // stable across builds in the same directory (the prefix cache)
+        let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();
+        assert_eq!(out, again);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

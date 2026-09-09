@@ -215,6 +215,10 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
+        // multimodal blocks are the most expensive, worst-cached context:
+        // attachments older than the last few messages become notes now,
+        // before the request is built (the idempotent pass is cheap)
+        compact::trim_old_attachments(&mut history);
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
@@ -299,9 +303,33 @@ pub fn run_agent(
                 && let Ok(s) = compact::summarize(model, &history[..cut])
                 && !s.is_empty()
             {
+                // the original task rides verbatim on top of the summary:
+                // long-running work must not drift from what was asked. On
+                // re-compaction it is recovered from the previous summary
+                // (the first user message is long gone by then).
+                let dropped = &history[..cut];
+                let task = match dropped.first() {
+                    Some(Msg::Summary { text }) => compact::extract_original_task(text),
+                    _ => dropped.iter().find_map(|m| match m {
+                        Msg::User { text, .. } => Some(text.clone()),
+                        _ => None,
+                    }),
+                };
+                let task = task.map(|t| {
+                    if t.len() > 4000 {
+                        let mut cut_text =
+                            t[..crate::core::text::floor_boundary(&t, 4000)].to_string();
+                        cut_text.push('…');
+                        cut_text
+                    } else {
+                        t
+                    }
+                });
                 let tail = history.split_off(cut);
                 history.clear();
-                history.push(Msg::Summary { text: s });
+                history.push(Msg::Summary {
+                    text: compact::compose_summary(task.as_deref(), &s),
+                });
                 history.extend(tail);
                 on_update(AgentUpdate::Compacted { removed: cut });
             }

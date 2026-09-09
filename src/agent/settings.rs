@@ -32,7 +32,7 @@ impl AgentSettings {
                 .or(self.context_window)
                 .unwrap_or(128_000),
             reserve_tokens: self.reserve_tokens.unwrap_or(16_384),
-            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(20_000),
+            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(32_000),
         }
     }
 }
