@@ -20,6 +20,13 @@ const WRAP_EARLY: usize = 3;
 /// the reference caps a horizontal rule at 80 cells.
 const HR_MAX: usize = 80;
 
+/// An unclosed inline marker holds at most this many bytes before it
+/// degrades to literal text: a prose `[`, a stray backtick or a very long
+/// unclosed span must not stall the stream until the line ends. Spans
+/// that close within the cap render styled (span text is short in
+/// practice); longer ones stream verbatim.
+const HOLD_CAP: usize = 80;
+
 // ---------------------------------------------------------------------------
 // MdStream: complete-line rendering (replay)
 // ---------------------------------------------------------------------------
@@ -290,7 +297,9 @@ fn flush_table(st: &mut BlockState, out: &mut String) {
     }
     sep(st, out);
     let rows = std::mem::take(&mut st.table);
-    render_table(&rows, st, out);
+    for line in box_table_lines(&rows, st.wrap, st.p) {
+        emit_line(st, &line, out);
+    }
     block_done(st);
 }
 
@@ -327,13 +336,16 @@ fn wrap_cell(text: &str, width: usize) -> Vec<String> {
     out.split('\n').map(str::to_string).collect()
 }
 
-/// Render buffered `|` rows as a the reference-style box table: `┌─┬─┐` frame, bold
-/// header, a separator between every row, cells wrapped and padded to the
-/// column widths (content-natural, floored at the longest word, grown
-/// proportionally when the table must fit a narrower width). Malformed
-/// rows (no `|---|` separator under the header) fall back to verbatim.
-fn render_table(rows: &[String], st: &mut BlockState, out: &mut String) {
-    let p = st.p;
+/// Render buffered `|` rows as a the reference-style box table, one ready-to-print
+/// line each (styled, no margin): `┌─┬─┐` frame, bold header, a separator
+/// between every row, cells wrapped and padded to the column widths
+/// (content-natural, floored at the longest word, grown proportionally
+/// when the table must fit a narrower width). Malformed rows (no
+/// `|---|` separator under the header) fall back to verbatim. Shared by
+/// the replay engine and the live stream (which holds `|` rows until the
+/// table ends — exactly when the reference's parser first shows a table, too).
+fn box_table_lines(rows: &[String], width: usize, p: &Palette) -> Vec<String> {
+    let mut out = Vec::new();
     let split = |r: &str| -> Vec<String> {
         let t = r.trim();
         let t = t.strip_prefix('|').unwrap_or(t);
@@ -348,10 +360,8 @@ fn render_table(rows: &[String], st: &mut BlockState, out: &mut String) {
             })
     };
     if rows.len() < 2 || !is_sep(&split(&rows[1])) {
-        for r in rows {
-            emit_line(st, r, out);
-        }
-        return;
+        out.extend(rows.iter().cloned());
+        return out;
     }
     let header: Vec<String> = split(&rows[0])
         .iter()
@@ -365,7 +375,7 @@ fn render_table(rows: &[String], st: &mut BlockState, out: &mut String) {
         .len()
         .max(body.iter().map(Vec::len).max().unwrap_or(0));
     if cols == 0 {
-        return;
+        return out;
     }
     let cell_of = |row: &[String], i: usize| -> String { row.get(i).cloned().unwrap_or_default() };
     // natural widths and longest-word floors (a floor caps at 30)
@@ -389,10 +399,10 @@ fn render_table(rows: &[String], st: &mut BlockState, out: &mut String) {
         measure(r);
     }
     let border_overhead = 3 * cols + 1;
-    let widths: Vec<usize> = if st.wrap == 0 {
+    let widths: Vec<usize> = if width == 0 {
         natural.clone()
     } else {
-        let avail = st.wrap.saturating_sub(border_overhead).max(cols);
+        let avail = width.saturating_sub(border_overhead).max(cols);
         if natural.iter().sum::<usize>() <= avail {
             natural.clone()
         } else {
@@ -447,26 +457,23 @@ fn render_table(rows: &[String], st: &mut BlockState, out: &mut String) {
             })
             .collect()
     };
-    emit_line(st, &hline('┌', '┬', '┐'), out);
+    out.push(hline('┌', '┬', '┐'));
     let header_cells: Vec<Vec<String>> = (0..cols)
         .map(|i| wrap_cell(&cell_of(&header, i), widths[i]))
         .collect();
-    for l in row_line(&header_cells, true) {
-        emit_line(st, &l, out);
-    }
-    emit_line(st, &hline('├', '┼', '┤'), out);
+    out.extend(row_line(&header_cells, true));
+    out.push(hline('├', '┼', '┤'));
     for (ri, r) in body.iter().enumerate() {
         let cells: Vec<Vec<String>> = (0..cols)
             .map(|i| wrap_cell(&cell_of(r, i), widths[i]))
             .collect();
-        for l in row_line(&cells, false) {
-            emit_line(st, &l, out);
-        }
+        out.extend(row_line(&cells, false));
         if ri + 1 < body.len() {
-            emit_line(st, &hline('├', '┼', '┤'), out);
+            out.push(hline('├', '┼', '┤'));
         }
     }
-    emit_line(st, &hline('└', '┴', '┘'), out);
+    out.push(hline('└', '┴', '┘'));
+    out
 }
 
 fn is_setext(t: &str) -> bool {
@@ -676,6 +683,11 @@ pub struct StyleStream {
     fence_flushed: usize,
     /// the two-space fence indent written for this content line
     fence_indented: bool,
+    /// `|` rows accumulated for the table being streamed
+    table_buf: Vec<String>,
+    /// an unclosed inline marker is holding its span (plain chars can
+    /// then skip the scan pass entirely)
+    marker_open: bool,
 }
 
 enum St {
@@ -683,8 +695,9 @@ enum St {
     Classify,
     /// inline-resolving from the byte offset
     Inline(usize),
-    /// `|` row streaming verbatim from the byte offset
-    Table(usize),
+    /// consecutive `|` rows held until the table ends, then rendered as
+    /// one box grid (it shows a table only once its parser closes it too)
+    Table,
     /// whole line held: HR decision at line end
     Hr,
     /// opening fence line held until line end
@@ -712,6 +725,8 @@ impl StyleStream {
             in_fence: false,
             fence_flushed: 0,
             fence_indented: false,
+            table_buf: Vec::new(),
+            marker_open: false,
         }
     }
 
@@ -747,31 +762,62 @@ impl StyleStream {
     /// on its own line; returns whether anything was flushed.
     pub fn finish(&mut self, rendered: &mut String) -> bool {
         if self.line.is_empty() && !self.line_printed {
-            return false;
+            return self.flush_pending_table(rendered);
         }
         self.line_end(rendered);
+        // line_end may have buffered a final row into the table
+        self.flush_pending_table(rendered);
         true
+    }
+
+    /// A pending table (rows held, nothing printed yet) flushes as a box
+    /// grid; returns whether anything was pending.
+    fn flush_pending_table(&mut self, out: &mut String) -> bool {
+        if self.table_buf.is_empty() {
+            return false;
+        }
+        let buf = std::mem::take(&mut self.table_buf);
+        self.flush_table_grid(&buf, out);
+        true
+    }
+
+    /// Render held table rows as one box grid through the row emitter.
+    fn flush_table_grid(&mut self, rows: &[String], out: &mut String) {
+        for line in box_table_lines(rows, self.wrap, self.p) {
+            out.push_str(&self.margin);
+            out.push_str(&line);
+            out.push('\n');
+        }
+        self.emitted = true;
     }
 
     // ---- line lifecycle ------------------------------------------------
 
     fn advance(&mut self, out: &mut String) {
+        // a pending table owns the stream: later lines hold entirely until
+        // their line end, where the grid renders first (a row that is not
+        // a `|` line closes the table)
+        if !self.table_buf.is_empty() {
+            return;
+        }
         if matches!(self.st, St::Classify) {
             let d = self.decide();
             self.apply(d, out);
         }
         match self.st {
-            St::Table(at) => {
-                if at < self.line.len() {
-                    let rest = self.line[at..].to_string();
-                    for ch in rest.chars() {
-                        self.putc(ch, out);
-                    }
-                    self.st = St::Table(self.line.len());
-                }
-            }
+            St::Table => {} // rows hold until the table ends
             St::Inline(at) if at < self.line.len() => {
-                self.scan_inline(at, out, false);
+                // fast path: a plain char outside any open marker streams
+                // straight through — no scan pass, no allocation
+                if !self.marker_open
+                    && !matches!(self.line.as_bytes()[at], b'`' | b'*' | b'~' | b'[')
+                {
+                    let ch = self.line[at..].chars().next().unwrap();
+                    self.putc(ch, out);
+                    self.st = St::Inline(at + ch.len_utf8());
+                } else {
+                    self.scan_inline(at, out, false);
+                }
             }
             _ => {}
         }
@@ -783,6 +829,20 @@ impl StyleStream {
         if self.in_fence {
             self.fence_line_end(out);
             return;
+        }
+        // a `|` row joins a pending table (nothing prints until it ends);
+        // any other line closes the table — the grid renders first, then
+        // the line settles below
+        if matches!(self.st, St::Table) || !self.table_buf.is_empty() {
+            let row = std::mem::take(&mut self.line);
+            if row.trim_start().starts_with('|') && !row.trim().is_empty() {
+                self.table_buf.push(row);
+                self.reset_line();
+                return;
+            }
+            self.st = St::Classify;
+            self.line = row;
+            self.flush_pending_table(out);
         }
         // a whitespace-only line is a blank line: no margin, no content
         if !self.line_printed && self.line.trim().is_empty() {
@@ -830,12 +890,7 @@ impl StyleStream {
                     self.scan_inline(at, out, true);
                 }
             }
-            St::Table(at) => {
-                let rest = self.line[at..].to_string();
-                for ch in rest.chars() {
-                    self.putc(ch, out);
-                }
-            }
+            St::Table => unreachable!("table rows settle above"),
             St::Inline(at) => self.scan_inline(at, out, true),
         }
         self.end_row(out);
@@ -860,6 +915,21 @@ impl StyleStream {
         }
         out.push('\n');
         self.emitted = true;
+        self.reset_line();
+        if self.dynamic {
+            self.refresh_width();
+        }
+        if self.in_fence {
+            let p = self.p;
+            self.ctx = p.code_block.clone();
+            self.open = self.ctx.clone();
+            self.cont = 2;
+        }
+    }
+
+    /// Clear every per-line state without terminating the row (a buffered
+    /// table row prints nothing yet).
+    fn reset_line(&mut self) {
         self.line.clear();
         self.line_printed = false;
         self.cells = 0;
@@ -871,15 +941,7 @@ impl StyleStream {
         self.st = St::Classify;
         self.fence_flushed = 0;
         self.fence_indented = false;
-        if self.dynamic {
-            self.refresh_width();
-        }
-        if self.in_fence {
-            let p = self.p;
-            self.ctx = p.code_block.clone();
-            self.open = self.ctx.clone();
-            self.cont = 2;
-        }
+        self.marker_open = false;
     }
 
     // ---- fenced code ---------------------------------------------------
@@ -1120,7 +1182,7 @@ impl StyleStream {
             Decision::Hr => self.st = St::Hr,
             Decision::FenceOpen => self.st = St::FenceOpen,
             Decision::Inline { at } => self.st = St::Inline(at),
-            Decision::Table => self.st = St::Table(0),
+            Decision::Table => self.st = St::Table,
             Decision::Heading { level, at } => {
                 let mut codes = format!("{}{}", p.heading, p.bold);
                 if level == 1 {
@@ -1207,7 +1269,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol {
+                    if !eol && line.len() - i <= HOLD_CAP {
                         break;
                     }
                     for _ in 0..run {
@@ -1238,7 +1300,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol {
+                    if !eol && line.len() - i <= HOLD_CAP {
                         break;
                     }
                     for _ in 0..run {
@@ -1265,7 +1327,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol {
+                    if !eol && line.len() - i <= HOLD_CAP {
                         break;
                     }
                     for _ in 0..tilde_run.min(2) {
@@ -1279,7 +1341,7 @@ impl StyleStream {
                     if let Some(rb) = line[i + 1..].find(']') {
                         let close = i + 1 + rb;
                         if close + 1 >= line.len() {
-                            if !eol {
+                            if !eol && line.len() - i <= HOLD_CAP {
                                 break; // ']' is the last char so far
                             }
                         } else if line.as_bytes()[close + 1] != b'(' {
@@ -1310,10 +1372,10 @@ impl StyleStream {
                             self.putc('[', out);
                             i += 1;
                             continue;
-                        } else if !eol {
+                        } else if !eol && line.len() - i <= HOLD_CAP {
                             break; // `](` seen, ')' pending
                         }
-                    } else if !eol {
+                    } else if !eol && line.len() - i <= HOLD_CAP {
                         break; // no ']' yet
                     }
                     self.putc('[', out);
@@ -1327,6 +1389,8 @@ impl StyleStream {
             }
         }
         self.st = St::Inline(i);
+        // broke early = a marker still holds its span
+        self.marker_open = i < line.len();
     }
 
     // ---- row emitter ----------------------------------------------------
@@ -2006,9 +2070,37 @@ mod tests {
     }
 
     #[test]
-    fn live_table_rows_pass_through_verbatim() {
+    fn live_tables_render_as_box_grids_when_closed() {
+        // rows hold while streaming; the grid appears when the table ends
+        // (exactly when the reference's parser first shows it) — byte-identical to
+        // the replay renderer
+        let t = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        assert_eq!(live(t), render(t));
+        // a following paragraph closes the table and prints after it
+        let t2 = "| a |\n|---|\n| 1 |\nafter\n";
+        assert_eq!(live(t2), render(t2));
+        // a table at end-of-stream flushes at finish
+        let t3 = "| a |\n|---|\n| 1 |";
+        assert_eq!(live(t3), render(t3));
+        assert!(live(t3).contains('┌'));
+    }
+
+    #[test]
+    fn live_tables_without_separator_fall_back_verbatim() {
         let t = "| a | b |\n| 1 | 2 |\n";
         assert_eq!(live(t), t);
+    }
+
+    #[test]
+    fn long_unclosed_marker_degrades_within_the_cap() {
+        // a prose bracket or stray backtick must not hold the rest of the
+        // line: past HOLD_CAP the marker streams literally and the scan
+        // continues (a later closed span still renders)
+        let xs = "x".repeat(100);
+        let doc = format!("see [note {xs} and `code` too\n");
+        assert_eq!(live(&doc), format!("see [note {xs} and {C}code{R} too\n"));
+        // and it matches the one-shot resolver for never-closed markers
+        assert_eq!(live(&doc), render(&doc));
     }
 
     #[test]
