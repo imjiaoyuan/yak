@@ -685,6 +685,11 @@ pub struct StyleStream {
     fence_indented: bool,
     /// `|` rows accumulated for the table being streamed
     table_buf: Vec<String>,
+    /// live progress hint while table rows hold (terminal mode): a dim
+    /// `… N rows` row rewrites in place so a streaming table never reads
+    /// as a frozen screen; cleared the moment the grid renders
+    live_hints: bool,
+    hint_open: bool,
     /// an unclosed inline marker is holding its span (plain chars can
     /// then skip the scan pass entirely)
     marker_open: bool,
@@ -726,14 +731,19 @@ impl StyleStream {
             fence_flushed: 0,
             fence_indented: false,
             table_buf: Vec::new(),
+            live_hints: false,
+            hint_open: false,
             marker_open: false,
         }
     }
 
     /// Terminal mode: wrap at the live terminal width, re-read at every
-    /// line start so a resize applies from the next row on.
+    /// line start so a resize applies from the next row on; also arms the
+    /// in-place table progress hint (the one redraw the live stream uses,
+    /// the same shape as the tool-output counter).
     pub fn wrap_terminal(&mut self) {
         self.dynamic = true;
+        self.live_hints = true;
         self.refresh_width();
     }
 
@@ -776,9 +786,37 @@ impl StyleStream {
         if self.table_buf.is_empty() {
             return false;
         }
+        self.clear_hint(out);
         let buf = std::mem::take(&mut self.table_buf);
         self.flush_table_grid(&buf, out);
         true
+    }
+
+    /// Rewrite the in-place progress row (terminal mode only): the grid
+    /// needs all rows before it can render, so held rows show a live
+    /// counter instead of a frozen screen.
+    fn table_hint(&mut self, out: &mut String) {
+        if !self.live_hints {
+            return;
+        }
+        let n = self.table_buf.len();
+        if n < 2 {
+            return;
+        }
+        let p = self.p;
+        out.push_str("\r\x1b[2K");
+        out.push_str(&self.margin);
+        out.push_str(&p.dim);
+        out.push_str(&format!("… {n} rows"));
+        out.push_str(&p.reset);
+        self.hint_open = true;
+    }
+
+    fn clear_hint(&mut self, out: &mut String) {
+        if self.hint_open {
+            out.push_str("\r\x1b[2K");
+            self.hint_open = false;
+        }
     }
 
     /// Render held table rows as one box grid through the row emitter.
@@ -838,6 +876,7 @@ impl StyleStream {
             if row.trim_start().starts_with('|') && !row.trim().is_empty() {
                 self.table_buf.push(row);
                 self.reset_line();
+                self.table_hint(out);
                 return;
             }
             self.st = St::Classify;
@@ -2067,6 +2106,32 @@ mod tests {
         assert_eq!(live("--\n"), "--\n");
         // `**bold**` at line start aborts the HR candidate and resolves
         assert_eq!(live("**注意**：\n"), format!("{B}注意{R}：\n"));
+    }
+
+    #[test]
+    fn live_table_hold_shows_an_in_place_progress_hint() {
+        // terminal mode only: while rows hold, a dim `… N rows` row
+        // rewrites in place (the screen never freezes), and the grid
+        // renders on the cleared row once the table ends
+        let mut s = StyleStream::indented(2, p());
+        s.wrap_terminal();
+        let mut out = String::new();
+        for ch in "| a |\n|---|\n| 1 |\n| 2 |\n".chars() {
+            s.push_delta(&ch.to_string(), &mut out);
+        }
+        assert!(out.contains("… 4 rows"), "hint tracks held rows: {out:?}");
+        s.finish(&mut out);
+        let hint_at = out.find("… 4 rows").unwrap();
+        let grid_at = out.find('┌').unwrap();
+        assert!(grid_at > hint_at);
+        // cleared in place right before the grid
+        assert!(out[hint_at..grid_at].contains("\r\x1b[2K"));
+        // non-terminal streams never emit the rewrite
+        let mut plain = StyleStream::indented(2, p());
+        let mut pout = String::new();
+        plain.push_delta("| a |\n|---|\n| 1 |\n", &mut pout);
+        plain.finish(&mut pout);
+        assert!(!pout.contains('\r'));
     }
 
     #[test]
