@@ -228,7 +228,7 @@ impl TaskView {
                 if self.show_trace {
                     let pad = " ".repeat(self.indent);
                     let p = crate::theme::err();
-                    eprintln!("{}{pad}thinking ... end{}", p.dim, p.reset);
+                    eprintln!("{}{pad}thinking ... end{}", p.gray, p.reset);
                 }
             }
         }
@@ -363,13 +363,13 @@ impl TaskView {
             };
             eprintln!(
                 "{}{pad}{secs:.1}s · ↑{} ↓{}{cache}{}",
-                p.dim,
+                p.gray,
                 humanize_tokens(self.total_in),
                 humanize_tokens(self.total_out),
                 p.reset
             );
         } else {
-            eprintln!("{}{pad}{secs:.1}s{}", p.dim, p.reset);
+            eprintln!("{}{pad}{secs:.1}s{}", p.gray, p.reset);
         }
     }
 }

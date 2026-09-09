@@ -60,7 +60,9 @@ pub fn print_diff_block(diff: &str) {
     for line in diff.split('\n') {
         let wrapped = crate::core::render_md::wrap_block(line, width, 2);
         let styled = match line.chars().next() {
-            Some('+') => format!("{}  {wrapped}{}", p.diff_add, p.reset),
+            // the legacy chrome look: additions default, deletions gray,
+            // hunk headers and context dim
+            Some('+') => format!("  {wrapped}"),
             Some('-') => format!("{}  {wrapped}{}", p.diff_del, p.reset),
             _ => format!("{}  {wrapped}{}", p.diff_ctx, p.reset),
         };

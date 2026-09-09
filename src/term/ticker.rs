@@ -35,7 +35,7 @@ impl Ticker {
                     let spin = SPINNER[frame % SPINNER.len()];
                     frame += 1;
                     let phase = phase_text.lock().map(|p| p.clone()).unwrap_or_default();
-                    eprint!("\r\x1b[2K{}{spin} {secs:.0}s · {phase}{}", p.dim, p.reset);
+                    eprint!("\r\x1b[2K{}{spin} {secs:.0}s · {phase}{}", p.gray, p.reset);
                     let _ = std::io::stderr().flush();
                     last_draw = std::time::Instant::now();
                 }

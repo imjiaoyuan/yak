@@ -170,11 +170,11 @@ impl Session {
                             eprint!("\r\x1b[2K");
                             let width = crate::term::columns().max(20);
                             let wrapped = crate::core::render_md::wrap_block(&line, width, 2);
-                            eprintln!("{}{wrapped}{}", p.dim, p.reset);
+                            eprintln!("{}{wrapped}{}", p.gray, p.reset);
                         } else {
                             // beyond the head: one line, rewritten in place
                             let p = crate::theme::err();
-                            eprint!("\r\x1b[2K{}  … +{n} lines{}      ", p.dim, p.reset);
+                            eprint!("\r\x1b[2K{}  … +{n} lines{}      ", p.gray, p.reset);
                             use std::io::Write;
                             let _ = std::io::stderr().flush();
                         }
@@ -192,7 +192,7 @@ impl Session {
                             let p = crate::theme::err();
                             for (i, line) in summary.lines().enumerate() {
                                 if i == 0 {
-                                    eprintln!("{}{}  ✗ {line}{}", p.bold, p.red, p.reset);
+                                    eprintln!("{}{}  ✗ {line}{}", p.dim, p.red, p.reset);
                                 } else {
                                     eprintln!("{}  {line}{}", p.red, p.reset);
                                 }
@@ -202,7 +202,7 @@ impl Session {
                             let width = crate::term::columns().max(20);
                             for line in summary.lines() {
                                 let wrapped = crate::core::render_md::wrap_block(line, width, 2);
-                                eprintln!("{}{wrapped}{}", p.dim, p.reset);
+                                eprintln!("{}{wrapped}{}", p.gray, p.reset);
                             }
                         }
                         // the next model round is awaited right after: spin,

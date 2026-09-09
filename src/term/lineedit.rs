@@ -1322,7 +1322,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
             let _ = writeln!(
                 out,
                 "{}  (no matches — keep typing or backspace){}",
-                crate::theme::err().dim,
+                crate::theme::err().gray,
                 crate::theme::err().reset
             );
             printed += 1;
@@ -1344,7 +1344,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 let _ = writeln!(
                     out,
                     "{}  · {} more ↓{}",
-                    crate::theme::err().dim,
+                    crate::theme::err().gray,
                     matched.len() - top - visible,
                     crate::theme::err().reset
                 );
@@ -1354,7 +1354,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
         let _ = writeln!(
             out,
             "{}filter: {query}▏  (enter select · ↑↓ move · esc cancel){}",
-            crate::theme::err().dim,
+            crate::theme::err().gray,
             crate::theme::err().reset
         );
         let _ = out.flush();
