@@ -19,6 +19,10 @@ pub struct Screen {
     /// `queued:` notice lines the watcher deferred; drained by the render
     /// thread at the next settle point
     pub notices: std::sync::Mutex<Vec<String>>,
+    /// the user pressed a key mid-stream — they are watching, so the render
+    /// thread flushes its pacing backlog on the next tick instead of typing
+    /// it out (write-once holds; pacing only decides when bytes are written)
+    pub flush_now: std::sync::atomic::AtomicBool,
 }
 
 pub fn screen() -> &'static Screen {
@@ -26,6 +30,7 @@ pub fn screen() -> &'static Screen {
     SCREEN.get_or_init(|| Screen {
         dangling: std::sync::atomic::AtomicBool::new(false),
         notices: std::sync::Mutex::new(Vec::new()),
+        flush_now: std::sync::atomic::AtomicBool::new(false),
     })
 }
 

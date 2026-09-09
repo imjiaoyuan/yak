@@ -1503,64 +1503,74 @@ impl KeyWatcher {
                 }
                 match term.next_byte() {
                     RawByte::Timeout => continue,
-                    RawByte::Key(b) => match b {
-                        // raw mode disables ISIG, so ctrl-c arrives here as 0x03;
-                        // an interrupt also discards the half-typed line
-                        0x03 => {
-                            buf.clear();
-                            crate::core::http::request_interrupt();
+                    RawByte::Key(b) => {
+                        // any non-interrupt keystroke means the user is
+                        // watching: flush the pacing backlog so they see
+                        // everything streamed so far, right now
+                        if !matches!(b, 0x03 | 0x1b) {
+                            super::screen()
+                                .flush_now
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
-                        // a lone ESC interrupts like ctrl-c, but arrow and
-                        // edit keys also start with ESC — swallow whole
-                        // sequences so their tails cannot raise the flag
-                        0x1b => {
-                            if term.escape_seq().is_none() {
+                        match b {
+                            // raw mode disables ISIG, so ctrl-c arrives here as 0x03;
+                            // an interrupt also discards the half-typed line
+                            0x03 => {
                                 buf.clear();
                                 crate::core::http::request_interrupt();
                             }
-                        }
-                        // enter: queue the line. No per-character echo — it would
-                        // interleave with the streaming answer and tear lines
-                        // apart; this dim notice is the confirmation instead.
-                        // (\n is ctrl+j mid-task: harmless to treat as enter,
-                        // the empty buffer queues nothing)
-                        b'\r' | b'\n' => {
-                            let line = String::from_utf8_lossy(&buf).trim().to_string();
-                            if !line.is_empty() {
-                                if let Ok(mut q) = queue.lock() {
-                                    q.push(line.clone());
-                                }
-                                if super::screen()
-                                    .dangling
-                                    .load(std::sync::atomic::Ordering::Relaxed)
-                                {
-                                    // the answer owns the current row: erasing it
-                                    // would tear the streamed text apart and the
-                                    // continuation would land at column 0 — defer
-                                    // the notice to the render thread, which
-                                    // prints it once the row is settled
-                                    if let Ok(mut n) = super::screen().notices.lock() {
-                                        n.push(format!("queued: {line}"));
-                                    }
-                                } else {
-                                    // clear the spinner frame first so the
-                                    // notice lands on its own line
-                                    eprint!("\r\x1b[2K");
-                                    eprintln!(
-                                        "{}queued: {line}{}",
-                                        crate::theme::err().dim,
-                                        crate::theme::err().reset
-                                    );
+                            // a lone ESC interrupts like ctrl-c, but arrow and
+                            // edit keys also start with ESC — swallow whole
+                            // sequences so their tails cannot raise the flag
+                            0x1b => {
+                                if term.escape_seq().is_none() {
+                                    buf.clear();
+                                    crate::core::http::request_interrupt();
                                 }
                             }
-                            buf.clear();
+                            // enter: queue the line. No per-character echo — it would
+                            // interleave with the streaming answer and tear lines
+                            // apart; this dim notice is the confirmation instead.
+                            // (\n is ctrl+j mid-task: harmless to treat as enter,
+                            // the empty buffer queues nothing)
+                            b'\r' | b'\n' => {
+                                let line = String::from_utf8_lossy(&buf).trim().to_string();
+                                if !line.is_empty() {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push(line.clone());
+                                    }
+                                    if super::screen()
+                                        .dangling
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                    {
+                                        // the answer owns the current row: erasing it
+                                        // would tear the streamed text apart and the
+                                        // continuation would land at column 0 — defer
+                                        // the notice to the render thread, which
+                                        // prints it once the row is settled
+                                        if let Ok(mut n) = super::screen().notices.lock() {
+                                            n.push(format!("queued: {line}"));
+                                        }
+                                    } else {
+                                        // clear the spinner frame first so the
+                                        // notice lands on its own line
+                                        eprint!("\r\x1b[2K");
+                                        eprintln!(
+                                            "{}queued: {line}{}",
+                                            crate::theme::err().dim,
+                                            crate::theme::err().reset
+                                        );
+                                    }
+                                }
+                                buf.clear();
+                            }
+                            0x7f | 0x08 => {
+                                crate::core::text::pop_utf8_char(&mut buf);
+                            }
+                            c if c >= 0x20 => buf.push(c),
+                            _ => {}
                         }
-                        0x7f | 0x08 => {
-                            crate::core::text::pop_utf8_char(&mut buf);
-                        }
-                        c if c >= 0x20 => buf.push(c),
-                        _ => {}
-                    },
+                    }
                 }
             }
             // the flag can land between bytes: un-entered input is parked

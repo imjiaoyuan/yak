@@ -13,18 +13,26 @@ use crate::core::http::Usage;
 /// per-frame syscalls (one write+flush each frame, no per-character write).
 const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
 
-/// Smooth-playback cadence: when the backlog holds more text than the
-/// budget may print, the screen plays it out character by character, one
-/// [`SMOOTH_CHARS`] installment per interval, so a bursty upstream reads
-/// as the reference-style typewriter output. Pacing only engages on backlog.
-const SMOOTH_MILLIS: u64 = 16;
+/// Typewriter cadence: one pacing tick every [`TICK_MILLIS`] — the pacer
+/// thread polls at 8ms but grants are time-gated to this cadence, so the
+/// feel is identical however often ticks fire.
+const TICK_MILLIS: u64 = 16;
 
-/// Characters printed per [`SMOOTH_MILLIS`] installment (~125/s): fast
-/// enough to outrun reading, slow enough to read as flow. The budget is
-/// credited by elapsed time, not sampled per call: ticks only fire when a
-/// delta arrives, so a delta after a stall releases everything the silence
-/// paid for instead of trickling two characters per arrival.
-const SMOOTH_CHARS: usize = 2;
+/// Characters per tick when caught up (2/16ms ≈ 125 chars/s): fast enough
+/// to outrun reading, slow enough to read as a typewriter.
+const BASE_CHARS: usize = 2;
+
+/// Backlog acceleration: one extra character per tick for every
+/// [`ACCEL_DIV`] characters waiting, so a burst plays out as fast typing
+/// that decelerates into the readable base rate as the backlog clears —
+/// the pen never lags far behind the stream.
+const ACCEL_DIV: usize = 24;
+
+/// Per-tick grant ceiling (~24 chars per 16ms ≈ 1500 chars/s while far
+/// behind): no single frame may pop a visible chunk. This is the anti-dump
+/// rule — a stall never buys a big installment, catch-up happens over
+/// several accelerated ticks instead.
+const MAX_GRANT: usize = 24;
 
 pub struct Renderer {
     /// accumulated visible output
@@ -45,21 +53,15 @@ pub struct Renderer {
     dangling: bool,
     last_flush: std::time::Instant,
     /// arrival-side queue: deltas land here and drain onto the screen at a
-    /// steady cadence, so a bursty upstream (whole paragraphs in one SSE
-    /// chunk, seconds apart) reads as continuous typewriter output instead
-    /// of stop-motion. `ready` holds text whose drain time has come.
+    /// steady typewriter cadence (base rate readable, accelerating with
+    /// backlog, capped per tick) so a bursty upstream (whole paragraphs in
+    /// one SSE chunk, seconds apart) reads as continuous typing — never a
+    /// chunk pop, never stop-motion.
     backlog: String,
-    /// the terminal-visible backlog drain: one row per interval
-    drain: Option<DrainState>,
-}
-
-/// Pacing state for [`Renderer::backlog`]: when the next tick may print
-/// (chars flow at a fixed rate between ticks), and whether a tick landed
-/// while the stream kept up (a never-pacing stream prints verbatim).
-struct DrainState {
-    /// when the latest installment was granted; every full
-    /// [`SMOOTH_MILLIS`] elapsed since then buys [`SMOOTH_CHARS`] more
-    last: std::time::Instant,
+    /// true while the backlog is being played out (a paced batch is open)
+    draining: bool,
+    /// when the latest installment was granted (cadence gating)
+    last_grant: std::time::Instant,
 }
 
 impl Default for Renderer {
@@ -82,7 +84,11 @@ impl Renderer {
                 .checked_sub(FLUSH_INTERVAL)
                 .unwrap_or_else(std::time::Instant::now),
             backlog: String::new(),
-            drain: None,
+            draining: false,
+            // pre-aged so the very first installment grants immediately
+            last_grant: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(TICK_MILLIS))
+                .unwrap_or_else(std::time::Instant::now),
         }
     }
 
@@ -111,20 +117,9 @@ impl Renderer {
         self.output.push_str(text);
         if let Some(md) = self.md.as_mut() {
             md.push_delta(text, &mut self.backlog);
-            // a stream that keeps up prints verbatim: only open a paced
-            // batch when text is already waiting (the upstream burst case)
-            if self.drain.is_none() {
-                if self.backlog.is_empty() {
-                    self.pending.push_str(&self.backlog);
-                } else {
-                    self.drain = Some(DrainState {
-                        last: std::time::Instant::now(),
-                    });
-                    self.drain_tick();
-                }
-            } else {
-                self.drain_tick();
-            }
+            // pacing opens exactly when settled text is waiting; a stream
+            // that keeps up drains each delta the moment it lands
+            self.drain_tick();
         } else {
             // plain pipes stream verbatim: pacing is a tty affordance
             self.pending.push_str(text);
@@ -134,11 +129,22 @@ impl Renderer {
         }
     }
 
-    /// Print what is due: chars join the write buffer at a steady typewriter
-    /// cadence (one SMOOTH_CHARS installment per interval, credited by
-    /// elapsed time) only while a batch is running — the common
-    /// fast-upstream case never opens one and adds no pacing at all.
+    /// Print what is due: one time-gated typewriter installment per
+    /// [`TICK_MILLIS`] while a batch is running — the common fast-upstream
+    /// case never opens one and adds no pacing at all.
     fn drain_tick(&mut self) {
+        if crate::term::screen()
+            .flush_now
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+            && !self.backlog.is_empty()
+        {
+            // the user pressed a key mid-stream: they are watching — print
+            // everything waiting at once. Write-once holds; pacing only
+            // ever decided when bytes were written, never what is written.
+            self.pending.push_str(&self.backlog);
+            self.backlog.clear();
+            self.draining = false;
+        }
         let now = std::time::Instant::now();
         if !self.backlog.is_empty() {
             self.take_due_chars(now);
@@ -155,29 +161,29 @@ impl Renderer {
     /// long.
     pub(crate) fn pump_due(&mut self) -> bool {
         self.drain_tick();
-        self.drain.is_some() || !self.pending.is_empty()
+        self.draining || !self.pending.is_empty()
     }
 
-    /// Move up to the time-credited budget of backlog characters into
-    /// `pending`, cutting on a char boundary (never mid-UTF-8). Each full
-    /// [`SMOOTH_MILLIS`] since the last grant buys one [`SMOOTH_CHARS`]
-    /// installment; the open tick grants one up front. Ticks only fire when
-    /// a delta arrives, so it is elapsed time that keeps a post-stall delta
-    /// from trickling. Returns the visible count; an empty backlog closes
-    /// the batch.
+    /// Move one typewriter installment of backlog characters into
+    /// `pending`, cutting on a char boundary (never mid-UTF-8). The grant
+    /// is time-gated to one per [`TICK_MILLIS``] and sized by the backlog:
+    /// [`BASE_CHARS`] caught up, one more per [`ACCEL_DIV`] waiting, capped
+    /// at [`MAX_GRANT`] — so bursts play out as fast-but-continuous typing
+    /// and no frame ever dumps a chunk, however long the upstream stalled
+    /// before it. Escape sequences (`\x1b[...m`) ride whole and cost no
+    /// budget. Returns the visible count; an empty backlog closes the batch.
     fn take_due_chars(&mut self, now: std::time::Instant) -> usize {
         if self.backlog.is_empty() {
-            self.drain = None;
+            self.draining = false;
             return 0;
         }
-        if self.drain.is_none() {
-            self.drain = Some(DrainState { last: now });
+        self.draining = true;
+        if now.duration_since(self.last_grant) < std::time::Duration::from_millis(TICK_MILLIS) {
+            return 0; // cadence gate: installments land on the tick, not on
+            // however often a tick happens to fire
         }
-        let idle = self
-            .drain
-            .as_ref()
-            .map_or(0, |d| now.duration_since(d.last).as_millis() as u64);
-        let budget = (idle / SMOOTH_MILLIS + 1) as usize * SMOOTH_CHARS;
+        let behind = self.backlog.chars().count();
+        let budget = (BASE_CHARS + behind / ACCEL_DIV).min(MAX_GRANT);
         // never cut an escape sequence (`\x1b[...m`) in half: emit up to
         // and including it, the sequence itself is invisible on screen
         let mut end = 0usize;
@@ -199,10 +205,9 @@ impl Renderer {
         }
         self.pending.push_str(&self.backlog[..end]);
         self.backlog.drain(..end);
+        self.last_grant = now;
         if self.backlog.is_empty() {
-            self.drain = None;
-        } else if let Some(d) = self.drain.as_mut() {
-            d.last = now;
+            self.draining = false;
         }
         n
     }
@@ -248,7 +253,7 @@ impl Renderer {
                 self.backlog.push_str(&chunk);
             }
         }
-        self.drain = None;
+        self.draining = false;
         self.pending.push_str(&self.backlog);
         self.backlog.clear();
         self.flush_pending();
@@ -339,7 +344,7 @@ impl TaskView {
     /// Start the typewriter heartbeat once a paced batch is open (never in
     /// plain-pipe mode, where pacing does not engage).
     fn ensure_pacer(&mut self) {
-        if self.pacer.is_none() && self.renderer.lock().unwrap().drain.is_some() {
+        if self.pacer.is_none() && self.renderer.lock().unwrap().draining {
             self.pacer = Some(crate::term::ticker::DrainTicker::start(
                 std::sync::Arc::clone(&self.renderer),
             ));
@@ -444,7 +449,7 @@ impl TaskView {
         let open = {
             let mut r = self.renderer.lock().unwrap();
             r.push_delta(text);
-            r.drain.is_some()
+            r.draining
         };
         if open {
             self.ensure_pacer();
@@ -565,9 +570,9 @@ impl TaskView {
 mod tests {
     use super::*;
 
-    /// A burst larger than one tick's budget paces: the first tick prints
-    /// at most SMOOTH_CHARS characters and the rest waits in the backlog,
-    /// to be played out char by char (the reference-style typewriter).
+    /// A burst paces: the first tick drains exactly one installment
+    /// (base rate plus backlog acceleration) and the rest waits in the
+    /// backlog, played out tick by tick (the reference-style typewriter).
     #[test]
     fn burst_backlog_paces_char_by_char() {
         let mut r = Renderer::new();
@@ -577,16 +582,18 @@ mod tests {
         r.backlog = text.clone();
         r.output = text.clone();
         r.drain_tick();
-        assert!(
-            r.backlog.chars().count() >= text.chars().count() - SMOOTH_CHARS,
-            "one tick drains at most {SMOOTH_CHARS} chars, drained {}",
-            text.chars().count() - r.backlog.chars().count()
+        let behind = text.chars().count();
+        let drained = behind - r.backlog.chars().count();
+        assert_eq!(
+            drained,
+            (BASE_CHARS + behind / ACCEL_DIV).min(MAX_GRANT),
+            "one tick drains exactly one installment"
         );
         assert_eq!(r.output, text, "the full text is always accumulated");
         // repeated ticks drain everything; finish_stream settles the rest
         while !r.backlog.is_empty() {
             r.drain_tick();
-            std::thread::sleep(std::time::Duration::from_millis(SMOOTH_MILLIS + 1));
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MILLIS + 1));
         }
         r.finish_stream();
         assert!(r.pending.is_empty() && r.backlog.is_empty());
@@ -601,12 +608,9 @@ mod tests {
         let text = format!("a{BOLD}b");
         r.backlog = text.clone();
         r.pending.clear();
-        r.drain = Some(DrainState {
-            last: std::time::Instant::now(),
-        });
         let printed = r.take_due_chars(std::time::Instant::now());
         assert!(
-            printed <= SMOOTH_CHARS,
+            printed <= BASE_CHARS,
             "one tick prints its budget, got {printed}"
         );
         assert!(r.pending.starts_with('a'), "visible chars lead the budget");
@@ -621,6 +625,7 @@ mod tests {
         }
         // the rest of the backlog settles with no split sequences either
         while !r.backlog.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MILLIS + 1));
             r.take_due_chars(std::time::Instant::now());
         }
         assert_eq!(r.pending, text, "the drained pending holds the full text");
@@ -631,20 +636,44 @@ mod tests {
         );
     }
 
-    /// Time is credited, not sampled: a delta arriving after a long stall
-    /// prints everything the silence paid for instead of two characters.
+    /// A stall never dumps: however long the upstream was silent before a
+    /// burst, one tick pops at most MAX_GRANT characters — catch-up happens
+    /// over several accelerated ticks, visible as fast typing, not a chunk.
     #[test]
-    fn stall_releases_accumulated_budget() {
+    fn a_stall_never_dumps_a_chunk() {
         let mut r = Renderer::new();
-        r.backlog = "x".repeat(40);
-        r.drain = Some(DrainState {
-            last: std::time::Instant::now(),
-        });
-        // ≥21 idle intervals earn ≥22 installments = ≥44 visible chars ≥ 40
-        std::thread::sleep(std::time::Duration::from_millis(SMOOTH_MILLIS * 21));
+        r.backlog = "x".repeat(400);
+        std::thread::sleep(std::time::Duration::from_millis(80));
         let printed = r.take_due_chars(std::time::Instant::now());
-        assert_eq!(printed, 40, "a stall releases everything it paid for");
-        assert!(r.backlog.is_empty() && r.pending.len() == 40);
+        assert!(
+            printed <= MAX_GRANT,
+            "one tick pops at most {MAX_GRANT}, got {printed}"
+        );
+        let mut ticks = 0;
+        while !r.backlog.is_empty() && ticks < 500 {
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MILLIS + 1));
+            let printed = r.take_due_chars(std::time::Instant::now());
+            assert!(printed <= MAX_GRANT, "no tick may dump: {printed}");
+            ticks += 1;
+        }
+        assert!(
+            r.backlog.is_empty(),
+            "the backlog drains fully ({ticks} ticks)"
+        );
+    }
+
+    /// Backlog acceleration is capped: even thousands of waiting characters
+    /// never buy a dump — every tick stays at or under MAX_GRANT.
+    #[test]
+    fn huge_backlog_catches_up_without_ever_dumping() {
+        let mut r = Renderer::new();
+        r.backlog = "y".repeat(5000);
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MILLIS + 1));
+            let printed = r.take_due_chars(std::time::Instant::now());
+            assert!(printed <= MAX_GRANT, "capped grant exceeded: {printed}");
+        }
+        assert!(!r.backlog.is_empty(), "5000 chars cannot land in 10 ticks");
     }
 
     /// A stream that keeps up never paces: the backlog never grows, every
