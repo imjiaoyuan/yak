@@ -109,9 +109,10 @@ pub fn resolve(
     }
     if cfg.mode == Mode::Yolo {
         return match (tier, bash_command) {
-            (Tier::Exec, Some(cmd)) if dangerous_command(cmd) => Decision::Ask(
-                "destructive command — one-shot approval required even in yolo".to_string(),
-            ),
+            (Tier::Exec, Some(cmd)) if dangerous_command(cmd) => {
+                // no reason line: the command itself is the explanation
+                Decision::Ask(String::new())
+            }
             _ => Decision::Auto,
         };
     }
@@ -309,6 +310,7 @@ const READONLY_GIT: &[&str] = &[
     "grep",
     "cat-file",
     "config",
+    "check-ignore",
 ];
 
 /// True when every command a bash call would start is on the read-only
@@ -432,10 +434,11 @@ const DANGEROUS_COMMANDS: &[&str] = &[
     "init",
 ];
 
-/// True when a bash call would start a command on the destructive list, or
-/// carries a raw destruction pattern (fork bomb, redirect into a device).
+/// True when a bash call would start a command on the destructive list,
+/// carries a fork bomb, or redirects output into a real device node
+/// (`> /dev/sda`). Sinks like `2>/dev/null` are hygiene, not destruction.
 pub fn dangerous_command(command: &str) -> bool {
-    if command.contains(":(){") || command.contains(">/dev/") || command.contains("> /dev/") {
+    if command.contains(":(){") || redirects_into_device(command) {
         return true;
     }
     split_compound(command).iter().any(|seg| {
@@ -443,6 +446,42 @@ pub fn dangerous_command(command: &str) -> bool {
             .first()
             .is_some_and(|first| DANGEROUS_COMMANDS.contains(&first.as_str()))
     })
+}
+
+/// Redirect targets that only ever discard or pass bytes through: writing
+/// these destroys nothing.
+const SAFE_DEVICES: &[&str] = &["null", "zero", "full", "stdout", "stderr", "tty", "console"];
+
+/// True when the command redirects output into a real device node. Every
+/// `>`/`>>`/`2>`/`&>` form is checked; `/dev/null` and friends are exempt
+/// (they are the standard way to silence a stream), block devices are not.
+fn redirects_into_device(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut i = 0usize;
+    while let Some(rel) = command[i..].find('>') {
+        let at = i + rel;
+        i = at + 1;
+        let mut j = at + 1;
+        // `>>`, `>&`, spaces and quoted targets interleave: skip them all
+        // together before the redirect destination
+        while matches!(
+            bytes.get(j),
+            Some(b'&') | Some(b'>') | Some(b'"') | Some(b' ')
+        ) {
+            j += 1;
+        }
+        if command[j..].starts_with("/dev/") {
+            let rest = &command[j + 5..];
+            let name = rest
+                .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '"' | '\''))
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() && !SAFE_DEVICES.contains(&name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
@@ -583,6 +622,8 @@ mod tests {
             "sudo apt install x",
             "mkfs.ext4 /dev/sda1",
             "dd if=img of=/dev/sdb",
+            "cat img.iso > /dev/sdb",
+            "echo x >>/dev/sda",
             "shutdown now",
             "reboot",
             "echo hi | sudo tee /etc/hosts",
@@ -590,11 +631,46 @@ mod tests {
             let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
             assert!(matches!(d, Decision::Ask(_)), "{cmd} must prompt in yolo");
         }
+        // the prompt carries no reason line: the command is the explanation
+        let d = resolve(
+            "bash",
+            Tier::Exec,
+            false,
+            &cfg(Mode::Yolo, &[]),
+            Some("rm -rf build"),
+        );
+        assert_eq!(d, Decision::Ask(String::new()));
         // everything else stays automatic
         for cmd in ["ls", "git status", "cargo test", "git push origin main"] {
             let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
             assert_eq!(d, Decision::Auto, "{cmd} should stay auto in yolo");
         }
+    }
+
+    #[test]
+    fn yolo_lets_dev_null_redirects_run_free() {
+        // real-world exploration commands from the field: every `2>/dev/null`
+        // is stream hygiene, not destruction — these must never prompt
+        for cmd in [
+            "ls -la scripts/ evo/ && echo --- && cat requirements.txt && \
+             ls tests 2>/dev/null || echo \"no tests dir\"",
+            "ls results/ | head -30; git check-ignore -v a.zip b.zip 2>/dev/null; \
+             du -sh .git 2>/dev/null",
+            "cargo build 2>/dev/null",
+            "echo hi >/dev/null",
+            "wc -l <file >>/dev/null",
+            "python x.py &>/dev/null",
+        ] {
+            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} must run free in yolo");
+        }
+        // a real device target still prompts (dd of= paths are caught by
+        // the program list, not the redirect scan)
+        assert!(redirects_into_device("x >/dev/nvme0n1"));
+        assert!(redirects_into_device("x > \"/dev/sda\""));
+        assert!(!redirects_into_device("dd if=a of=/dev/nvme0n1"));
+        assert!(!redirects_into_device("x 2>/dev/null"));
+        assert!(!redirects_into_device("x > /dev/stdout"));
     }
 
     #[test]
