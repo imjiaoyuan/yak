@@ -18,10 +18,12 @@ pub struct Renderer {
     pub output: String,
     /// accumulated reasoning output
     pub reasoning: String,
-    /// live block streaming (terminal modes opt in via terminal_md): the
-    /// answer flows verbatim inside a left-margin block, hard-wrapped at
-    /// the terminal width so continuation rows keep the margin
-    md: Option<crate::core::render_md::BlockStream>,
+    /// live styled streaming (terminal modes opt in via terminal_md): the
+    /// answer renders the reference-style markdown inside a left-margin block,
+    /// write-once (the settled prefix streams, open inline markers hold
+    /// until they resolve), hard-wrapped at the terminal width so
+    /// continuation rows keep the margin
+    md: Option<crate::core::render_md::StyleStream>,
     /// bytes not yet written (frame batching)
     pending: String,
     /// a partial row is on screen without its terminating newline — the state
@@ -48,15 +50,15 @@ impl Renderer {
     }
 
     /// Terminal live-stream mode, TTY-gated: pipes and quiet mode keep raw
-    /// output. The answer streams verbatim with a left margin on each of the
+    /// output. The answer streams styled with a left margin on each of the
     /// model's own lines; rows hard-wrap at the terminal width so wrapped
-    /// continuation rows carry the margin too (the width is re-read at every
-    /// line start, so a resize applies from the next row on).
+    /// continuation rows keep the margin too (the width is re-read at
+    /// every line start, so a resize applies from the next row on).
     pub fn terminal_md(&mut self, indent: usize) -> bool {
         if !std::io::stdout().is_terminal() {
             return false;
         }
-        let mut md = crate::core::render_md::BlockStream::indented(indent);
+        let mut md = crate::core::render_md::StyleStream::indented(indent, crate::theme::out());
         md.wrap_terminal();
         self.md = Some(md);
         true
@@ -225,7 +227,8 @@ impl TaskView {
                 self.thinking_trace_shown = true;
                 if self.show_trace {
                     let pad = " ".repeat(self.indent);
-                    eprintln!("\x1b[90m{pad}thinking ... end\x1b[0m");
+                    let p = crate::theme::err();
+                    eprintln!("{}{pad}thinking ... end{}", p.dim, p.reset);
                 }
             }
         }
@@ -245,7 +248,7 @@ impl TaskView {
         }
         self.pause();
         for line in notices {
-            eprintln!("\x1b[2m{line}\x1b[0m");
+            eprintln!("{}", crate::theme::edim(&line));
         }
     }
 
@@ -347,6 +350,7 @@ impl TaskView {
         if self.streamed_any {
             println!();
         }
+        let p = crate::theme::err();
         let pad = " ".repeat(self.indent);
         if self.total_in > 0 || self.total_out > 0 {
             let cache = if self.total_cached > 0 {
@@ -358,12 +362,14 @@ impl TaskView {
                 String::new()
             };
             eprintln!(
-                "\x1b[90m{pad}{secs:.1}s · ↑{} ↓{}{cache}\x1b[0m",
+                "{}{pad}{secs:.1}s · ↑{} ↓{}{cache}{}",
+                p.dim,
                 humanize_tokens(self.total_in),
-                humanize_tokens(self.total_out)
+                humanize_tokens(self.total_out),
+                p.reset
             );
         } else {
-            eprintln!("\x1b[90m{pad}{secs:.1}s\x1b[0m");
+            eprintln!("{}{pad}{secs:.1}s{}", p.dim, p.reset);
         }
     }
 }

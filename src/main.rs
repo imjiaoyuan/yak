@@ -10,6 +10,7 @@ mod platform;
 mod providers;
 mod read;
 mod term;
+mod theme;
 mod yaml;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
