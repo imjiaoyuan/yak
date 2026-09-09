@@ -103,7 +103,7 @@ impl Session {
         // shared behind a RefCell so the approval callback can pause the
         // spinner before printing its banner (otherwise they race mid-line)
         let view = std::cell::RefCell::new(crate::term::render::TaskView::new(2, &model_id, true));
-        view.borrow_mut().renderer_mut().terminal_md(2);
+        view.borrow_mut().terminal_md(2);
         let task_start = std::time::Instant::now();
         // an approval prompt already echoed the command; the matching
         // ToolStart must not print it a second time

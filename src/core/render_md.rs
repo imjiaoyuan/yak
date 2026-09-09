@@ -1460,7 +1460,7 @@ pub(crate) fn cell_width(s: &str) -> usize {
 /// CSI (`ESC [`…final), OSC (`ESC ]`…BEL/ST), and the short two-byte forms, so
 /// a stray sequence can never make us skip real content or count a control
 /// byte as a cell.
-fn escape_end(bytes: &[u8], i: usize) -> usize {
+pub(crate) fn escape_end(bytes: &[u8], i: usize) -> usize {
     let n = bytes.len();
     match bytes.get(i + 1) {
         Some(b'[') => {

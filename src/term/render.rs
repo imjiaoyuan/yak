@@ -13,6 +13,19 @@ use crate::core::http::Usage;
 /// per-frame syscalls (one write+flush each frame, no per-character write).
 const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
 
+/// Smooth-playback cadence: when the backlog holds more text than the
+/// budget may print, the screen plays it out character by character, one
+/// [`SMOOTH_CHARS`] installment per interval, so a bursty upstream reads
+/// as the reference-style typewriter output. Pacing only engages on backlog.
+const SMOOTH_MILLIS: u64 = 16;
+
+/// Characters printed per [`SMOOTH_MILLIS`] installment (~125/s): fast
+/// enough to outrun reading, slow enough to read as flow. The budget is
+/// credited by elapsed time, not sampled per call: ticks only fire when a
+/// delta arrives, so a delta after a stall releases everything the silence
+/// paid for instead of trickling two characters per arrival.
+const SMOOTH_CHARS: usize = 2;
+
 pub struct Renderer {
     /// accumulated visible output
     pub output: String,
@@ -31,6 +44,28 @@ pub struct Renderer {
     /// (re)start while it holds
     dangling: bool,
     last_flush: std::time::Instant,
+    /// arrival-side queue: deltas land here and drain onto the screen at a
+    /// steady cadence, so a bursty upstream (whole paragraphs in one SSE
+    /// chunk, seconds apart) reads as continuous typewriter output instead
+    /// of stop-motion. `ready` holds text whose drain time has come.
+    backlog: String,
+    /// the terminal-visible backlog drain: one row per interval
+    drain: Option<DrainState>,
+}
+
+/// Pacing state for [`Renderer::backlog`]: when the next tick may print
+/// (chars flow at a fixed rate between ticks), and whether a tick landed
+/// while the stream kept up (a never-pacing stream prints verbatim).
+struct DrainState {
+    /// when the latest installment was granted; every full
+    /// [`SMOOTH_MILLIS`] elapsed since then buys [`SMOOTH_CHARS`] more
+    last: std::time::Instant,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Renderer::new()
+    }
 }
 
 impl Renderer {
@@ -46,6 +81,8 @@ impl Renderer {
             last_flush: std::time::Instant::now()
                 .checked_sub(FLUSH_INTERVAL)
                 .unwrap_or_else(std::time::Instant::now),
+            backlog: String::new(),
+            drain: None,
         }
     }
 
@@ -66,16 +103,108 @@ impl Renderer {
 
     /// Append answer text, printing it (hard-wrapped inside the block when
     /// streaming). Output is written at most once per FLUSH_INTERVAL.
+    ///
+    /// Text first lands in the backlog; the backlog drains onto the screen
+    /// at a steady row cadence (see [`Renderer::drain`]), so upstream burst
+    /// size shapes nothing the eye can see.
     pub fn push_delta(&mut self, text: &str) {
         self.output.push_str(text);
         if let Some(md) = self.md.as_mut() {
-            md.push_delta(text, &mut self.pending);
+            md.push_delta(text, &mut self.backlog);
+            // a stream that keeps up prints verbatim: only open a paced
+            // batch when text is already waiting (the upstream burst case)
+            if self.drain.is_none() {
+                if self.backlog.is_empty() {
+                    self.pending.push_str(&self.backlog);
+                } else {
+                    self.drain = Some(DrainState {
+                        last: std::time::Instant::now(),
+                    });
+                    self.drain_tick();
+                }
+            } else {
+                self.drain_tick();
+            }
         } else {
+            // plain pipes stream verbatim: pacing is a tty affordance
             self.pending.push_str(text);
+            if self.last_flush.elapsed() >= FLUSH_INTERVAL {
+                self.flush_pending();
+            }
+        }
+    }
+
+    /// Print what is due: chars join the write buffer at a steady typewriter
+    /// cadence (one SMOOTH_CHARS installment per interval, credited by
+    /// elapsed time) only while a batch is running — the common
+    /// fast-upstream case never opens one and adds no pacing at all.
+    fn drain_tick(&mut self) {
+        let now = std::time::Instant::now();
+        if !self.backlog.is_empty() {
+            self.take_due_chars(now);
         }
         if self.last_flush.elapsed() >= FLUSH_INTERVAL {
             self.flush_pending();
         }
+    }
+
+    /// Heartbeat-side tick ([`crate::term::ticker::DrainTicker`]): grant due
+    /// installments and flush the write buffer from a timer, so paced text
+    /// keeps flowing while no delta arrives. True while the batch is open or
+    /// `pending` still holds unprinted text — the pacer lives exactly that
+    /// long.
+    pub(crate) fn pump_due(&mut self) -> bool {
+        self.drain_tick();
+        self.drain.is_some() || !self.pending.is_empty()
+    }
+
+    /// Move up to the time-credited budget of backlog characters into
+    /// `pending`, cutting on a char boundary (never mid-UTF-8). Each full
+    /// [`SMOOTH_MILLIS`] since the last grant buys one [`SMOOTH_CHARS`]
+    /// installment; the open tick grants one up front. Ticks only fire when
+    /// a delta arrives, so it is elapsed time that keeps a post-stall delta
+    /// from trickling. Returns the visible count; an empty backlog closes
+    /// the batch.
+    fn take_due_chars(&mut self, now: std::time::Instant) -> usize {
+        if self.backlog.is_empty() {
+            self.drain = None;
+            return 0;
+        }
+        if self.drain.is_none() {
+            self.drain = Some(DrainState { last: now });
+        }
+        let idle = self
+            .drain
+            .as_ref()
+            .map_or(0, |d| now.duration_since(d.last).as_millis() as u64);
+        let budget = (idle / SMOOTH_MILLIS + 1) as usize * SMOOTH_CHARS;
+        // never cut an escape sequence (`\x1b[...m`) in half: emit up to
+        // and including it, the sequence itself is invisible on screen
+        let mut end = 0usize;
+        let mut n = 0usize;
+        let bytes = self.backlog.as_bytes();
+        while end < bytes.len() {
+            let ch = self.backlog[end..].chars().next().unwrap();
+            if ch == '\x1b' {
+                // an SGR span is invisible on screen: it rides whole (never
+                // split mid-sequence) and costs no budget
+                end = crate::core::render_md::escape_end(bytes, end);
+                continue;
+            }
+            if n >= budget {
+                break;
+            }
+            n += 1;
+            end += ch.len_utf8();
+        }
+        self.pending.push_str(&self.backlog[..end]);
+        self.backlog.drain(..end);
+        if self.backlog.is_empty() {
+            self.drain = None;
+        } else if let Some(d) = self.drain.as_mut() {
+            d.last = now;
+        }
+        n
     }
 
     /// Streaming cadence: write everything that has arrived, the trailing
@@ -109,14 +238,19 @@ impl Renderer {
     }
     /// Flush a pending partial line — terminating it first when dangling in
     /// terminal-markdown mode — so later rounds and chrome start on their own
-    /// line (plain pipes flush verbatim, without the terminator).
+    /// line (plain pipes flush verbatim, without the terminator). A paced
+    /// backlog drains fully first: the smooth cadence must not leak stale
+    /// text into later rounds or chrome.
     pub fn finish_stream(&mut self) {
         if let Some(md) = self.md.as_mut() {
             let mut chunk = String::new();
             if md.finish(&mut chunk) {
-                self.pending.push_str(&chunk);
+                self.backlog.push_str(&chunk);
             }
         }
+        self.drain = None;
+        self.pending.push_str(&self.backlog);
+        self.backlog.clear();
         self.flush_pending();
     }
 }
@@ -139,7 +273,11 @@ pub fn humanize_tokens(n: u64) -> String {
 /// footer. `indent` is the chrome margin (agent 2, prompt/chat 0); `live`
 /// false disables the spinner (quiet/JSON modes).
 pub struct TaskView {
-    renderer: Renderer,
+    /// shared with the [`crate::term::ticker::DrainTicker`] heartbeat, which
+    /// drains paced text from a timer thread while no delta arrives
+    renderer: std::sync::Arc<std::sync::Mutex<Renderer>>,
+    /// the heartbeat, alive only while a paced batch is open
+    pacer: Option<crate::term::ticker::DrainTicker>,
     ticker: Option<crate::term::ticker::Ticker>,
     label: String,
     indent: usize,
@@ -156,7 +294,8 @@ pub struct TaskView {
 impl TaskView {
     pub fn new(indent: usize, label: &str, live: bool) -> TaskView {
         TaskView {
-            renderer: Renderer::new(),
+            renderer: std::sync::Arc::new(std::sync::Mutex::new(Renderer::new())),
+            pacer: None,
             ticker: if live {
                 Some(crate::term::ticker::Ticker::start(label))
             } else {
@@ -175,13 +314,19 @@ impl TaskView {
         }
     }
 
-    pub fn renderer_mut(&mut self) -> &mut Renderer {
-        &mut self.renderer
+    /// Opt the answer stream into terminal-markdown rendering (the
+    /// tty-gated the reference-style path).
+    pub fn terminal_md(&self, indent: usize) {
+        self.renderer.lock().unwrap().terminal_md(indent);
     }
 
     /// Reclaim the renderer (accumulated output/reasoning/usage).
-    pub fn into_renderer(self) -> Renderer {
-        self.renderer
+    pub fn into_renderer(mut self) -> Renderer {
+        self.stop_pacer();
+        match std::sync::Arc::try_unwrap(self.renderer) {
+            Ok(m) => m.into_inner().unwrap(),
+            Err(arc) => std::mem::take(&mut *arc.lock().unwrap()),
+        }
     }
 
     /// -R: keep buffering reasoning but never print the trace line.
@@ -189,6 +334,39 @@ impl TaskView {
         if let Some(mut t) = self.ticker.take() {
             t.stop();
         }
+    }
+
+    /// Start the typewriter heartbeat once a paced batch is open (never in
+    /// plain-pipe mode, where pacing does not engage).
+    fn ensure_pacer(&mut self) {
+        if self.pacer.is_none() && self.renderer.lock().unwrap().drain.is_some() {
+            self.pacer = Some(crate::term::ticker::DrainTicker::start(
+                std::sync::Arc::clone(&self.renderer),
+            ));
+        }
+    }
+
+    fn stop_pacer(&mut self) {
+        if let Some(mut p) = self.pacer.take() {
+            p.stop();
+        }
+    }
+
+    /// Type the paced backlog out and stop the heartbeat: chrome (tool
+    /// result, next round, footer) must never land over untyped text. The
+    /// cap only guards a pathological giant tail — past it, finish_stream
+    /// dumps the rest.
+    fn settle(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let more = self.renderer.lock().unwrap().pump_due();
+            if !more || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        self.stop_pacer();
+        self.renderer.lock().unwrap().finish_stream();
     }
 
     fn relabel(&mut self, label: &str) {
@@ -202,7 +380,7 @@ impl TaskView {
         // `\r\x1b[2K` would retract live text, and settling (a newline)
         // would break the stream mid-word — the streaming text itself
         // already shows liveness
-        if self.live && !self.renderer.has_dangling() {
+        if self.live && !self.renderer.lock().unwrap().has_dangling() {
             self.ticker = Some(crate::term::ticker::Ticker::start(label));
         }
     }
@@ -263,7 +441,14 @@ impl TaskView {
         self.stop_ticker();
         self.close_thinking();
         self.streamed_any = true;
-        self.renderer.push_delta(text);
+        let open = {
+            let mut r = self.renderer.lock().unwrap();
+            r.push_delta(text);
+            r.drain.is_some()
+        };
+        if open {
+            self.ensure_pacer();
+        }
     }
 
     /// Reasoning is never streamed: buffer it and relabel the spinner once.
@@ -271,7 +456,7 @@ impl TaskView {
     /// newline, no spinner start while a partial row is live (`relabel`
     /// guards the start; the label swap on a running ticker is row-safe).
     pub fn reasoning_delta(&mut self, text: &str) {
-        self.renderer.push_reasoning_buffered(text);
+        self.renderer.lock().unwrap().push_reasoning_buffered(text);
         if !self.thinking_announced {
             self.thinking_announced = true;
             self.relabel("thinking ...");
@@ -283,7 +468,7 @@ impl TaskView {
     /// silence the spinner and close any pending thinking trace.
     pub fn pause(&mut self) {
         self.stop_ticker();
-        self.renderer.finish_stream();
+        self.settle();
         self.close_thinking();
     }
 
@@ -328,7 +513,7 @@ impl TaskView {
         }
         self.close_thinking();
         self.thinking_announced = false; // next round may announce again
-        self.renderer.finish_stream();
+        self.settle();
         // rounds continue while tools are pending: restart the wait spinner
         // (footer/abort silence it when the task ends instead)
         self.relabel(&self.label.clone());
@@ -337,9 +522,10 @@ impl TaskView {
     /// Cleanup without the footer (provider error, interrupt).
     pub fn abort(&mut self) {
         self.stop_ticker();
+        self.stop_pacer();
         // do-not print the "thinking ... end" trace on an abnormal stop:
         // a force-interrupt must not read as thinking having finished
-        self.renderer.finish_stream();
+        self.renderer.lock().unwrap().finish_stream();
     }
 
     /// The `secs · ↑in ↓out` line, right before the prompt returns. When the
@@ -347,6 +533,7 @@ impl TaskView {
     /// so prefix-cache health is visible at a glance.
     pub fn footer(&mut self, secs: f64) {
         self.stop_ticker();
+        self.stop_pacer();
         if self.streamed_any {
             println!();
         }
@@ -370,6 +557,126 @@ impl TaskView {
             );
         } else {
             eprintln!("{}{pad}{secs:.1}s{}", p.gray, p.reset);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A burst larger than one tick's budget paces: the first tick prints
+    /// at most SMOOTH_CHARS characters and the rest waits in the backlog,
+    /// to be played out char by char (the reference-style typewriter).
+    #[test]
+    fn burst_backlog_paces_char_by_char() {
+        let mut r = Renderer::new();
+        let text: String = (0..20).map(|i| format!("row {i}\n")).collect();
+        // the styled path feeds the backlog (the plain path streams pipes
+        // verbatim; terminal_md is TTY-gated), so seed it directly
+        r.backlog = text.clone();
+        r.output = text.clone();
+        r.drain_tick();
+        assert!(
+            r.backlog.chars().count() >= text.chars().count() - SMOOTH_CHARS,
+            "one tick drains at most {SMOOTH_CHARS} chars, drained {}",
+            text.chars().count() - r.backlog.chars().count()
+        );
+        assert_eq!(r.output, text, "the full text is always accumulated");
+        // repeated ticks drain everything; finish_stream settles the rest
+        while !r.backlog.is_empty() {
+            r.drain_tick();
+            std::thread::sleep(std::time::Duration::from_millis(SMOOTH_MILLIS + 1));
+        }
+        r.finish_stream();
+        assert!(r.pending.is_empty() && r.backlog.is_empty());
+    }
+
+    /// An escape sequence is never cut in half by the char budget: the
+    /// whole sequence rides with the tick that touches it.
+    #[test]
+    fn escape_sequences_never_split() {
+        const BOLD: &str = "\x1b[1m";
+        let mut r = Renderer::new();
+        let text = format!("a{BOLD}b");
+        r.backlog = text.clone();
+        r.pending.clear();
+        r.drain = Some(DrainState {
+            last: std::time::Instant::now(),
+        });
+        let printed = r.take_due_chars(std::time::Instant::now());
+        assert!(
+            printed <= SMOOTH_CHARS,
+            "one tick prints its budget, got {printed}"
+        );
+        assert!(r.pending.starts_with('a'), "visible chars lead the budget");
+        // no split sequence in whatever was printed: escape_end of the last
+        // ESC lands exactly at the end of the printed prefix
+        if let Some(pos) = r.pending.find('\x1b') {
+            let e = crate::core::render_md::escape_end(r.pending.as_bytes(), pos);
+            assert!(
+                e <= r.pending.len(),
+                "an escape sequence is never cut in half"
+            );
+        }
+        // the rest of the backlog settles with no split sequences either
+        while !r.backlog.is_empty() {
+            r.take_due_chars(std::time::Instant::now());
+        }
+        assert_eq!(r.pending, text, "the drained pending holds the full text");
+        r.finish_stream();
+        assert!(
+            r.pending.is_empty(),
+            "finish_stream prints and clears pending"
+        );
+    }
+
+    /// Time is credited, not sampled: a delta arriving after a long stall
+    /// prints everything the silence paid for instead of two characters.
+    #[test]
+    fn stall_releases_accumulated_budget() {
+        let mut r = Renderer::new();
+        r.backlog = "x".repeat(40);
+        r.drain = Some(DrainState {
+            last: std::time::Instant::now(),
+        });
+        // ≥21 idle intervals earn ≥22 installments = ≥44 visible chars ≥ 40
+        std::thread::sleep(std::time::Duration::from_millis(SMOOTH_MILLIS * 21));
+        let printed = r.take_due_chars(std::time::Instant::now());
+        assert_eq!(printed, 40, "a stall releases everything it paid for");
+        assert!(r.backlog.is_empty() && r.pending.len() == 40);
+    }
+
+    /// A stream that keeps up never paces: the backlog never grows, every
+    /// delta is settled the moment it lands.
+    #[test]
+    fn caught_up_stream_never_holds_backlog() {
+        let mut r = Renderer::new();
+        for i in 0..5 {
+            r.push_delta(&format!("line {i}\n"));
+            assert!(r.backlog.is_empty(), "a settled row is never withheld");
+        }
+        assert_eq!(r.output.matches('\n').count(), 5);
+        r.finish_stream();
+        assert!(!r.dangling, "the last row ends with a newline");
+    }
+}
+
+#[cfg(test)]
+mod dbg3 {
+    use super::*;
+    #[test]
+    fn probe_hold() {
+        let mut r = Renderer::new();
+        for i in 0..5 {
+            r.push_delta(&format!("line {i}\n"));
+            let held = r.backlog.trim_end_matches('\n').to_string();
+            eprintln!(
+                "after line {i}: held={:?} dangling={} pending_nl={}",
+                held,
+                r.dangling,
+                r.pending.matches('\n').count()
+            );
         }
     }
 }
