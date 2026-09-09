@@ -382,15 +382,8 @@ pub fn run_agent(
                         let mut log =
                             |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
                         let out = cleared.tool.execute(&call.arguments, &opts.cwd, &mut log);
-                        let _ = fire(
-                            opts.hooks,
-                            "tool_result",
-                            json!({
-                                "tool": call.name,
-                                "summary": summarize(&out.content),
-                                "is_error": out.is_error,
-                            }),
-                        );
+                        // tool_result fires once, after the match below, so
+                        // denied and executed calls notify hooks identically
                         Ok(out)
                     }
                 }
@@ -492,9 +485,6 @@ fn gate_call<'a>(
     if let Err(e) = tools::validate(&tool.parameters(), &call.arguments) {
         return Err(format!("invalid arguments: {e}"));
     }
-
-    // root commands are never run by the agent, in any mode — before any
-    // preview work, so a hard denial pays nothing
 
     let escapes = call
         .arguments
