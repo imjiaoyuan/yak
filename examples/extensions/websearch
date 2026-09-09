@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""websearch — a resident llm extension: two tools + one slash command.
+
+Copy to ~/.llm/extensions/websearch, chmod +x, /reload. It mounts:
+
+  web_search {query, limit?}   web search → top titles + URLs
+  web_fetch  {url}             fetch a page → readable text (capped)
+  /web <query>                 run a search straight from the prompt
+
+Search backend: Brave's Search API when BRAVE_API_KEY is set in the
+environment (free tier at https://brave.com/search/api — full web
+results, official API). Without a key it degrades to a keyless chain:
+DuckDuckGo's HTML page, then its Instant Answer JSON, then the Wikipedia
+API (encyclopedia scope, always works). The result's first line says
+which backend answered.
+
+Note the built-in `webfetch` tool still exists; `web_fetch` here is the
+plugin-form demonstration. All extension tools are exec-tier: the
+approval matrix applies as usual. Protocol: newline-delimited JSON on
+stdio, one reply per request id (docs/extensions.md has the reference).
+"""
+
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from html import unescape
+from html.parser import HTMLParser
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; llm-websearch/1.0)",
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+}
+FETCH_CAP = 6000  # chars of page text returned to the model
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def http_get(url, timeout=15):
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(262144).decode("utf-8", "replace")
+
+
+def http_get_json(url, timeout=15):
+    return json.loads(http_get(url, timeout))
+
+
+# ------------------------------------------------------------------ fetch --
+class _Text(HTMLParser):
+    """Collect visible text; skip script/style; newline at block tags."""
+
+    BLOCKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "pre", "table"}
+    SKIP = {"script", "style", "noscript", "template"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip += 1
+        elif tag in self.BLOCKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip:
+            self._skip -= 1
+        elif tag in self.BLOCKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def web_fetch(url):
+    if not url.startswith(("http://", "https://")):
+        return "error: only http(s) URLs are supported"
+    page = http_get(url)
+    p = _Text()
+    p.feed(page)
+    text = re.sub(r"[ \t]+", " ", "".join(p.parts))
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    if len(text) > FETCH_CAP:
+        text = text[:FETCH_CAP] + f"\n… truncated at {FETCH_CAP} chars"
+    return f"{url}\n\n{text}" if text else f"{url}\n\n(no text content)"
+
+
+# ----------------------------------------------------------------- search --
+def _brave(query, limit):
+    key = os.environ.get("BRAVE_API_KEY", "")
+    if not key:
+        raise RuntimeError("BRAVE_API_KEY not set")
+    url = (
+        "https://api.search.brave.com/res/v1/web/search?q="
+        + urllib.parse.quote_plus(query)
+        + "&count="
+        + str(min(limit, 20))
+    )
+    req = urllib.request.Request(
+        url,
+        headers={
+            "X-Subscription-Token": key,
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        },
+    )
+    try:
+        d = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError("BRAVE_API_KEY rejected (HTTP %d)" % e.code) from e
+        raise
+    out = []
+    for r in d.get("web", {}).get("results", []):
+        desc = re.sub(r"<[^>]+>", "", r.get("description", ""))
+        title = r.get("title", "")
+        out.append((f"{title} — {unescape(desc)}".strip(" —"), r["url"]))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _ddg_unwrap(href):
+    """DuckDuckGo wraps result links as //duckduckgo.com/l/?uddg=<encoded>."""
+    if "uddg=" in href:
+        href = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
+    if href.startswith("//"):
+        href = "https:" + href
+    return href
+
+
+def _ddg_html(query, limit):
+    page = http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
+    out = []
+    for m in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S):
+        title = re.sub(r"<[^>]+>", "", m.group(2))
+        out.append((unescape(title).strip(), _ddg_unwrap(m.group(1))))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _ddg_instant(query, limit):
+    d = http_get_json(
+        "https://api.duckduckgo.com/?q="
+        + urllib.parse.quote_plus(query)
+        + "&format=json&no_html=1&skip_disambig=1"
+    )
+    out = []
+
+    def walk(topics):
+        for t in topics:
+            if "FirstURL" in t and len(out) < limit:
+                out.append((t.get("Text", ""), t["FirstURL"]))
+            walk(t.get("Topics", []))
+
+    walk(d.get("RelatedTopics", []))
+    return out
+
+
+def _wikipedia(query, limit):
+    d = http_get_json(
+        "https://en.wikipedia.org/w/api.php?action=query&list=search&srlimit="
+        + str(limit)
+        + "&srsearch="
+        + urllib.parse.quote_plus(query)
+        + "&format=json"
+    )
+    return [
+        (h["title"], "https://en.wikipedia.org/wiki/" + h["title"].replace(" ", "_"))
+        for h in d.get("query", {}).get("search", [])[:limit]
+    ]
+
+
+BACKENDS = [
+    ("brave", _brave),
+    ("duckduckgo", _ddg_html),
+    ("duckduckgo instant answers", _ddg_instant),
+    ("wikipedia (encyclopedia only)", _wikipedia),
+]
+
+
+def web_search(query, limit=5):
+    if not query.strip():
+        return "error: empty query"
+    errors = []
+    for label, backend in BACKENDS:
+        try:
+            results = backend(query, limit)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            continue
+        if results:
+            lines = [f"via {label}"] + [
+                f"{i}. {title}\n   {url}" for i, (title, url) in enumerate(results, 1)
+            ]
+            return "\n".join(lines)
+    hint = "" if os.environ.get("BRAVE_API_KEY") else (
+        "\n(set BRAVE_API_KEY for full Brave web search; free tier at "
+        "https://brave.com/search/api)"
+    )
+    note = f" ({'; '.join(errors)})" if errors else ""
+    return f"no results for {query!r}{note}{hint}"
+
+
+# ------------------------------------------------------------------- main --
+TOOLS = [
+    {
+        "name": "web_search",
+        "description": "Search the web and return the top result titles and "
+        "URLs (Brave Search API when BRAVE_API_KEY is set, keyless "
+        "DuckDuckGo/Wikipedia fallback otherwise)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "the search query"},
+                "limit": {
+                    "type": "integer",
+                    "description": "max results (default 5)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": "Fetch a web page and return its readable text "
+        "(capped, scripts and styles stripped)",
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "http(s) URL"}},
+            "required": ["url"],
+        },
+    },
+]
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": ["web"], "events": []}})
+        elif kind == "call_tool":
+            args = msg.get("args") or {}
+            try:
+                if msg.get("name") == "web_search":
+                    out = web_search(str(args.get("query", "")), int(args.get("limit") or 5))
+                elif msg.get("name") == "web_fetch":
+                    out = web_fetch(str(args.get("url", "")))
+                else:
+                    out = f"unknown tool {msg.get('name')}"
+                reply({"id": mid, "result": out})
+            except Exception as e:  # network errors become tool errors
+                reply({"id": mid, "error": f"{type(e).__name__}: {e}"})
+        elif kind == "run_command" and msg.get("name") == "web":
+            try:
+                reply({"id": mid, "result": web_search(str(msg.get("args") or "").strip())})
+            except Exception as e:
+                reply({"id": mid, "result": f"search failed: {e}"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

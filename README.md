@@ -121,6 +121,7 @@ shell, R, anything with an interpreter:
 # --- llm-tool: wordcount
 # description: count characters in a text
 # args: text (string) the text
+# arg-mode: argv
 import sys
 print(len(sys.argv[1]))
 ```
@@ -141,8 +142,10 @@ The `initialize` handshake advertises the extension's tools (JSON Schema paramet
 commands and event subscriptions; the host then routes `call_tool` when the model invokes one,
 `run_command` when the user types a matching `/command`, and `event` at turn and tool boundaries
 (`tool_call` may deny or rewrite a call — permission gates and path protection live here).
-Extension tools are exec-tier: the approval matrix asks by default (`Allow? [Y/n/a]`, remembered
-per session with `a`), `[agent] tools` policies still win, and `--tools` picks a subset.
+Extension tools are exec-tier: the approval matrix treats them like `bash` — under the default
+yolo mode they run free, and in ask mode every call prompts (`Allow? [Y/n/a]`, remembered per
+session with `a`). `[agent] tools` policies still win in either mode, and `--tools` picks a
+subset.
 `extensions.disabled` in config.json skips one by name, `/reload` respawns everything, and a
 slow or broken extension warns dimly and mounts nothing — it never blocks a session. Tool calls
 time out after 120s (config `extensions.tool_timeout`), events after 5s.
@@ -153,6 +156,14 @@ runtime** — the user section is written in the extension API, `host.registerTo
 paste straight in; APIs that need the process (UI, editors, hotkeys) raise with a clear
 message) and `template.py` (the same shape in Python). Copy one into the extensions directory and
 edit its user section.
+
+The full reference is [`docs/extensions.md`](docs/extensions.md) — manifest fields, every
+protocol message and event, the `tool_call` gate, timeouts and config keys — and
+`examples/extensions/` also carries three runnable examples: `wordcount` (a script tool),
+`websearch` (a resident extension mounting `web_search` + `web_fetch` tools and a `/web`
+command — Brave's Search API when `BRAVE_API_KEY` is set, keyless DuckDuckGo/Wikipedia
+fallback otherwise), and `todo` (the reference todo.ts example, ported onto the
+the reference-compatible shim below), ready to copy.
 
 A minimal resident extension, complete in thirty lines of Python:
 
@@ -262,7 +273,7 @@ Options:
 
 ## Examples
 
-`llm` is the agent, the reference-shaped: bare `llm` on a terminal opens the interactive REPL, `llm "fix the failing test"` runs the task once with tools and exits, and piped stdin is the task text (`git diff | llm "review this change" > review.md` — pipes stay plain, never ANSI codes). The loop can read, edit, search and run commands, asking before anything that can change state — file writes, deletions, `git push`, unrecognized or non-read-only commands — while reads inside the working directory and read-only commands (`ls`, `git status`, `rg`, `cargo test`, ...) run free; pass `--yolo` or set `approval_mode = "yolo"` in config for automatic approval, with `/yolo` toggling it for the session (a project previously marked trusted in `~/.llm/trust.json` still starts in yolo); file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. The REPL carries slash commands (`/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/resume`, `/compact`, `/status`, `/reload`, ... — `/help` lists them one per line, skills included as `/skill:<name>`), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Streamed answers play out at a steady cadence: when the model delivers a burst (a whole paragraph in one chunk, seconds of silence between), the terminal renders it row by row instead of in stop-motion blocks, and a stream that keeps up is printed with no pacing at all. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one.
+`llm` is the agent, the reference-shaped: bare `llm` on a terminal opens the interactive REPL, `llm "fix the failing test"` runs the task once with tools and exits, and piped stdin is the task text (`git diff | llm "review this change" > review.md` — pipes stay plain, never ANSI codes). The loop can read, edit, search and run commands; it runs in **yolo mode by default** — everything auto-approved except a short list of destructive commands (`rm`, `sudo`, `dd`, `mkfs`, `shutdown`, …) that keeps its one-shot `Allow? [Y/n/a]` prompt. Prefer to confirm every state change? Pass `--approval-mode ask` or set `approval_mode = "always-ask"` in config: then file writes, deletions, `git push` and unrecognized or non-read-only commands prompt, while reads inside the working directory and read-only commands (`ls`, `git status`, `rg`, `cargo test`, ...) always run free; `/yolo` toggles the mode for the session; file edits and writes show a unified-diff preview (context, `-` and `+` rows, capped) right above the approval question, so you decide with the actual change in view. The `read` tool streams text files a window at a time instead of loading them: each answer opens with a metadata header naming the file, its size and the shown range, `offset` and `limit` page through 500-line windows (50KB byte cap, single lines capped at 2000 characters so a minified bundle cannot eat the context), and binary formats are refused with a hint at the right local tooling rather than garbage bytes. `webfetch <url>` fetches web pages and returns plain text (HTML stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult docs and articles without a shell. The REPL carries slash commands (`/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/resume`, `/compact`, `/status`, `/reload`, ... — `/help` lists them one per line, skills included as `/skill:<name>`), shell passthrough via `!cmd`, and ctrl-c or esc to interrupt a running task (esc takes effect within a tenth of a second, even mid-reasoning). Streamed answers play out at a steady cadence: when the model delivers a burst (a whole paragraph in one chunk, seconds of silence between), the terminal renders it row by row instead of in stop-motion blocks, and a stream that keeps up is printed with no pacing at all. While a task runs you can keep typing; the queued lines are delivered to the model at the next tool boundary and any that outlive the task run as the next prompt. Branching is cheap: `llm --fork` continues the most recent session on a fresh branch (the original keeps its own history from that point), and `--fork --session ID` branches a specific one.
 
 Pick a model per call with `-m deepseek/deepseek-chat`. Model options ride along as `-o temperature=0.2 -o top_p=0.9`. Attach files or URLs with `-a shot.png`, force a mimetype with `--at image.png image/png`, and add a system prompt with `-s`; piped stdin can feed an attachment instead of the prompt, so `llm -a - "what is this" < shot.png` sends the image and the words together, images, PDFs, wav/mp3 clips and plain-text files (.txt, .md, .csv, source code) ride the same request as native content blocks: text attaches as a document block on anthropic models and as an extra text part elsewhere, and anything a model family cannot accept is refused before a request leaves the machine with the supported list named in the error.
 
@@ -288,16 +299,16 @@ Agent behavior is tuned under the `"agent"` key of `config.json`:
 }
 ```
 
-`approval_mode` is `always-ask` (default) or `yolo`; `context_window` is where compaction
+`approval_mode` is `yolo` (default) or `always-ask`; `context_window` is where compaction
 kicks in; `tools` maps each tool to `allow`, `deny` or `prompt`.
 
 ## Outputs
 
-Every prompt and agent session is written to `~/.llm/threads/` as JSONL thread files: reasoning parts are stored next to the responses, tool calls and results ride along in agent sessions, and turns carry their model, options and token usage. A `logs-off` marker file in the user directory turns prompt logging off entirely.
+Every prompt and agent session is written to `~/.llm/threads/` as JSONL thread files: reasoning parts are stored next to the responses, tool calls and results ride along in agent sessions, and turns carry their model, options and token usage. Sessions persist unless `--no-session` opts out; there is no global logging switch.
 
 ## Semantics
 
-Model ids are `provider/model` everywhere, with the `aliases` object in config.json mapping short names on top; `models set` and `models options` manage the mapping, and the `aliases` object is hand-edited config. Terminal rendering is enabled only on a TTY: prompts and agent answers stream as markdown with a two-column margin, blank lines are dropped except around headings and code blocks, and piped output is the raw text. Reasoning is never dumped to the screen in any mode, one gray `thinking ... end` line records that it happened and `-R` hides even that. Approval tiers split agent tools into read, write and exec: reads run freely in ask mode, writes and exec-tier calls prompt with y/n/a (`a` allows the tool for the rest of the session). Session ids are ULIDs, `-c` continues the newest session and `--cid` picks an exact one. Long lists in any picker scroll inside a bounded window instead of flooding the screen.
+Model ids are `provider/model` everywhere, with the `aliases` object in config.json mapping short names on top; `models set` and `models options` manage the mapping, and the `aliases` object is hand-edited config. Terminal rendering is enabled only on a TTY: prompts and agent answers stream as markdown with a two-column margin, blank lines are dropped except around headings and code blocks, and piped output is the raw text. Reasoning is never dumped to the screen in any mode, one gray `thinking ... end` line records that it happened and `-R` hides even that. Approval tiers split agent tools into read, write and exec: yolo is the default (everything auto except the destructive list), while ask mode prompts for writes and exec-tier calls with y/n/a (`a` allows the tool for the rest of the session). Session ids are ULIDs, `-c` continues the newest session and `--cid` picks an exact one. Long lists in any picker scroll inside a bounded window instead of flooding the screen.
 
 ## Development
 

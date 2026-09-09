@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+# --- llm-tool: wordcount
+# description: count characters, words and lines of a text
+# args: text (string) the text to measure
+# arg-mode: argv
+# interpreter: python3
+# timeout: 10
+#
+# A "script tool": the manifest header above is all the integration there
+# is. Copy this file into ~/.llm/extensions/ (or the project's
+# .llm/extensions/) and /reload — no exec bit needed, the host runs it
+# through the declared interpreter.
+#
+# arg-mode: argv passes the single declared argument as plain argv[1], so
+# the script never parses JSON. Without that line the arguments object
+# arrives as one JSON line on stdin instead.
+
+import sys
+
+text = sys.argv[1] if len(sys.argv) > 1 else ""
+lines = text.count("\n") + 1 if text else 0
+print(f"{len(text)} chars · {len(text.split())} words · {lines} lines")
