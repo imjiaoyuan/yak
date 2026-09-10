@@ -190,9 +190,12 @@ impl std::fmt::Display for HttpError {
 
 /// Per-request retry budget. Connection failures get their own, larger
 /// counter with a longer backoff (the reference's split): a dead network is worth
-/// waiting out, a flaky 5xx is not.
+/// waiting out, a flaky 5xx is not. The connection budget is still bounded
+/// for an attended terminal — six attempts top out around three minutes of
+/// automatic fighting, then the error surfaces and a human decides; every
+/// phase of the wait is esc/ctrl-c interruptible regardless.
 const REQUEST_MAX_RETRIES: usize = 4;
-const CONNECTION_MAX_RETRIES: usize = 12;
+const CONNECTION_MAX_RETRIES: usize = 6;
 /// A stream silent for this long is dead, however long the generation.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -286,6 +289,14 @@ pub fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // the connect phase must fail on its own: ureq leaves these
+            // unlimited, and OS defaults stretch into minutes (Linux SYN
+            // retransmits ≈ 2min) or to the global ceiling (a TLS handshake
+            // to a black-holed host) — minutes of dead spinner before the
+            // retry loop even starts. A real stream is unaffected: these
+            // bound dialing only, the 1800s global still covers generation.
+            .timeout_resolve(Some(Duration::from_secs(5)))
+            .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_global(Some(Duration::from_secs(1800)))
             .build()
             .into()
@@ -320,6 +331,10 @@ pub fn post_sse(
     let a = agent();
     let mut retry = Retry::new();
     loop {
+        // a press that landed between attempts must not read as a fresh try
+        if interrupted() {
+            return Err(HttpError::new(0, "interrupted"));
+        }
         let result = send_sse(a, req, &mut |ev, data| {
             on_data(ev, data);
         });
@@ -342,11 +357,11 @@ pub fn post_sse(
 }
 
 fn send_sse(
-    agent: &ureq::Agent,
+    agent: &'static ureq::Agent,
     req: &HttpRequest,
     on_data: &mut impl FnMut(&str, &str),
 ) -> Result<(), HttpError> {
-    let response = send_raw(agent, req)?;
+    let response = send_raw_interruptible_flag(agent, req, crate::platform::interrupt::flag())?;
     let reader = BufReader::new(response.into_body().into_reader());
     // the blocking read lives on its own thread while this loop polls the
     // interrupt flag between 100ms slices — a silent server (long thinking
@@ -411,11 +426,26 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
     let a = agent();
     let mut retry = Retry::new();
     loop {
-        match send_raw(a, req).and_then(|r| {
-            r.into_body()
-                .read_to_string()
-                .map_err(|e| HttpError::new(0, format!("stream: {e}")))
-        }) {
+        if interrupted() {
+            return Err(HttpError::new(0, "interrupted"));
+        }
+        // the whole attempt (send + body read) runs on the worker: a body
+        // read stalled by a dead peer would otherwise hang to the global
+        // ceiling with the interrupt flag unreachable, same as the dial
+        let owned = HttpRequest {
+            url: req.url.clone(),
+            headers: req.headers.clone(),
+            body: req.body.clone(),
+        };
+        let result = attempt_interruptible(crate::platform::interrupt::flag(), move || {
+            send_raw(a, &owned).and_then(|r| {
+                r.into_body()
+                    .read_to_string()
+                    .map_err(|e| HttpError::new(0, format!("stream: {e}")))
+            })
+        })
+        .and_then(std::convert::identity);
+        match result {
             Ok(body) => return Ok(body),
             Err(e) => {
                 let Some(delay) = next_delay(&mut retry, &e) else {
@@ -468,8 +498,61 @@ pub fn session_id() -> String {
         .clone()
 }
 
+/// One blocking network attempt — DNS, TCP, TLS, body upload, response
+/// headers, and whatever body read the caller chains in — runs on a worker
+/// thread while this loop polls the interrupt flag in 100ms slices. A plain
+/// blocking call offers no hook to reach the flag: a connect black-holed by
+/// a dead network or a stalled read used to hang inside code esc/ctrl-c
+/// cannot touch, and a pressed key sat ignored until the OS gave up
+/// (minutes; a TLS handshake to a black-holed host, the global ceiling) —
+/// the "stuck, cannot exit" report. An abandoned worker finishes alone
+/// (bounded by the resolve/connect/global timeouts) and its result drops on
+/// the floor when the receiver is gone.
+fn attempt_interruptible<T: Send + 'static>(
+    flag: &AtomicBool,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, HttpError> {
+    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(HttpError::new(0, "interrupted"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // the receiver may have left (interrupt): a send error just ends
+        // the worker, which is exactly what abandonment means
+        let _ = tx.send(f());
+    });
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => return Ok(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(HttpError::new(0, "interrupted"));
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(HttpError::new(0, "request worker died"));
+            }
+        }
+    }
+}
+
+/// The flag is a parameter so tests can drive the short-circuit with a local
+/// atomic instead of flipping the process-wide interrupt over parallel tests.
+fn send_raw_interruptible_flag(
+    agent: &'static ureq::Agent,
+    req: &HttpRequest,
+    flag: &AtomicBool,
+) -> Result<ureq::http::Response<ureq::Body>, HttpError> {
+    let owned = HttpRequest {
+        url: req.url.clone(),
+        headers: req.headers.clone(),
+        body: req.body.clone(),
+    };
+    attempt_interruptible(flag, move || send_raw(agent, &owned)).and_then(std::convert::identity)
+}
+
 fn send_raw(
-    agent: &ureq::Agent,
+    agent: &'static ureq::Agent,
     req: &HttpRequest,
 ) -> Result<ureq::http::Response<ureq::Body>, HttpError> {
     let mut request = agent.post(&req.url);
@@ -523,8 +606,32 @@ pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     get_with(agent(), url)
 }
 
-/// One GET through `agent`: status check, whole body, content type.
-fn get_with(agent: &ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+/// One GET through `agent`: status check, whole body, content type. The
+/// whole fetch (dial through body read) runs on a worker polled in 100ms
+/// slices, so a black-holed URL attachment fetch is esc/ctrl-c interruptible
+/// instead of hanging to the global timeout (send_sse's rationale, GET-flavored).
+fn get_with(agent: &'static ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    get_with_flag(agent, url, crate::platform::interrupt::flag())
+}
+
+/// Flag-as-parameter twin of `get_with`, same test rationale as
+/// `send_raw_interruptible_flag`.
+fn get_with_flag(
+    agent: &'static ureq::Agent,
+    url: &str,
+    flag: &AtomicBool,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let owned = url.to_string();
+    attempt_interruptible(flag, move || get_blocking(agent, &owned))
+        .map_err(|e| format!("Failed to fetch {url}: {e}"))
+        .and_then(std::convert::identity)
+}
+
+/// The blocking body of `get_with`, running on its worker thread.
+fn get_blocking(
+    agent: &'static ureq::Agent,
+    url: &str,
+) -> Result<(Vec<u8>, Option<String>), String> {
     let mut request = agent.get(url);
     for (k, v) in identity_headers(url) {
         request = request.header(k, v);
@@ -560,7 +667,19 @@ pub struct FetchedPage {
 /// a binary body (image/pdf/audio/…) errors naming its content type instead
 /// of producing garbage text. Fails fast instead of hanging a task.
 pub fn fetch_page(url: &str) -> Result<FetchedPage, String> {
-    let mut request = short_agent().get(url);
+    // same interruptible shape as get_with, short-agent flavored: the 10s
+    // global timeout bounds a dead fetch, the worker poll bounds a ctrl-c
+    let owned = url.to_string();
+    attempt_interruptible(crate::platform::interrupt::flag(), move || {
+        fetch_page_blocking(short_agent(), &owned)
+    })
+    .map_err(|e| e.to_string())
+    .and_then(std::convert::identity)
+}
+
+/// The blocking body of `fetch_page`, running on its worker thread.
+fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<FetchedPage, String> {
+    let mut request = agent.get(url);
     for (k, v) in identity_headers(url) {
         request = request.header(k, v);
     }
@@ -665,6 +784,22 @@ mod tests {
             HttpError::new(400, "invalid model").class(),
             Class::InvalidRequest
         );
+    }
+
+    #[test]
+    fn an_interrupt_lands_even_inside_the_connect_phase() {
+        // a local flag, not the process-wide one: flipping the global here
+        // would race every parallel test that reads it (the read tool does)
+        let flag = AtomicBool::new(true);
+        let req = HttpRequest {
+            url: "http://127.0.0.1:9/v1/chat/completions".into(),
+            headers: vec![],
+            body: "{}".into(),
+        };
+        let e = send_raw_interruptible_flag(agent(), &req, &flag).unwrap_err();
+        assert_eq!(e.class(), Class::Interrupted);
+        let g = get_with_flag(agent(), "http://127.0.0.1:9/x", &flag).unwrap_err();
+        assert!(g.contains("interrupted"), "{g}");
     }
 
     #[test]
