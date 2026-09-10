@@ -407,6 +407,30 @@ impl ReadTool {
     }
 }
 
+/// Write through a same-directory temp file + rename: a crash or power loss
+/// mid-write used to leave the target truncated — a real risk when the model
+/// writes a long document in one call. Rename is atomic within the volume;
+/// an existing file's permissions are carried over (the executable bit on
+/// edited scripts must survive) since the rename swaps in a fresh inode.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".{}.tmp", crate::core::db::ulid()));
+    let write = || -> std::io::Result<()> {
+        std::fs::write(&tmp, bytes)?;
+        if let Ok(mode) = std::fs::metadata(path).map(|m| m.permissions()) {
+            let _ = std::fs::set_permissions(&tmp, mode);
+        }
+        std::fs::rename(&tmp, path)
+    };
+    match write() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 struct WriteTool;
 
 impl Tool for WriteTool {
@@ -465,7 +489,7 @@ impl Tool for WriteTool {
         {
             return ToolOutput::err(format!("cannot create {}: {e}", parent.display()));
         }
-        match std::fs::write(&path, content) {
+        match write_atomic(&path, content.as_bytes()) {
             Ok(()) => ToolOutput::ok(format!(
                 "wrote {} bytes to {}",
                 content.len(),
@@ -571,7 +595,7 @@ impl Tool for EditTool {
         for (start, end, new) in spans.iter().rev() {
             text.replace_range(start..end, new);
         }
-        match std::fs::write(&path, &text) {
+        match write_atomic(&path, text.as_bytes()) {
             Ok(()) => ToolOutput::ok(format!(
                 "applied {} edits to {}",
                 spans.len(),
@@ -1317,6 +1341,47 @@ fn truncate_in_place(s: &mut String, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
+        let dir = std::env::temp_dir().join(format!("llm-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.md");
+        std::fs::write(&path, "old").unwrap();
+
+        write_atomic(&path, b"new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.unwrap().file_name().into_string().ok())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+
+        // a fresh file lands too (no permissions to carry over)
+        let fresh = dir.join("new.txt");
+        write_atomic(&fresh, b"hi").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "hi");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_existing_mode_over_the_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("llm-atomic-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.sh");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        write_atomic(&path, b"#!/bin/sh\necho ok\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit must survive the rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_change_hunks_single_edit_with_context() {

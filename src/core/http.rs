@@ -259,8 +259,10 @@ fn jitter01() -> f64 {
 fn next_delay(retry: &mut Retry, e: &HttpError) -> Option<Duration> {
     let delay = retry.next(e)?;
     if delay >= Duration::from_secs(2) {
+        // clear the row first: the spinner redraws this row without a
+        // newline, and an append would glue the notice onto its frame
         eprintln!(
-            "{}retrying in {}s ({}){}",
+            "{}\r\x1b[2Kretrying in {}s ({}){}",
             crate::theme::err().dim,
             delay.as_secs_f32().ceil() as u64,
             e.class().label(),
@@ -310,6 +312,22 @@ pub fn short_agent() -> &'static ureq::Agent {
         ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into()
+    })
+}
+
+/// A longer-timeout variant for the webfetch tool: pages download slowly and
+/// a 10s ceiling cuts real content off mid-read; probes stay on
+/// `short_agent` so a dead host still fails fast there.
+pub fn fetch_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_resolve(Some(Duration::from_secs(5)))
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(30)))
             .build()
             .into()
     })
@@ -443,8 +461,7 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
                     .read_to_string()
                     .map_err(|e| HttpError::new(0, format!("stream: {e}")))
             })
-        })
-        .and_then(std::convert::identity);
+        });
         match result {
             Ok(body) => return Ok(body),
             Err(e) => {
@@ -510,7 +527,7 @@ pub fn session_id() -> String {
 /// the floor when the receiver is gone.
 fn attempt_interruptible<T: Send + 'static>(
     flag: &AtomicBool,
-    f: impl FnOnce() -> T + Send + 'static,
+    f: impl FnOnce() -> Result<T, HttpError> + Send + 'static,
 ) -> Result<T, HttpError> {
     if flag.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(HttpError::new(0, "interrupted"));
@@ -523,7 +540,7 @@ fn attempt_interruptible<T: Send + 'static>(
     });
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => return Ok(result),
+            Ok(result) => return result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if flag.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(HttpError::new(0, "interrupted"));
@@ -548,7 +565,7 @@ fn send_raw_interruptible_flag(
         headers: req.headers.clone(),
         body: req.body.clone(),
     };
-    attempt_interruptible(flag, move || send_raw(agent, &owned)).and_then(std::convert::identity)
+    attempt_interruptible(flag, move || send_raw(agent, &owned))
 }
 
 fn send_raw(
@@ -622,25 +639,27 @@ fn get_with_flag(
     flag: &AtomicBool,
 ) -> Result<(Vec<u8>, Option<String>), String> {
     let owned = url.to_string();
-    attempt_interruptible(flag, move || get_blocking(agent, &owned))
-        .map_err(|e| format!("Failed to fetch {url}: {e}"))
-        .and_then(std::convert::identity)
+    attempt_interruptible(flag, move || get_blocking(agent, &owned)).map_err(|e| e.to_string())
 }
 
-/// The blocking body of `get_with`, running on its worker thread.
+/// The blocking body of `get_with`, running on its worker thread. Errors
+/// carry the full "Failed to fetch …" text; `HttpError` displays it verbatim.
 fn get_blocking(
     agent: &'static ureq::Agent,
     url: &str,
-) -> Result<(Vec<u8>, Option<String>), String> {
+) -> Result<(Vec<u8>, Option<String>), HttpError> {
     let mut request = agent.get(url);
     for (k, v) in identity_headers(url) {
         request = request.header(k, v);
     }
     let resp = request
         .call()
-        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+        .map_err(|e| HttpError::new(0, format!("Failed to fetch {url}: {e}")))?;
     if resp.status().as_u16() >= 400 {
-        return Err(format!("Failed to fetch {url}: HTTP {}", resp.status()));
+        return Err(HttpError::new(
+            0,
+            format!("Failed to fetch {url}: HTTP {}", resp.status()),
+        ));
     }
     let content_type = resp
         .headers()
@@ -650,7 +669,7 @@ fn get_blocking(
     let mut buf = Vec::new();
     let mut reader = resp.into_body().into_reader();
     std::io::Read::read_to_end(&mut reader, &mut buf)
-        .map_err(|e| format!("Failed to read {url}: {e}"))?;
+        .map_err(|e| HttpError::new(0, format!("Failed to read {url}: {e}")))?;
     Ok((buf, content_type))
 }
 
@@ -671,24 +690,26 @@ pub fn fetch_page(url: &str) -> Result<FetchedPage, String> {
     // global timeout bounds a dead fetch, the worker poll bounds a ctrl-c
     let owned = url.to_string();
     attempt_interruptible(crate::platform::interrupt::flag(), move || {
-        fetch_page_blocking(short_agent(), &owned)
+        fetch_page_blocking(fetch_agent(), &owned)
     })
     .map_err(|e| e.to_string())
-    .and_then(std::convert::identity)
 }
 
 /// The blocking body of `fetch_page`, running on its worker thread.
-fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<FetchedPage, String> {
+fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<FetchedPage, HttpError> {
     let mut request = agent.get(url);
     for (k, v) in identity_headers(url) {
         request = request.header(k, v);
     }
     let resp = request
         .call()
-        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+        .map_err(|e| HttpError::new(0, format!("Failed to fetch {url}: {e}")))?;
     let status = resp.status().as_u16();
     if status >= 400 {
-        return Err(format!("Failed to fetch {url}: HTTP {status}"));
+        return Err(HttpError::new(
+            0,
+            format!("Failed to fetch {url}: HTTP {status}"),
+        ));
     }
     let final_url = resp.get_uri().to_string();
     let content_type = resp
@@ -700,9 +721,12 @@ fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<Fetched
     let mut buf = Vec::new();
     let mut reader = resp.into_body().into_reader();
     std::io::Read::read_to_end(&mut reader, &mut buf)
-        .map_err(|e| format!("Failed to read {url}: {e}"))?;
+        .map_err(|e| HttpError::new(0, format!("Failed to read {url}: {e}")))?;
     let body = String::from_utf8(buf).map_err(|_| {
-        format!("Failed to read {url}: non-UTF-8 body (content-type: {content_type})")
+        HttpError::new(
+            0,
+            format!("Failed to read {url}: non-UTF-8 body (content-type: {content_type})"),
+        )
     })?;
     Ok(FetchedPage {
         url: final_url,

@@ -214,6 +214,17 @@ impl Session {
                     // silent on the terminal
                     view.borrow_mut().pause();
                 }
+                AgentUpdate::StreamRecovered { chars, error } => {
+                    // settle the partial answer, then say why the wait
+                    // continues; the model picks up from the partial text
+                    view.borrow_mut().pause();
+                    let p = crate::theme::err();
+                    eprintln!(
+                        "{}stream dropped ({error}) — keeping the partial answer ({chars} chars), continuing{}",
+                        p.dim, p.reset
+                    );
+                    view.borrow_mut().resume_wait();
+                }
             }
         };
         // esc or ctrl-c during a running task requests a cooperative
@@ -277,13 +288,33 @@ impl Session {
                 // conversation per task); persistence reads it first
                 let history = std::mem::take(&mut outcome.history);
                 let reasoning = view.into_inner().into_renderer().reasoning;
-                self.persist_turn(seed_len, &history, &outcome, &reasoning, task_start);
+                self.persist_turn(
+                    seed_len,
+                    &history,
+                    &outcome.final_text,
+                    outcome.usage,
+                    &reasoning,
+                    task_start,
+                );
                 self.seed = history;
                 Ok((outcome, reasoning))
             }
             // the failure carries what was already sent: the session
-            // survives without a defensive clone taken up front
+            // survives without a defensive clone taken up front. A failed
+            // round still saw real work — completed tool rounds, maybe a
+            // partial answer — so it persists too; without this a dropped
+            // connection late in a long task would erase the transcript
+            // from /resume while the in-memory seed kept it.
             Err(failure) => {
+                let reasoning = view.into_inner().into_renderer().reasoning;
+                self.persist_turn(
+                    seed_len,
+                    &failure.history,
+                    &failure.final_text,
+                    None,
+                    &reasoning,
+                    task_start,
+                );
                 self.seed = failure.history;
                 Err(failure.message)
             }
@@ -301,16 +332,19 @@ impl Session {
 
     /// Persist the turn: the wire-level messages so `-c` can replay it.
     /// Runs inside `run_task` (the callers never see the history). Skipped
-    /// with --no-session.
+    /// with --no-session, or when nothing was added to the history — a
+    /// completed round and a failed/interrupted one persist alike, so
+    /// `/resume` sees the work either way.
     fn persist_turn(
         &mut self,
         seed_len: usize,
         history: &[Msg],
-        outcome: &crate::agent::AgentOutcome,
+        response: &str,
+        usage: Option<crate::core::http::Usage>,
         reasoning: &str,
         start: std::time::Instant,
     ) {
-        if self.no_session || outcome.final_text.is_empty() {
+        if self.no_session || history.len() <= seed_len.min(history.len()) {
             return;
         }
         let Some(store) = self.store.as_ref() else {
@@ -364,13 +398,13 @@ impl Session {
             cwd: Some(self.cwd.display().to_string()),
             system: self.system.clone(),
             prompt,
-            response: outcome.final_text.clone(),
+            response: response.to_string(),
             reasoning: if reasoning.is_empty() {
                 None
             } else {
                 Some(reasoning.to_string())
             },
-            usage: outcome.usage.map(|u| (u.input, u.output)),
+            usage: usage.map(|u| (u.input, u.output)),
             duration_ms: Some(start.elapsed().as_millis() as i64),
             options: turn_options,
             messages: new_messages,
@@ -506,6 +540,74 @@ pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A round that failed late (stream drop after tool rounds) must still
+    /// reach the thread file: `/resume` sees the work either way.
+    #[test]
+    fn a_failed_round_persists_its_tool_rounds() {
+        let dir = std::env::temp_dir().join(format!("llm-persist-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = threads::Store::open_path(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut session = Session {
+            compact: CompactConfig::default(),
+            model: crate::providers::ResolvedModel {
+                provider_name: "mock".into(),
+                kind: "openai-compat".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                api_key: None,
+                model_id: "m".into(),
+                options: vec![],
+            },
+            tools: Vec::new(),
+            system: None,
+            cwd: cwd.clone(),
+            max_turns: 4,
+            stream: true,
+            no_session: false,
+            store: Some(store),
+            approval: crate::agent::approval::ApprovalConfig::default(),
+            conversation_id: None,
+            seed: Vec::new(),
+            thinking: None,
+            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            extensions: crate::agent::ext::Extensions::connect(&cwd),
+            tokens: (0, 0),
+            tokens_cached: 0,
+        };
+        let history = vec![
+            Msg::user("write the docs"),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "write".into(),
+                    arguments: serde_json::json!({"path": "a.md", "content": "x"}),
+                }],
+            },
+            Msg::ToolResult {
+                call_id: "c1".into(),
+                name: "write".into(),
+                content: "wrote 1 bytes to a.md".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+        ];
+        // the round died here: no final answer, no usage — still persisted
+        session.persist_turn(0, &history, "", None, "", std::time::Instant::now());
+        let cid = session.conversation_id.clone().expect("thread created");
+        let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].messages.len(), 3, "prompt, tool call, result");
+        assert_eq!(turns[0].response, "");
+
+        // nothing new since the seed: no second turn
+        session.persist_turn(3, &history, "", None, "", std::time::Instant::now());
+        let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
+        assert_eq!(turns.len(), 1, "an unchanged history persists nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn user_attachments_keep_their_real_provenance_in_storage() {

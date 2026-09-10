@@ -45,6 +45,12 @@ pub enum AgentUpdate {
     Compacted {
         removed: usize,
     },
+    /// a dropped stream was recovered: the partial answer is kept as a real
+    /// assistant message and the model continues from it (bounded per run)
+    StreamRecovered {
+        chars: usize,
+        error: String,
+    },
 }
 
 /// What the UI answered to an approval request.
@@ -107,9 +113,13 @@ pub struct AgentOutcome {
 
 /// A provider-level failure: the error plus everything already sent, so the
 /// caller's session survives without having cloned the history up front.
+/// `final_text` is the last completed answer (or the partial one a dropped
+/// stream left behind), kept for the persisted turn.
+#[derive(Debug)]
 pub struct AgentFailure {
     pub message: String,
     pub history: Vec<Msg>,
+    pub final_text: String,
 }
 
 const WRAP_UP_NOTE: &str = "[System] The turn budget is almost exhausted. Finish your current \
@@ -169,6 +179,11 @@ pub fn run_agent(
     let mut last_usage = None;
     let mut final_text = String::new();
     let mut interrupted = false;
+    // mid-stream drops recovered so far; the cap keeps a link that drops
+    // every few KB from looping forever (each recovery re-enters the model
+    // call with a fresh transport-level retry budget)
+    let mut recoveries = 0;
+    const MAX_STREAM_RECOVERIES: usize = 5;
 
     let _ = fire(
         opts.hooks,
@@ -267,9 +282,35 @@ pub fn run_agent(
                 interrupted = true;
                 break;
             }
+            // a drop after output was handed out is never replayed — the
+            // answer on screen would duplicate — but the run need not die
+            // either: the partial text becomes a real assistant message and
+            // the model continues from it (assistant-last is a prefill for
+            // both wire shapes). Bounded: a link that drops every few KB
+            // would otherwise recover forever, each attempt with a fresh
+            // retry budget. The pending user message lands first so the
+            // order stays what happened: prompt, partial answer.
+            if !text.is_empty() {
+                if has_pending {
+                    history.push(pending.take().expect("checked above"));
+                }
+                history.push(Msg::Assistant {
+                    text: text.clone(),
+                    tool_calls: vec![],
+                });
+                recoveries += 1;
+                if recoveries <= MAX_STREAM_RECOVERIES {
+                    on_update(AgentUpdate::StreamRecovered {
+                        chars: text.chars().count(),
+                        error: e,
+                    });
+                    continue;
+                }
+            }
             return Err(AgentFailure {
                 message: e,
                 history,
+                final_text: final_text.clone(),
             });
         }
 
@@ -615,5 +656,114 @@ mod tests {
         assert_eq!(calls[0].id, "first");
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[0].arguments, json!({"a": 1}));
+    }
+
+    /// A mock SSE server that drops the first connection after one delta
+    /// (no [DONE]) and completes the second: the agent loop must keep the
+    /// partial answer as a real assistant message and finish the task on
+    /// the continued request — the order stays prompt, partial, continuation.
+    #[test]
+    fn a_dropped_stream_continues_from_its_partial_answer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let server = std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut c = conn;
+                // read past the request head + body (content-length)
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    use std::io::Read;
+                    if c.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                    let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
+                    if let Some(i) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        let body_read = buf.len() - i - 4;
+                        if body_read >= len {
+                            break;
+                        }
+                    }
+                }
+                if n == 0 {
+                    // one delta, then the connection dies mid-answer
+                    let _ = c.write_all(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".as_bytes(),
+                    );
+                    let _ = c.write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial ans\"}}]}\n\n",
+                    );
+                    drop(c); // no [DONE]: the stream is cut
+                } else {
+                    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ued cleanly\"}}]}\n\n\
+                                data: [DONE]\n\n";
+                    let _ = c.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    break;
+                }
+            }
+        });
+        use std::io::Write as _;
+
+        let model = crate::providers::ResolvedModel {
+            provider_name: "mock".into(),
+            kind: "openai-compat".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: Some("sk-x".into()),
+            model_id: "m".into(),
+            options: vec![],
+        };
+        let tools: Vec<Box<dyn tools::Tool>> = vec![];
+        let opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 4,
+            stream: true,
+            compact: None,
+            reasoning: None,
+            hooks: None,
+        };
+        let mut approval = approval::ApprovalConfig::default();
+        let outcome = run_agent(
+            &model,
+            &tools,
+            "go",
+            vec![],
+            vec![],
+            &opts,
+            &mut approval,
+            &mut |_| {},
+            &mut |_| ApprovalResponse::Deny,
+            &mut || vec![],
+        )
+        .expect("the run must recover from the dropped stream");
+        server.join().unwrap();
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one recovery request"
+        );
+        assert!(!outcome.interrupted);
+        assert_eq!(outcome.final_text, "ued cleanly");
+        assert_eq!(outcome.history.len(), 3, "prompt, partial, continuation");
+        assert!(
+            matches!(&outcome.history[1], Msg::Assistant { text, tool_calls } if text == "partial ans" && tool_calls.is_empty()),
+            "the partial answer rides the history as a real assistant message"
+        );
     }
 }
