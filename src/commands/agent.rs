@@ -126,7 +126,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         .map(|l| l.request())
         .collect();
 
-    // session continuation: -c = most recent, --session/--cid = given id
+    // session continuation: -c = most recent (this directory's, else the
+    // newest anywhere), --session/--cid = given id
+    let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd_str = cwd.display().to_string();
     let mut conversation_id: Option<String> = None;
     let mut seed: Vec<Msg> = Vec::new();
     let mut conv_system: Option<String> = None;
@@ -136,7 +139,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         let store = store
             .as_ref()
             .ok_or("--session requires a store (remove -n)?")?;
-        let Some(cid) = store.resolve_thread(raw)? else {
+        let Some(cid) = store.resolve_thread(raw, Some(&cwd_str))? else {
             return Err(format!(
                 "session id or prefix '{raw}' matches nothing (or is ambiguous)"
             ));
@@ -151,7 +154,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conversation_id = Some(cid);
     } else if args.flag(&["continue"])
         && let Some(store) = store.as_ref()
-        && let Some(cid) = store.latest_thread().ok().flatten()
+        && let Some(cid) = store
+            .latest_thread(Some(&cwd_str))
+            .ok()
+            .flatten()
+            .or_else(|| store.latest_thread(None).ok().flatten())
     {
         let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
         seed = msgs;

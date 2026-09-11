@@ -97,11 +97,19 @@ pub struct StoredTurn {
 }
 
 /// One row of the browser list.
+#[derive(Clone)]
 pub struct ThreadSummary {
     pub id: String,
     pub turns: usize,
     pub last: String,
     pub last_prompt: String,
+    /// working directory of the thread's last turn, when recorded
+    pub cwd: Option<String>,
+}
+
+/// True when two recorded working directories name the same place.
+fn same_dir(a: &str, b: &str) -> bool {
+    Path::new(a) == Path::new(b)
 }
 
 /// The thread-file store. A thin handle over a directory; every method
@@ -177,22 +185,34 @@ impl Store {
         Ok(turns)
     }
 
-    /// The newest thread id by file mtime.
-    pub fn latest_thread(&self) -> Result<Option<String>, String> {
+    /// The newest thread id by file mtime, restricted to `cwd` when given.
+    pub fn latest_thread(&self, cwd: Option<&str>) -> Result<Option<String>, String> {
         let mut best: Option<(std::time::SystemTime, String)> = None;
         for entry in self.entries()? {
             let Ok(meta) = entry.metadata() else { continue };
             let Ok(m) = meta.modified() else { continue };
-            if best.as_ref().is_none_or(|(t, _)| m > *t) {
-                best = Some((m, entry_id(&entry)?));
+            if best.as_ref().is_some_and(|(t, _)| m <= *t) {
+                continue;
             }
+            let id = entry_id(&entry)?;
+            if let Some(cwd) = cwd
+                && !self.ran_in_dir(&id, cwd)
+            {
+                continue;
+            }
+            best = Some((m, id));
         }
         Ok(best.map(|(_, id)| id))
     }
 
-    /// Resolve a full id or an unambiguous prefix. None = no match or
+    /// Resolve a full id or an unambiguous prefix. When a prefix matches
+    /// several threads, one that ran in `cwd` wins; None = no match or
     /// ambiguous (the caller prints the combined message).
-    pub fn resolve_thread(&self, prefix: &str) -> Result<Option<String>, String> {
+    pub fn resolve_thread(
+        &self,
+        prefix: &str,
+        cwd: Option<&str>,
+    ) -> Result<Option<String>, String> {
         let mut hits: Vec<String> = Vec::new();
         for entry in self.entries()? {
             let id = entry_id(&entry)?;
@@ -203,13 +223,38 @@ impl Store {
                 hits.push(id);
             }
         }
-        Ok((hits.len() == 1).then(|| hits[0].clone()))
+        if hits.len() <= 1 {
+            return Ok(hits.into_iter().next());
+        }
+        if let Some(cwd) = cwd {
+            let local: Vec<String> = hits
+                .iter()
+                .filter(|id| self.ran_in_dir(id, cwd))
+                .cloned()
+                .collect();
+            if local.len() == 1 {
+                return Ok(local.into_iter().next());
+            }
+        }
+        Ok(None)
+    }
+
+    /// True when the thread's last turn ran in `cwd`.
+    fn ran_in_dir(&self, id: &str, cwd: &str) -> bool {
+        self.summarize(id)
+            .and_then(|t| t.cwd)
+            .is_some_and(|c| same_dir(&c, cwd))
     }
 
     /// Recent threads, newest first (by last-turn timestamp), capped at
-    /// `limit`. A `limit` of `usize::MAX` lists everything.
-    pub fn recent_threads(&self, limit: usize) -> Vec<ThreadSummary> {
+    /// `limit`. A `limit` of `usize::MAX` lists everything; `cwd` restricts
+    /// the list to conversations that ran in that directory.
+    pub fn recent_threads(&self, limit: usize, cwd: Option<&str>) -> Vec<ThreadSummary> {
         let mut all = self.summaries();
+        all.retain(|t| match cwd {
+            Some(cwd) => t.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)),
+            None => true,
+        });
         all.sort_by(|a, b| b.last.cmp(&a.last));
         all.truncate(limit);
         all
@@ -252,6 +297,7 @@ impl Store {
             turns,
             last: last.ts,
             last_prompt: last.prompt,
+            cwd: last.cwd,
         })
     }
 
@@ -333,10 +379,38 @@ mod tests {
         }
     }
 
+    /// The same turn, stamped with the directory it ran in.
+    fn turn_in(id: &str, cwd: &str, prompt: &str) -> StoredTurn {
+        let mut t = turn(id, prompt, "ans", "agent");
+        t.cwd = Some(cwd.to_string());
+        t
+    }
+
+    /// Append `turns` and pin the thread file's mtime `age_secs` into the
+    /// past, so mtime ordering is explicit instead of filesystem-grained.
+    fn seed(store: &Store, turns: &[StoredTurn], age_secs: u64) -> String {
+        let id = store.append_turn(None, &turns[0]).unwrap();
+        for t in &turns[1..] {
+            store.append_turn(Some(&id), t).unwrap();
+        }
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        let file = fs::File::options()
+            .write(true)
+            .open(store.thread_path(&id))
+            .unwrap();
+        file.set_modified(old).unwrap();
+        id
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("llm-threads-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
     #[test]
     fn appends_and_reads_back_in_order() {
-        let dir = std::env::temp_dir().join(format!("llm-threads-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch("order");
         let store = Store::open_path(&dir).unwrap();
         let id = store
             .append_turn(None, &turn("1", "one", "ans1", "prompt"))
@@ -353,28 +427,124 @@ mod tests {
 
     #[test]
     fn resolves_exact_and_unique_prefix() {
-        let dir = std::env::temp_dir().join(format!("llm-threads-r-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch("r");
         let store = Store::open_path(&dir).unwrap();
         let id = store
             .append_turn(None, &turn("1", "a", "b", "agent"))
             .unwrap();
         assert_eq!(
-            store.resolve_thread(&id).unwrap().as_deref(),
+            store.resolve_thread(&id, None).unwrap().as_deref(),
             Some(id.as_str())
         );
         assert_eq!(
-            store.resolve_thread(&id[..6]).unwrap().as_deref(),
+            store.resolve_thread(&id[..6], None).unwrap().as_deref(),
             Some(id.as_str())
         );
-        assert_eq!(store.resolve_thread("zzz").unwrap(), None);
+        assert_eq!(store.resolve_thread("zzz", None).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prefix_matching_two_threads_prefers_this_directory() {
+        let dir = scratch("prefix");
+        let store = Store::open_path(&dir).unwrap();
+        let mine = seed(&store, &[turn_in("1", "/p/mine", "a")], 0);
+        let theirs = seed(&store, &[turn_in("2", "/p/theirs", "b")], 0);
+        let shared = mine
+            .chars()
+            .zip(theirs.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(shared >= 4, "ids share no usable prefix: {mine} {theirs}");
+        let prefix = &mine[..shared];
+        assert_eq!(store.resolve_thread(prefix, None).unwrap(), None);
+        assert_eq!(
+            store
+                .resolve_thread(prefix, Some("/p/mine"))
+                .unwrap()
+                .as_deref(),
+            Some(mine.as_str())
+        );
+        assert_eq!(
+            store
+                .resolve_thread(prefix, Some("/p/theirs"))
+                .unwrap()
+                .as_deref(),
+            Some(theirs.as_str())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_threads_are_scoped_to_one_directory() {
+        let dir = scratch("scope");
+        let store = Store::open_path(&dir).unwrap();
+        let old = seed(&store, &[turn_in("1", "/p/a", "old")], 120);
+        let here = seed(&store, &[turn_in("2", "/p/b", "here")], 60);
+        let untagged = seed(&store, &[turn("3", "legacy", "", "agent")], 0);
+        let ids =
+            |ts: Vec<ThreadSummary>| -> Vec<String> { ts.into_iter().map(|t| t.id).collect() };
+        assert_eq!(
+            ids(store.recent_threads(30, None)),
+            vec![untagged, here, old.clone()]
+        );
+        assert_eq!(
+            ids(store.recent_threads(30, Some("/p/a"))),
+            vec![old.clone()]
+        );
+        // a trailing slash or `.` component is the same directory
+        assert_eq!(
+            ids(store.recent_threads(30, Some("/p/a/"))),
+            vec![old.clone()]
+        );
+        assert_eq!(
+            ids(store.recent_threads(30, Some("/p/./a"))),
+            vec![old.clone()]
+        );
+        // a different directory is filtered out
+        assert!(store.recent_threads(30, Some("/p/c")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_thread_can_be_scoped_to_one_directory() {
+        let dir = scratch("latest");
+        let store = Store::open_path(&dir).unwrap();
+        let old = seed(&store, &[turn_in("1", "/p/a", "old")], 120);
+        let here = seed(&store, &[turn_in("2", "/p/b", "here")], 60);
+        assert_eq!(
+            store.latest_thread(Some("/p/b")).unwrap().as_deref(),
+            Some(here.as_str())
+        );
+        assert_eq!(
+            store.latest_thread(Some("/p/a")).unwrap().as_deref(),
+            Some(old.as_str())
+        );
+        assert_eq!(store.latest_thread(Some("/p/nowhere")).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summaries_carry_the_last_turns_directory() {
+        let dir = scratch("cwd");
+        let store = Store::open_path(&dir).unwrap();
+        let id = seed(
+            &store,
+            &[turn_in("1", "/p/a", "first"), turn_in("2", "/p/b", "moved")],
+            0,
+        );
+        let summaries = store.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, id);
+        assert_eq!(summaries[0].turns, 2);
+        assert_eq!(summaries[0].last_prompt, "moved");
+        assert_eq!(summaries[0].cwd.as_deref(), Some("/p/b"));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn fork_copies_the_thread() {
-        let dir = std::env::temp_dir().join(format!("llm-threads-f-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch("f");
         let store = Store::open_path(&dir).unwrap();
         let id = store
             .append_turn(None, &turn("1", "a", "b", "agent"))

@@ -96,11 +96,13 @@ ctrl+v pastes the clipboard image as a temp-file path you can see and edit, and 
 typed into a message attaches itself automatically. Long conversations keep only the most recent
 image attachments in context — older ones become short text notes.
 
-Sessions persist: `llm -c "and in python?"` continues the newest one, `llm --session 01ABC...`
-(`--cid`, or a short unambiguous prefix like `01m13d`) picks an exact thread, and `--no-session`
-opts out. `llm -r` is the way back in: one filterable list of recent conversations (typing filters
-across preview and id, fuzzy-filter style); enter opens the transcript and offers to resume it. `--fork`
-branches the loaded session onto a new thread id sharing its turns so far.
+Sessions persist: `llm -c "and in python?"` continues the newest conversation of this directory,
+`llm --session 01ABC...` (`--cid`, or a short unambiguous prefix like `01m13d`) picks an exact
+thread, and `--no-session` opts out. `llm -r` is the way back in: one filterable list of this
+directory's conversations, newest first (typing filters across preview and id, fuzzy-filter style); enter
+opens the transcript and offers to resume it. A directory with no history of its own falls back to
+listing every directory, the directory tagged on each row. `/resume` inside the REPL opens the same
+picker. `--fork` branches the loaded session onto a new thread id sharing its turns so far.
 
 Skills and memory live under the user directory. Skills are SKILL.md folders discovered from
 `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from

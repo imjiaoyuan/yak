@@ -314,39 +314,14 @@ fn slash_hint(word: &str) -> Option<String> {
     crate::core::text::closest_name(word, &names).map(|n| format!("/{n}"))
 }
 
-/// `/resume`: pick a past conversation and load it into this session —
-/// history replays, the next task appends to the same thread.
+/// `/resume`: pick a past conversation — this directory's, newest first —
+/// and load it into this session (history replays, the next task appends to
+/// the same thread).
 fn resume_pick(session: &mut Session) -> Result<(), String> {
-    let store = crate::core::threads::Store::open()?;
-    let threads = store.recent_threads(30);
-    if threads.is_empty() {
-        eprintln!(
-            "{}no conversations yet{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-        return Ok(());
-    }
-    let now = crate::core::db::now_turn_datetime();
-    let items: Vec<String> = threads
-        .iter()
-        .map(|t| {
-            let preview: String = t.last_prompt.chars().take(40).collect::<String>();
-            let preview = preview.replace('\n', " ");
-            format!(
-                "{} · {} turn{} · \"{}\" · {}",
-                &t.id[..t.id.len().min(6)],
-                t.turns,
-                if t.turns == 1 { "" } else { "s" },
-                preview,
-                crate::core::db::short_time(&now, &t.last)
-            )
-        })
-        .collect();
-    let Some(i) = crate::term::lineedit::pick("resume:", &items, false) else {
+    let Some(cid) = crate::commands::logs::pick_thread(&session.cwd, "resume:")? else {
         return Ok(());
     };
-    let cid = threads[i].id.clone();
+    let store = crate::core::threads::Store::open()?;
     let (msgs, system) = crate::agent::session::rebuild_thread(&store, &cid);
     session.seed = msgs;
     session.system = system;
