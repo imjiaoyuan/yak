@@ -21,7 +21,7 @@ irm https://jiaoyuan.org/llm/install.ps1 | iex
 
 It lands in `%USERPROFILE%\.local\bin`, no admin needed, and appends that directory to the user
 `Path`. Re-running either line is the updater: it checks the latest GitHub release, prints
-`updating 0.1.2 -> 0.1.5` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
+`updating 0.1.2 -> 0.1.6` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
 reinstalls anyway; `LLM_VERSION` pins a release tag, `LLM_REPO` installs from a fork and
 `LLM_INSTALL_DIR` picks a different directory. On Linux the static musl build is used, so the same
 binary runs on any distribution; prebuilt targets today are x86_64 and aarch64 Linux, x86_64 and
@@ -97,12 +97,14 @@ typed into a message attaches itself automatically. Long conversations keep only
 image attachments in context — older ones become short text notes.
 
 Sessions persist: `llm -c "and in python?"` continues the newest conversation of this directory,
-`llm --session 01ABC...` (`--cid`, or a short unambiguous prefix like `01m13d`) picks an exact
-thread, and `--no-session` opts out. `llm -r` is the way back in: one filterable list of this
-directory's conversations, newest first (typing filters across preview and id, fuzzy-filter style); enter
-opens the transcript and offers to resume it. A directory with no history of its own falls back to
-listing every directory, the directory tagged on each row. `/resume` inside the REPL opens the same
-picker. `--fork` branches the loaded session onto a new thread id sharing its turns so far.
+falling back to the newest anywhere — with a dim note naming that directory — when this one has no
+history yet. `llm --session 01ABC...` (`--cid`, or a short unambiguous prefix like `01m13d`) picks
+an exact thread, and `--no-session` opts out. `llm -r` is the way back in: one filterable list of
+this directory's conversations, newest first (typing filters across preview and id, fuzzy-filter style);
+enter opens the transcript and offers to resume it. A directory with no history of its own falls
+back to listing every directory, the directory tagged on each row. `/resume` inside the REPL opens
+the same picker. `--fork` branches the loaded session onto a new thread id sharing its turns so
+far.
 
 Skills and memory live under the user directory. Skills are SKILL.md folders discovered from
 `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from
