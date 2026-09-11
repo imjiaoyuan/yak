@@ -154,20 +154,32 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conversation_id = Some(cid);
     } else if args.flag(&["continue"])
         && let Some(store) = store.as_ref()
-        && let Some(cid) = store
-            .latest_thread(Some(&cwd_str))
-            .ok()
-            .flatten()
-            .or_else(|| store.latest_thread(None).ok().flatten())
     {
-        let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
-        seed = msgs;
-        conv_system = system;
-        conv_model = store
-            .read_thread(&cid)
-            .ok()
-            .and_then(|turns| turns.last().map(|t| t.model.clone()));
-        conversation_id = Some(cid);
+        let local = store.latest_thread(Some(&cwd_str)).ok().flatten();
+        let from_here = local.is_some();
+        // no history in this directory: the newest anywhere, said out loud so
+        // a stray `-c` cannot silently continue another project's session
+        if let Some(cid) = local.or_else(|| store.latest_thread(None).ok().flatten()) {
+            let turns = store.read_thread(&cid).unwrap_or_default();
+            if !from_here {
+                let p = crate::theme::err();
+                let from = turns
+                    .last()
+                    .and_then(|t| t.cwd.as_deref())
+                    .unwrap_or("another directory");
+                eprintln!(
+                    "{}continuing {} from {from}{}",
+                    p.dim,
+                    &cid[..cid.len().min(6)],
+                    p.reset
+                );
+            }
+            let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
+            seed = msgs;
+            conv_system = system;
+            conv_model = turns.last().map(|t| t.model.clone());
+            conversation_id = Some(cid);
+        }
     }
 
     // --fork: branch the loaded session onto a fresh thread id sharing the

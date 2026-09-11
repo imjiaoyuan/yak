@@ -2,6 +2,7 @@
 //! `~/.llm/threads/<ulid>.jsonl`, one turn object per line. Resume is
 //! the reference shape: a thread id reopens the file, nothing else.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -186,7 +187,16 @@ impl Store {
     }
 
     /// The newest thread id by file mtime, restricted to `cwd` when given.
+    /// The scoped walk reads each thread file once (for its directory) and
+    /// then only stats them.
     pub fn latest_thread(&self, cwd: Option<&str>) -> Result<Option<String>, String> {
+        let local: Option<HashSet<String>> = cwd.map(|cwd| {
+            self.summaries()
+                .into_iter()
+                .filter(|t| t.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)))
+                .map(|t| t.id)
+                .collect()
+        });
         let mut best: Option<(std::time::SystemTime, String)> = None;
         for entry in self.entries()? {
             let Ok(meta) = entry.metadata() else { continue };
@@ -195,9 +205,7 @@ impl Store {
                 continue;
             }
             let id = entry_id(&entry)?;
-            if let Some(cwd) = cwd
-                && !self.ran_in_dir(&id, cwd)
-            {
+            if local.as_ref().is_some_and(|local| !local.contains(&id)) {
                 continue;
             }
             best = Some((m, id));

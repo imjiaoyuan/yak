@@ -117,11 +117,16 @@ pub fn show_transcript(cid: &str) -> i32 {
             return 1;
         }
     };
+    let p = crate::theme::out();
     if let Some(first) = turns.first() {
-        match first.cwd.as_deref() {
-            Some(cwd) => println!("conversation: {cid} · {} · {cwd}", first.model),
-            None => println!("conversation: {cid} · {}", first.model),
-        }
+        let where_ = match first.cwd.as_deref() {
+            Some(cwd) => format!(" · {cwd}"),
+            None => String::new(),
+        };
+        println!(
+            "{}conversation: {cid} · {}{where_}{}",
+            p.dim, first.model, p.reset
+        );
     }
     for turn in &turns {
         let p = crate::theme::out();
