@@ -66,6 +66,7 @@ non-comment line):
 | `arg-mode: argv` | single declared argument arrives as plain `argv[1]` instead of stdin JSON |
 | `interpreter: <prog>` | run the file through this program (`${ENV}` expanded); without it the file runs itself |
 | `timeout: <secs>` | per-call timeout; default `extensions.tool_timeout` (120s) |
+| `tier: read\|write\|exec` | trust tier the approval matrix sees; default `exec` |
 
 Invocation contract:
 
@@ -76,7 +77,7 @@ Invocation contract:
 - exit code `0` → normal result, anything else → error result (the exit code is appended)
 - timeout → the call is interrupted and returned as an error result
 - cwd is the agent's working directory
-- script tools are exec-tier: the approval matrix applies (see below)
+- script tools are exec-tier unless the manifest declares otherwise: the approval matrix applies (see below)
 
 ## Resident extensions
 
@@ -90,7 +91,8 @@ the diagnostics tail; stderr likewise.
 2. Host sends `initialize`; the extension must reply within **10s**.
 3. Requests flow: `call_tool`, `run_command`, `event` — each answered by id.
 4. On exit or `/reload`: host sends `shutdown`, closes stdin, then kills the process.
-   A dead extension stays dead until `/reload`; its tools then error out per call.
+   A dead extension is respawned lazily on its next use (tool call, command or hook) — a crash
+   costs one call, not the rest of the session. `/reload` still re-reads the discovery dirs.
 
 ### Messages
 
@@ -109,7 +111,11 @@ may be ignored silently — the host times them out.
    }}
 ```
 
-`parameters` is JSON Schema; `commands` and `events` may be empty lists or omitted.
+`parameters` is JSON Schema; `commands` and `events` may be empty lists or omitted. Each tool may
+carry an optional `"tier": "read" | "write" | "exec"` (default `exec`).
+
+Tool names are registry-wide: a name that collides with a built-in or another extension is
+exposed as `<extension-stem>__<name>` (the wire protocol keeps the original name).
 
 **`call_tool`** — the model invoked one of your tools (deadline `extensions.tool_timeout`, 120s
 default):
@@ -170,8 +176,11 @@ Multiple subscribed extensions fire in order; the first deny wins, and argument 
 
 ## Approval, tiers and policies
 
-Every extension tool (script or resident) is **exec-tier**: the approval matrix treats it
-exactly like `bash`. The agent's default mode is **yolo** — extension tools run free unless a
+Every extension tool is **exec-tier** by default: the approval matrix treats it exactly like
+`bash`. A tool may declare a lower tier — `# tier: write` in a script manifest, or
+`"tier": "read"` on a tool in the `initialize` reply — and then the matrix treats it like the
+corresponding built-in (a `read` tool runs unprompted in ask mode). This is a trust decision:
+lower it only for tools you would let run anyway, since a mislabeled tool bypasses the prompt. The agent's default mode is **yolo** — extension tools run free unless a
 per-tool policy says otherwise. In ask mode (`--approval-mode ask`, or config
 `approval_mode = "always-ask"`) every extension tool call prompts (`Allow? [Y/n/a]` — `a`
 remembers for the session). Note the destructive-command list that keeps its prompt in yolo

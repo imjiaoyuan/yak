@@ -128,13 +128,16 @@ pub struct ExecToolSpec {
     /// itself (shebang / exec bit / Windows association)
     pub interpreter: Option<String>,
     pub timeout: u64,
+    /// declared trust tier (`# tier: write`); defaults to exec
+    pub tier: Tier,
 }
 
 /// Parse the manifest header off a script. A manifest starts at a comment
 /// line carrying `--- llm-tool: <name>` (`#` or `//` prefix) and extends
 /// over the following comment lines; the first non-comment line ends it.
 /// Fields: `description:`, `args: name (type) desc` (repeatable),
-/// `arg-mode: argv`, `interpreter: <prog>`, `timeout: <secs>`.
+/// `arg-mode: argv`, `interpreter: <prog>`, `timeout: <secs>`,
+/// `tier: read|write|exec`.
 pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
     let mut name: Option<String> = None;
     let mut description = String::new();
@@ -143,6 +146,7 @@ pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
     let mut arg_mode_argv = false;
     let mut interpreter: Option<String> = None;
     let mut timeout: Option<u64> = None;
+    let mut tier = Tier::Exec;
     let mut in_header = false;
     for line in text.lines() {
         let trimmed = line.trim_end();
@@ -179,6 +183,9 @@ pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
             }
         } else if let Some(rest) = comment.strip_prefix("timeout:") {
             timeout = rest.trim().parse::<u64>().ok().filter(|t| *t > 0);
+        } else if let Some(rest) = comment.strip_prefix("tier:") {
+            // an unknown tier stays exec (the safe default)
+            tier = Tier::parse(rest).unwrap_or(Tier::Exec);
         }
     }
     Some(ExecToolSpec {
@@ -193,6 +200,7 @@ pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
         arg_mode_argv,
         interpreter,
         timeout: timeout.unwrap_or_else(|| crate::core::config::extension_tool_timeout().as_secs()),
+        tier,
     })
 }
 
@@ -267,6 +275,8 @@ pub struct ToolMeta {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// declared trust tier; an absent or unknown value stays exec
+    pub tier: Tier,
 }
 
 pub struct ExtState {
@@ -302,25 +312,89 @@ impl Drop for Conn {
 pub struct Ext {
     pub name: String,
     target: String,
+    /// the discovered file; `None` for a placeholder that never connected
+    path: Option<PathBuf>,
     state: Mutex<Result<ExtState, String>>,
     tail: Arc<Mutex<VecDeque<String>>>,
     conn: Mutex<Option<Conn>>,
+    /// serializes respawns: two concurrent tool calls on a dead extension
+    /// must not race two children into the same slot
+    respawn: Mutex<()>,
 }
 
 impl Ext {
+    /// Bring a dead extension back before using it: a crash or an exit no
+    /// longer kills the tool until `/reload`. Runs at most one spawn per
+    /// request; if the respawn itself fails, `state` carries the reason.
+    fn ensure_alive(&self) -> Result<(), String> {
+        if self.is_alive() {
+            return Ok(());
+        }
+        if self.path.is_none() {
+            return Err(format!("extension '{}' is not running", self.name));
+        }
+        self.respawn();
+        match &*lock(&self.state) {
+            Ok(_) => Ok(()),
+            Err(reason) => Err(reason.clone()),
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        lock(&self.conn)
+            .as_ref()
+            .is_some_and(|c| !c.dead.load(Ordering::Relaxed))
+    }
+
+    /// Spawn a fresh child under the respawn lock, re-checking liveness after
+    /// acquiring it (another caller may have finished the job while we
+    /// waited). A no-op for a placeholder that never had a path.
+    fn respawn(&self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let _serialize = lock(&self.respawn);
+        if !self.is_alive() {
+            self.spawn_and_handshake(&path);
+        }
+    }
+
+    /// The child can die between `ensure_alive`'s liveness check and the
+    /// write — the reader thread marks `dead` a moment later — so a call that
+    /// fails on a broken pipe gets one respawn and retry instead of leaking
+    /// the race to the model.
+    fn recoverable(error: &str) -> bool {
+        error.contains("closed its stdout")
+            || error.contains("pipe closed")
+            || error.contains("is not running")
+    }
+
     /// Send one request and await its reply, slicing the wait so ctrl+c
-    /// stays responsive. No respawn: a dead extension stays dead until
-    /// `/reload`; its tools then error out.
+    /// stays responsive. The connection is revived on demand first.
     fn request(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
+        self.ensure_alive()?;
+        match self.request_live(msg, timeout) {
+            Err(e) if Self::recoverable(&e) && self.path.is_some() => {
+                self.respawn();
+                match &*lock(&self.state) {
+                    Ok(_) => self.request_live(msg, timeout),
+                    Err(reason) => Err(reason.clone()),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// The transport half of `request`, for callers that already hold a
+    /// live connection (the handshake itself: respawning from inside
+    /// `ensure_alive` would re-enter the respawn lock).
+    fn request_live(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
         let guard = lock(&self.conn);
         let conn = guard
             .as_ref()
-            .ok_or_else(|| format!("extension '{}' is not running (run /reload)", self.name))?;
+            .ok_or_else(|| format!("extension '{}' is not running", self.name))?;
         if conn.dead.load(Ordering::Relaxed) {
-            return Err(format!(
-                "extension '{}' is not running (run /reload)",
-                self.name
-            ));
+            return Err(format!("extension '{}' is not running", self.name));
         }
         let id = msg
             .get("id")
@@ -463,17 +537,26 @@ impl Extensions {
     }
 
     /// Append one `ExtTool` per tool of every ready extension, plus one
-    /// `ScriptTool` per manifest-carrying script.
+    /// `ScriptTool` per manifest-carrying script. Names are flat across the
+    /// whole registry (builtins included), so a collision — the obvious
+    /// case is two extensions both shipping a `search` tool — would silently
+    /// shadow one of them; instead the later tool is namespaced to
+    /// `<stem>__<tool>`, which its own `call_tool` never sees (the wire name
+    /// stays what the extension advertised).
     pub fn mount_tools(&self, out: &mut Vec<Box<dyn Tool>>) {
+        let mut taken: std::collections::HashSet<String> =
+            out.iter().map(|t| t.name().to_string()).collect();
         for spec in &self.script_tools {
             let description = if spec.description.is_empty() {
                 format!("Script tool {}", spec.name)
             } else {
                 spec.description.clone()
             };
+            let exposed = unique_tool_name(&spec.name, "script", &mut taken);
             out.push(Box::new(ScriptTool {
                 spec: spec.clone(),
                 description,
+                exposed,
             }));
         }
         for ext in &self.exts {
@@ -486,11 +569,14 @@ impl Extensions {
                 } else {
                     format!("{} (extension: {})", meta.description, ext.name)
                 };
+                let exposed = unique_tool_name(&meta.name, &ext.name, &mut taken);
                 out.push(Box::new(ExtTool {
                     ext: Arc::clone(ext),
                     tool_name: meta.name.clone(),
+                    exposed,
                     description,
                     schema: meta.schema.clone(),
+                    tier: meta.tier,
                 }));
             }
         }
@@ -561,13 +647,36 @@ impl Extensions {
     }
 }
 
+/// Claim a registry-wide tool name, namespacing with the owner when the
+/// plain name is already taken (`search` → `websearch__search`); a rebuilt
+/// registry is the only caller, so this needs no global state.
+fn unique_tool_name(
+    wanted: &str,
+    owner: &str,
+    taken: &mut std::collections::HashSet<String>,
+) -> String {
+    if taken.insert(wanted.to_string()) {
+        return wanted.to_string();
+    }
+    let base = format!("{owner}__{wanted}");
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while !taken.insert(candidate.clone()) {
+        candidate = format!("{base}{n}");
+        n += 1;
+    }
+    candidate
+}
+
 fn failed(name: &str, reason: String) -> Arc<Ext> {
     Arc::new(Ext {
         name: name.to_string(),
         target: String::new(),
+        path: None,
         state: Mutex::new(Err(reason)),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
+        respawn: Mutex::new(()),
     })
 }
 
@@ -580,9 +689,11 @@ fn connect_one(path: &Path) -> Arc<Ext> {
     let ext = Arc::new(Ext {
         name,
         target: path.display().to_string(),
+        path: Some(path.to_path_buf()),
         state: Mutex::new(Err("connecting".to_string())),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
+        respawn: Mutex::new(()),
     });
     ext.spawn_and_handshake(path);
     ext
@@ -595,7 +706,7 @@ impl Ext {
         let outcome = (|| -> Result<(), String> {
             let conn = self.spawn_conn(path)?;
             *lock(&self.conn) = Some(conn);
-            let result = self.request(
+            let result = self.request_live(
                 &json!({
                     "id": next_id(),
                     "type": "initialize",
@@ -732,6 +843,11 @@ fn parse_tools(result: &Value) -> Vec<ToolMeta> {
                             .get("parameters")
                             .cloned()
                             .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                        tier: t
+                            .get("tier")
+                            .and_then(Value::as_str)
+                            .and_then(Tier::parse)
+                            .unwrap_or(Tier::Exec),
                     })
                 })
                 .collect()
@@ -745,14 +861,16 @@ fn parse_tools(result: &Value) -> Vec<ToolMeta> {
 struct ScriptTool {
     spec: ExecToolSpec,
     description: String,
+    /// registry name; differs from `spec.name` only on a collision
+    exposed: String,
 }
 
 impl Tool for ScriptTool {
     fn name(&self) -> &str {
-        &self.spec.name
+        &self.exposed
     }
     fn tier(&self) -> Tier {
-        Tier::Exec
+        self.spec.tier
     }
     fn description(&self) -> &str {
         &self.description
@@ -883,17 +1001,21 @@ fn reader_loop(
 /// matrix asks by default, per-tool policies still win.
 struct ExtTool {
     ext: Arc<Ext>,
+    /// the name the extension knows over the wire
     tool_name: String,
+    /// registry name; differs from `tool_name` only on a collision
+    exposed: String,
     description: String,
     schema: Value,
+    tier: Tier,
 }
 
 impl Tool for ExtTool {
     fn name(&self) -> &str {
-        &self.tool_name
+        &self.exposed
     }
     fn tier(&self) -> Tier {
-        Tier::Exec
+        self.tier
     }
     fn description(&self) -> &str {
         &self.description
@@ -938,5 +1060,117 @@ mod tests {
     #[test]
     fn plain_scripts_have_no_manifest() {
         assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s")).is_none());
+    }
+
+    #[test]
+    fn manifest_tier_defaults_to_exec_and_parses_declarations() {
+        let base = "#!/bin/sh\n# --- llm-tool: t\n";
+        let plain = parse_tool_manifest(base, Path::new("/x/t")).expect("manifest");
+        assert_eq!(plain.tier, Tier::Exec, "absent tier stays exec");
+        let read = parse_tool_manifest(&format!("{base}# tier: read\n"), Path::new("/x/t"))
+            .expect("manifest");
+        assert_eq!(read.tier, Tier::Read);
+        let write = parse_tool_manifest(&format!("{base}# tier: Write\n"), Path::new("/x/t"))
+            .expect("manifest");
+        assert_eq!(write.tier, Tier::Write, "case-insensitive");
+        let bogus = parse_tool_manifest(&format!("{base}# tier: whatever\n"), Path::new("/x/t"))
+            .expect("manifest");
+        assert_eq!(
+            bogus.tier,
+            Tier::Exec,
+            "an unknown tier must not lower trust"
+        );
+    }
+
+    #[test]
+    fn initialize_tools_carry_their_declared_tier() {
+        let result = json!({"tools": [
+            {"name": "safe", "tier": "read", "parameters": {}},
+            {"name": "writer", "tier": "WRITE", "parameters": {}},
+            {"name": "shell", "tier": "exec", "parameters": {}},
+            {"name": "unlabeled", "parameters": {}},
+            {"name": "nonsense", "tier": "nope", "parameters": {}},
+        ]});
+        let tiers: Vec<Tier> = parse_tools(&result).iter().map(|t| t.tier).collect();
+        assert_eq!(
+            tiers,
+            vec![Tier::Read, Tier::Write, Tier::Exec, Tier::Exec, Tier::Exec]
+        );
+    }
+
+    #[test]
+    fn colliding_tool_names_are_namespaced_not_shadowed() {
+        let mut taken: std::collections::HashSet<String> =
+            ["read".to_string()].into_iter().collect();
+        // a built-in already holds the plain name: the extension keeps its
+        // own identity via the owner prefix
+        assert_eq!(
+            unique_tool_name("read", "websearch", &mut taken),
+            "websearch__read"
+        );
+        // a second extension with the same tool gets its own prefix too
+        assert_eq!(unique_tool_name("read", "todo", &mut taken), "todo__read");
+        // an unprefixed name is untouched
+        assert_eq!(
+            unique_tool_name("deploy", "websearch", &mut taken),
+            "deploy"
+        );
+        // ...and is then itself reserved
+        assert_eq!(
+            unique_tool_name("deploy", "todo", &mut taken),
+            "todo__deploy"
+        );
+    }
+
+    /// A resident extension that dies between calls must come back on the
+    /// next use. The script exits right after the first `call_tool`, so the
+    /// second call exercises the respawn path end to end via real stdio.
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_extension_is_respawned_on_next_use() {
+        let dir = std::env::temp_dir().join(format!("llm-ext-respawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("flaky");
+        let counter = dir.join("count");
+        // plain shell: reply to initialize, answer the first call_tool then
+        // exit (simulating a crash), answering further calls needs a respawn
+        let body = format!(
+            r#"#!/bin/sh
+c=$(cat {counter} 2>/dev/null || echo 0)
+c=$((c+1))
+echo $c > {counter}
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{{"id":%s,"result":{{"tools":[{{"name":"ping","parameters":{{}}}}]}}}}\n' "$id"
+      ;;
+    *call_tool*)
+      printf '{{"id":%s,"result":"alive"}}\n' "$id"
+      if [ "$c" -le 1 ]; then exit 1; fi
+      ;;
+  esac
+done
+"#,
+            counter = counter.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ext = connect_one(&script);
+        assert!(lock(&ext.state).is_ok(), "initial handshake must succeed");
+        assert_eq!(ext.call_tool("ping", &json!({})).unwrap(), "alive");
+        // the child exited after answering: the next call must respawn it
+        let out = ext.call_tool("ping", &json!({}));
+        assert_eq!(out.unwrap(), "alive", "respawned, not an error");
+        let n: u32 = std::fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(n >= 2, "the script must have run twice, saw {n}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

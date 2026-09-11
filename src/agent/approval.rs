@@ -18,6 +18,30 @@ pub enum Tier {
     Exec,
 }
 
+impl Tier {
+    #[allow(dead_code)] // used by tests/diagnostics; kept for the tier vocabulary
+    pub fn label(self) -> &'static str {
+        match self {
+            Tier::Read => "read",
+            Tier::Write => "write",
+            Tier::Exec => "exec",
+        }
+    }
+
+    /// An extension may declare a tool's tier (its `initialize` reply or a
+    /// manifest `tier:` field). This is a trust decision made by whoever
+    /// installed the extension: a tool claiming `read` runs unprompted in
+    /// ask mode, so only lower the tier for tools you would let run anyway.
+    pub fn parse(s: &str) -> Option<Tier> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read" | "readonly" | "read-only" => Some(Tier::Read),
+            "write" => Some(Tier::Write),
+            "exec" | "execute" => Some(Tier::Exec),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     /// reads inside the working directory auto, everything else prompts
