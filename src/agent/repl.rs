@@ -68,7 +68,7 @@ pub fn repl(
         if text.is_empty() {
             continue;
         }
-        if text == "exit" || text == "quit" || text == "/exit" || text == "/quit" {
+        if text == "/exit" {
             break;
         }
         if let Some(rest) = text.strip_prefix('!') {
@@ -437,7 +437,9 @@ fn render_history(seed: &[crate::providers::Msg]) {
                     );
                 }
             }
-            Msg::Assistant { text, tool_calls } => {
+            Msg::Assistant {
+                text, tool_calls, ..
+            } => {
                 if !text.is_empty() {
                     for line in text.lines() {
                         eprintln!("  {line}");
@@ -795,7 +797,14 @@ fn repl_command(
         }
         "/status" => {
             let p = crate::theme::err();
-            let used = crate::agent::compact::estimate_tokens(&session.seed, None);
+            // the last round's input covers the entire conversation (each
+            // round resends it all) and its output the final answer: the
+            // real usage is exact, not a chars/4 estimate
+            let n = session.seed.len();
+            let used = crate::agent::compact::estimate_tokens(
+                &session.seed,
+                session.last_usage.map(|u| (n, u)),
+            );
             let window = session.compact.context_window;
             let pct = (used * 100).checked_div(window).unwrap_or(0);
             eprintln!(
@@ -828,15 +837,24 @@ fn repl_command(
                 humanize_tokens(session.tokens.0),
                 humanize_tokens(session.tokens.1),
                 if session.tokens_cached > 0 {
-                    format!(
-                        " · cache {}%",
-                        crate::core::http::Usage {
-                            input: session.tokens.0,
-                            output: 0,
-                            cached: session.tokens_cached
+                    let cumulative = crate::core::http::Usage {
+                        input: session.tokens.0,
+                        output: 0,
+                        cached: session.tokens_cached,
+                    }
+                    .cache_percent();
+                    // the per-turn figure is what a compaction or prefix
+                    // change actually costs; the average lags behind it
+                    match session
+                        .last_usage
+                        .filter(|u| u.input > 0 && u.cached > 0)
+                        .map(|u| u.cache_percent())
+                    {
+                        Some(last) if last != cumulative => {
+                            format!(" · cache {cumulative}% (last {last}%)")
                         }
-                        .cache_percent()
-                    )
+                        _ => format!(" · cache {cumulative}%"),
+                    }
                 } else {
                     String::new()
                 },
