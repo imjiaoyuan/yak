@@ -494,15 +494,6 @@ fn completions(buf: &str, skill_names: &[String], cwd: &str) -> Vec<String> {
             .map(|n| format!("/skill:{n}"))
             .collect();
     }
-    if let Some(arg) = buf.strip_prefix("/memory ") {
-        // the editor replaces the current WORD, so candidates are bare
-        let subs = ["add", "edit"];
-        return subs
-            .iter()
-            .filter(|s| s.starts_with(arg.trim_start()))
-            .map(|s| s.to_string())
-            .collect();
-    }
     if buf.starts_with('/') && !buf.contains(' ') {
         // the mode you are already in is not a completion target
         return SLASH_COMMANDS

@@ -113,8 +113,11 @@ Skills and memory live under the user directory. Skills are SKILL.md folders dis
 the working directory (later wins by name); the agent lists them via `/help`, runs one with
 `/skill:<name>`, and can pick them itself from the system-prompt list (disable per skill with
 `disable_model_invocation` or globally via `[agent] disabled_skills`). Global memory is a
-hand-edited `~/.llm/LLM.md` injected into the agent system prompt, read on the next session — there
-is no agent-written memory. Model traffic goes through the HTTP proxies in
+hand-edited `~/.llm/LLM.md` injected into the agent system prompt. The `<user_memory>` block always
+names that path (even before the file exists), and the built-in prompt tells the agent to record
+durable preferences there and repo-scoped rules in `AGENTS.md`/`CLAUDE.md` instead — so "remember
+this" lands somewhere the user can review. The file is never agent-owned: there is no auto-update
+pass, only a direct edit the user can see in the diff. Model traffic goes through the HTTP proxies in
 `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`) automatically.
 
 Agent behavior is tuned under the `"agent"` key of `config.json`:

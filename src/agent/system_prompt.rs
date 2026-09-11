@@ -81,17 +81,16 @@ pub fn build_system_prompt(
                      - When the task is done, stop and give the result — do not run more commands to \
                      \"confirm\".\n\
                      \n\
-                     Today's date: {date}"
+                     Today's date: {date}\
+                     \n                     Memory (user preferences)\n                     - Durable preferences the user asks you to remember go to the user memory file \n                       named in the `<user_memory>` block below — one concise line each. Edit that \n                       file (it is plain markdown the user owns and reviews); reload is not needed \n                       for the next session to pick it up.\n                     - Repo- or directory-scoped rules belong in a project AGENTS.md/CLAUDE.md \n                       instead; do not put project facts in the global memory file.\n                     - Never record secrets, tokens or credentials."
                 )
             }
         },
     };
     let mut out = base;
     if !continuation {
-        if let Some(mem) = crate::agent::memory::section() {
-            out.push_str("\n\n");
-            out.push_str(&mem);
-        }
+        out.push_str("\n\n");
+        out.push_str(&crate::agent::memory::section());
         if let Some(ctx) = project_context(cwd) {
             out.push_str("\n\n");
             out.push_str(&ctx);
@@ -174,6 +173,14 @@ mod tests {
         std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
         let out = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         assert!(out.contains("Environment: "), "{}", out);
+        // the memory block must be unconditional: it is the only place the
+        // built-in prompt can point the agent at the file to edit
+        assert!(
+            out.contains("<user_memory path="),
+            "the memory path must survive an empty/missing file: {out}"
+        );
+        assert!(out.contains("LLM.md"), "{out}");
+        assert!(out.contains("Memory (user preferences)"), "{out}");
         assert!(
             out.contains("cargo test`"),
             "a cargo project names its verify command: {out}"
