@@ -100,7 +100,7 @@ may be ignored silently — the host times them out.
 **`initialize`** — advertise what you provide:
 
 ```json
-→ {"id": 1, "type": "initialize", "v": 1, "params": {"version": "0.1.6", "cwd": "/home/me/proj"}}
+→ {"id": 1, "type": "initialize", "v": 1, "params": {"version": "0.1.7", "cwd": "/home/me/proj"}}
 ← {"id": 1, "result": {
      "tools":    [{"name": "deploy", "description": "Deploy the current tree",
                     "parameters": {"type": "object", "properties": {}, "required": []}}],
