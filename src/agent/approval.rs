@@ -68,6 +68,9 @@ impl Policy {
 pub struct ApprovalConfig {
     pub mode: Mode,
     pub tool_policies: HashMap<String, Policy>,
+    /// command blacklist (`~/.llm/blacklist` + `.llm/blacklist`); a hit
+    /// denies the bash call outright, ahead of the destructive list
+    pub blacklist: crate::agent::blacklist::Blacklist,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,13 +111,24 @@ pub fn resolve(
         _ => {}
     }
     if cfg.mode == Mode::Yolo {
-        return match (tier, bash_command) {
-            (Tier::Exec, Some(cmd)) if dangerous_command(cmd) => {
-                // no reason line: the command itself is the explanation
-                Decision::Ask(String::new())
+        if let Tier::Exec = tier
+            && let Some(cmd) = bash_command
+        {
+            let segments = split_compound(cmd);
+            let positions = segments
+                .iter()
+                .flat_map(|seg| command_positions(seg, 0))
+                .collect::<Vec<_>>();
+            let hit = cfg.blacklist.denied(&segments, &positions);
+            if !hit.is_empty() {
+                return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
             }
-            _ => Decision::Auto,
-        };
+            if dangerous_command(cmd) {
+                // no reason line: the command itself is the explanation
+                return Decision::Ask(String::new());
+            }
+        }
+        return Decision::Auto;
     }
     match (tier, escapes_cwd) {
         (Tier::Read, false) => Decision::Auto,
@@ -122,6 +136,19 @@ pub fn resolve(
         (Tier::Write, _) => Decision::Ask("writing files requires approval".to_string()),
         (Tier::Exec, _) if bash_command.is_some_and(readonly_command) => Decision::Auto,
         (Tier::Exec, _) => {
+            // the blacklist applies in ask mode too: a forbidden command
+            // never reaches the prompt
+            if let Some(cmd) = bash_command {
+                let segments = split_compound(cmd);
+                let positions = segments
+                    .iter()
+                    .flat_map(|seg| command_positions(seg, 0))
+                    .collect::<Vec<_>>();
+                let hit = cfg.blacklist.denied(&segments, &positions);
+                if !hit.is_empty() {
+                    return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
+                }
+            }
             Decision::Ask("running a non-read-only command requires approval".to_string())
         }
     }
@@ -534,6 +561,7 @@ mod tests {
         ApprovalConfig {
             mode,
             tool_policies: policies.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            blacklist: crate::agent::blacklist::Blacklist::default(),
         }
     }
 

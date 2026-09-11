@@ -238,6 +238,13 @@ pub(crate) fn pattern_matches_path(pattern: &Pattern, rel: &str, is_dir: bool) -
     pattern_matches(pattern, &segs, is_dir)
 }
 
+/// Match a single word (no `/` depth, no `**`): the segment matcher over
+/// one atom. Public for the command blacklist, which matches shell words,
+/// not paths.
+pub(crate) fn word_matches(pattern: &str, word: &str) -> bool {
+    seg_match(pattern, word)
+}
+
 /// Segment-wise glob: `**` spans segments, `*`/`?`/`[...]` stay within one.
 fn glob_match(pat: &[String], path: &[&str]) -> bool {
     if pat.is_empty() {

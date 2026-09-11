@@ -5,6 +5,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::agent::approval::{self, ApprovalConfig, Policy};
+use crate::agent::blacklist;
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
 use crate::core::threads;
@@ -230,6 +231,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             None => eprintln!("Warning: invalid policy '{policy}' for tool '{tool}' in config"),
         }
     }
+    // command blacklist: ship the default file on first start, then load
+    // user + project homes (an empty file allows everything)
+    blacklist::Blacklist::ensure_default();
+    approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
 
     let max_turns: usize = args
         .opt(&["max-turns"])
@@ -300,6 +305,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         extensions,
         tokens: (0, 0),
         tokens_cached: 0,
+        last_usage: None,
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;
