@@ -75,7 +75,13 @@ pub struct ApprovalRequest<'a> {
 pub struct AgentOptions<'a> {
     pub system: Option<&'a str>,
     pub cwd: std::path::PathBuf,
+    /// maximum agent turns per task; 0 = unlimited (compaction and the
+    /// token budget are the guardrails, not a turn cap)
     pub max_turns: usize,
+    /// cumulative input-token budget for one task: past the soft share a
+    /// wrap-up note is injected, at the cap the run stops with a visible
+    /// line. 0 disables (the reference style rollout budget over turns alone)
+    pub token_budget: u64,
     pub stream: bool,
     /// enable compaction with this configuration; None disables it
     pub compact: Option<compact::CompactConfig>,
@@ -110,6 +116,8 @@ pub struct AgentOutcome {
     pub usage: Option<Usage>,
     /// the user interrupted the run (ctrl-c); partial history is kept
     pub interrupted: bool,
+    /// the token budget stopped the run; a follow-up continues seamlessly
+    pub budget_exhausted: bool,
 }
 
 /// A provider-level failure: the error plus everything already sent, so the
@@ -125,6 +133,9 @@ pub struct AgentFailure {
 
 const WRAP_UP_NOTE: &str = "[System] The turn budget is almost exhausted. Finish your current \
                             work and produce a final answer now; do not start new tool calls.";
+
+const BUDGET_NOTE: &str = "[System] The token budget for this task is almost exhausted. Finish your \
+                            current work and produce a final answer now; do not start new tool calls.";
 
 /// Fold steering lines into the pending user message: multiple queued lines
 /// join into one message, and an existing pending message keeps its text
@@ -172,11 +183,27 @@ pub fn run_agent(
         })
         .collect();
 
-    let max_turns = opts.max_turns.max(1);
-    let soft_limit = (max_turns * 4 / 5).max(1);
+    // turn cap: 0 = unlimited. other agents run unbounded loops guarded by
+    // compaction and a token budget instead — a turn cap kills legitimate
+    // large refactors whose context is nowhere near the window. kept as an
+    // explicit escape hatch (--max-turns N).
+    let max_turns = opts.max_turns;
+    let soft_limit = if max_turns > 0 { max_turns * 4 / 5 } else { 0 };
+    // token budget: cumulative input tokens across the task's model rounds.
+    // Each round resends the full context, so the sum grows quadratically —
+    // a runaway loop becomes visible long before the context window does.
+    let token_budget = opts.token_budget;
+    let soft_budget = if token_budget > 0 {
+        token_budget * 4 / 5
+    } else {
+        0
+    };
     let mut history: Vec<Msg> = seed;
     let mut pending: Option<Msg> = Some(Msg::user_with(prompt, attachments));
     let mut warned = false;
+    let mut budget_warned = false;
+    let mut spent_input = 0u64;
+    let mut budget_exhausted = false;
     let mut last_usage = None;
     let mut final_text = String::new();
     let mut interrupted = false;
@@ -194,10 +221,10 @@ pub fn run_agent(
     let mut turn = 0;
     loop {
         turn += 1;
-        if turn > max_turns {
+        if max_turns > 0 && turn > max_turns {
             break;
         }
-        if turn == soft_limit && !warned {
+        if max_turns > 0 && turn == soft_limit && !warned {
             warned = true;
             let note = match pending.take() {
                 Some(Msg::User { text, attachments }) => Msg::User {
@@ -205,6 +232,21 @@ pub fn run_agent(
                     attachments,
                 },
                 _ => Msg::user(WRAP_UP_NOTE),
+            };
+            pending = Some(note);
+        }
+        if token_budget > 0 && spent_input >= token_budget {
+            budget_exhausted = true;
+            break;
+        }
+        if token_budget > 0 && !budget_warned && spent_input >= soft_budget {
+            budget_warned = true;
+            let note = match pending.take() {
+                Some(Msg::User { text, attachments }) => Msg::User {
+                    text: format!("{text}\n\n{BUDGET_NOTE}"),
+                    attachments,
+                },
+                _ => Msg::user(BUDGET_NOTE),
             };
             pending = Some(note);
         }
@@ -330,6 +372,9 @@ pub fn run_agent(
         });
         final_text = text;
         last_usage = usage;
+        if let Some(u) = usage {
+            spent_input += u.input;
+        }
         on_update(AgentUpdate::TurnEnd { usage });
         let _ = fire(
             opts.hooks,
@@ -503,6 +548,7 @@ pub fn run_agent(
         final_text,
         usage: last_usage,
         interrupted,
+        budget_exhausted,
     })
 }
 
@@ -739,6 +785,7 @@ mod tests {
             system: None,
             cwd: std::env::temp_dir(),
             max_turns: 4,
+            token_budget: 0,
             stream: true,
             compact: None,
             reasoning: None,
@@ -765,11 +812,150 @@ mod tests {
             "exactly one recovery request"
         );
         assert!(!outcome.interrupted);
+        assert!(!outcome.budget_exhausted);
         assert_eq!(outcome.final_text, "ued cleanly");
         assert_eq!(outcome.history.len(), 3, "prompt, partial, continuation");
         assert!(
             matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, .. } if text == "partial ans" && tool_calls.is_empty()),
             "the partial answer rides the history as a real assistant message"
         );
+    }
+
+    /// The token budget stops a task like a turn cap would, but on the
+    /// metric that actually prices a runaway loop: cumulative input tokens.
+    /// Past 80% a wrap-up note rides the pending prompt; at 100% the loop
+    /// breaks and the outcome says so. A plain answer (no tool calls) ends
+    /// the run normally, so the server needs one tool call per round to
+    /// keep the loop alive until the budget bites.
+    #[test]
+    fn token_budget_warns_then_stops_the_run() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let server = std::thread::spawn(move || {
+            let mut n = 0usize;
+            for conn in listener.incoming().flatten() {
+                if n >= 10 {
+                    break;
+                }
+                let mut c = conn;
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    use std::io::Read;
+                    if c.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                    let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
+                    if let Some(i) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if buf.len() - i - 4 >= len {
+                            break;
+                        }
+                    }
+                }
+                let _ = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                n += 1;
+                // each round reports 1000 input tokens and asks for a tool;
+                // budget 2500: warn after round 2 (2000 ≥ 80%), stop before 4
+                let body = format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c{n}\",\"function\":{{\"name\":\"echo\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\n\
+                     data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                     data: {{\"usage\":{{\"prompt_tokens\":1000,\"completion_tokens\":5}}}}\n\n\
+                     data: [DONE]\n\n"
+                );
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        use std::io::Write as _;
+
+        let model = crate::providers::ResolvedModel {
+            provider_name: "mock".into(),
+            kind: "openai-compat".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: Some("sk-x".into()),
+            model_id: "m".into(),
+            options: vec![],
+        };
+        let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
+        let opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 0,
+            token_budget: 2500,
+            stream: true,
+            compact: None,
+            reasoning: None,
+            hooks: None,
+        };
+        let mut approval = approval::ApprovalConfig::default();
+        let outcome = run_agent(
+            &model,
+            &tools,
+            "go",
+            vec![],
+            vec![],
+            &opts,
+            &mut approval,
+            &mut |_| {},
+            &mut |_| ApprovalResponse::Deny,
+            &mut || vec![],
+        )
+        .expect("a budget stop is a normal outcome, not a failure");
+        // let a hypothetical erroneous 4th request land before counting
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(server);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "round 4 never starts: 3000 spent ≥ 2500 budget"
+        );
+        assert!(outcome.budget_exhausted);
+        // the wrap-up note rode the round-3 prompt (2400 ≥ 2400 soft line)
+        let warned = outcome
+            .history
+            .iter()
+            .any(|m| matches!(m, Msg::User { text, .. } if text.contains("token budget")));
+        assert!(warned, "the soft-line note must be in the history");
+    }
+
+    struct EchoTool;
+    impl tools::Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn tier(&self) -> super::approval::Tier {
+            super::approval::Tier::Read
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+        fn preview(&self, _args: &serde_json::Value) -> String {
+            "echo".into()
+        }
+        fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _cwd: &std::path::Path,
+            _log: &mut dyn FnMut(&str),
+        ) -> tools::ToolOutput {
+            tools::ToolOutput::ok("echoed")
+        }
     }
 }

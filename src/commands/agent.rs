@@ -49,7 +49,13 @@ const SPECS: &[OptSpec] = &[
     value_spec!(
         "max-turns",
         None,
-        "Maximum agent turns per task (default 50)",
+        "Max agent turns per task (0 = unlimited, the default)",
+        "N"
+    ),
+    value_spec!(
+        "token-budget",
+        None,
+        "Cumulative input-token budget per task (0 = unlimited, the default)",
         "N"
     ),
     flag_spec!(
@@ -236,12 +242,24 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     blacklist::Blacklist::ensure_default();
     approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
 
+    // turns: 0 = unlimited. other agents run unbounded agent loops guarded
+    // by compaction and budgets; a turn cap cut legitimate long tasks short.
+    // --max-turns remains as an explicit escape hatch.
     let max_turns: usize = args
-        .opt(&["max-turns"])
+        .opt(&(["max-turns"]))
         .map(|s| s.parse::<usize>())
         .transpose()
         .map_err(|e| format!("invalid --max-turns: {e}"))?
-        .unwrap_or(50);
+        .unwrap_or(0);
+
+    // cumulative input-token budget per task (each round resends the full
+    // context, so the sum is what a runaway loop costs); 0 = unlimited
+    let token_budget: u64 = args
+        .opt(&(["token-budget"]))
+        .map(|s| s.parse::<u64>())
+        .transpose()
+        .map_err(|e| format!("invalid --token-budget: {e}"))?
+        .unwrap_or(0);
 
     // reasoning effort: CLI > the stored global; invalid values are a hard
     // error on the CLI and a warning from config
@@ -294,6 +312,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         system,
         cwd,
         max_turns,
+        token_budget,
         stream: !args.flag(&["no-stream"]),
         no_session: args.flag(&["no-session"]),
         store,

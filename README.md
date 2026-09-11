@@ -84,7 +84,9 @@ Pick a model per call with `-m deepseek/deepseek-chat`. Model options ride along
 `-o temperature=0.2 -o top_p=0.9`, and `--thinking high` maps to `reasoning_effort` on
 OpenAI-compatible endpoints and a thinking budget on Anthropic ones (`off` omits the parameter
 entirely). Add a system prompt with `-s` or `--append-system-prompt`, limit the toolbox with
-`--tools read,grep` and the turn budget with `--max-turns`.
+`--tools read,grep` and cap a task with `--token-budget N` (cumulative input tokens — a runaway
+loop prices itself out long before the context window does; the old `--max-turns` remains as an
+explicit escape hatch, `0`/unset = unlimited).
 
 Attach files or URLs with `-a shot.png` (`--at image.png image/png` forces a mimetype); images,
 PDFs, wav/mp3 clips and plain-text files (.txt, .md, .csv, source code) ride the request as native

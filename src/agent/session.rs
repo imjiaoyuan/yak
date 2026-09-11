@@ -17,6 +17,8 @@ pub struct Session {
     pub system: Option<String>,
     pub cwd: PathBuf,
     pub max_turns: usize,
+    /// cumulative input-token budget per task; 0 = unlimited
+    pub token_budget: u64,
     pub stream: bool,
     pub compact: CompactConfig,
     pub no_session: bool,
@@ -87,6 +89,7 @@ impl Session {
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
             max_turns: self.max_turns,
+            token_budget: self.token_budget,
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
@@ -291,6 +294,15 @@ impl Session {
                 // should not dump a long-running elapsed/footer after it.
                 if !outcome.interrupted {
                     view.borrow_mut().footer(task_start.elapsed().as_secs_f64());
+                }
+                // a budget stop is deliberate and quiet otherwise; name it
+                // so "why did it stop" never needs archeology
+                if outcome.budget_exhausted {
+                    let p = crate::theme::err();
+                    eprintln!(
+                        "{}  token budget reached — follow up to continue{}",
+                        p.gray, p.reset
+                    );
                 }
                 // the history moves into the seed (no clone of the whole
                 // conversation per task); persistence reads it first
@@ -582,6 +594,7 @@ mod tests {
             system: None,
             cwd: cwd.clone(),
             max_turns: 4,
+            token_budget: 0,
             stream: true,
             no_session: false,
             store: Some(store),
