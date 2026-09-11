@@ -309,6 +309,16 @@ impl Drop for Conn {
     }
 }
 
+impl Conn {
+    /// Has the child exited? The reader thread marks `dead` only once it sees
+    /// EOF, which can lag the process by a moment — and a request written
+    /// into that gap waits out the whole timeout instead of respawning.
+    /// Asking the OS directly closes it.
+    fn exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+}
+
 pub struct Ext {
     pub name: String,
     target: String,
@@ -341,9 +351,18 @@ impl Ext {
     }
 
     fn is_alive(&self) -> bool {
-        lock(&self.conn)
-            .as_ref()
-            .is_some_and(|c| !c.dead.load(Ordering::Relaxed))
+        let mut guard = lock(&self.conn);
+        let Some(conn) = guard.as_mut() else {
+            return false;
+        };
+        if conn.dead.load(Ordering::Relaxed) {
+            return false;
+        }
+        if conn.exited() {
+            conn.dead.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     /// Spawn a fresh child under the respawn lock, re-checking liveness after
@@ -374,7 +393,7 @@ impl Ext {
     fn request(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
         self.ensure_alive()?;
         match self.request_live(msg, timeout) {
-            Err(e) if Self::recoverable(&e) && self.path.is_some() => {
+            Err(e) if self.should_retry(&e) => {
                 self.respawn();
                 match &*lock(&self.state) {
                     Ok(_) => self.request_live(msg, timeout),
@@ -385,13 +404,21 @@ impl Ext {
         }
     }
 
+    /// A call that failed because the child died is worth one respawn and a
+    /// retry: the pipe was closed, the process was gone, or the reply never
+    /// came *because* the process had exited. A live-but-slow extension keeps
+    /// its single timeout instead, so a slow tool is never run twice.
+    fn should_retry(&self, error: &str) -> bool {
+        self.path.is_some() && (Self::recoverable(error) || !self.is_alive())
+    }
+
     /// The transport half of `request`, for callers that already hold a
     /// live connection (the handshake itself: respawning from inside
     /// `ensure_alive` would re-enter the respawn lock).
     fn request_live(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
-        let guard = lock(&self.conn);
+        let mut guard = lock(&self.conn);
         let conn = guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| format!("extension '{}' is not running", self.name))?;
         if conn.dead.load(Ordering::Relaxed) {
             return Err(format!("extension '{}' is not running", self.name));
@@ -416,6 +443,13 @@ impl Ext {
                     if crate::core::http::interrupted() {
                         lock(&conn.pending).remove(&id);
                         return Err("interrupted".to_string());
+                    }
+                    // the process can vanish without the reader having said
+                    // so yet: stop waiting, and let `request` respawn instead
+                    // of burning the full timeout on a corpse
+                    if conn.exited() {
+                        lock(&conn.pending).remove(&id);
+                        return Err(format!("extension '{}' is not running", self.name));
                     }
                     if Instant::now() >= deadline {
                         lock(&conn.pending).remove(&id);
