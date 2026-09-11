@@ -198,13 +198,13 @@ fn read_root() -> std::io::Result<serde_json::Value> {
 }
 
 fn write_root(root: &serde_json::Value) -> std::io::Result<()> {
-    fs::write(config_path(), jsonfmt::dumps_indent(root, 2) + "\n")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(config_path(), fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    // atomic, and 0600 from the first byte: this file holds API keys, and a
+    // crash mid-write must never leave it truncated (or world-readable)
+    crate::core::fsx::write_atomic(
+        &config_path(),
+        (jsonfmt::dumps_indent(root, 2) + "\n").as_bytes(),
+        Some(0o600),
+    )
 }
 
 // model aliases — the hand-edited "aliases" object in config.json

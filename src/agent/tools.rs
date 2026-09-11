@@ -407,28 +407,12 @@ impl ReadTool {
     }
 }
 
-/// Write through a same-directory temp file + rename: a crash or power loss
-/// mid-write used to leave the target truncated — a real risk when the model
-/// writes a long document in one call. Rename is atomic within the volume;
-/// an existing file's permissions are carried over (the executable bit on
-/// edited scripts must survive) since the rename swaps in a fresh inode.
+/// Write through the shared atomic helper: a crash or power loss mid-write
+/// used to leave the target truncated — a real risk when the model writes a
+/// long document in one call. An existing file's permissions are carried
+/// over (the executable bit on edited scripts must survive).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(".{}.tmp", crate::core::db::ulid()));
-    let write = || -> std::io::Result<()> {
-        std::fs::write(&tmp, bytes)?;
-        if let Ok(mode) = std::fs::metadata(path).map(|m| m.permissions()) {
-            let _ = std::fs::set_permissions(&tmp, mode);
-        }
-        std::fs::rename(&tmp, path)
-    };
-    match write() {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    crate::core::fsx::write_atomic(path, bytes, None)
 }
 
 struct WriteTool;

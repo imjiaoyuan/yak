@@ -11,6 +11,7 @@ pub mod attachments;
 pub mod commands_md;
 pub mod config;
 pub mod db;
+pub mod fsx;
 pub mod http;
 pub mod paths;
 pub mod render_md;

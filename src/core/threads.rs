@@ -338,7 +338,9 @@ impl Store {
             out.push('\n');
         }
         let path = self.thread_path(id);
-        fs::write(&path, out).map_err(|e| format!("cannot rewrite thread {id}: {e}"))
+        // atomic: truncation is the one rewrite the user cannot undo
+        crate::core::fsx::write_atomic(&path, out.as_bytes(), None)
+            .map_err(|e| format!("cannot rewrite thread {id}: {e}"))
     }
 
     fn entries(&self) -> Result<Vec<fs::DirEntry>, String> {
