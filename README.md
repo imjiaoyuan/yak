@@ -21,7 +21,7 @@ irm https://jiaoyuan.org/llm/install.ps1 | iex
 
 It lands in `%USERPROFILE%\.local\bin`, no admin needed, and appends that directory to the user
 `Path`. Re-running either line is the updater: it checks the latest GitHub release, prints
-`updating 0.1.2 -> 0.1.7` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
+`updating 0.1.2 -> 0.1.8` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
 reinstalls anyway; `LLM_VERSION` pins a release tag, `LLM_REPO` installs from a fork and
 `LLM_INSTALL_DIR` picks a different directory. On Linux the static musl build is used, so the same
 binary runs on any distribution; prebuilt targets today are x86_64 and aarch64 Linux, x86_64 and
