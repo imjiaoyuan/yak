@@ -1259,7 +1259,6 @@ pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
 pub fn display_verb(name: &str) -> &str {
     match name {
         "bash" => "run",
-        n if n.starts_with("mcp__") => "mcp",
         other => other,
     }
 }

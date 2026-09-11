@@ -36,6 +36,10 @@ pub struct Session {
     pub tokens: (u64, u64),
     /// cumulative input tokens served from the provider prompt cache
     pub tokens_cached: u64,
+    /// the latest model round's usage: a per-turn cache view the cumulative
+    /// totals cannot show (a compaction or prefix change makes one round a
+    /// full miss while the session average stays high)
+    pub last_usage: Option<crate::core::http::Usage>,
 }
 
 impl Session {
@@ -51,6 +55,7 @@ impl Session {
         self.conversation_id = None;
         self.tokens = (0, 0);
         self.tokens_cached = 0;
+        self.last_usage = None;
     }
 
     /// Switch the session's model (the `/model` command): re-resolve,
@@ -107,6 +112,7 @@ impl Session {
         let mut total_in = 0u64;
         let mut total_out = 0u64;
         let mut total_cached = 0u64;
+        let mut last_usage: Option<crate::core::http::Usage> = None;
         let mut on_update = |u: AgentUpdate| {
             match u {
                 AgentUpdate::Delta(text) => {
@@ -205,6 +211,7 @@ impl Session {
                         total_in += u.input;
                         total_out += u.output;
                         total_cached += u.cached;
+                        last_usage = Some(u);
                     }
                     view.borrow_mut().turn_end(usage);
                 }
@@ -275,6 +282,7 @@ impl Session {
         self.tokens.0 += total_in;
         self.tokens.1 += total_out;
         self.tokens_cached += total_cached;
+        self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
                 // one footer per completed task: totals across rounds and
@@ -585,6 +593,7 @@ mod tests {
             extensions: crate::agent::ext::Extensions::connect(&cwd),
             tokens: (0, 0),
             tokens_cached: 0,
+            last_usage: None,
         };
         let history = vec![
             Msg::user("write the docs"),

@@ -15,8 +15,8 @@ use crate::jsonfmt;
 pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
-    /// snapshot of aliases.json taken once per `load()`, so per-model
-    /// resolution does not re-read it from disk
+    /// resolved aliases off the same bytes, so per-model resolution does
+    /// not re-read the file (see `load` — one read, two parses)
     #[serde(skip)]
     pub aliases: BTreeMap<String, String>,
 }
@@ -282,7 +282,7 @@ fn default_thinking_from(value: &serde_json::Value) -> Option<String> {
 
 /// Write `models.default`, collapsing any legacy per-mode entries — the
 /// first write moves an old install onto the new shape. Callers report
-/// errors themselves (`llm models set` exits nonzero).
+/// errors themselves (`/model` in the REPL reports write failures).
 pub fn try_set_default_model(model: &str) -> std::io::Result<()> {
     edit_mode_default(|root| set_default_model_in(root, model))
 }

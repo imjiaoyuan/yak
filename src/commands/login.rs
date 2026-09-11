@@ -332,7 +332,7 @@ pub(crate) fn wizard() -> Result<(), String> {
             }
         }
     }
-    eprintln!("\nTry it:  llm -m {name} \"hello\"   |   llm agent \"look around\"");
+    eprintln!("\nTry it:  llm -m {name} \"hello\"   |   llm  (bare = interactive session)");
     Ok(())
 }
 
