@@ -3,6 +3,11 @@
 //! Two homes, project winning by later lines: `.llm/blacklist` in the
 //! project (nearest walking up) and `~/.llm/blacklist` for the user.
 //!
+//! This file is **additive**. The commands that must never run — privilege
+//! escalation, filesystem/machine destruction — are hardcoded in
+//! `approval.rs` and cannot be switched off from here; this file is how you
+//! refuse *more* (`rm`, a deploy script, a repo-specific foot-gun).
+//!
 //! Semantics (deliberately simpler than gitignore — patterns match words,
 //! not paths):
 //! - one pattern per line; `#` comments and blanks are skipped
@@ -79,26 +84,31 @@ impl Blacklist {
         Blacklist { entries }
     }
 
-    /// The default file content written on first start: the built-in
-    /// destructive-command list, so the shipped guard and the customized
-    /// one are the same mechanism.
+    /// The default file content written on first start: the syntax, written
+    /// out so the mechanism is discoverable, and nothing enforced. The
+    /// commands that must never run live in `approval.rs` and cannot be
+    /// turned off from here, so seeding them into this file would only
+    /// suggest an edit that has no effect.
     pub fn default_file() -> String {
-        let commands = [
-            "rm", "sudo", "su", "doas", "mkfs*", "dd", "shred", "wipefs", "fdisk", "sfdisk",
-            "cfdisk", "parted", "shutdown", "reboot", "poweroff", "halt", "init",
-        ];
-        let mut out = String::from(
+        String::from(
             "# llm command blacklist — one pattern per line\n\
+             #\n\
+             # Add a line to refuse a command. Privilege escalation and\n\
+             # filesystem/machine destruction (sudo, mkfs, dd, shutdown, …)\n\
+             # are already refused by the program itself; this file is how\n\
+             # you refuse more.\n\
+             #\n\
              # word pattern  : matches that command word anywhere in the line\n\
              # words pattern : matches the whole command segment\n\
              # globs: * ? [...] · ! re-allows (last match wins) · # comment\n\
-             # delete this file to disable; keep it empty to allow everything\n\n",
-        );
-        for c in commands {
-            out.push_str(c);
-            out.push('\n');
-        }
-        out
+             # deleting this file resets it to these comments; an empty file\n\
+             # is the same, since the hardcoded refusals still apply\n\
+             #\n\
+             # examples — uncomment to use:\n\
+             # rm\n\
+             # git push --force*\n\
+             # !rm -rf ./build\n",
+        )
     }
 
     /// Write the default file when the user home has none.
@@ -215,19 +225,31 @@ mod tests {
     }
 
     #[test]
-    fn default_file_parses_back_to_itself() {
+    fn default_file_is_comments_only() {
+        // the seeded file documents the syntax and enforces nothing: the
+        // refusals that must always hold are hardcoded in approval.rs, so
+        // editing this file can only ever add to them
         let b = Blacklist::parse(&Blacklist::default_file());
-        assert!(b.entries.len() >= 17);
-        assert!(!b.entries.iter().any(|e| e.allow));
-        // the built-in destructive list stays covered
         assert!(
-            !b.denied(&["sudo apt install x".into()], &["sudo".into()])
-                .is_empty()
+            b.entries.is_empty(),
+            "the default file must enforce nothing"
         );
         assert!(
-            !b.denied(&["mkfs.btrfs /dev/sdb".into()], &["mkfs.btrfs".into()])
-                .is_empty()
+            Blacklist::default_file().contains("# rm"),
+            "the syntax should be shown as a commented example"
         );
-        assert!(!b.denied(&["reboot".into()], &["reboot".into()]).is_empty());
+        // a dangerous word as an *argument* is not a command position:
+        // `init` must not catch `npm init` or `git init`
+        let wild = bl("init");
+        for (seg, words) in [("npm init -y", vec!["npm"]), ("git init", vec!["git"])] {
+            assert!(
+                wild.denied(
+                    &[seg.to_string()],
+                    &words.iter().map(|w| w.to_string()).collect::<Vec<_>>()
+                )
+                .is_empty(),
+                "{seg} must not be denied"
+            );
+        }
     }
 }

@@ -19,15 +19,6 @@ pub enum Tier {
 }
 
 impl Tier {
-    #[allow(dead_code)] // used by tests/diagnostics; kept for the tier vocabulary
-    pub fn label(self) -> &'static str {
-        match self {
-            Tier::Read => "read",
-            Tier::Write => "write",
-            Tier::Exec => "exec",
-        }
-    }
-
     /// An extension may declare a tool's tier (its `initialize` reply or a
     /// manifest `tier:` field). This is a trust decision made by whoever
     /// installed the extension: a tool claiming `read` runs unprompted in
@@ -46,8 +37,7 @@ impl Tier {
 pub enum Mode {
     /// reads inside the working directory auto, everything else prompts
     AlwaysAsk,
-    /// everything auto; the destructive-command list still forces a
-    /// one-shot prompt
+    /// everything auto; the user's blacklist still refuses commands outright
     #[default]
     Yolo,
 }
@@ -108,9 +98,9 @@ pub enum Decision {
 }
 
 /// Resolve whether a tool call may run. Precedence: explicit policy
-/// (deny/prompt/allow) > yolo short-circuit (a short destructive-command
-/// list still asks once) > tier gate. Explicit prompts and denies hold even
-/// in yolo mode.
+/// (deny/prompt/allow) > the hardcoded refusal list > the user's blacklist
+/// file > the mode's tier gate. The first two hold in every mode; explicit
+/// policies stay strongest in both directions.
 ///
 /// The gate is directory-scoped: reads inside the working directory run free,
 /// reads outside it and any file write ask, and a bash command runs free
@@ -134,24 +124,27 @@ pub fn resolve(
         Some(Policy::Allow) => return Decision::Auto,
         _ => {}
     }
-    if cfg.mode == Mode::Yolo {
-        if let Tier::Exec = tier
-            && let Some(cmd) = bash_command
-        {
-            let segments = split_compound(cmd);
-            let positions = segments
-                .iter()
-                .flat_map(|seg| command_positions(seg, 0))
-                .collect::<Vec<_>>();
-            let hit = cfg.blacklist.denied(&segments, &positions);
-            if !hit.is_empty() {
-                return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
-            }
-            if dangerous_command(cmd) {
-                // no reason line: the command itself is the explanation
-                return Decision::Ask(String::new());
-            }
+    // Hard stops on shell commands, in either mode: the hardcoded core
+    // first (privilege escalation, filesystem and machine destruction, a
+    // fork bomb, a write into a device node), then the user's blacklist
+    // file, which only *adds* refusals on top. A refusal, not a prompt — no
+    // run makes these the right answer, and nothing here can be switched
+    // off by editing a file or passing a flag.
+    if let (Tier::Exec, Some(cmd)) = (tier, bash_command) {
+        if let Some(reason) = forbidden_command(cmd) {
+            return Decision::Deny(reason);
         }
+        let segments = split_compound(cmd);
+        let positions = segments
+            .iter()
+            .flat_map(|seg| command_positions(seg, 0))
+            .collect::<Vec<_>>();
+        let hit = cfg.blacklist.denied(&segments, &positions);
+        if !hit.is_empty() {
+            return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
+        }
+    }
+    if cfg.mode == Mode::Yolo {
         return Decision::Auto;
     }
     match (tier, escapes_cwd) {
@@ -160,19 +153,6 @@ pub fn resolve(
         (Tier::Write, _) => Decision::Ask("writing files requires approval".to_string()),
         (Tier::Exec, _) if bash_command.is_some_and(readonly_command) => Decision::Auto,
         (Tier::Exec, _) => {
-            // the blacklist applies in ask mode too: a forbidden command
-            // never reaches the prompt
-            if let Some(cmd) = bash_command {
-                let segments = split_compound(cmd);
-                let positions = segments
-                    .iter()
-                    .flat_map(|seg| command_positions(seg, 0))
-                    .collect::<Vec<_>>();
-                let hit = cfg.blacklist.denied(&segments, &positions);
-                if !hit.is_empty() {
-                    return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
-                }
-            }
             Decision::Ask("running a non-read-only command requires approval".to_string())
         }
     }
@@ -456,28 +436,32 @@ pub fn readonly_command(command: &str) -> bool {
     true
 }
 
-/// Commands that stay behind a one-shot prompt even in yolo mode: deleting
-/// files, privilege escalation and anything that can destroy a filesystem
-/// or take the machine down. yolo auto-approves everything else; these ask
-/// once (`Y` clears the one call, `a` the rest of the session).
-const DANGEROUS_COMMANDS: &[&str] = &[
-    "rm",
+/// The commands that must never run, in either mode, whatever any config key
+/// or blacklist file says: privilege escalation, filesystem creation and
+/// destruction, and machine-level control. Hardcoded on purpose — this is
+/// the core a user cannot switch off, unlike the blacklist file. The file
+/// only *adds* refusals on top of it.
+const FORBIDDEN_COMMANDS: &[&str] = &[
+    // privilege escalation
     "sudo",
     "su",
     "doas",
+    // filesystem creation and destruction
     "mkfs",
     "mkfs.ext2",
     "mkfs.ext4",
     "mkfs.xfs",
     "mkfs.btrfs",
     "mkfs.vfat",
-    "dd",
-    "shred",
-    "wipefs",
+    "mkswap",
     "fdisk",
     "sfdisk",
     "cfdisk",
     "parted",
+    "wipefs",
+    "shred",
+    "dd",
+    // machine-level control
     "shutdown",
     "reboot",
     "poweroff",
@@ -485,18 +469,45 @@ const DANGEROUS_COMMANDS: &[&str] = &[
     "init",
 ];
 
-/// True when a bash call would start a command on the destructive list,
-/// carries a fork bomb, or redirects output into a real device node
-/// (`> /dev/sda`). Sinks like `2>/dev/null` are hygiene, not destruction.
-pub fn dangerous_command(command: &str) -> bool {
-    if command.contains(":(){") || redirects_into_device(command) {
-        return true;
+/// The hardcoded first line of defence: `Some(reason)` when the command must
+/// never run. Checked before the blacklist file and before either approval
+/// mode, so no file edit and no flag can turn any of it back on.
+fn forbidden_command(command: &str) -> Option<String> {
+    if command.contains(":(){") {
+        return Some("command is a fork bomb".to_string());
     }
-    split_compound(command).iter().any(|seg| {
-        command_positions(seg, 0)
-            .first()
-            .is_some_and(|first| DANGEROUS_COMMANDS.contains(&first.as_str()))
-    })
+    if redirects_into_device(command) {
+        return Some("command writes into a device node".to_string());
+    }
+    for seg in split_compound(command) {
+        if let Some(first) = command_positions(&seg, 0).first()
+            && FORBIDDEN_COMMANDS.contains(&first.as_str())
+        {
+            return Some(format!("'{first}' is never allowed"));
+        }
+        if deletes_the_root(&seg) {
+            return Some("command deletes the whole filesystem".to_string());
+        }
+    }
+    None
+}
+
+/// `rm -rf /` and friends: an `rm` whose target word *is* the root or a home
+/// shorthand. Matched on the whole word, so `rm -rf /tmp/build` stays the
+/// ordinary cleanup it is and only the whole-filesystem case is refused.
+fn deletes_the_root(segment: &str) -> bool {
+    let toks = tokens(segment);
+    let words: Vec<&str> = toks
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.starts_with('-'))
+        .collect();
+    if words.first() != Some(&"rm") {
+        return false;
+    }
+    words[1..]
+        .iter()
+        .any(|w| matches!(*w, "/" | "/*" | "~" | "~/" | "$HOME" | "${HOME}"))
 }
 
 /// Redirect targets that only ever discard or pass bytes through: writing
@@ -650,7 +661,6 @@ mod tests {
             "sed -i 's/a/b/' f.txt",
             "find . -name x -delete",
             "find . -name x -exec rm {} ;",
-            "echo hi | sudo tee /etc/hosts",
             "bash -c 'git push'",
             "npm install",
             "chmod +x run.sh",
@@ -667,36 +677,104 @@ mod tests {
     }
 
     #[test]
-    fn yolo_still_prompts_once_for_destructive_commands() {
-        for cmd in [
-            "rm -rf build",
-            "rm notes.txt",
-            "sudo apt install x",
-            "mkfs.ext4 /dev/sda1",
-            "dd if=img of=/dev/sdb",
-            "cat img.iso > /dev/sdb",
-            "echo x >>/dev/sda",
-            "shutdown now",
-            "reboot",
-            "echo hi | sudo tee /etc/hosts",
-        ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
-            assert!(matches!(d, Decision::Ask(_)), "{cmd} must prompt in yolo");
+    fn the_hardcoded_core_is_refused_in_every_mode() {
+        // no blacklist file, no config: these are refused anyway
+        for mode in [Mode::Yolo, Mode::AlwaysAsk] {
+            for cmd in [
+                "sudo apt install x",
+                "su -",
+                "doas rm x",
+                "mkfs.ext4 /dev/sda1",
+                "dd if=img of=/dev/sdb",
+                "shutdown now",
+                "reboot",
+                "halt",
+                "echo hi | sudo tee /etc/hosts",
+                "cat img.iso > /dev/sdb",
+                "echo x >>/dev/sda",
+                ":(){ :|:& };:",
+                "rm -rf /",
+                "rm -rf ~",
+                "rm -rf /*",
+            ] {
+                let d = resolve("bash", Tier::Exec, false, &cfg(mode, &[]), Some(cmd));
+                assert!(
+                    matches!(d, Decision::Deny(_)),
+                    "{cmd} must be denied in {mode:?}, got {d:?}"
+                );
+            }
         }
-        // the prompt carries no reason line: the command is the explanation
+        // the reason names the offending command, so the model can adapt
         let d = resolve(
             "bash",
             Tier::Exec,
             false,
             &cfg(Mode::Yolo, &[]),
-            Some("rm -rf build"),
+            Some("sudo -i"),
         );
-        assert_eq!(d, Decision::Ask(String::new()));
-        // everything else stays automatic
-        for cmd in ["ls", "git status", "cargo test", "git push origin main"] {
+        assert_eq!(d, Decision::Deny("'sudo' is never allowed".into()));
+    }
+
+    #[test]
+    fn ordinary_commands_still_run_in_yolo() {
+        for cmd in [
+            "ls",
+            "git status",
+            "cargo test",
+            "npm init -y",
+            "git init",
+            // an rm of real paths is normal cleanup: only the whole-root
+            // case is refused
+            "rm -rf /tmp/build",
+            "rm -rf ./build",
+            "rm notes.txt",
+            "rm -rf /home/me/proj/target",
+        ] {
             let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
-            assert_eq!(d, Decision::Auto, "{cmd} should stay auto in yolo");
+            assert_eq!(d, Decision::Auto, "{cmd} should run free in yolo");
         }
+    }
+
+    #[test]
+    fn a_blacklist_line_cannot_re_enable_a_hardcoded_refusal() {
+        let mut c = cfg(Mode::Yolo, &[]);
+        c.blacklist = crate::agent::blacklist::Blacklist::parse("!sudo\n!rm -rf /");
+        assert!(matches!(
+            resolve("bash", Tier::Exec, false, &c, Some("sudo -i")),
+            Decision::Deny(_)
+        ));
+        assert!(matches!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm -rf /")),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn the_blacklist_file_only_adds_refusals() {
+        let mut c = cfg(Mode::Yolo, &[]);
+        c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\n!rm -rf ./build");
+        assert!(matches!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
+            Decision::Deny(_)
+        ));
+        // and the `!` line punches the hole the user asked for
+        assert_eq!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm -rf ./build")),
+            Decision::Auto
+        );
+    }
+
+    #[test]
+    fn the_hardcoded_core_beats_the_ask_prompt_too() {
+        let c = cfg(Mode::AlwaysAsk, &[]);
+        let d = resolve("bash", Tier::Exec, false, &c, Some("sudo apt install x"));
+        assert!(
+            matches!(d, Decision::Deny(_)),
+            "a hardcoded refusal must never prompt, got {d:?}"
+        );
+        // a command that is merely non-read-only still prompts
+        let d = resolve("bash", Tier::Exec, false, &c, Some("npm install"));
+        assert!(matches!(d, Decision::Ask(_)));
     }
 
     #[test]
@@ -716,10 +794,10 @@ mod tests {
             let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
             assert_eq!(d, Decision::Auto, "{cmd} must run free in yolo");
         }
-        // a real device target still prompts (dd of= paths are caught by
-        // the program list, not the redirect scan)
-        assert!(redirects_into_device("x >/dev/nvme0n1"));
-        assert!(redirects_into_device("x > \"/dev/sda\""));
+        // a real device target is refused by the shape check; `dd of=` paths
+        // are caught by the program list, not the redirect scan
+        assert!(forbidden_command("x >/dev/nvme0n1").is_some());
+        assert!(forbidden_command("x > \"/dev/sda\"").is_some());
         assert!(!redirects_into_device("dd if=a of=/dev/nvme0n1"));
         assert!(!redirects_into_device("x 2>/dev/null"));
         assert!(!redirects_into_device("x > /dev/stdout"));

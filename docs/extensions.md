@@ -183,10 +183,12 @@ corresponding built-in (a `read` tool runs unprompted in ask mode). This is a tr
 lower it only for tools you would let run anyway, since a mislabeled tool bypasses the prompt. The agent's default mode is **yolo** — extension tools run free unless a
 per-tool policy says otherwise. In ask mode (`--approval-mode ask`, or config
 `approval_mode = "always-ask"`) every extension tool call prompts (`Allow? [Y/n/a]` — `a`
-remembers for the session). Note the destructive-command list that keeps its prompt in yolo
-applies to the `bash` tool only; an extension tool is whatever its script does, so gate it with
-`tool_call` if it can do damage. Explicit per-tool policies in config.json win over everything,
-in either direction:
+remembers for the session). A command in the hardcoded core (privilege escalation, filesystem or
+machine destruction, a fork bomb, a write into a device node) or one you added to `~/.llm/blacklist`
+or `.llm/blacklist` is refused outright in either mode; the blacklist is matched against the `bash`
+tool's command line only — an extension tool is whatever its script does, so gate it with `tool_call`
+if it can do damage. The blacklist file only *adds* refusals; the core cannot be edited away.
+Explicit per-tool policies in config.json win over everything, in either direction:
 
 ```json
 {"agent": {"tools": {"deploy": "allow", "git_push": "deny"}}}

@@ -65,9 +65,21 @@ another command.
 
 ### Approvals
 
-The agent runs in **yolo mode** by default: it does whatever it needs without asking. The one
-exception is a short list of destructive commands (`rm`, `sudo`, `dd`, `mkfs`, `shutdown`, …) — those
-still stop and ask `Allow? [Y/n/a]`.
+The agent runs in **yolo mode** by default: it does whatever it needs without asking. What stops it
+is a hard refusal, never a prompt, and it comes in two layers.
+
+**Hardcoded — nothing can switch these off.** Privilege escalation (`sudo`, `su`, `doas`),
+filesystem creation and destruction (`mkfs*`, `mkswap`, `fdisk`, `parted`, `dd`, `shred`, `wipefs`),
+machine control (`shutdown`, `reboot`, `poweroff`, `halt`, `init`), a fork bomb, a write into a real
+device node (`> /dev/sda` — `2>/dev/null` is fine), and `rm` aimed at `/` or `~`. These are refused
+in yolo *and* ask mode, and no config or file edit can re-enable them.
+
+**Your blacklist file — remove or add freely.** `~/.llm/blacklist` for every project, plus
+`.llm/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the
+hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line
+is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment
+(`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded
+with the syntax as comments; deleting it just resets those comments.
 
 Want to approve things yourself? Use `--approval-mode ask` for one run, or put
 `"approval_mode": "always-ask"` in `config.json` to make it the default. In ask mode:
@@ -189,6 +201,11 @@ Under the `"agent"` key of `config.json`:
 `approval_mode` is `yolo` (default) or `always-ask`. `context_window` is the point where long
 conversations get compacted. `tools` maps a tool to `allow`, `deny` or `prompt`.
 
+The command blacklist is a plain file, not a config key: `~/.llm/blacklist` for everything you run,
+and `.llm/blacklist` for one project (its lines win; the two are concatenated). It only adds refusals
+— privilege escalation and the other dangerous commands are hardcoded and always apply. See
+[Approvals](#approvals) for the line syntax.
+
 Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in
 `~/.llm/commands/` (or the nearest `.llm/commands/` — the project copy wins) and `/name` runs it: the
 body is the prompt, optional frontmatter can pin `system`, and `$input` receives everything after the
@@ -293,6 +310,7 @@ Everything lives under `~/.llm`:
 | `extensions/` | your plugins |
 | `pkg/` | packages installed with `llm install` |
 | `commands/` | prompt templates |
+| `blacklist` | extra commands to refuse (yours; the core is built in) |
 
 `/model` picks the model and its thinking depth, saved for future sessions; `/thinking` changes the
 depth alone. Both live in the `models` object of config.json. `-m` and `LLM_MODEL` override per run,
@@ -402,9 +420,11 @@ Rendering is on only for a real terminal: answers stream as markdown with a left
 output is the raw text. Reasoning is never printed — a dim `thinking ... end` line just marks that it
 happened.
 
-Approval tiers are read, write and exec. Yolo mode (the default) auto-approves everything except the
-destructive list; ask mode prompts for writes and exec-tier calls with `y/n/a`, where `a` allows that
-tool for the rest of the session. Session ids are ULIDs.
+Approval tiers are read, write and exec. Yolo mode (the default) auto-approves everything; the
+hardcoded refusals (privilege escalation, filesystem/machine destruction, a fork bomb, a write into a
+device node, `rm` at `/` or `~`) apply in either mode, and your blacklist file only adds to them.
+Ask mode prompts for writes and exec-tier calls with `y/n/a`, where `a` allows that tool for the rest
+of the session. Session ids are ULIDs.
 
 ## Development
 

@@ -997,8 +997,9 @@ fn reader_loop(
 // the Tool wrapper
 // ============================================================================
 
-/// One extension tool mounted into the registry. Exec-tier: the approval
-/// matrix asks by default, per-tool policies still win.
+/// One extension tool mounted into the registry. The extension declares its
+/// tier (`initialize`, or `# tier:` in a script manifest); an absent or
+/// unknown value stays `exec`, and per-tool policies still win.
 struct ExtTool {
     ext: Arc<Ext>,
     /// the name the extension knows over the wire
