@@ -82,7 +82,11 @@ pub fn build_body(
                     "content": super::user_content(text, attachments, attachment_block)?
                 }));
             }
-            Msg::Assistant { text, tool_calls } => {
+            Msg::Assistant {
+                text,
+                tool_calls,
+                reasoning: _,
+            } => {
                 flush_results(&mut messages, &mut pending_results);
                 if tool_calls.is_empty() {
                     messages.push(json!({"role": "assistant", "content": text}));
@@ -449,6 +453,7 @@ mod tests {
                         arguments: json!({"path":"x"}),
                     },
                 ],
+                reasoning: None,
             },
             Msg::tool_result("t1", "ls", "a"),
             Msg::ToolResult {
@@ -584,6 +589,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: json!({"command": "ls"}),
                 }],
+                reasoning: None,
             },
             Msg::tool_result("t1", "bash", "out"),
         ];

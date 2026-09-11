@@ -43,7 +43,9 @@ fn text_tokens(text: &str) -> u64 {
 fn msg_tokens(msg: &Msg) -> u64 {
     let text: &str = match msg {
         Msg::User { text, .. } | Msg::Summary { text } => text,
-        Msg::Assistant { text, tool_calls } => {
+        Msg::Assistant {
+            text, tool_calls, ..
+        } => {
             let calls: u64 = tool_calls
                 .iter()
                 .map(|c| {
@@ -115,7 +117,9 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
         let entry = match msg {
             Msg::User { text, .. } => format!("user: {text}"),
             Msg::Summary { text } => format!("prior summary: {text}"),
-            Msg::Assistant { text, tool_calls } => {
+            Msg::Assistant {
+                text, tool_calls, ..
+            } => {
                 let calls: Vec<String> = tool_calls
                     .iter()
                     .map(|c| format!("{}({})", c.name, c.arguments))
@@ -307,6 +311,7 @@ mod tests {
             Msg::Assistant {
                 text: String::new(),
                 tool_calls: vec![call("1")],
+                reasoning: None,
             },
             Msg::tool_result("1", "bash", "a\nb\nc"),
             user(&"y".repeat(400)),
@@ -323,11 +328,13 @@ mod tests {
             Msg::Assistant {
                 text: String::new(),
                 tool_calls: vec![call("1")],
+                reasoning: None,
             },
             Msg::tool_result("1", "bash", "r".repeat(4000)),
             Msg::Assistant {
                 text: String::new(),
                 tool_calls: vec![call("2")],
+                reasoning: None,
             },
             Msg::tool_result("2", "bash", "r".repeat(4000)),
         ];

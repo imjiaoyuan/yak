@@ -34,6 +34,10 @@ pub enum Msg {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCall>,
+        /// reasoning trace the model produced with this message (thinking
+        /// models via gateways that require it back on replay). None on
+        /// non-thinking models and legacy histories.
+        reasoning: Option<String>,
     },
     ToolResult {
         call_id: String,
@@ -63,6 +67,7 @@ impl Msg {
         Msg::Assistant {
             text: text.into(),
             tool_calls: Vec::new(),
+            reasoning: None,
         }
     }
 

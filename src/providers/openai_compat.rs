@@ -70,9 +70,20 @@ pub fn build_body(
             Msg::User { text, attachments } => {
                 messages.push(json!({"role": "user", "content": super::user_content(text, attachments, attachment_block)?}));
             }
-            Msg::Assistant { text, tool_calls } => {
+            Msg::Assistant {
+                text,
+                tool_calls,
+                reasoning,
+            } => {
                 if tool_calls.is_empty() {
-                    messages.push(json!({"role": "assistant", "content": text}));
+                    let mut msg = json!({"role": "assistant", "content": text});
+                    if let Some(r) = reasoning
+                        && !r.is_empty()
+                        && super::replay_reasoning(m)
+                    {
+                        msg["reasoning_content"] = json!(r);
+                    }
+                    messages.push(msg);
                 } else {
                     let calls: Vec<Value> = tool_calls
                         .iter()
@@ -89,9 +100,15 @@ pub fn build_body(
                     } else {
                         json!(text)
                     };
-                    messages.push(
-                        json!({"role": "assistant", "content": content, "tool_calls": calls}),
-                    );
+                    let mut msg =
+                        json!({"role": "assistant", "content": content, "tool_calls": calls});
+                    if let Some(r) = reasoning
+                        && !r.is_empty()
+                        && super::replay_reasoning(m)
+                    {
+                        msg["reasoning_content"] = json!(r);
+                    }
+                    messages.push(msg);
                 }
                 for call in tool_calls {
                     if !super::call_answered(&last_result, &call.id, i) {
@@ -432,6 +449,37 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_replays_only_when_the_host_requires_it() {
+        let history = [Msg::Assistant {
+            text: "answer".into(),
+            tool_calls: Vec::new(),
+            reasoning: Some("chain of thought".into()),
+        }];
+        // plain host: reasoning is dropped (DeepSeek's API rejects it back)
+        let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
+        assert_eq!(body["messages"][0]["content"], json!("answer"));
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+
+        // opencode.ai gateway: replayed verbatim
+        let mut gw = model("openai-compat");
+        gw.base_url = "https://opencode.ai/aopencode/openai".into();
+        let body = build_body(&gw, &input(&history, &[]), false).unwrap();
+        assert_eq!(
+            body["messages"][0]["reasoning_content"],
+            json!("chain of thought")
+        );
+
+        // explicit -o override flips either default
+        let mut opt = model("openai-compat");
+        opt.options = vec![("replay_reasoning".into(), "true".into())];
+        let body = build_body(&opt, &input(&history, &[]), false).unwrap();
+        assert_eq!(
+            body["messages"][0]["reasoning_content"],
+            json!("chain of thought")
+        );
+    }
+
+    #[test]
     fn tool_history_and_tools_wire_shapes() {
         let history = vec![
             Msg::user("list files"),
@@ -442,6 +490,7 @@ mod tests {
                     name: "ls".into(),
                     arguments: json!({"path": "."}),
                 }],
+                reasoning: None,
             },
             Msg::tool_result("call_1", "ls", "a\nb"),
         ];
@@ -487,6 +536,7 @@ mod tests {
                 name: "ls".into(),
                 arguments: json!({}),
             }],
+            reasoning: None,
         }];
         let body = build_body(&model("openai-compat"), &input(&history, &[]), true).unwrap();
         assert_eq!(body["tools"], json!([]));
@@ -503,6 +553,7 @@ mod tests {
                 name: "ls".into(),
                 arguments: json!({}),
             }],
+            reasoning: None,
         }];
         let body = build_body(
             &model("openai-compat"),
@@ -525,6 +576,7 @@ mod tests {
                     name: "ls".into(),
                     arguments: json!({}),
                 }],
+                reasoning: None,
             },
             Msg::tool_result("c1", "ls", "a\nb"),
         ];

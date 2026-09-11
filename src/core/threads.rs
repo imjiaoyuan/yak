@@ -49,6 +49,10 @@ pub enum StoredMsg {
         text: String,
         #[serde(default)]
         tool_calls: Vec<StoredToolCall>,
+        /// reasoning trace (thinking models); replayed to gateways that
+        /// require it back
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     Tool {
         call_id: String,

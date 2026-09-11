@@ -106,7 +106,7 @@ pub fn resolve_run_model(
         .or(stored_default);
     let Some(query) = query else {
         return Err(
-            "No default model configured. Run `llm models set <model>`, `llm login`, or use -m."
+            "No default model configured. Run `llm login` in the REPL (or edit config.json), or use -m."
                 .to_string(),
         );
     };
@@ -191,6 +191,29 @@ pub(crate) fn apply_options(body: &mut Value, options: &[(String, String)]) {
     for (k, v) in options {
         let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
         body[k] = parsed;
+    }
+}
+
+/// Whether assistant `reasoning_content` must be replayed on later turns.
+/// DeepSeek's own API rejects it back ("reasoning_content ... is not
+/// expected"), but gateways fronting thinking models — opencode Console Go
+/// upstreams — 400 the other way ("The `reasoning_content` in the thinking
+/// mode must be passed back to the API"). Table: hosts that require it;
+/// everything else defaults to dropping it. `-o replay_reasoning=...`
+/// (or the per-model options table) overrides either way.
+pub(crate) fn replay_reasoning(m: &ResolvedModel) -> bool {
+    let default = m
+        .base_url
+        .split('/')
+        .any(|seg| seg.eq_ignore_ascii_case("opencode.ai"));
+    match m
+        .options
+        .iter()
+        .find(|(k, _)| k == "replay_reasoning")
+        .map(|(_, v)| v.as_str())
+    {
+        Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+        None => default,
     }
 }
 
@@ -462,6 +485,7 @@ mod tests {
                     name: "ls".into(),
                     arguments: json!({}),
                 }],
+                reasoning: None,
             },
             Msg::Assistant {
                 text: "done".into(),
@@ -470,6 +494,7 @@ mod tests {
                     name: "read".into(),
                     arguments: json!({}),
                 }],
+                reasoning: None,
             },
             Msg::tool_result("b", "read", "content"),
         ];

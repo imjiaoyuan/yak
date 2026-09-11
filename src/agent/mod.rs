@@ -3,6 +3,7 @@
 //! `ToolCall`) lives in `providers` — see `providers/mod.rs`.
 
 pub mod approval;
+pub mod blacklist;
 pub mod compact;
 pub mod ext;
 pub mod memory;
@@ -248,6 +249,7 @@ pub fn run_agent(
         };
 
         let mut text = String::new();
+        let mut reasoning_text = String::new();
         let mut acc = ToolCallAccumulator::default();
         let mut usage = None;
         let mut stop = StopReason::default();
@@ -257,6 +259,7 @@ pub fn run_agent(
                 on_update(AgentUpdate::Delta(t));
             }
             crate::core::http::Event::ReasoningDelta(t) => {
+                reasoning_text.push_str(&t);
                 on_update(AgentUpdate::ReasoningDelta(t));
             }
             crate::core::http::Event::ToolCallDelta {
@@ -297,6 +300,7 @@ pub fn run_agent(
                 history.push(Msg::Assistant {
                     text: text.clone(),
                     tool_calls: vec![],
+                    reasoning: None,
                 });
                 recoveries += 1;
                 if recoveries <= MAX_STREAM_RECOVERIES {
@@ -318,9 +322,11 @@ pub fn run_agent(
             history.push(pending.take().expect("checked above"));
         }
         let tool_calls = acc.finish();
+        let reasoning = (!reasoning_text.is_empty()).then(|| reasoning_text.clone());
         history.push(Msg::Assistant {
             text: text.clone(),
             tool_calls: tool_calls.clone(),
+            reasoning,
         });
         final_text = text;
         last_usage = usage;
@@ -762,7 +768,7 @@ mod tests {
         assert_eq!(outcome.final_text, "ued cleanly");
         assert_eq!(outcome.history.len(), 3, "prompt, partial, continuation");
         assert!(
-            matches!(&outcome.history[1], Msg::Assistant { text, tool_calls } if text == "partial ans" && tool_calls.is_empty()),
+            matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, .. } if text == "partial ans" && tool_calls.is_empty()),
             "the partial answer rides the history as a real assistant message"
         );
     }

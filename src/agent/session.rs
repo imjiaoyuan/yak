@@ -426,7 +426,11 @@ pub fn msg_to_stored(m: &Msg) -> StoredMsg {
             attachments: attachments.iter().map(attachment_to_stored).collect(),
         },
         Msg::Summary { text } => StoredMsg::Summary { text: text.clone() },
-        Msg::Assistant { text, tool_calls } => StoredMsg::Assistant {
+        Msg::Assistant {
+            text,
+            tool_calls,
+            reasoning,
+        } => StoredMsg::Assistant {
             text: text.clone(),
             tool_calls: tool_calls
                 .iter()
@@ -436,6 +440,7 @@ pub fn msg_to_stored(m: &Msg) -> StoredMsg {
                     arguments: c.arguments.clone(),
                 })
                 .collect(),
+            reasoning: reasoning.clone(),
         },
         Msg::ToolResult {
             call_id,
@@ -499,7 +504,11 @@ pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<St
                         ));
                     }
                 }
-                StoredMsg::Assistant { text, tool_calls } => {
+                StoredMsg::Assistant {
+                    text,
+                    tool_calls,
+                    reasoning,
+                } => {
                     msgs.push(Msg::Assistant {
                         text: text.clone(),
                         tool_calls: tool_calls
@@ -510,6 +519,7 @@ pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<St
                                 arguments: c.arguments.clone(),
                             })
                             .collect(),
+                        reasoning: reasoning.clone(),
                     });
                 }
                 StoredMsg::Tool {
@@ -585,6 +595,7 @@ mod tests {
                     name: "write".into(),
                     arguments: serde_json::json!({"path": "a.md", "content": "x"}),
                 }],
+                reasoning: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -693,6 +704,7 @@ mod tests {
                         name: "read".into(),
                         arguments: serde_json::json!({"path": "a.png"}),
                     }],
+                    reasoning: None,
                 },
                 StoredMsg::Tool {
                     call_id: "c1".into(),
@@ -732,7 +744,9 @@ mod tests {
             _ => panic!("expected tool result"),
         }
         match &msgs[3] {
-            Msg::Assistant { text, tool_calls } => {
+            Msg::Assistant {
+                text, tool_calls, ..
+            } => {
                 assert_eq!(text, "it is a cat");
                 assert!(tool_calls.is_empty());
             }
