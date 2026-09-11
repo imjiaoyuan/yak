@@ -52,75 +52,129 @@ reads plain input.
 
 ## Usage
 
-Bare `llm` on a terminal opens the interactive REPL, `llm "fix the failing test"` runs the task
-once with tools and exits, and piped stdin is the task text
-(`git diff | llm "review this change" > review.md` — pipes stay plain, never ANSI codes). The loop
-reads, edits, searches and runs commands; it runs in **yolo mode by default** — everything
-auto-approved except a short list of destructive commands (`rm`, `sudo`, `dd`, `mkfs`, `shutdown`,
-…) that keeps its one-shot `Allow? [Y/n/a]` prompt. Pass `--approval-mode ask` or set
-`approval_mode = "always-ask"` to confirm every state change: file writes, deletions, `git push`
-and unrecognized or non-read-only commands prompt, while reads inside the working directory and
-read-only commands (`ls`, `git status`, `rg`, `cargo test`, ...) always run free; `/yolo` toggles
-the mode for the session. File edits and writes show a unified-diff preview right above the
-approval question.
+The shortest version:
 
-The `read` tool streams text files a window at a time instead of loading them: each answer opens
-with a metadata header naming the file, its size and the shown range, `offset` and `limit` page
-through 2000-line windows (50KB byte cap, single lines capped at 2000 characters so a minified
-bundle cannot eat the context), `paths` batches up to five files into one call, and binary formats
-are refused with a hint at the right local tooling rather than garbage bytes — `pdftotext` for
-PDFs, `samtools` for BAM/CRAM, `duckdb` for Parquet/HDF5, `libreoffice --headless --convert-to csv`
-for legacy Office formats. `webfetch <url>` fetches web pages and returns plain text (HTML
-stripped, 256KB cap, http(s) only, proxies inherited from the environment) so the agent can consult
-docs without a shell.
+```bash
+llm                            # open the interactive session
+llm "fix the failing test"      # run one task, then exit
+cat error.log | llm "what broke?"   # the prompt can come from stdin
+```
 
-The REPL carries slash commands (`/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/resume`,
-`/tree`, `/status`, `/reload`, ... — `/help` lists them one per line, skills included as
-`/skill:<name>`) and shell passthrough via `!cmd`, with bash-style tab completion for command names
-and paths. Ctrl-c or esc interrupts a running task; while it runs, typed lines are queued as
-steering and delivered at the next tool boundary, and leftovers become new tasks.
+Piped output is plain text — no colours, no control codes — so it drops straight into a file or
+another command.
 
-Pick a model per call with `-m deepseek/deepseek-chat`. Model options ride along as
-`-o temperature=0.2 -o top_p=0.9`, and `--thinking high` maps to `reasoning_effort` on
-OpenAI-compatible endpoints and a thinking budget on Anthropic ones (`off` omits the parameter
-entirely). Add a system prompt with `-s` or `--append-system-prompt`, limit the toolbox with
-`--tools read,grep` and cap a task with `--token-budget N` (cumulative input tokens — a runaway
-loop prices itself out long before the context window does; the old `--max-turns` remains as an
-explicit escape hatch, `0`/unset = unlimited).
+### Approvals
 
-Attach files or URLs with `-a shot.png` (`--at image.png image/png` forces a mimetype); images,
-PDFs, wav/mp3 clips and plain-text files (.txt, .md, .csv, source code) ride the request as native
-content blocks — text attaches as a document block on Anthropic models and as an extra text part
-elsewhere, and anything the model family cannot accept is refused before a request leaves the
-machine. Piped stdin can feed an attachment instead of the prompt, so
-`llm -a - "what is this" < shot.png` sends the image and the words together. Inside a session
-ctrl+v pastes the clipboard image as a temp-file path you can see and edit, and any local image path
-typed into a message attaches itself automatically. Long conversations keep only the most recent
-image attachments in context — older ones become short text notes.
+The agent runs in **yolo mode** by default: it does whatever it needs without asking. The one
+exception is a short list of destructive commands (`rm`, `sudo`, `dd`, `mkfs`, `shutdown`, …) — those
+still stop and ask `Allow? [Y/n/a]`.
 
-Sessions persist: `llm -c "and in python?"` continues the newest conversation of this directory,
-falling back to the newest anywhere — with a dim note naming that directory — when this one has no
-history yet. `llm --session 01ABC...` (`--cid`, or a short unambiguous prefix like `01m13d`) picks
-an exact thread, and `--no-session` opts out. `llm -r` is the way back in: one filterable list of
-this directory's conversations, newest first (typing filters across preview and id, fuzzy-filter style);
-enter opens the transcript and offers to resume it. A directory with no history of its own falls
-back to listing every directory, the directory tagged on each row. `/resume` inside the REPL opens
-the same picker. `--fork` branches the loaded session onto a new thread id sharing its turns so
-far.
+Want to approve things yourself? Use `--approval-mode ask` for one run, or put
+`"approval_mode": "always-ask"` in `config.json` to make it the default. In ask mode:
 
-Skills and memory live under the user directory. Skills are SKILL.md folders discovered from
-`~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from
-the working directory (later wins by name); the agent lists them via `/help`, runs one with
-`/skill:<name>`, and can pick them itself from the system-prompt list (disable per skill with
-`disable_model_invocation` or globally via `[agent] disabled_skills`). Global memory is a
-hand-edited `~/.llm/LLM.md` injected into the agent system prompt. The `<user_memory>` block always
-names that path (even before the file exists), and the built-in prompt tells the agent to record
-durable preferences there and repo-scoped rules in `AGENTS.md`/`CLAUDE.md` instead — so "remember
-this" lands somewhere the user can review. The file is never agent-owned: there is no auto-update
-pass, only a direct edit the user can see in the diff. Model traffic goes through the HTTP proxies in
-`ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`) automatically.
+- **Free:** reading files in your project, and read-only commands like `ls`, `git status`, `rg`,
+  `cargo test`.
+- **Asks first:** file writes and edits, branch changes like `git push`, and anything it cannot
+  recognise as safe.
 
-Agent behavior is tuned under the `"agent"` key of `config.json`:
+File edits show a unified diff right above the question. Type `a` to allow that tool for the rest of
+the session. `/yolo` flips the mode on and off mid-session.
+
+### Tools
+
+Eight built-ins: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`. The agent picks
+them itself; `--tools read,grep` narrows the set.
+
+The `read` tool pages through large files instead of loading them whole. Every answer starts with a
+header naming the file, its size and the range shown; `offset` and `limit` walk through it in
+2000-line windows (50 KB per call, single lines capped at 2000 characters so a minified bundle
+cannot flood the context). `paths` reads up to five files at once. Binary formats are refused with a
+hint at the right local tool — `pdftotext` for PDFs, `samtools` for BAM/CRAM, `duckdb` for
+Parquet/HDF5, `libreoffice --headless --convert-to csv` for old Office files.
+
+`webfetch <url>` grabs a page and returns it as text (HTML stripped, 256 KB cap, http(s) only,
+proxies honoured) so the agent can read docs without a shell.
+
+### The interactive session
+
+Slash commands cover the model and the session — `/model`, `/thinking`, `/login`, `/logout`,
+`/clear`, `/resume`, `/tree`, `/status`, `/reload`, … `/help` lists every one, including your skills
+as `/skill:<name>`. `!cmd` runs a shell command directly, and tab completes command names and paths.
+
+Ctrl-c or esc interrupts a running task. Anything you type while it works is queued as steering and
+delivered at the next tool boundary; whatever is left over becomes your next message.
+
+### Per-run flags
+
+```bash
+llm -m deepseek/deepseek-chat "..."        # pick a model for this run
+llm -o temperature=0.2 -o top_p=0.9 "..."  # extra model options
+llm --thinking high "..."                  # off | minimal | low | medium | high | xhigh
+llm -s "you are a Rust reviewer" "..."     # replace the system prompt
+llm --append-system-prompt "be terse" "..."
+llm --tools read,grep "..."                # limit the toolbox
+llm --token-budget 500000 "..."            # stop after this many input tokens
+```
+
+`--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on
+Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the
+context, so the total is what a runaway task actually costs. It warns at 80% and stops cleanly at
+100%. (`--max-turns` still exists as an explicit cap; `0` or unset means unlimited.)
+
+### Attachments
+
+```bash
+llm -a shot.png "what is wrong here?"      # attach a file
+llm -a https://example.com/page "summarise this"
+llm --at image.png image/png "..."         # force the mimetype
+llm -a - "what is this?" < shot.png        # stdin as the attachment
+```
+
+Images, PDFs, wav/mp3 clips and plain text (.txt, .md, .csv, source files) are sent as native
+content blocks. Text becomes a document block on Anthropic models and an extra text part elsewhere.
+Anything the chosen model cannot accept is refused before the request leaves your machine.
+
+In a session, ctrl+v pastes the clipboard image as a temp-file path you can see and edit, and any
+local image path you type attaches itself. Long conversations keep only the newest image
+attachments; older ones collapse into short text notes.
+
+### Sessions
+
+Every conversation is saved, so you can always come back to it:
+
+```bash
+llm -c "and in python?"                    # continue the newest session here
+llm -r                                     # browse and resume past sessions
+llm --session 01ABC... "..."               # pick an exact one (a short prefix works)
+llm --no-session "..."                     # this run only, don't save it
+llm --fork "..."                           # branch this session onto a new thread
+```
+
+`-c` looks in the current directory first and falls back to the newest session anywhere, telling you
+which directory it used. `-r` opens one filterable list, newest first; typing filters across the
+preview and the id. `/resume` inside the session opens the same list.
+
+### Skills and memory
+
+Both live in your user directory.
+
+**Skills** are `SKILL.md` folders, discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest
+`.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). The agent lists
+them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system
+prompt. Turn one off with `disable_model_invocation`, or all of them with `[agent] disabled_skills`.
+
+**Memory** is a plain markdown file: `~/.llm/LLM.md`. The system prompt always names that path —
+even before the file exists — so "remember this" has somewhere to go: ask the agent to remember a
+preference and it edits that file for you. Durable preferences live there; repo-specific rules
+belong in `AGENTS.md`/`CLAUDE.md` instead. Nothing is written behind your back — the edit is a normal
+file change you can review, change or delete.
+
+Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`)
+automatically.
+
+### Tuning the agent
+
+Under the `"agent"` key of `config.json`:
 
 ```json
 {
@@ -132,12 +186,13 @@ Agent behavior is tuned under the `"agent"` key of `config.json`:
 }
 ```
 
-`approval_mode` is `yolo` (default) or `always-ask`; `context_window` is where compaction kicks in;
-`tools` maps each tool to `allow`, `deny` or `prompt`. Prompt templates turn a prompt you keep
-retyping into a slash command: drop a `.md` file in `~/.llm/commands/` (or the nearest
-`.llm/commands/`, project wins) and `/name` runs it — the body is the prompt, frontmatter may pin
-`system`, and `$input` receives everything after the command name, so `/review src/main.rs` runs the
-template with `src/main.rs` as input, submitted as one task in the agent session.
+`approval_mode` is `yolo` (default) or `always-ask`. `context_window` is the point where long
+conversations get compacted. `tools` maps a tool to `allow`, `deny` or `prompt`.
+
+Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in
+`~/.llm/commands/` (or the nearest `.llm/commands/` — the project copy wins) and `/name` runs it: the
+body is the prompt, optional frontmatter can pin `system`, and `$input` receives everything after the
+command name. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
 
 ### Help
 
@@ -205,15 +260,13 @@ Options:
 
 ## Providers and models
 
-Run `llm` and use `/login`: the wizard opens a picker over the built-in provider catalog (38
-providers — Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, Cerebras, NVIDIA, Hugging Face,
-Together, Baseten, Fireworks, xAI, OpenRouter, Moonshot, Kimi, Z.ai, Qwen token plans, Xiaomi MiMo,
-MiniMax, Vercel AI Gateway, SiliconFlow, Zhipu, and the local runtimes Ollama, LM Studio, llama.cpp
-and vLLM), asks for your API key with hidden input, and writes the provider into `config.json`; the
-first provider's first model automatically becomes the shared default, so a fresh install is ready
-to run. `/logout` removes a provider and clears the default if it pointed there.
+The easy path: run `llm`, type `/login`, pick a provider, paste your API key (hidden). That's it —
+the first provider's first model becomes your default, so a fresh install is ready to run. The
+catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI,
+OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider
+and clears the default if it pointed there.
 
-Or skip the wizard and put the provider block in `config.json` directly:
+If you prefer to edit config by hand, add a block like this to `config.json`:
 
 ```json
 {
@@ -228,33 +281,34 @@ Or skip the wizard and put the provider block in `config.json` directly:
 }
 ```
 
-`kind` is `openai-compat` or `anthropic`, and `api_key` expands `${ENV_VAR}` references at request
-time, so literal secrets and environment indirection live in the same field.
+`kind` is `openai-compat` or `anthropic`. `api_key` can hold the key itself or `${ENV_VAR}` to read it
+from the environment at request time — either works.
 
-Data lives under the user directory, `~/.llm` by default: `threads/` holds every conversation as
-JSONL thread files, `config.json` every setting (providers with their API keys, the `models` family,
-the `agent` section, the `extensions` table), `extensions/` the code-bearing plugins, `pkg/` the
-installed packages, and `commands/` the prompt templates.
+Everything lives under `~/.llm`:
 
-`/model` picks the default model and its thinking depth — one default the REPL always starts on.
-The picker walks provider → model → thinking depth and saves the choice; `/thinking` adjusts the
-depth alone. It is all one `models` object in config.json: `default` is the startup model,
-`thinking` the reasoning depth riding it, and `options` per-model default options (hand-edited).
-`-m` and `LLM_MODEL` stay per-invocation; the stored `thinking` loses only to `--thinking`. Legacy
-per-mode entries (`prompt`/`agent` keys from older versions) migrate on first read; when the stored
-default no longer resolves, runs warn and fall back.
+| | |
+|---|---|
+| `threads/` | every conversation, as JSONL files |
+| `config.json` | all settings, including providers and their keys |
+| `extensions/` | your plugins |
+| `pkg/` | packages installed with `llm install` |
+| `commands/` | prompt templates |
+
+`/model` picks the model and its thinking depth, saved for future sessions; `/thinking` changes the
+depth alone. Both live in the `models` object of config.json. `-m` and `LLM_MODEL` override per run,
+and `--thinking` beats the stored depth. Configs from older versions migrate on first read; if the
+saved model no longer resolves, you get a warning and a fallback.
 
 ## Plugins
 
-Extensions are the plugin system: anything the core skips, you build yourself as an extension in
-`~/.llm/extensions/` or the project's `.llm/extensions/` (the project copy wins by name). One
-directory, one mental model: drop an executable in, restart or `/reload`. Three forms, from
-thinnest up:
+Extensions are how you add things the core does not ship. Put a file in `~/.llm/extensions/` — or in
+the project's `.llm/extensions/`, which wins by name — then restart, or type `/reload`. There are two
+shapes, and the shape is chosen by the file itself.
 
-**Script tools — any language, three comment lines.** A plain script with a manifest header is a
-tool; the host spawns it per call, feeds the arguments (a single declared argument rides as plain
-`argv[1]`, no JSON), collects stdout as the result, and owns timeout, size cap and approval. Python,
-shell, R, anything with an interpreter:
+### A script tool: a script with a header
+
+Add a few comment lines at the top and any script becomes a tool. The host runs it per call, passes
+the arguments, and takes stdout as the result — Python, shell, R, whatever you have:
 
 ```python
 #!/usr/bin/env python3
@@ -266,8 +320,12 @@ import sys
 print(len(sys.argv[1]))
 ```
 
-**Resident extensions — tools, commands and event hooks.** A file without a manifest header is
-spawned once per session and speaks one JSON message per line over stdio:
+A tool with one declared argument gets it as a plain command-line argument — no JSON to parse.
+
+### A resident extension: a program that stays running
+
+Without a header, the file is started once per session and you talk to it in one-JSON-per-line over
+stdio:
 
 ```text
 → {"id":1,"type":"initialize","params":{"version":..,"cwd":..}}
@@ -277,16 +335,18 @@ spawned once per session and speaks one JSON message per line over stdio:
 → {"id":4,"type":"event","name":..,"params":{..}}      ← {"id":4,"result":{..}}
 ```
 
-The `initialize` handshake advertises the extension's tools (JSON Schema parameters), slash commands
-and event subscriptions; the host then routes `call_tool` when the model invokes one, `run_command`
-when the user types a matching `/command`, and `event` at turn and tool boundaries (`tool_call` may
-deny or rewrite a call — permission gates and path protection live here). Extension tools are
-exec-tier: the approval matrix treats them like `bash` — under the default yolo mode they run free,
-and in ask mode every call prompts (`Allow? [Y/n/a]`, remembered per session with `a`).
-`[agent] tools` policies still win in either mode, and `--tools` picks a subset.
-`extensions.disabled` in config.json skips one by name, `/reload` respawns everything, and a slow or
-broken extension warns dimly and mounts nothing — it never blocks a session. Tool calls time out
-after 120s (config `extensions.tool_timeout`), events after 5s.
+At startup the host asks what the extension offers: tools (with JSON Schema parameters), slash
+commands, and events it wants to hear about. After that it calls back when the model uses a tool,
+when you type a matching `/command`, and at turn and tool boundaries. The `tool_call` event is the
+useful one for gating — your extension can deny a call or rewrite its arguments.
+
+Extension tools start at the same trust level as `bash`: they run freely in yolo mode, and in ask
+mode each call prompts. You can lower a tool's tier if you have reviewed it — see
+[`docs/extensions.md`](docs/extensions.md). `[agent] tools` policies and `--tools` still apply.
+
+A slow or broken extension prints a dim warning and mounts nothing; it never blocks the session.
+Tool calls time out after 120s (`extensions.tool_timeout` in config), events after 5s.
+`extensions.disabled` skips one by name, and `/reload` restarts them all.
 
 Two self-contained templates ship in `examples/extensions/`: `template.js` (a JavaScript runtime
 whose user section uses a familiar extension API — `registerTool` / `registerCommand` /
@@ -294,13 +354,13 @@ whose user section uses a familiar extension API — `registerTool` / `registerC
 need the process, like UI, editors and hotkeys, raise with a clear message) and `template.py` (the
 same shape in Python). Copy one into the extensions directory and edit its user section.
 
-The full reference is [`docs/extensions.md`](docs/extensions.md) — manifest fields, every protocol
-message and event, the `tool_call` gate, timeouts and config keys — and `examples/extensions/` also
-carries three runnable examples: `wordcount` (a script tool), `websearch` (a resident extension
-mounting `web_search` + `web_fetch` tools and a `/web` command — Brave's Search API when
-`BRAVE_API_KEY` is set, keyless DuckDuckGo/Wikipedia fallback otherwise), and `todo`, ready to copy.
+The full reference is [`docs/extensions.md`](docs/extensions.md) — manifest fields, every message and
+event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has three runnable
+examples to copy: `wordcount` (a script tool), `websearch` (a resident extension offering
+`web_search` + `web_fetch` and a `/web` command — uses `BRAVE_API_KEY` when set, otherwise keyless
+DuckDuckGo/Wikipedia) and `todo`.
 
-A minimal resident extension, complete in thirty lines of Python:
+Here is a whole resident extension — a tool that shells out to `deploy.sh`:
 
 ```python
 #!/usr/bin/env python3
@@ -328,22 +388,23 @@ for line in sys.stdin:
 
 ## Threads
 
-Every prompt and agent session is written to `~/.llm/threads/` as a JSONL thread file: reasoning
-parts are stored next to the responses, tool calls and results ride along in agent sessions, and
-turns carry their model, options and token usage. Sessions persist unless `--no-session` opts out;
-there is no global logging switch.
+Every conversation is saved to `~/.llm/threads/` as a JSONL file, one per session. Each turn records
+its model, options and token usage; in agent sessions the tool calls and results ride along, and
+reasoning is stored beside the answer. Pass `--no-session` for a throwaway run — otherwise
+everything is kept.
 
 ## Semantics
 
-Model ids are `provider/model` everywhere, with the `aliases` object in config.json mapping short
-names on top (hand-edited config). Terminal rendering is enabled only on a TTY: prompts and agent
-answers stream as markdown with a two-column margin, blank lines are dropped except around headings
-and code blocks, and piped output is the raw text. Reasoning is never dumped to the screen in any
-mode; one gray `thinking ... end` line records that it happened and `-R` hides even that. Approval
-tiers split agent tools into read, write and exec: yolo is the default (everything auto except the
-destructive list), while ask mode prompts for writes and exec-tier calls with y/n/a (`a` allows the
-tool for the rest of the session). Session ids are ULIDs, `-c` continues the newest session and
-`--cid` picks an exact one.
+Models are named `provider/model`. Short aliases can be mapped in the `aliases` object of
+config.json.
+
+Rendering is on only for a real terminal: answers stream as markdown with a left margin, and piped
+output is the raw text. Reasoning is never printed — a dim `thinking ... end` line just marks that it
+happened.
+
+Approval tiers are read, write and exec. Yolo mode (the default) auto-approves everything except the
+destructive list; ask mode prompts for writes and exec-tier calls with `y/n/a`, where `a` allows that
+tool for the rest of the session. Session ids are ULIDs.
 
 ## Development
 
