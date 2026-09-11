@@ -139,8 +139,10 @@ def main():
     os.chmod(stub, 0o755)
     env["EDITOR"] = stub
 
-    # the completion target lives in the child's cwd
-    work = tempfile.mkdtemp()
+    # the completion target lives in the child's cwd. realpath: the child
+    # records getcwd()'s resolved spelling (/private/var on macOS) and the
+    # resume scoping matches on it
+    work = os.path.realpath(tempfile.mkdtemp())
     with open(os.path.join(work, "hello.txt"), "w") as f:
         f.write("from smoke\n")
 
@@ -151,7 +153,7 @@ def main():
     write_thread(
         user,
         "01foreignresumeprobe000000",
-        tempfile.mkdtemp(),
+        os.path.realpath(tempfile.mkdtemp()),
         "foreign session marker",
     )
 

@@ -200,16 +200,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def pin_thread_mtimes(user_dir, offsets):
     """Age each thread file by cwd: offsets maps a cwd to seconds relative to
-    now, so "newest" is explicit instead of filesystem-granular."""
+    now, so "newest" is explicit instead of filesystem-granular. Both sides
+    are resolved, because a temp path can be a symlink (/var on macOS) while
+    the child records `getcwd()`'s resolved spelling."""
     now = time.time()
+    offsets = {os.path.realpath(k): v for k, v in offsets.items()}
     thread_dir = os.path.join(user_dir, "threads")
     for name in os.listdir(thread_dir):
         path = os.path.join(thread_dir, name)
         with open(path) as f:
             lines = [ln for ln in f.read().splitlines() if ln.strip()]
         cwd = json.loads(lines[-1]).get("cwd") if lines else None
-        if cwd in offsets:
-            stamp = now + offsets[cwd]
+        key = os.path.realpath(cwd) if cwd else None
+        if key in offsets:
+            stamp = now + offsets[key]
             os.utime(path, (stamp, stamp))
 
 
@@ -453,35 +457,35 @@ def main():
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
         f"piped agent rc={piped.returncode} out={piped.stdout[-200:]!r} err={piped.stderr[-200:]!r}"
 
-    # resume scoping: `-c` continues this directory's newest session even
-    # when another directory's is newer; with none of its own here it falls
-    # back to the newest anywhere and says which directory that was
-    home_a = tempfile.mkdtemp()
-    home_b = tempfile.mkdtemp()
-    home_c = tempfile.mkdtemp()
-    for home, marker in ((home_a, "alpha marker"), (home_b, "beta marker")):
+    # resume scoping: with no history in this directory `-c` falls back to the
+    # newest anywhere and says which directory that was; with its own history
+    # it stays local even though another directory's session is newer
+    here = tempfile.mkdtemp()
+    other = tempfile.mkdtemp()
+    stray = tempfile.mkdtemp()
+    for home, marker in ((here, "alpha marker"), (other, "beta marker")):
         r = run([binary, "--yolo", "-m", "mock/m-a", marker], env, cwd=home,
                 stdin=subprocess.DEVNULL)
         assert r.returncode == 0, f"scoped run rc={r.returncode} err={r.stderr[-300:]!r}"
     # pin the thread files' ages so "newest" does not ride the filesystem's
-    # mtime granularity: beta (home_b) is the newest anywhere
-    pin_thread_mtimes(user, {home_a: -5, home_b: 100})
-
-    local = run([binary, "--yolo", "-c", "-m", "mock/m-a", "local turn"], env,
-                cwd=home_a, stdin=subprocess.DEVNULL)
-    body = json.dumps(seen.get("last_messages"))
-    assert local.returncode == 0 and "continuing" not in local.stderr, \
-        f"local continue must stay local: err={local.stderr[-300:]!r}"
-    assert "alpha marker" in body and "beta marker" not in body, \
-        f"local continue picked the wrong thread: {body[:300]!r}"
+    # mtime granularity: beta (other) is the newest anywhere
+    pin_thread_mtimes(user, {here: -5, other: 100})
 
     fallback = run([binary, "--yolo", "-c", "-m", "mock/m-a", "stray turn"], env,
-                   cwd=home_c, stdin=subprocess.DEVNULL)
+                   cwd=stray, stdin=subprocess.DEVNULL)
     body = json.dumps(seen.get("last_messages"))
     assert fallback.returncode == 0 and "continuing" in fallback.stderr, \
         f"cross-directory fallback must say so: err={fallback.stderr[-300:]!r}"
     assert "beta marker" in body and "alpha marker" not in body, \
-        f"fallback did not take the newest thread: {body[:300]!r}"
+        f"fallback did not take the newest thread: {body[-300:]!r}"
+
+    local = run([binary, "--yolo", "-c", "-m", "mock/m-a", "local turn"], env,
+                cwd=here, stdin=subprocess.DEVNULL)
+    body = json.dumps(seen.get("last_messages"))
+    assert local.returncode == 0 and "continuing" not in local.stderr, \
+        f"local continue must stay local: err={local.stderr[-300:]!r}"
+    assert "alpha marker" in body and "beta marker" not in body, \
+        f"local continue picked the wrong thread: {body[-300:]!r}"
 
     print("e2e smoke passed")
     return 0
