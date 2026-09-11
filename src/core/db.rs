@@ -1,6 +1,5 @@
 //! Ids and timestamps: monotonic ULIDs plus the ISO turn-timestamp format
-//! the store relies on. (The SQLite logs.db and its migrations were removed
-//! — the conversation store is now JSONL thread files, see `threads.rs`.)
+//! the thread store relies on.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

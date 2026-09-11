@@ -1,7 +1,6 @@
 //! The conversation store: one JSONL file per thread under
-//! `~/.llm/threads/<ulid>.jsonl`, one turn object per line. Replaces the
-//! SQLite logs.db + FTS + content-addressed message tree — resume is
-//! the reference shape (a thread id reopens the file), no b2 hashing, no search.
+//! `~/.llm/threads/<ulid>.jsonl`, one turn object per line. Resume is
+//! the reference shape: a thread id reopens the file, nothing else.
 
 use std::fs;
 use std::io::Write;

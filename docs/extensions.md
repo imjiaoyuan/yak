@@ -1,9 +1,9 @@
 # Extension API
 
 Extensions are the plugin system: anything the core skips, you build yourself as an executable
-dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`. One directory, one mental
-model: drop a file in, restart or `/reload`. This page is the full reference; runnable examples
-live in [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, plus the
+dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or
+`/reload`. This page is the full reference; runnable examples live in
+[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, plus the
 `template.js`/`template.py` starter templates).
 
 Extensions run with your full user permissions and inherit your environment. Only install or
@@ -183,9 +183,8 @@ in either direction:
 {"agent": {"tools": {"deploy": "allow", "git_push": "deny"}}}
 ```
 
-`--tools name1,name2` selects a subset of the mounted registry at startup. In yolo mode
-extension tools run free, like built-ins — write a `tool_call` gate if you want project-specific
-guardrails regardless of mode (the deny/rewrite reply shapes are in the protocol section above).
+`--tools name1,name2` selects a subset of the mounted registry at startup. For project-specific
+guardrails regardless of mode, write a `tool_call` gate.
 
 ## Timeouts and limits
 
@@ -204,9 +203,8 @@ guardrails regardless of mode (the deny/rewrite reply shapes are in the protocol
 protocol, so most tool/command/hook extensions written against the shim paste straight in. APIs that need
 the host process (UI, editors, hotkeys) raise with a clear message instead of silently no-oping.
 
-The proof is `examples/extensions/todo.js`: a port of the reference's official `todo.ts` example
-. The tool and command logic
-transliterates unchanged in shape — same `todo` tool with `list`/`add`/`toggle`/`clear`, same
+`examples/extensions/todo.js` is a port of the reference's official `todo.ts` example: the tool and command
+logic transliterates unchanged in shape — same `todo` tool with `list`/`add`/`toggle`/`clear`, same
 `/todos` command. Three things could not cross the process boundary and have substitutes:
 
 | in-process | out-of-process |

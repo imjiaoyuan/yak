@@ -2,6 +2,7 @@
 name = "llm"
 version = "0.1.5"
 edition = "2024"
+description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

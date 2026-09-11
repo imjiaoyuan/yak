@@ -1,7 +1,6 @@
 //! Global user memory: a single hand-editable `~/.llm/LLM.md` injected into
-//! the system prompt (agent). One manual region only — the user writes it
-//! by hand, `/memory add` appends a line. (The agent `remember` tool was
-//! removed on purpose: memory is manual, not agent-written.)
+//! the system prompt (agent). One manual region only — memory is
+//! user-written, never agent-written.
 
 use std::path::PathBuf;
 

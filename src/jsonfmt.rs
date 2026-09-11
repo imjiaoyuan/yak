@@ -1,7 +1,6 @@
-//! JSON serialization with the reference's indented on-disk shape
+//! JSON serialization with the indented on-disk shape
 //! (`json.dumps(v, indent=n)`): newline + indentation between items, ": "
-//! after keys, ASCII-escaped. The canonical/schema/compact variants died
-//! with the content-addressed SQLite store.
+//! after keys, ASCII-escaped.
 
 use serde_json::Value;
 
