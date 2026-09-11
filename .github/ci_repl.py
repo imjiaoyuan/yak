@@ -26,6 +26,28 @@ PORT = 8199
 seen = {}
 
 
+def write_thread(user_dir, thread_id, cwd, prompt):
+    """One stored turn, shaped like the agent writes it: the resume list
+    reads the last line's cwd and prompt."""
+    turn = {
+        "id": thread_id,
+        "ts": "2026-09-11T10:00:00+00:00",
+        "mode": "agent",
+        "model": "mock/m-a",
+        "cwd": cwd,
+        "prompt": prompt,
+        "response": "ok from mock",
+        "options": [],
+        "messages": [
+            {"role": "user", "text": prompt, "attachments": []},
+            {"role": "assistant", "text": "ok from mock", "tool_calls": []},
+        ],
+    }
+    path = os.path.join(user_dir, "threads", thread_id + ".jsonl")
+    with open(path, "w") as f:
+        f.write(json.dumps(turn) + "\n")
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -121,6 +143,17 @@ def main():
     work = tempfile.mkdtemp()
     with open(os.path.join(work, "hello.txt"), "w") as f:
         f.write("from smoke\n")
+
+    # two stored conversations: one from this directory, one from another.
+    # `/resume` must offer only the first (the reference-shaped scoping).
+    os.makedirs(os.path.join(user, "threads"), exist_ok=True)
+    write_thread(user, "01localresumeprobe0000000", work, "local session marker")
+    write_thread(
+        user,
+        "01foreignresumeprobe000000",
+        tempfile.mkdtemp(),
+        "foreign session marker",
+    )
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -229,6 +262,20 @@ def main():
     prompts = seen.get("prompts") or []
     assert prompts and prompts[-1] == "from editor", \
         f"editor round-trip on the wire: {prompts!r}"
+
+    # -- /resume lists this directory's conversations only -------------------
+    OUT.clear()
+    send(fd, b"/resume")
+    time.sleep(0.3)
+    send(fd, b"\r")
+    read_until(fd, rb"local session marker")
+    time.sleep(0.3)
+    screen = out_bytes()
+    assert b"foreign session marker" not in screen, \
+        f"/resume leaked another directory's session: {screen[-800:]!r}"
+    send(fd, b"\x1b")             # esc closes the picker
+    time.sleep(0.3)
+    read_until(fd, rb">")
 
     # -- exit: the kitty stack is popped ------------------------------------
     send(fd, b"\x03")

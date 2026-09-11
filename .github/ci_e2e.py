@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 PORT = 8123
 seen = {}
@@ -87,6 +88,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
         if messages:
             seen["last_prompt"] = messages[-1].get("content", "")
+            seen["last_messages"] = messages
             seen.setdefault("prompts", []).append(messages[-1].get("content", ""))
         if seen.get("tools") and any(
             t.get("function", {}).get("name") == "wordcount"
@@ -194,6 +196,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   "arguments": '{"path": "hello.txt", "content": "from agent\\n"}'}}]}}]},
                 {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
             ])
+
+
+def pin_thread_mtimes(user_dir, offsets):
+    """Age each thread file by cwd: offsets maps a cwd to seconds relative to
+    now, so "newest" is explicit instead of filesystem-granular."""
+    now = time.time()
+    thread_dir = os.path.join(user_dir, "threads")
+    for name in os.listdir(thread_dir):
+        path = os.path.join(thread_dir, name)
+        with open(path) as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        cwd = json.loads(lines[-1]).get("cwd") if lines else None
+        if cwd in offsets:
+            stamp = now + offsets[cwd]
+            os.utime(path, (stamp, stamp))
 
 
 def run(cmd, env, cwd=None, stdin=None):
@@ -435,6 +452,36 @@ def main():
                            env=env, timeout=120)
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
         f"piped agent rc={piped.returncode} out={piped.stdout[-200:]!r} err={piped.stderr[-200:]!r}"
+
+    # resume scoping: `-c` continues this directory's newest session even
+    # when another directory's is newer; with none of its own here it falls
+    # back to the newest anywhere and says which directory that was
+    home_a = tempfile.mkdtemp()
+    home_b = tempfile.mkdtemp()
+    home_c = tempfile.mkdtemp()
+    for home, marker in ((home_a, "alpha marker"), (home_b, "beta marker")):
+        r = run([binary, "--yolo", "-m", "mock/m-a", marker], env, cwd=home,
+                stdin=subprocess.DEVNULL)
+        assert r.returncode == 0, f"scoped run rc={r.returncode} err={r.stderr[-300:]!r}"
+    # pin the thread files' ages so "newest" does not ride the filesystem's
+    # mtime granularity: beta (home_b) is the newest anywhere
+    pin_thread_mtimes(user, {home_a: -5, home_b: 100})
+
+    local = run([binary, "--yolo", "-c", "-m", "mock/m-a", "local turn"], env,
+                cwd=home_a, stdin=subprocess.DEVNULL)
+    body = json.dumps(seen.get("last_messages"))
+    assert local.returncode == 0 and "continuing" not in local.stderr, \
+        f"local continue must stay local: err={local.stderr[-300:]!r}"
+    assert "alpha marker" in body and "beta marker" not in body, \
+        f"local continue picked the wrong thread: {body[:300]!r}"
+
+    fallback = run([binary, "--yolo", "-c", "-m", "mock/m-a", "stray turn"], env,
+                   cwd=home_c, stdin=subprocess.DEVNULL)
+    body = json.dumps(seen.get("last_messages"))
+    assert fallback.returncode == 0 and "continuing" in fallback.stderr, \
+        f"cross-directory fallback must say so: err={fallback.stderr[-300:]!r}"
+    assert "beta marker" in body and "alpha marker" not in body, \
+        f"fallback did not take the newest thread: {body[:300]!r}"
 
     print("e2e smoke passed")
     return 0
