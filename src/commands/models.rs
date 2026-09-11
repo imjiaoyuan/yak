@@ -35,14 +35,18 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     } else {
         let items: Vec<String> = cfg
             .providers
-            .iter()
-            .map(|(name, p)| {
+            .keys()
+            .map(|name| {
                 let marker = if current_provider == Some(name.as_str()) {
                     " ←"
                 } else {
                     ""
                 };
-                format!("{name} · {} models{marker}", p.models.len())
+                // no configured-model count here: it reads as the provider's
+                // catalog size and is wrong the moment the live list is
+                // fetched (opencode-go showed "3 models", then listed 36);
+                // the real count needs a network round trip
+                format!("{name}{marker}")
             })
             .collect();
         let i = crate::term::lineedit::pick("provider:", &items, false)?;
