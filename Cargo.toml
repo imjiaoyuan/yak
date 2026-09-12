@@ -1,6 +1,6 @@
 [package]
 name = "llm"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."
 
