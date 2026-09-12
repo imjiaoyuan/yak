@@ -35,6 +35,16 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     }
 }
 
+/// Cap in place at `max` bytes, floored to a char boundary, appending `…`
+/// when anything was cut. The shared ending for previews, summaries and
+/// error echoes; the byte cap keeps worst-case cost proportional.
+pub fn truncate_ellipsis(s: &mut String, max: usize) {
+    if s.len() > max {
+        s.truncate(floor_boundary(s, max));
+        s.push('…');
+    }
+}
+
 /// Pop one full UTF-8 character off the end of a byte buffer (raw-mode
 /// backspace over multibyte input skips the continuation bytes first).
 pub fn pop_utf8_char(buf: &mut Vec<u8>) {

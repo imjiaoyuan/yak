@@ -235,6 +235,18 @@ impl Session {
                     );
                     view.borrow_mut().resume_wait();
                 }
+                AgentUpdate::ToolResultsPruned { count } => {
+                    // settle the row, then say why the next request got
+                    // smaller; dim like the other automatic maintenance
+                    view.borrow_mut().pause();
+                    let p = crate::theme::err();
+                    let s = if count == 1 { "" } else { "s" };
+                    eprintln!(
+                        "{}pruned {count} oversized tool result{s} from context (full text stays in the session log){}",
+                        p.dim, p.reset
+                    );
+                    view.borrow_mut().resume_wait();
+                }
             }
         };
         // esc or ctrl-c during a running task requests a cooperative
@@ -411,6 +423,7 @@ impl Session {
             })
             .unwrap_or_default();
         let turn = StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: crate::core::db::ulid(),
             ts: crate::core::db::now_turn_datetime(),
             mode: self.mode_label().to_string(),
@@ -697,6 +710,7 @@ mod tests {
         // user (with attachment) → assistant tool_call → tool result (with
         // attachment) → final plain assistant, stored only as `response`
         let turn = StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "t1".into(),
             ts: "2026-08-23T01:00:00+00:00".into(),
             mode: "agent".into(),

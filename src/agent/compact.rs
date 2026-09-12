@@ -114,7 +114,7 @@ const TEMPLATE: &str = "Summarize this conversation for continuation. Use exactl
 fn serialize_prefix(prefix: &[Msg]) -> String {
     let mut out = String::new();
     for msg in prefix {
-        let entry = match msg {
+        let mut entry = match msg {
             Msg::User { text, .. } => format!("user: {text}"),
             Msg::Summary { text } => format!("prior summary: {text}"),
             Msg::Assistant {
@@ -140,12 +140,8 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
                 format!("tool result {name}{flag}: {content}")
             }
         };
-        let mut line = entry;
-        if line.len() > 2000 {
-            line.truncate(crate::core::text::floor_boundary(&line, 2000));
-            line.push('…');
-        }
-        out.push_str(&line);
+        crate::core::text::truncate_ellipsis(&mut entry, 2000);
+        out.push_str(&entry);
         out.push_str("\n\n");
     }
     out
@@ -156,7 +152,25 @@ pub fn summarize(
     model: &crate::providers::ResolvedModel,
     prefix: &[Msg],
 ) -> Result<String, String> {
-    summarize_with(model, prefix, "")
+    let prompt = format!(
+        "{TEMPLATE}\n\n<conversation>\n{}</conversation>",
+        serialize_prefix(prefix)
+    );
+    let input = PromptInput {
+        system: Some(SUMMARIZER_SYSTEM),
+        history: &[],
+        prompt: &prompt,
+        attachments: &[],
+        tools: &[],
+        reasoning: None,
+    };
+    let mut text = String::new();
+    model.stream(&input, true, &mut |event| {
+        if let Event::Delta(t) = event {
+            text.push_str(&t);
+        }
+    })?;
+    Ok(text.trim().to_string())
 }
 
 const TASK_MARK: &str = "# Original task\n";
@@ -245,37 +259,52 @@ pub fn trim_old_attachments(history: &mut [Msg]) {
     }
 }
 
-/// Summarize with the caller's extra instructions appended to the template
-/// (the `/compact <prompt>` argument).
-pub fn summarize_with(
-    model: &crate::providers::ResolvedModel,
-    prefix: &[Msg],
-    extra: &str,
-) -> Result<String, String> {
-    let extra = if extra.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\n\nAdditional instructions: {}", extra.trim())
-    };
-    let prompt = format!(
-        "{TEMPLATE}{extra}\n\n<conversation>\n{}</conversation>",
-        serialize_prefix(prefix)
-    );
-    let input = PromptInput {
-        system: Some(SUMMARIZER_SYSTEM),
-        history: &[],
-        prompt: &prompt,
-        attachments: &[],
-        tools: &[],
-        reasoning: None,
-    };
-    let mut text = String::new();
-    model.stream(&input, true, &mut |event| {
-        if let Event::Delta(t) = event {
-            text.push_str(&t);
+/// Pruning sizes (the compaction-tool-result-pruner defaults, in chars
+/// not bytes): a tool result over the threshold becomes its head, a marker
+/// naming what was cut, and its tail. Head + tail stay under the threshold,
+/// so a pruned result never re-qualifies and a second pass is a no-op.
+pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
+pub const PRUNE_HEAD_CHARS: usize = 4096;
+pub const PRUNE_TAIL_CHARS: usize = 1024;
+
+/// Replace over-budget tool-result text with head + marker + tail; returns
+/// the number of results pruned. Runs only once compaction pressure is
+/// confirmed, before the summarizer picks its cut — it costs no model call
+/// and may relieve enough to skip summarization entirely. The projected
+/// view is what changes: the thread file keeps each round's original text,
+/// so a resume re-reads full content and re-prunes on demand.
+pub fn prune_tool_results(history: &mut [Msg]) -> usize {
+    let mut pruned = 0;
+    for msg in history.iter_mut() {
+        let Msg::ToolResult { content, .. } = msg else {
+            continue;
+        };
+        let total = content.chars().count();
+        if total <= PRUNE_THRESHOLD_CHARS {
+            continue;
         }
-    })?;
-    Ok(text.trim().to_string())
+        // char-indexed cuts: byte offsets would split CJK text mid-codepoint
+        let head_end = content
+            .char_indices()
+            .nth(PRUNE_HEAD_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let tail_start = content
+            .char_indices()
+            .nth_back(PRUNE_TAIL_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let head = &content[..head_end];
+        let tail = &content[tail_start..];
+        let dropped = total - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
+        *content = format!(
+            "{head}\n[... {dropped} chars of the middle were cut to fit the context window; \
+             re-read the file with offset/limit or re-run the command if the missing middle \
+             matters ...]\n{tail}"
+        );
+        pruned += 1;
+    }
+    pruned
 }
 
 #[cfg(test)]
@@ -468,5 +497,59 @@ mod tests {
         assert!(s.contains("tool result bash (error):"));
         assert!(s.contains('…'));
         assert!(s.len() < 6000);
+    }
+
+    #[test]
+    fn oversized_tool_results_prune_to_head_marker_tail() {
+        let mut history = vec![
+            Msg::ToolResult {
+                call_id: "1".into(),
+                name: "bash".into(),
+                content: "x".repeat(20_000),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+            Msg::tool_result("2", "bash", "small"),
+        ];
+        assert_eq!(prune_tool_results(&mut history), 1);
+        let content = match &history[0] {
+            Msg::ToolResult { content, .. } => content,
+            _ => unreachable!(),
+        };
+        assert!(content.starts_with("xxxx"), "the head survives");
+        assert!(content.ends_with("xxxx"), "the tail survives");
+        assert!(
+            content.contains("chars of the middle were cut"),
+            "{content}"
+        );
+        assert!(
+            content.len() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 200,
+            "pruned content is bounded"
+        );
+        // a pruned result is under threshold: the second pass is a no-op
+        assert_eq!(prune_tool_results(&mut history), 0);
+        // small results are untouched
+        match &history[1] {
+            Msg::ToolResult { content, .. } => assert_eq!(content, "small"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn pruning_cuts_on_codepoint_boundaries() {
+        // byte-indexed slicing would split a CJK char mid-codepoint
+        let mut history = vec![Msg::tool_result("1", "read", "中".repeat(10_000))];
+        assert_eq!(prune_tool_results(&mut history), 1);
+        let content = match &history[0] {
+            Msg::ToolResult { content, .. } => content,
+            _ => unreachable!(),
+        };
+        assert!(content.starts_with("中中中"));
+        assert!(content.ends_with("中中中"));
+        assert!(
+            content.chars().count() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 200,
+            "char-count bounded: {}",
+            content.chars().count()
+        );
     }
 }

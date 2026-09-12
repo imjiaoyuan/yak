@@ -12,9 +12,21 @@ use serde_json::Value;
 
 use crate::core::config;
 
+/// The on-disk turn format this binary writes and reads. The stamp lives on
+/// every stored line; a line without one (written before versioning
+/// existed) reads as version 0. A higher number on read means a newer llm
+/// wrote the thread — refused loudly, never guessed at.
+pub const THREAD_FORMAT_VERSION: u32 = 1;
+
+/// `skip_serializing_if` for the version stamp: version 0 stays absent so
+/// pre-versioning lines keep their exact shape.
+fn v_is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Attachment provenance, metadata only — thread files store no bytes, and
 /// resume replays text only.
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct StoredAttachment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -27,7 +39,7 @@ pub struct StoredAttachment {
     pub base64: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StoredToolCall {
     pub id: String,
     pub name: String,
@@ -37,7 +49,7 @@ pub struct StoredToolCall {
 /// A stored wire-level message (user/assistant/tool/summary), mirroring
 /// `providers::Msg` — attachment payloads ride as base64 on the user/tool
 /// variants so a resume rebuilds the exact conversation.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum StoredMsg {
     User {
@@ -69,8 +81,12 @@ pub enum StoredMsg {
 }
 
 /// One completed turn, appended as a single JSON line.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct StoredTurn {
+    /// storage-format stamp: [`THREAD_FORMAT_VERSION`] at write time, 0 on
+    /// lines written before versioning existed
+    #[serde(default, skip_serializing_if = "v_is_zero")]
+    pub v: u32,
     /// turn id (ulid)
     pub id: String,
     /// `db::now_turn_datetime()`
@@ -172,20 +188,43 @@ impl Store {
         Ok(id)
     }
 
-    /// Read every turn of a thread, oldest first. Corrupt tail lines are
-    /// skipped rather than aborting the whole read.
+    /// Read every turn of a thread, oldest first. Two strict
+    /// disciplines: a corrupt line mid-file fails loudly (silently dropping
+    /// a turn would break tool-call pairing on resume), while a torn final
+    /// line — an append interrupted by a crash — is the one bounded repair:
+    /// dropped, with a warning. A format version newer than this binary
+    /// writes is refused with the upgrade path named.
     pub fn read_thread(&self, id: &str) -> Result<Vec<StoredTurn>, String> {
         let path = self.thread_path(id);
         let text =
             fs::read_to_string(&path).map_err(|e| format!("cannot read thread {id}: {e}"))?;
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         let mut turns = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
+        for (n, line) in lines.iter().enumerate() {
+            let turn: StoredTurn = match serde_json::from_str(line) {
+                Ok(t) => t,
+                Err(e) if n + 1 == lines.len() => {
+                    eprintln!(
+                        "Warning: thread {id}: repaired unsealed tail — dropped the incomplete \
+                         last line ({e})"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "thread {id}: corrupt turn on line {} ({e}) — refusing a damaged thread",
+                        n + 1
+                    ));
+                }
+            };
+            if turn.v > THREAD_FORMAT_VERSION {
+                return Err(format!(
+                    "thread {id}: format v{} is newer than this llm (writes \
+                     v{THREAD_FORMAT_VERSION}); upgrade llm to resume it",
+                    turn.v
+                ));
             }
-            if let Ok(t) = serde_json::from_str::<StoredTurn>(line) {
-                turns.push(t);
-            }
+            turns.push(turn);
         }
         Ok(turns)
     }
@@ -292,18 +331,19 @@ impl Store {
     fn summarize(&self, id: &str) -> Option<ThreadSummary> {
         let text = fs::read_to_string(self.thread_path(id)).ok()?;
         let mut turns = 0usize;
-        let mut last_line: Option<&str> = None;
+        // the last line that parses: a torn tail must not make the whole
+        // thread vanish from the lists
+        let mut last: Option<StoredTurn> = None;
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             turns += 1;
-            last_line = Some(line);
+            if let Ok(t) = serde_json::from_str::<StoredTurn>(line) {
+                last = Some(t);
+            }
         }
-        if turns == 0 {
-            return None;
-        }
-        let last: StoredTurn = serde_json::from_str(last_line?).ok()?;
+        let last = last?;
         Some(ThreadSummary {
             id: id.to_string(),
             turns,
@@ -374,6 +414,7 @@ mod tests {
 
     fn turn(id: &str, prompt: &str, response: &str, mode: &str) -> StoredTurn {
         StoredTurn {
+            v: THREAD_FORMAT_VERSION,
             id: id.to_string(),
             ts: format!("2026-08-23T0{}:00:00+00:00", id),
             mode: mode.to_string(),
@@ -566,6 +607,103 @@ mod tests {
         let forked = store.fork_thread(&id).unwrap().unwrap();
         assert_ne!(forked, id);
         assert_eq!(store.read_thread(&forked).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A turn stamped by a future format is refused with the upgrade path,
+    /// never parsed best-effort into something wrong.
+    #[test]
+    fn a_future_format_version_is_refused_loudly() {
+        let dir = scratch("future");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let text = fs::read_to_string(&path).unwrap();
+        let bumped = text.replace("\"v\":1", "\"v\":99");
+        assert_ne!(text, bumped, "the stamp must be present to bump");
+        fs::write(&path, bumped).unwrap();
+        let err = store.read_thread(&id).unwrap_err();
+        assert!(err.contains("newer") && err.contains("upgrade"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A crash mid-append tears the final line: the bounded repair drops it
+    /// with a warning instead of poisoning the whole read.
+    #[test]
+    fn a_torn_tail_is_repaired_not_fatal() {
+        let dir = scratch("torn");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("{\"v\":1,\"id\":\"torn");
+        fs::write(&path, text).unwrap();
+        let turns = store.read_thread(&id).unwrap();
+        assert_eq!(
+            turns.len(),
+            1,
+            "the torn line is dropped, the rest survives"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Corruption mid-file is real damage: fail loudly instead of silently
+    /// resuming a conversation with a turn missing.
+    #[test]
+    fn a_corrupt_middle_line_fails_loud() {
+        let dir = scratch("middle");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("not json at all\n");
+        text.push_str(&serde_json::to_string(&turn("2", "c", "d", "agent")).unwrap());
+        text.push('\n');
+        fs::write(&path, text).unwrap();
+        let err = store.read_thread(&id).unwrap_err();
+        assert!(err.contains("corrupt turn on line 2"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Lines written before versioning existed (no `v` field) still read;
+    /// they carry version 0.
+    #[test]
+    fn pre_version_lines_still_read() {
+        let dir = scratch("preversion");
+        let store = Store::open_path(&dir).unwrap();
+        let path = store.thread_path("oldthread");
+        let text = serde_json::to_string(&turn("1", "a", "b", "agent")).unwrap();
+        let old = text.replace("\"v\":1,", "");
+        assert_ne!(text, old, "the stamp must be present to strip");
+        fs::write(&path, old).unwrap();
+        let turns = store.read_thread("oldthread").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].v, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A torn tail must not make the thread vanish from the lists: the
+    /// summary falls back to the last line that parses.
+    #[test]
+    fn a_torn_tail_still_lists_the_thread() {
+        let dir = scratch("tornlist");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("{\"v\":1,\"id\":\"torn");
+        fs::write(&path, text).unwrap();
+        let summaries = store.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].last_prompt, "a");
         let _ = fs::remove_dir_all(&dir);
     }
 }

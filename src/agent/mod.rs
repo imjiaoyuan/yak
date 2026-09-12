@@ -52,6 +52,11 @@ pub enum AgentUpdate {
         chars: usize,
         error: String,
     },
+    /// oversized tool results were replaced by head+marker+tail views to
+    /// relieve context pressure (the full text stays in the session log)
+    ToolResultsPruned {
+        count: usize,
+    },
 }
 
 /// What the UI answered to an approval request.
@@ -137,6 +142,74 @@ const WRAP_UP_NOTE: &str = "[System] The turn budget is almost exhausted. Finish
 const BUDGET_NOTE: &str = "[System] The token budget for this task is almost exhausted. Finish your \
                             current work and produce a final answer now; do not start new tool calls.";
 
+/// Consecutive identical-call counts that trigger an advisory reminder.
+const REMIND_AT: [u32; 3] = [3, 5, 8];
+
+/// A key-order-insensitive copy of `v`: object keys sorted recursively, so
+/// two spellings of one arguments object compare equal.
+fn canon_json(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map
+                .iter()
+                .map(|(k, x)| (k.clone(), canon_json(x)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(entries.into_iter().collect())
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canon_json).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Loop hygiene (a repeat-tool-reminder, in-tree): a model repeating
+/// the exact same tool call cannot make progress, so at escalating repeat
+/// counts an advisory note rides the tool result, asking it to analyze what
+/// it has and change approach or finish. The count covers consecutive
+/// identical calls (same tool, arguments compared modulo key order) and
+/// clears when a new user message lands — a fresh instruction is never a
+/// loop. The reminder is advisory: it never blocks a legitimate repeat. A
+/// deny-flavored plugin twin lives at `examples/extensions/repeat_guard.py`
+/// (load either one, not both — a denial there means this guard never sees
+/// a third identical call).
+struct RepeatGuard {
+    last: Option<(String, serde_json::Value)>,
+    count: u32,
+}
+
+impl RepeatGuard {
+    fn observe(&mut self, tool: &str, args: &serde_json::Value) -> Option<String> {
+        let key = (tool.to_string(), canon_json(args));
+        let same = self.last.as_ref() == Some(&key);
+        self.last = Some(key);
+        self.count = if same { self.count + 1 } else { 1 };
+        let n = self.count;
+        if n == REMIND_AT[0] {
+            return Some(format!(
+                "\n\n[System] This is the {n}rd identical {tool} call in a row. The result will \
+                 not change: analyze what you already have and either change approach or finish."
+            ));
+        }
+        if REMIND_AT[1..].contains(&n) {
+            let mut preview = args.to_string();
+            crate::core::text::truncate_ellipsis(&mut preview, 500);
+            return Some(format!(
+                "\n\n[System] This is the {n}th identical {tool} call in a row. Repeating it \
+                 verbatim cannot make progress: decide from the results already in hand — \
+                 change approach, gather different evidence, or finish. Repeated arguments: {preview}"
+            ));
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.last = None;
+        self.count = 0;
+    }
+}
+
 /// Fold steering lines into the pending user message: multiple queued lines
 /// join into one message, and an existing pending message keeps its text
 /// first. Exposed for testing.
@@ -200,6 +273,10 @@ pub fn run_agent(
     };
     let mut history: Vec<Msg> = seed;
     let mut pending: Option<Msg> = Some(Msg::user_with(prompt, attachments));
+    let mut repeats = RepeatGuard {
+        last: None,
+        count: 0,
+    };
     let mut warned = false;
     let mut budget_warned = false;
     let mut spent_input = 0u64;
@@ -253,6 +330,11 @@ pub fn run_agent(
 
         // steering: queued mid-run input lands before the next model call
         pending = merge_steering(pending.take(), steer());
+        // a fresh user message clears the repeat tracker: a new instruction
+        // resets what counts as "the same call again"
+        if pending.is_some() {
+            repeats.reset();
+        }
         let _ = fire(opts.hooks, "turn_start", json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
             let _ = fire(
@@ -388,8 +470,18 @@ pub fn run_agent(
         // compaction check after each completed turn; the usage report
         // covered everything except the assistant we just pushed
         if let (Some(u), Some(cfg)) = (usage, opts.compact.as_ref()) {
-            let estimate =
-                compact::estimate_tokens(&history, Some((history.len().saturating_sub(1), u)));
+            let marker = Some((history.len().saturating_sub(1), u));
+            let mut estimate = compact::estimate_tokens(&history, marker);
+            if compact::should_compact(estimate, cfg) {
+                // pressure confirmed: prune oversized tool results first —
+                // it costs no model call and may relieve enough to skip
+                // summarization entirely
+                let pruned = compact::prune_tool_results(&mut history);
+                if pruned > 0 {
+                    estimate = compact::estimate_tokens(&history, marker);
+                    on_update(AgentUpdate::ToolResultsPruned { count: pruned });
+                }
+            }
             if compact::should_compact(estimate, cfg)
                 && let Some(cut) = compact::find_cut(&history, cfg.keep_recent_tokens)
                 && let Ok(s) = compact::summarize(model, &history[..cut])
@@ -407,15 +499,9 @@ pub fn run_agent(
                         _ => None,
                     }),
                 };
-                let task = task.map(|t| {
-                    if t.len() > 4000 {
-                        let mut cut_text =
-                            t[..crate::core::text::floor_boundary(&t, 4000)].to_string();
-                        cut_text.push('…');
-                        cut_text
-                    } else {
-                        t
-                    }
+                let task = task.map(|mut t| {
+                    crate::core::text::truncate_ellipsis(&mut t, 4000);
+                    t
                 });
                 let tail = history.split_off(cut);
                 history.clear();
@@ -481,6 +567,7 @@ pub fn run_agent(
                 }
                 Ok(None) => {}
             }
+            let mut repeat_note: Option<String> = None;
             let out = if let Some(reason) = denied {
                 Err(reason)
             } else {
@@ -502,6 +589,7 @@ pub fn run_agent(
                         let mut log =
                             |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
                         let out = cleared.tool.execute(&call.arguments, &opts.cwd, &mut log);
+                        repeat_note = repeats.observe(&call.name, &call.arguments);
                         // tool_result fires once, after the match below, so
                         // denied and executed calls notify hooks identically
                         Ok(out)
@@ -525,10 +613,16 @@ pub fn run_agent(
                 summary: summarize(&out.content),
                 is_error: out.is_error,
             });
+            // the repeat reminder rides the result the model is about to
+            // read; the terminal summary above stays the tool's own output
+            let mut content = out.content;
+            if let Some(note) = repeat_note {
+                content.push_str(&note);
+            }
             history.push(Msg::ToolResult {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
-                content: out.content,
+                content,
                 is_error: out.is_error,
                 attachments: out.attachments,
             });
@@ -563,10 +657,7 @@ fn summarize(content: &str) -> String {
     for l in content.lines().filter(|l| !l.trim().is_empty()) {
         if lines.len() < SHOWN {
             let mut s = l.to_string();
-            if s.len() > 200 {
-                s.truncate(crate::core::text::floor_boundary(&s, 200));
-                s.push('…');
-            }
+            crate::core::text::truncate_ellipsis(&mut s, 200);
             lines.push(s);
         } else {
             more += 1;
@@ -677,6 +768,57 @@ mod tests {
         // nothing queued → pending untouched
         assert!(merge_steering(None, vec![]).is_none());
     }
+
+    #[test]
+    fn identical_repeats_remind_at_escalating_counts() {
+        let mut g = RepeatGuard {
+            last: None,
+            count: 0,
+        };
+        let args = json!({"command": "ls -la", "path": "."});
+        assert!(
+            g.observe("bash", &args).is_none(),
+            "the first call is not a repeat"
+        );
+        assert!(
+            g.observe("bash", &args).is_none(),
+            "the second is still quiet"
+        );
+        let note = g.observe("bash", &args).expect("the third repeat reminds");
+        assert!(note.contains("3rd identical bash call"), "{note}");
+        assert!(
+            g.observe("bash", &args).is_none(),
+            "quiet between thresholds"
+        );
+        let note = g.observe("bash", &args).expect("the fifth repeat reminds");
+        assert!(note.contains("5th identical bash call"), "{note}");
+        assert!(
+            note.contains("ls -la"),
+            "the detailed note names the repeated arguments: {note}"
+        );
+    }
+
+    #[test]
+    fn repeat_tracking_ignores_key_order_and_resets_on_change() {
+        let mut g = RepeatGuard {
+            last: None,
+            count: 0,
+        };
+        assert!(g.observe("bash", &json!({"a": 1, "b": 2})).is_none());
+        assert!(
+            g.observe("bash", &json!({"b": 2, "a": 1})).is_none(),
+            "same arguments in a different key order are the same call"
+        );
+        let note = g
+            .observe("bash", &json!({"a": 1, "b": 2}))
+            .expect("third identical call");
+        assert!(note.contains("3rd"));
+        // a different call restarts the streak from one
+        assert!(g.observe("bash", &json!({"a": 9})).is_none());
+        // a new user message clears the tracker entirely
+        g.reset();
+        assert!(g.observe("bash", &json!({"a": 9})).is_none());
+    }
     use super::*;
 
     #[test]
@@ -710,6 +852,32 @@ mod tests {
         assert_eq!(calls[0].arguments, json!({"a": 1}));
     }
 
+    /// Read one mock-server request: past the request head plus its
+    /// content-length body. Shared by the inline SSE servers below.
+    fn read_request(c: &mut std::net::TcpStream) {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            use std::io::Read;
+            if c.read(&mut byte).unwrap_or(0) == 0 {
+                break;
+            }
+            buf.push(byte[0]);
+            let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
+            if let Some(i) = head_end {
+                let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if buf.len() - i - 4 >= len {
+                    break;
+                }
+            }
+        }
+    }
+
     /// A mock SSE server that drops the first connection after one delta
     /// (no [DONE]) and completes the second: the agent loop must keep the
     /// partial answer as a real assistant message and finish the task on
@@ -725,28 +893,7 @@ mod tests {
                 let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut c = conn;
                 // read past the request head + body (content-length)
-                let mut buf = Vec::new();
-                let mut byte = [0u8; 1];
-                loop {
-                    use std::io::Read;
-                    if c.read(&mut byte).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    buf.push(byte[0]);
-                    let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
-                    if let Some(i) = head_end {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                        let len: usize = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                        let body_read = buf.len() - i - 4;
-                        if body_read >= len {
-                            break;
-                        }
-                    }
-                }
+                read_request(&mut c);
                 if n == 0 {
                     // one delta, then the connection dies mid-answer
                     let _ = c.write_all(
@@ -840,27 +987,7 @@ mod tests {
                     break;
                 }
                 let mut c = conn;
-                let mut buf = Vec::new();
-                let mut byte = [0u8; 1];
-                loop {
-                    use std::io::Read;
-                    if c.read(&mut byte).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    buf.push(byte[0]);
-                    let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
-                    if let Some(i) = head_end {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                        let len: usize = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                        if buf.len() - i - 4 >= len {
-                            break;
-                        }
-                    }
-                }
+                read_request(&mut c);
                 let _ = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 n += 1;
                 // each round reports 1000 input tokens and asks for a tool;
@@ -957,5 +1084,102 @@ mod tests {
         ) -> tools::ToolOutput {
             tools::ToolOutput::ok("echoed")
         }
+    }
+
+    /// Loop hygiene end to end: three identical echo calls in a row, and
+    /// the third result carries the advisory reminder; a plain answer then
+    /// ends the run normally.
+    #[test]
+    fn a_third_identical_tool_call_reminds_the_model_to_change_approach() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let server = std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut c = conn;
+                read_request(&mut c);
+                let body = if n < 3 {
+                    format!(
+                        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c{n}\",\"function\":{{\"name\":\"echo\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\n\
+                         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                         data: [DONE]\n\n"
+                    )
+                } else {
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string()
+                };
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                if n >= 3 {
+                    break;
+                }
+            }
+        });
+        use std::io::Write as _;
+
+        let model = crate::providers::ResolvedModel {
+            provider_name: "mock".into(),
+            kind: "openai-compat".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: Some("sk-x".into()),
+            model_id: "m".into(),
+            options: vec![],
+        };
+        let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
+        let opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 0,
+            token_budget: 0,
+            stream: true,
+            compact: None,
+            reasoning: None,
+            hooks: None,
+        };
+        let mut approval = approval::ApprovalConfig::default();
+        let outcome = run_agent(
+            &model,
+            &tools,
+            "go",
+            vec![],
+            vec![],
+            &opts,
+            &mut approval,
+            &mut |_| {},
+            &mut |_| ApprovalResponse::Deny,
+            &mut || vec![],
+        )
+        .expect("identical echoes are not a failure");
+        server.join().unwrap();
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "three tool rounds plus the plain answer"
+        );
+        assert_eq!(outcome.final_text, "done");
+        let results: Vec<&str> = outcome
+            .history
+            .iter()
+            .filter_map(|m| match m {
+                Msg::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 3);
+        assert!(!results[0].contains("[System]"));
+        assert!(!results[1].contains("[System]"));
+        assert!(
+            results[2].contains("3rd identical echo call"),
+            "the reminder rides the third result: {}",
+            results[2]
+        );
     }
 }

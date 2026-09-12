@@ -180,17 +180,24 @@ pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) ->
     out
 }
 
-/// Finish a spawned-command result: merge stderr under stdout, note the
-/// exit code, truncate and mark. Shared by the bash and script tools.
-pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32) -> ToolOutput {
-    let mut out = String::from_utf8_lossy(&stdout).into_owned();
-    let err_text = String::from_utf8_lossy(&stderr);
+/// Merge captured process output into one stream: stderr rides under
+/// stdout. Shared by the bash tool's normal and timed-out endings.
+fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut out = String::from_utf8_lossy(stdout).into_owned();
+    let err_text = String::from_utf8_lossy(stderr);
     if !err_text.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
         out.push_str(&err_text);
     }
+    out
+}
+
+/// Finish a spawned-command result: merge stderr under stdout, note the
+/// exit code, truncate and mark. Shared by the bash and script tools.
+pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32) -> ToolOutput {
+    let mut out = merge_process_output(&stdout, &stderr);
     if code != 0 {
         out.push_str(&format!("\nCommand exited with code {code}"));
     }
@@ -815,7 +822,22 @@ impl Tool for BashTool {
             return ToolOutput::err("command interrupted");
         }
         if outcome.timed_out {
-            return ToolOutput::err(format!("command timed out after {timeout}s: {command}"));
+            // the deadline and the output are independent facts: a command
+            // killed at the limit usually printed what explains it already,
+            // so the partial output rides the error instead of dying with
+            // the process
+            let mut out = truncate_marked(
+                &merge_process_output(&outcome.stdout, &outcome.stderr),
+                MAX_LINES,
+                MAX_BYTES,
+            );
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "Command timed out after {timeout}s (process killed): {command}"
+            ));
+            return ToolOutput::err(out);
         }
         finish_process_output(outcome.stdout, outcome.stderr, outcome.code)
     }
@@ -898,7 +920,7 @@ impl Tool for GrepTool {
                     let hi = (i + context).min(lines.len() - 1);
                     for (offset, line) in lines[lo..=hi].iter().enumerate() {
                         let mut l = line.to_string();
-                        truncate_in_place(&mut l, GREP_LINE_LIMIT);
+                        crate::core::text::truncate_ellipsis(&mut l, GREP_LINE_LIMIT);
                         matches.push(format!(
                             "{}:{}: {}",
                             display_rel(cwd, &path),
@@ -1314,13 +1336,6 @@ fn gather_files(root: &Path, glob: Option<&crate::gitignore::Pattern>) -> Vec<Pa
     files
 }
 
-fn truncate_in_place(s: &mut String, max: usize) {
-    if s.len() > max {
-        s.truncate(crate::core::text::floor_boundary(s, max));
-        s.push('…');
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1679,6 +1694,30 @@ mod tests {
         // truncated to the last MAX_LINES lines (plus the truncation marker)
         assert!(out.content.lines().count() < 20000);
         assert!(out.content.contains("20000"));
+    }
+
+    /// The deadline and the output are independent facts: a command killed
+    /// at its limit keeps the partial output it already printed, so the
+    /// model can read what explains the timeout instead of a bare verdict.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_command_keeps_its_partial_output() {
+        let out = BashTool.execute(
+            &json!({"command": "echo partial-before-deadline; sleep 30", "timeout": 1}),
+            Path::new("."),
+            &mut |_| {},
+        );
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("partial-before-deadline"),
+            "partial output must survive the kill: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("timed out after 1s"),
+            "{}",
+            out.content
+        );
     }
 
     #[test]
