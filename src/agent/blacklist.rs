@@ -21,7 +21,8 @@
 //!   word: `rm -rf /` denies `rm -rf /` but not `rm notes.txt`
 //! - globs `*`, `?`, `[...]` work within a word: `mkfs*`, `git push --force*`
 //!
-//! A hit is a hard deny: no approval prompt, the model receives the reason.
+//! A hit asks for approval — even in yolo; the command runs only after
+//! the user allows it (`a` spares the pattern for the session).
 
 use std::path::Path;
 

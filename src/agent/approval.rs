@@ -605,12 +605,19 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
         Some(_) => ApprovalResponse::Deny,
         // no raw terminal: fail closed with a hint
         None => {
-            eprintln!(
-                "Error: approval needed for {tier:?}-tier tool '{tool}' but no terminal is available. \
-                 Re-run with --yolo or an allow policy.",
-                tier = req.tier,
-                tool = req.tool,
-            );
+            if let Some(pattern) = req.pattern {
+                eprintln!(
+                    "Error: '{pattern}' is on the ask-list but no terminal is available to \
+                     approve it. Approve interactively, or remove the pattern from the blacklist file."
+                );
+            } else {
+                eprintln!(
+                    "Error: approval needed for {tier:?}-tier tool '{tool}' but no terminal is available. \
+                     Re-run with --yolo or an allow policy.",
+                    tier = req.tier,
+                    tool = req.tool,
+                );
+            }
             ApprovalResponse::Deny
         }
     }

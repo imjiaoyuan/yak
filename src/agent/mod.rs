@@ -723,7 +723,9 @@ fn gate_call<'a>(
     // prompt (highlighted there) and to the `a` answer, which spares the
     // pattern — not the whole bash tool — for the session
     let matched_pattern = bash_command.and_then(|cmd| approval::blacklist_hit(approval, cmd));
-    if ask && !extension_allowed {
+    // a blacklist ask prompts even when an extension said allow:
+    // gating every run of the pattern is the file's whole point
+    if ask && (!extension_allowed || matched_pattern.is_some()) {
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),
             tier: tool.tier(),
