@@ -75,6 +75,9 @@ pub struct ApprovalRequest<'a> {
     /// optional change preview (edit/write diffs) shown under the action line
     pub diff: Option<&'a str>,
     pub reason: &'a str,
+    /// the blacklist pattern the command matched, when it did — highlighted
+    /// in the prompt so the dangerous word is the first thing read
+    pub pattern: Option<&'a str>,
 }
 
 pub struct AgentOptions<'a> {
@@ -716,6 +719,10 @@ fn gate_call<'a>(
         };
     let preview = tool.preview(&call.arguments);
     let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
+    // a bash command that hit the ask-list carries its pattern down to the
+    // prompt (highlighted there) and to the `a` answer, which spares the
+    // pattern — not the whole bash tool — for the session
+    let matched_pattern = bash_command.and_then(|cmd| approval::blacklist_hit(approval, cmd));
     if ask && !extension_allowed {
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),
@@ -723,13 +730,18 @@ fn gate_call<'a>(
             preview: &preview,
             diff: diff.as_deref(),
             reason: &reason,
+            pattern: matched_pattern.as_deref(),
         });
         match answer {
             ApprovalResponse::Allow => {}
             ApprovalResponse::AllowSession => {
-                approval
-                    .tool_policies
-                    .insert(tool.name().to_string(), approval::Policy::Allow);
+                if let Some(pattern) = matched_pattern {
+                    approval.blacklist_session_allows.push(pattern);
+                } else {
+                    approval
+                        .tool_policies
+                        .insert(tool.name().to_string(), approval::Policy::Allow);
+                }
             }
             ApprovalResponse::Deny => {
                 return Err(format!("denied by user: {preview}"));

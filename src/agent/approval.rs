@@ -37,7 +37,7 @@ impl Tier {
 pub enum Mode {
     /// reads inside the working directory auto, everything else prompts
     AlwaysAsk,
-    /// everything auto; the user's blacklist still refuses commands outright
+    /// everything auto; blacklisted commands still prompt before running
     #[default]
     Yolo,
 }
@@ -82,9 +82,13 @@ impl Policy {
 pub struct ApprovalConfig {
     pub mode: Mode,
     pub tool_policies: HashMap<String, Policy>,
-    /// command blacklist (`~/.llm/blacklist` + `.llm/blacklist`); a hit
-    /// denies the bash call outright, ahead of the destructive list
+    /// command ask-list (`~/.llm/blacklist` + `.llm/blacklist`); a hit
+    /// forces the approval prompt in either mode, after the destructive
+    /// list
     pub blacklist: crate::agent::blacklist::Blacklist,
+    /// blacklist patterns approved with `a` this session: they skip the
+    /// ask until the process exits, never persisted
+    pub blacklist_session_allows: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,8 +101,9 @@ pub enum Decision {
     Deny(String),
 }
 
-/// Resolve whether a tool call may run. Precedence: explicit policy
-/// (deny/prompt/allow) > the hardcoded refusal list > the user's blacklist
+/// Resolve whether a tool call may run. Precedence: the hardcoded refusal
+/// list > the user's ask-list (always prompts, immune to allow policies) >
+/// explicit policy (deny/prompt/allow) > the mode's tier rules
 /// file > the mode's tier gate. The first two hold in every mode; explicit
 /// policies stay strongest in both directions.
 ///
@@ -107,6 +112,20 @@ pub enum Decision {
 /// only when every command it would start is on the read-only whitelist —
 /// writes, deletes, network fetches, interpreters and anything unrecognized
 /// ask. `bash_command` is the raw command line for exec-tier tools.
+/// The ask-list pattern a bash command hits, if any (`None` = no match or a
+/// `!` line exempted it).
+pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
+    let segments = split_compound(cmd);
+    let positions = segments
+        .iter()
+        .flat_map(|seg| command_positions(seg, 0))
+        .collect::<Vec<_>>();
+    match cfg.blacklist.evaluate(&segments, &positions) {
+        crate::agent::blacklist::Match::Deny(pattern) => Some(pattern),
+        _ => None,
+    }
+}
+
 pub fn resolve(
     name: &str,
     tier: Tier,
@@ -114,6 +133,26 @@ pub fn resolve(
     cfg: &ApprovalConfig,
     bash_command: Option<&str>,
 ) -> Decision {
+    // Shell commands face two file-independent layers, in either mode: the
+    // hardcoded refusals first (privilege escalation, filesystem and machine
+    // destruction, a fork bomb, a write into a device node — a refusal, not
+    // a prompt: no run makes these the right answer), then the user's
+    // ask-list, whose hit forces the approval prompt even in yolo unless a
+    // `!` line exempted the pattern or `a` approved it earlier this session.
+    let mut blacklist_ask: Option<String> = None;
+    if let Some(cmd) = bash_command
+        && let Some(pattern) = blacklist_hit(cfg, cmd)
+        && !cfg.blacklist_session_allows.iter().any(|a| a == &pattern)
+    {
+        blacklist_ask = Some(format!(
+            "command matches blacklist pattern '{pattern}' — approval required"
+        ));
+    }
+    if let (Tier::Exec, Some(cmd)) = (tier, bash_command) {
+        if let Some(reason) = forbidden_command(cmd) {
+            return Decision::Deny(reason);
+        }
+    }
     match cfg.tool_policies.get(name) {
         Some(Policy::Deny) => {
             return Decision::Deny(format!("tool '{name}' is denied by configuration"));
@@ -121,28 +160,13 @@ pub fn resolve(
         Some(Policy::Prompt) => {
             return Decision::Ask(format!("tool '{name}' is set to prompt"));
         }
-        Some(Policy::Allow) => return Decision::Auto,
+        // an allow policy cannot answer a blacklist ask: the file gates
+        // every run of the pattern, that is its point
+        Some(Policy::Allow) if blacklist_ask.is_none() => return Decision::Auto,
         _ => {}
     }
-    // Hard stops on shell commands, in either mode: the hardcoded core
-    // first (privilege escalation, filesystem and machine destruction, a
-    // fork bomb, a write into a device node), then the user's blacklist
-    // file, which only *adds* refusals on top. A refusal, not a prompt — no
-    // run makes these the right answer, and nothing here can be switched
-    // off by editing a file or passing a flag.
-    if let (Tier::Exec, Some(cmd)) = (tier, bash_command) {
-        if let Some(reason) = forbidden_command(cmd) {
-            return Decision::Deny(reason);
-        }
-        let segments = split_compound(cmd);
-        let positions = segments
-            .iter()
-            .flat_map(|seg| command_positions(seg, 0))
-            .collect::<Vec<_>>();
-        let hit = cfg.blacklist.denied(&segments, &positions);
-        if !hit.is_empty() {
-            return Decision::Deny(format!("command matches blacklist pattern '{hit}'"));
-        }
+    if let Some(reason) = blacklist_ask {
+        return Decision::Ask(reason);
     }
     if cfg.mode == Mode::Yolo {
         return Decision::Auto;
@@ -437,10 +461,10 @@ pub fn readonly_command(command: &str) -> bool {
 }
 
 /// The commands that must never run, in either mode, whatever any config key
-/// or blacklist file says: privilege escalation, filesystem creation and
+/// or ask-list file says: privilege escalation, filesystem creation and
 /// destruction, and machine-level control. Hardcoded on purpose — this is
-/// the core a user cannot switch off, unlike the blacklist file. The file
-/// only *adds* refusals on top of it.
+/// the core a user cannot switch off, unlike the ask-list file, whose hits
+/// prompt instead of refusing.
 const FORBIDDEN_COMMANDS: &[&str] = &[
     // privilege escalation
     "sudo",
@@ -553,12 +577,16 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
     // the same activity line the tool log prints (bold $, command in green)
     crate::agent::tools::print_action_line(verb, req.preview, req.diff);
     if !req.reason.is_empty() {
-        eprintln!(
-            "{}  {}{}",
-            crate::theme::err().dim,
-            req.reason,
-            crate::theme::err().reset
-        );
+        let p = crate::theme::err();
+        if let Some(pattern) = req.pattern {
+            // the matched ask-list pattern is the thing to read: bold on red
+            eprintln!(
+                "{}  blacklist hit:{} {}{}{pattern}{}{} — asks every time; a spares it for the session{}",
+                p.dim, p.reset, p.bold, p.red, p.reset, p.dim, p.reset
+            );
+        } else {
+            eprintln!("{}  {}{}", p.dim, req.reason, p.reset);
+        }
     }
     use crate::term::lineedit::{ApprovalKey, read_approval_key};
     eprint!(
@@ -597,6 +625,7 @@ mod tests {
             mode,
             tool_policies: policies.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             blacklist: crate::agent::blacklist::Blacklist::default(),
+            blacklist_session_allows: Vec::new(),
         }
     }
 
@@ -750,16 +779,76 @@ mod tests {
     }
 
     #[test]
-    fn the_blacklist_file_only_adds_refusals() {
+    #[test]
+    fn a_blacklisted_command_asks_even_in_yolo() {
         let mut c = cfg(Mode::Yolo, &[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\n!rm -rf ./build");
-        assert!(matches!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
-            Decision::Deny(_)
-        ));
+        // the hit is a prompt now, not a refusal
+        match resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")) {
+            Decision::Ask(reason) => {
+                assert!(reason.contains("'rm'"), "{reason}");
+            }
+            other => panic!("rm notes.txt must ask, got {other:?}"),
+        }
         // and the `!` line punches the hole the user asked for
         assert_eq!(
             resolve("bash", Tier::Exec, false, &c, Some("rm -rf ./build")),
+            Decision::Auto
+        );
+        // the ask survives an allow policy: gating every run is the point
+        let mut c = cfg(Mode::Yolo, &[("bash", Policy::Allow)]);
+        c.blacklist = crate::agent::blacklist::Blacklist::parse("rm");
+        assert!(matches!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
+            Decision::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn an_always_answer_spares_the_pattern_for_the_session() {
+        let mut c = cfg(Mode::Yolo, &[]);
+        c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\ngit push --force*");
+        c.blacklist_session_allows.push("rm".into());
+        assert_eq!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
+            Decision::Auto
+        );
+        // a pattern not yet approved still asks
+        assert!(matches!(
+            resolve(
+                "bash",
+                Tier::Exec,
+                false,
+                &c,
+                Some("git push --force origin")
+            ),
+            Decision::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_default_ask_list_gates_rm_and_force_pushes() {
+        let mut c = cfg(Mode::Yolo, &[]);
+        c.blacklist = crate::agent::blacklist::Blacklist::parse(
+            &crate::agent::blacklist::Blacklist::default_file(),
+        );
+        assert!(matches!(
+            resolve("bash", Tier::Exec, false, &c, Some("rm -rf ./build")),
+            Decision::Ask(_)
+        ));
+        assert!(matches!(
+            resolve(
+                "bash",
+                Tier::Exec,
+                false,
+                &c,
+                Some("git push --force origin main")
+            ),
+            Decision::Ask(_)
+        ));
+        // ordinary work runs free
+        assert_eq!(
+            resolve("bash", Tier::Exec, false, &c, Some("cargo test")),
             Decision::Auto
         );
     }

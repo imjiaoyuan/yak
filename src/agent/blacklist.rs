@@ -3,10 +3,12 @@
 //! Two homes, project winning by later lines: `.llm/blacklist` in the
 //! project (nearest walking up) and `~/.llm/blacklist` for the user.
 //!
-//! This file is **additive**. The commands that must never run — privilege
-//! escalation, filesystem/machine destruction — are hardcoded in
-//! `approval.rs` and cannot be switched off from here; this file is how you
-//! refuse *more* (`rm`, a deploy script, a repo-specific foot-gun).
+//! This file is an **ask-list**, not a refusal list. The commands that must
+//! never run — privilege escalation, filesystem/machine destruction — are
+//! hardcoded in `approval.rs` and cannot be switched off from here; a
+//! pattern matched here forces the approval prompt in either mode (yolo
+//! included), so `rm` or a force-push always waits for a keystroke. `!`
+//! re-allows a pattern; answering `a` spares it for the session.
 //!
 //! Semantics (deliberately simpler than gitignore — patterns match words,
 //! not paths):
@@ -30,6 +32,17 @@ pub struct Entry {
     pub pattern: String,
     /// `!` — re-allow (last match wins)
     pub allow: bool,
+}
+
+/// The outcome of matching one command line against the file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Match {
+    /// no line matched
+    None,
+    /// the last matching line is a deny: the command asks for approval
+    Deny(String),
+    /// the last matching line is a `!` re-allow: the pattern is exempt
+    Allow,
 }
 
 /// The compiled blacklist: entries in file order, user file first so
@@ -84,34 +97,33 @@ impl Blacklist {
         Blacklist { entries }
     }
 
-    /// The default file content written on first start: the syntax, written
-    /// out so the mechanism is discoverable, and nothing enforced. The
-    /// commands that must never run live in `approval.rs` and cannot be
-    /// turned off from here, so seeding them into this file would only
-    /// suggest an edit that has no effect.
+    /// The default file content written on first start: the two rules every
+    /// install should confirm interactively (`rm`, force-pushes) plus the
+    /// syntax, written out so the mechanism is discoverable. The commands
+    /// that must never run live in `approval.rs` and cannot be turned off
+    /// from here, which is why they are not seeded here.
     pub fn default_file() -> String {
         String::from(
-            "# llm command blacklist — one pattern per line\n\
+            "# llm command ask-list — one pattern per line\n\
              #\n\
-             # Add a line to refuse a command. Privilege escalation and\n\
-             # filesystem/machine destruction (sudo, mkfs, dd, shutdown, …)\n\
-             # are already refused by the program itself; this file is how\n\
-             # you refuse more.\n\
+             # A command matched here always asks for your approval before\n\
+             # running, even in yolo mode. The truly dangerous ones (sudo,\n\
+             # mkfs, dd, shutdown, rm -rf /, …) are refused by the program\n\
+             # itself and cannot be re-enabled; this file gates commands you\n\
+             # want to confirm, not ban.\n\
              #\n\
              # word pattern  : matches that command word anywhere in the line\n\
              # words pattern : matches the whole command segment\n\
              # globs: * ? [...] · ! re-allows (last match wins) · # comment\n\
-             # deleting this file resets it to these comments; an empty file\n\
-             # is the same, since the hardcoded refusals still apply\n\
+             # answer a at the prompt to spare a pattern for this session\n\
+             # deleting this file resets it to these two rules\n\
              #\n\
-             # examples — uncomment to use:\n\
-             # rm\n\
-             # git push --force*\n\
-             # !rm -rf ./build\n",
+             rm\n\
+             git push --force*\n",
         )
     }
 
-    /// Write the default file when the user home has none.
+    /// Seed the user's file with the two default rules when there is none.
     pub fn ensure_default() {
         let path = crate::core::config::user_dir().join("blacklist");
         if !path.exists() {
@@ -119,16 +131,15 @@ impl Blacklist {
         }
     }
 
-    /// True when the command line hits a deny pattern (and no later allow
-    /// pattern re-permits it). `positions` are the command words (already
-    /// expanded past wrappers and `shell -c`) and `segments` the raw
-    /// compound-command segments.
-    pub fn denied(&self, segments: &[String], positions: &[String]) -> String {
+    /// Match the command line against the file. `positions` are the command
+    /// words (already expanded past wrappers and `shell -c`) and `segments`
+    /// the raw compound-command segments.
+    pub fn evaluate(&self, segments: &[String], positions: &[String]) -> Match {
         let segs: Vec<String> = segments.iter().map(|s| s.to_lowercase()).collect();
         let words: Vec<String> = positions.iter().map(|s| s.to_lowercase()).collect();
         // last matching entry wins (gitignore semantics): scan all, keep
         // the newest hit — an `!` allow line later in the file re-permits
-        let mut hit = String::new();
+        let mut hit = Match::None;
         for entry in &self.entries {
             let matched = if entry.pattern.contains(char::is_whitespace) {
                 segs.iter().any(|s| self.matches(&entry.pattern, s))
@@ -137,9 +148,9 @@ impl Blacklist {
             };
             if matched {
                 hit = if entry.allow {
-                    String::new()
+                    Match::Allow
                 } else {
-                    entry.pattern.clone()
+                    Match::Deny(entry.pattern.clone())
                 };
             }
         }
@@ -165,21 +176,21 @@ mod tests {
     fn word_pattern_matches_any_command_position() {
         let b = bl("sudo\nrm");
         // both words hit; the later line (rm) wins — either deny is correct
-        assert!(
-            !b.denied(&["sudo rm -rf /".into()], &["sudo".into(), "rm".into()])
-                .is_empty()
-        );
+        assert!(matches!(
+            b.evaluate(&["sudo rm -rf /".into()], &["sudo".into(), "rm".into()]),
+            Match::Deny(_)
+        ));
         assert_eq!(
-            b.denied(
+            b.evaluate(
                 &["echo hi | sudo tee /etc/hosts".into()],
                 &["echo".into(), "sudo".into()]
             ),
-            "sudo"
+            Match::Deny("sudo".into())
         );
         // the word must be a command position, not an argument
         assert_eq!(
-            b.denied(&["grep rm notes.txt".into()], &["grep".into()]),
-            String::new()
+            b.evaluate(&["grep rm notes.txt".into()], &["grep".into()]),
+            Match::None
         );
     }
 
@@ -187,12 +198,12 @@ mod tests {
     fn segment_pattern_matches_the_whole_segment() {
         let b = bl("git push --force*");
         assert_eq!(
-            b.denied(&["git push --force origin main".into()], &["git".into()]),
-            "git push --force*"
+            b.evaluate(&["git push --force origin main".into()], &["git".into()]),
+            Match::Deny("git push --force*".into())
         );
         assert_eq!(
-            b.denied(&["git push origin".into()], &["git".into()]),
-            String::new()
+            b.evaluate(&["git push origin".into()], &["git".into()]),
+            Match::None
         );
     }
 
@@ -200,54 +211,61 @@ mod tests {
     fn allow_entry_beats_an_earlier_deny() {
         let b = bl("rm\n!rm -rf ./build");
         assert_eq!(
-            b.denied(&["rm -rf ./build".into()], &["rm".into()]),
-            String::new()
+            b.evaluate(&["rm -rf ./build".into()], &["rm".into()]),
+            Match::Allow
         );
-        assert_eq!(b.denied(&["rm -rf /".into()], &["rm".into()]), "rm");
+        assert_eq!(
+            b.evaluate(&["rm -rf /".into()], &["rm".into()]),
+            Match::Deny("rm".into())
+        );
     }
 
     #[test]
     fn globs_and_comments() {
         let b = bl("# comment\n\nmkfs*\n  shred  \n");
         assert_eq!(
-            b.denied(&["mkfs.ext4 /dev/sda".into()], &["mkfs.ext4".into()]),
-            "mkfs*"
+            b.evaluate(&["mkfs.ext4 /dev/sda".into()], &["mkfs.ext4".into()]),
+            Match::Deny("mkfs*".into())
         );
-        assert_eq!(b.denied(&["shred x".into()], &["shred".into()]), "shred");
-        assert_eq!(b.denied(&["ls".into()], &["ls".into()]), String::new());
+        assert_eq!(
+            b.evaluate(&["shred x".into()], &["shred".into()]),
+            Match::Deny("shred".into())
+        );
+        assert_eq!(b.evaluate(&["ls".into()], &["ls".into()]), Match::None);
         assert_eq!(b.entries.len(), 2);
     }
 
     #[test]
     fn case_insensitive() {
         let b = bl("SUDO");
-        assert_eq!(b.denied(&["sudo x".into()], &["sudo".into()]), "sudo");
+        assert_eq!(
+            b.evaluate(&["sudo x".into()], &["sudo".into()]),
+            Match::Deny("sudo".into())
+        );
     }
 
     #[test]
-    fn default_file_is_comments_only() {
-        // the seeded file documents the syntax and enforces nothing: the
-        // refusals that must always hold are hardcoded in approval.rs, so
-        // editing this file can only ever add to them
+    fn default_file_gates_rm_and_force_pushes() {
+        // the seeded rules are the two every install should confirm: any rm
+        // (the word, so rmdir stays free) and any force-push
         let b = Blacklist::parse(&Blacklist::default_file());
+        assert_eq!(b.entries.len(), 2, "rm and git push --force*");
+        assert_eq!(b.entries[0].pattern, "rm");
+        assert!(!b.entries[0].allow);
+        assert_eq!(b.entries[1].pattern, "git push --force*");
         assert!(
-            b.entries.is_empty(),
-            "the default file must enforce nothing"
-        );
-        assert!(
-            Blacklist::default_file().contains("# rm"),
-            "the syntax should be shown as a commented example"
+            Blacklist::default_file().contains("# deleting this file resets it to these two rules")
         );
         // a dangerous word as an *argument* is not a command position:
         // `init` must not catch `npm init` or `git init`
         let wild = bl("init");
         for (seg, words) in [("npm init -y", vec!["npm"]), ("git init", vec!["git"])] {
-            assert!(
-                wild.denied(
+            assert_eq!(
+                wild.evaluate(
                     &[seg.to_string()],
                     &words.iter().map(|w| w.to_string()).collect::<Vec<_>>()
-                )
-                .is_empty(),
+                ),
+                Match::None,
                 "{seg} must not be denied"
             );
         }
