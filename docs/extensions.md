@@ -3,8 +3,11 @@
 Extensions are the plugin system: anything the core skips, you build yourself as an executable
 dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or
 `/reload`. This page is the full reference; runnable examples live in
-[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, plus the
-`template.js`/`template.py` starter templates).
+[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, `repeat_guard.py` —
+a `tool_call` deny gate for stuck loops, plus the `template.js`/`template.py` starter templates).
+`websearch.ts` is a TypeScript twin of the python `websearch` (node >= 23.6 runs it directly
+through native type stripping; bun/deno also work) — install one of the two, not both: the
+host dedups extension entries by file stem.
 
 Extensions run with your full user permissions and inherit your environment. Only install or
 write code you would run yourself.

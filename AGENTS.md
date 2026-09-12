@@ -47,5 +47,7 @@ python .github/ci_repl.py target/debug/llm   # CI interactive REPL over a real p
   `.github/workflows/release.yml`.
 - Extensions are the plugin surface: the wire protocol and manifest reference is
   `docs/extensions.md`, runnable examples live in `examples/extensions/` (`wordcount`,
-  `websearch`, `todo` — a port of the reference todo.ts); refresh both when the host changes.
+  `websearch` and its TypeScript twin `websearch.ts` (node >= 23.6, or bun/deno),
+  `todo` — a port of the reference todo.ts — and `repeat_guard.py`, a `tool_call`
+  deny gate that breaks identical-call loops); refresh both when the host changes.
 - 

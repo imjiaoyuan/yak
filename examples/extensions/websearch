@@ -45,6 +45,19 @@ def reply(obj):
 def http_get(url, timeout=15):
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as r:
+        # refuse binary bodies (pdf/image/zip/...): decoded with errors="replace"
+        # they would feed the model mojibake — the built-in webfetch errors by
+        # content type for the same reason
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        major = ctype.split("/")[0]
+        if major in ("image", "audio", "video") or ctype in (
+            "application/pdf",
+            "application/octet-stream",
+            "application/zip",
+        ):
+            raise ValueError(
+                f"binary content ({ctype or 'unknown type'}) — fetch it with bash curl instead"
+            )
         return r.read(262144).decode("utf-8", "replace")
 
 
