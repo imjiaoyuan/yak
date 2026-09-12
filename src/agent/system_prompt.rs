@@ -54,6 +54,14 @@ pub fn build_system_prompt(
             Some(s) => strip_cwd_line(s),
             None => {
                 let date = crate::core::db::today();
+                let ext_dir = crate::core::config::user_dir()
+                    .join("extensions")
+                    .display()
+                    .to_string();
+                let skills_dir = crate::core::config::user_dir()
+                    .join("skills")
+                    .display()
+                    .to_string();
                 format!(
                     "You are llm agent, a terminal coding assistant. Lead with the outcome: act, \
                      verify, then answer concisely. Be efficient — use the fewest commands to get \
@@ -75,6 +83,16 @@ pub fn build_system_prompt(
                        when a targeted hunk will do, and avoid shell pipelines for edits.\n\
                      - Never revert unrelated changes you did not make; work around them.\n\
                      \n\
+                     Extending yourself\n\
+                     - You can add tools for yourself: write a script into {ext_dir} (or the \
+                       project's nearest .llm/extensions). A leading `# --- llm-tool: <name>` \
+                       comment header (`description:`, `args: name (type) desc`, \
+                       `interpreter: python3`) turns any script into a tool; an executable file \
+                       without the header speaking line-delimited JSON on stdio becomes a \
+                       resident extension with tools, commands and event hooks. New or changed \
+                       files are live from the next task — no restart, no /reload. A directory \
+                       with a SKILL.md under {skills_dir} (or the project's .llm/skills) \
+                       publishes a /skill:<name> command the same way.\n\
                      Final answer\n\
                      - Be concise and friendly; mirror the user's language and tone.\n\
                      - Reference files with paths and line numbers, not by dumping their contents.\n\

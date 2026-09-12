@@ -69,6 +69,100 @@ pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// The plugin-surface roots live-reload watches: every extension root
+/// ([`discover_dirs`]) and skill root (the same walk `skills::discover`
+/// takes), plus config.json (settings, disabled extensions, tool policies).
+pub fn fingerprint_roots(cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
+    let mut roots = discover_dirs(cwd);
+    roots.extend(crate::commands::pkg::skill_dirs(true));
+    roots.extend(crate::commands::pkg::skill_dirs(false));
+    let user = crate::core::config::user_dir();
+    roots.push(user.join(".agents/skills"));
+    roots.push(user.join("skills"));
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".agents/skills", true) {
+        roots.push(d);
+    }
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/skills", true) {
+        roots.push(d);
+    }
+    (roots, crate::core::config::config_path())
+}
+
+/// A cheap change probe over the plugin surfaces. The REPL snapshots this
+/// at startup and re-runs the /reload path at a task boundary whenever the
+/// value moves, so a file the agent (or the user) drops into an extensions
+/// or skills dir mid-session is live on the next task — the reference's
+/// reload-runtime without the manual step.
+pub fn plugin_fingerprint(cwd: &Path) -> u64 {
+    let (roots, config) = fingerprint_roots(cwd);
+    hash_roots(&roots, &config)
+}
+
+fn hash_roots(roots: &[PathBuf], config: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let stamp = |p: &Path| -> (u64, u64) {
+        match std::fs::metadata(p) {
+            Ok(m) => (
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                m.len(),
+            ),
+            Err(_) => (0, 0),
+        }
+    };
+    let mut h = DefaultHasher::new();
+    let mut roots: Vec<&PathBuf> = roots.iter().collect();
+    roots.sort();
+    for root in roots {
+        h.write(root.as_os_str().as_encoded_bytes());
+        let Ok(rd) = std::fs::read_dir(root) else {
+            h.write_u8(0); // absent root: a stable placeholder
+            continue;
+        };
+        // every entry of the root, and — skills live one level down — each
+        // subdirectory's immediate children; deeper trees stop mattering
+        let mut entries: Vec<(String, u64, u64, Vec<(String, u64)>)> = Vec::new();
+        for e in rd.flatten() {
+            let (m, len) = stamp(&e.path());
+            let mut children = Vec::new();
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && let Ok(sub) = std::fs::read_dir(e.path())
+            {
+                for c in sub.flatten() {
+                    let (cm, _) = stamp(&c.path());
+                    children.push((c.file_name().to_string_lossy().into_owned(), cm));
+                }
+                children.sort();
+            }
+            entries.push((
+                e.file_name().to_string_lossy().into_owned(),
+                m,
+                len,
+                children,
+            ));
+        }
+        entries.sort();
+        for (name, m, len, children) in entries {
+            h.write(name.as_bytes());
+            h.write_u64(m);
+            h.write_u64(len);
+            for (cn, cm) in children {
+                h.write(cn.as_bytes());
+                h.write_u64(cm);
+            }
+        }
+    }
+    let (cm, clen) = stamp(config);
+    h.write(config.as_os_str().as_encoded_bytes());
+    h.write_u64(cm);
+    h.write_u64(clen);
+    h.finish()
+}
+
 /// Discovered extension entries, split by form: resident executables
 /// (spawned once, speaking the protocol) and manifest script tools (one
 /// comment header on any script in any language; the host runs the
@@ -1206,6 +1300,49 @@ done
             .parse()
             .unwrap();
         assert!(n >= 2, "the script must have run twice, saw {n}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fingerprint_tracks_dropped_and_edited_files() {
+        let dir = std::env::temp_dir().join(format!("llm-fp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.json");
+        std::fs::write(&config, b"{}").unwrap();
+        let root = dir.join("extensions");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let h1 = hash_roots(&[root.clone()], &config);
+        assert_eq!(
+            h1,
+            hash_roots(&[root.clone()], &config),
+            "stable with no changes"
+        );
+
+        std::fs::write(root.join("tool.py"), b"# --- llm-tool: t\n").unwrap();
+        let h3 = hash_roots(&[root.clone()], &config);
+        assert_ne!(h3, h1, "a dropped file moves the fingerprint");
+
+        std::fs::write(root.join("tool.py"), b"# --- llm-tool: t2\n").unwrap();
+        let h4 = hash_roots(&[root.clone()], &config);
+        assert_ne!(h4, h3, "an edit moves it too");
+
+        // skills live one level down: a SKILL.md in a subdirectory counts
+        let sk = dir.join("skills");
+        std::fs::create_dir_all(sk.join("mine")).unwrap();
+        let h5 = hash_roots(&[root.clone(), sk.clone()], &config);
+        std::fs::write(sk.join("mine/SKILL.md"), b"x").unwrap();
+        assert_ne!(
+            hash_roots(&[root.clone(), sk], &config),
+            h5,
+            "a subdirectory file moves it"
+        );
+
+        std::fs::write(&config, b"{\"a\":1}").unwrap();
+        let h7 = hash_roots(&[root.clone()], &config);
+        std::fs::write(&config, b"{\"a\":1,\"b\":2}").unwrap();
+        assert_ne!(hash_roots(&[root], &config), h7, "a config edit moves it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
