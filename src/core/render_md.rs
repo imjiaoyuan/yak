@@ -219,6 +219,9 @@ fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
     }
 
     if let Some((marker_len, ordered)) = list_marker(t) {
+        // a paragraph line held for the setext lookahead belongs *before*
+        // this item: flushing it with `sep` alone would reorder the block
+        flush_pending(st, out);
         sep(st, out);
         let level = (1 + indent / 2).min(3);
         let lead = " ".repeat(4 * (level - 1));
@@ -324,8 +327,12 @@ fn is_setext(t: &str) -> bool {
 }
 
 fn is_hr(t: &str) -> bool {
-    let marks = t.chars().filter(|c| !c.is_whitespace()).count();
-    marks >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ' | '\t'))
+    let mut marks = t.chars().filter(|c| !c.is_whitespace());
+    let Some(first) = marks.next() else {
+        return false;
+    };
+    // commonmark wants three or more *matching* markers: `-*-` is prose
+    matches!(first, '-' | '*' | '_') && marks.clone().count() >= 2 && marks.all(|c| c == first)
 }
 
 /// Returns (marker length including trailing space, is ordered) when the
@@ -681,12 +688,23 @@ impl StyleStream {
                     self.end_row(out);
                     return;
                 }
-                // not a rule after all: resolve as inline
-                self.scan_inline(0, out, true);
+                // not a rule after all: resolve as inline. Replay trims the
+                // line's leading whitespace, so start at the first non-space
+                // char rather than at column zero.
+                let indent = self.line.len() - self.line.trim_start().len();
+                self.scan_inline(indent, out, true);
             }
             St::Classify => {
                 let d = self.decide_eol();
                 self.apply(d, out);
+                // an empty heading (`##` on its own) printed nothing yet, but
+                // replay emits its style codes: match that byte for byte
+                if !self.line_printed && !self.open.is_empty() {
+                    let codes = std::mem::take(&mut self.open);
+                    out.push_str(&codes);
+                    out.push_str(self.p.reset.as_str());
+                    self.line_printed = true;
+                }
                 if let St::Inline(at) = self.st {
                     self.scan_inline(at, out, true);
                 }
@@ -846,9 +864,17 @@ impl StyleStream {
                 } else if hashes > 6 {
                     Decision::Inline { at: i }
                 } else if t[hashes] == b' ' {
-                    Decision::Heading {
-                        level: hashes,
-                        at: i + hashes + 1,
+                    // replay trims the run after the hashes: start the content
+                    // there, and wait while only spaces have arrived so they
+                    // never stream as content
+                    let skip = t[hashes..].iter().take_while(|&&c| c == b' ').count();
+                    if skip == t.len() - hashes {
+                        Decision::Wait
+                    } else {
+                        Decision::Heading {
+                            level: hashes,
+                            at: i + hashes + skip,
+                        }
                     }
                 } else {
                     Decision::Inline { at: i }
@@ -858,7 +884,13 @@ impl StyleStream {
                 if t.len() == 1 {
                     Decision::Wait
                 } else if t[1] == b' ' {
-                    Decision::Quote { at: i + 2 }
+                    // replay trims the run after `>`, so start there
+                    let skip = t[1..].iter().take_while(|&&c| c == b' ').count();
+                    if skip + 1 == t.len() {
+                        Decision::Wait
+                    } else {
+                        Decision::Quote { at: i + 1 + skip }
+                    }
                 } else {
                     Decision::Quote { at: i + 1 }
                 }
@@ -875,9 +907,9 @@ impl StyleStream {
                     } else {
                         self.decide_list(i, t, 2)
                     }
-                } else if t[0] != b'+' && t[1] == t[0] && is_hr_so_far(t) {
-                    // `--`/`**`-shaped: an hr candidate (aborts to inline
-                    // as soon as a non-marker char arrives)
+                } else if t[0] != b'+' && is_hr_so_far(t) {
+                    // `--`/`**`/`-*-`-shaped: an hr candidate (aborts to
+                    // inline as soon as a non-marker char arrives)
                     Decision::Hr
                 } else {
                     Decision::Inline { at: i }
@@ -927,11 +959,37 @@ impl StyleStream {
         if t.is_empty() {
             return Decision::Inline { at: i };
         }
+        // trailing spaces never stream: replay trims them away
+        let end = t.iter().rposition(|&c| c != b' ').map_or(0, |p| p + 1);
+        let t = &t[..end];
+        if t.is_empty() {
+            return Decision::Inline { at: i };
+        }
+        // a bare run of `#` is an empty heading and a bare `>` an empty
+        // quote: replay renders both, so the live stream does too
+        let hashes = t.iter().take_while(|&&c| c == b'#').count();
+        if hashes == t.len() && hashes <= 6 {
+            return Decision::Heading {
+                level: hashes,
+                at: b.len(),
+            };
+        }
+        if t == b">" {
+            return Decision::Quote { at: b.len() };
+        }
         // a bare list marker is an empty item
         if matches!(t[0], b'-' | b'*' | b'+') && (t.len() == 1 || t[1] == b' ') {
+            if t.len() == 1 {
+                // a bare marker: its trailing spaces are the marker's own
+                return Decision::List {
+                    indent: i,
+                    at: b.len(),
+                };
+            }
+            let skip = t[2..].iter().take_while(|&&c| c == b' ').count();
             return Decision::List {
                 indent: i,
-                at: i + t.len().min(2),
+                at: i + 2 + skip,
             };
         }
         if t[0].is_ascii_digit() {
@@ -939,7 +997,7 @@ impl StyleStream {
             if t.len() == digits + 1 && t[digits] == b'.' {
                 return Decision::List {
                     indent: i,
-                    at: i + digits + 1,
+                    at: b.len(),
                 };
             }
         }
@@ -975,9 +1033,15 @@ impl StyleStream {
             }
             return Decision::Wait; // no ']' yet
         }
+        // replay trims the spaces between the marker and its content: wait
+        // until a real char shows up so the run cannot stream as content
+        let skip = t[marker_end..].iter().take_while(|&&c| c == b' ').count();
+        if skip == t.len() - marker_end {
+            return Decision::Wait;
+        }
         Decision::List {
             indent,
-            at: indent + marker_end,
+            at: indent + marker_end + skip,
         }
     }
 
@@ -1025,7 +1089,13 @@ impl StyleStream {
                         self.putc(' ', out);
                     }
                 }
-                let raw = self.line[indent..at].to_string();
+                // replay prints the marker with a single space before the
+                // content (`-   x` and `- x` look alike there), so collapse
+                // the run between marker and content here too
+                let mut raw = self.line[indent..at].to_string();
+                while raw.contains("  ") {
+                    raw = raw.replace("  ", " ");
+                }
                 let mut marker: String = {
                     let mut cs = raw.chars();
                     match cs.next() {
@@ -1056,7 +1126,9 @@ impl StyleStream {
     /// flushes literally and the scan continues (matching the one-shot
     /// resolver byte for byte).
     fn scan_inline(&mut self, at: usize, out: &mut String, eol: bool) {
-        let line = self.line.clone();
+        // the scan reads the line while `putc` mutates the stream: move it out
+        // for the duration instead of cloning it on every delta
+        let line = std::mem::take(&mut self.line);
         let p = self.p;
         let mut i = at;
         while i < line.len() {
@@ -1117,6 +1189,11 @@ impl StyleStream {
                 b'~' => {
                     let tilde_run = line[i..].chars().take_while(|&c| c == '~').count();
                     if tilde_run < 2 {
+                        // one `~` so far: a second may still arrive and open a
+                        // strike span, so hold it until the next char shows up
+                        if !eol && i + 1 >= line.len() {
+                            break;
+                        }
                         self.putc('~', out);
                         i += 1;
                         continue;
@@ -1197,6 +1274,7 @@ impl StyleStream {
         self.st = St::Inline(i);
         // broke early = a marker still holds its span
         self.marker_open = i < line.len();
+        self.line = line;
     }
 
     // ---- row emitter ----------------------------------------------------
@@ -1307,10 +1385,18 @@ enum Decision {
 
 /// The line so far consists only of thematic-break characters (spaces
 /// allowed between them): it may still be an HR.
+/// A thematic break in the making: two or more *matching* markers and
+/// nothing else. Two is enough here because the run may still grow (`**`
+/// becomes `***`); the decision aborts as soon as a real char arrives.
 fn is_hr_so_far(t: &[u8]) -> bool {
-    !t.is_empty()
+    let mut marks = t.iter().copied().filter(|&c| c != b' ');
+    let Some(first) = marks.next() else {
+        return false;
+    };
+    matches!(first, b'-' | b'_' | b'*')
+        && marks.clone().count() >= 1
+        && marks.all(|c| c == first)
         && t.iter().all(|&c| matches!(c, b'-' | b'_' | b'*' | b' '))
-        && t.iter().filter(|&&c| c != b' ').count() >= 2
 }
 
 // ---------------------------------------------------------------------------
@@ -2034,18 +2120,41 @@ mod tests {
         assert!(!chars.contains("\x1b[J"));
     }
 
+    /// The shapes a model actually answers in, streamed one char at a time
+    /// (the worst case for every hold decision) and replayed: both renderers
+    /// must produce the same bytes. Every rendering change must keep this
+    /// green — the markdown differential is where the streaming bugs live.
+    ///
+    /// Two shapes are deliberately absent because live and replay cannot
+    /// agree on them by construction:
+    ///   * runs of blank lines — the live stream has already printed each one
+    ///     (it never erases), replay collapses a run to a single blank;
+    ///   * setext underlines (`text` then `---`) — replay folds the pair into
+    ///     a heading, live has already emitted the paragraph line.
     #[test]
-    fn live_and_replay_agree_on_well_formed_markdown() {
-        // single-blank-separated documents: the streamed answer and the
-        // replayed transcript render byte-identically
-        let doc = "# 标题\n\n段落 `code` 与 **加粗**。\n\n- 甲\n- [x] 乙\n\n> 引用\n\n---\n\n```rust\nfn x() {}\n```\n";
-        assert_eq!(live(doc), render(doc));
-        // a span wider than the old byte bound must render the same way
-        // streamed as replayed (the cap bug: the asterisks stayed on screen)
-        let long =
-            "4. **只作用于 smooth frequency，没把低覆盖位点从 reads 面板剔除**（PDF 101-102）\n";
-        assert_eq!(live(long), render(long));
-        assert_eq!(live(doc), render(doc));
+    fn live_and_replay_agree_on_a_realistic_corpus() {
+        let docs = [
+            // headings, inline spans, lists, quote, rule, fence
+            "# 标题\n\n段落 `code` 与 **加粗**。\n\n- 甲\n- [x] 乙\n\n> 引用\n\n---\n\n```rust\nfn x() {}\n```\n",
+            // a chinese answer: nested and ordered items, an autolink, and a
+            // long emphasis span (the byte-vs-cell cap bug)
+            "## 结论\n\n4. **只作用于 smooth frequency，没把低覆盖位点从 reads 面板剔除**（PDF 101-102）\n   - 子项见 http://example.com/x\n5. 其余按 `min_calls` 处理\n",
+            // strike spans: a lone `~` must wait for its pair
+            "这是 ~~删除线~~ 与 ~~另一个~~ 和 ~单个波浪~\n",
+            // a quote continuing over two source lines
+            "> 第一行\n> 第二行\n\n正文\n",
+            // markers with their padding: extra spaces after `#`, `>`, `-`
+            "-  甲\n1.  乙\n\n##  标题\n\n>  补一句\n",
+            // a fence with an info string and a blank line inside
+            "```python\nprint(1)\n\nprint(2)\n```\n",
+            // a table row pair
+            "| a | b |\n| - | - |\n| 1 | 2 |\n",
+            // inline code, a link and an image-looking bracket
+            "见 `改哪里` 与 [链接](http://x) 以及 ![图片](img.png) 结束\n",
+        ];
+        for doc in docs {
+            assert_eq!(live(doc), render(doc), "live vs replay for {doc:?}");
+        }
     }
 
     #[test]
