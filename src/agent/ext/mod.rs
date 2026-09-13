@@ -546,6 +546,23 @@ impl Extensions {
             .collect()
     }
 
+    /// Every mounted plugin, for the banner: a resident extension's stem
+    /// (marked when it never connected) followed by each manifest script
+    /// tool's declared name — both live in the same registry, so both
+    /// belong in the one row.
+    pub fn plugin_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .exts
+            .iter()
+            .map(|ext| match &*lock(&ext.state) {
+                Ok(_) => ext.name.clone(),
+                Err(_) => format!("{} (failed)", ext.name),
+            })
+            .collect();
+        names.extend(self.script_tools.iter().map(|s| s.name.clone()));
+        names
+    }
+
     /// Listing for `/tools`: (name, target, tools, commands, reason).
     pub fn rows(&self) -> Vec<(String, String, usize, usize, String)> {
         self.exts

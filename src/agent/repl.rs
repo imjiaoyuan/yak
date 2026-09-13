@@ -21,7 +21,7 @@ pub fn repl(
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
 
-    print_banner(&session);
+    print_banner(&session, &skills);
     render_history(&session.seed);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
@@ -37,7 +37,7 @@ pub fn repl(
         }
         let p = crate::theme::err();
         let prompt = format!("{}>{} ", p.bold, p.reset);
-        let help = repl_help(&session);
+        let help = repl_help(&session, &skills);
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let cwd = session.cwd.display().to_string();
         let command_names = session.extensions.command_names();
@@ -301,7 +301,7 @@ fn abbrev_home(path: &str) -> String {
 }
 
 /// Full help page shown on ctrl+o.
-fn repl_help(session: &Session) -> String {
+fn repl_help(session: &Session, skills: &[crate::agent::skills::SkillDef]) -> String {
     let p = crate::theme::err();
     let mut h = format!(
         "{}keys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
@@ -309,7 +309,7 @@ fn repl_help(session: &Session) -> String {
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
     h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /yolo /reload /exit · !cmd runs shell · /help lists all");
-    h.push_str(&info_rows(session, "    "));
+    h.push_str(&info_rows(session, skills, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", session.model.qualified_id()),
         None => session.model.qualified_id(),
@@ -319,9 +319,13 @@ fn repl_help(session: &Session) -> String {
     h
 }
 
+/// How many names a banner row lists before it says `+N more`: the rows
+/// stay one line wide on a normal terminal.
+const NAME_CAP: usize = 6;
+
 /// The context/session rows shared by the banner and the ctrl+o page.
 /// `pad` widens the label to match the surrounding layout.
-fn info_rows(session: &Session, pad: &str) -> String {
+fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: &str) -> String {
     let mut rows = String::new();
     // project instructions directly in the working directory, file name only
     let context = ["CLAUDE.md", "AGENTS.md"]
@@ -336,7 +340,32 @@ fn info_rows(session: &Session, pad: &str) -> String {
     if let Some(cid) = &session.conversation_id {
         rows.push_str(&format!("session{pad}{cid}\n"));
     }
+    // the plugin surface, the reference-style: what is actually mounted right now, so a
+    // skill or extension that never loaded is visible here and not only in
+    // /help and /tools (a label is 7 cells, matching `session`)
+    let plugins = session.extensions.plugin_names();
+    let skills: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    rows.push_str(&name_row("plugins", pad, &plugins));
+    rows.push_str(&name_row("skills ", pad, &skills));
     rows
+}
+
+/// One `names` row, or nothing at all when the list is empty (a bare banner
+/// stays bare for someone who mounts neither).
+fn name_row(label: &str, pad: &str, names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut list = names
+        .iter()
+        .take(NAME_CAP)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > NAME_CAP {
+        list.push_str(&format!(" +{} more", names.len() - NAME_CAP));
+    }
+    format!("{label}{pad}{list}\n")
 }
 
 const SLASH_COMMANDS: &[&str] = &[
@@ -441,7 +470,7 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
-fn print_banner(session: &Session) {
+fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
     let thinking = session
         .thinking
         .as_deref()
@@ -459,7 +488,7 @@ fn print_banner(session: &Session) {
         t = thinking,
         a = session.approval.mode.label()
     );
-    eprint!("{}{}{}", p.dim, info_rows(session, " "), p.reset);
+    eprint!("{}{}{}", p.dim, info_rows(session, skills, " "), p.reset);
 }
 
 /// Replay the loaded conversation on resume, so the user actually sees what
@@ -837,7 +866,7 @@ fn repl_command(
                 &session.cwd,
                 &settings.disabled_skills,
             );
-            print_banner(session);
+            print_banner(session, skills);
         }
         "/status" => {
             let p = crate::theme::err();
@@ -1016,6 +1045,27 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_row_lists_the_plugin_surface_and_caps_it() {
+        // neither surface mounted: no row at all
+        assert_eq!(name_row("skills ", " ", &[]), "");
+        // the labels stay 7 cells wide, so the banner is one column
+        assert_eq!(
+            name_row("skills ", " ", &["demo".into(), "probe".into()]),
+            "skills  demo, probe\n"
+        );
+        assert_eq!(
+            name_row("plugins", "    ", &[("tool (failed)").into()]),
+            "plugins    tool (failed)\n"
+        );
+        // more than the cap: the extra count, never a second line
+        let many: Vec<String> = (0..NAME_CAP + 3).map(|i| format!("s{i}")).collect();
+        assert_eq!(
+            name_row("skills ", " ", &many),
+            "skills  s0, s1, s2, s3, s4, s5 +3 more\n"
+        );
+    }
 
     #[test]
     fn slash_skill_prompt_carries_the_skill_dir() {
