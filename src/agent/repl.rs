@@ -408,6 +408,9 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     session.system = system;
     session.conversation_id = Some(cid);
     render_history(&session.seed);
+    // the replay above shows the thread as stored; the projection happens
+    // before the next request, where it belongs
+    session.prune_seed_to_fit();
     Ok(())
 }
 

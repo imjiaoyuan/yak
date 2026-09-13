@@ -21,7 +21,7 @@ irm https://jiaoyuan.org/llm/install.ps1 | iex
 
 It lands in `%USERPROFILE%\.local\bin`, no admin needed, and appends that directory to the user
 `Path`. Re-running either line is the updater: it checks the latest GitHub release, prints
-`updating 0.1.11 -> 0.1.12` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
+`updating 0.1.12 -> 0.2.0` when it moves and leaves an unchanged version alone. `LLM_FORCE=1`
 reinstalls anyway; `LLM_VERSION` pins a release tag, `LLM_REPO` installs from a fork and
 `LLM_INSTALL_DIR` picks a different directory. On Linux the static musl build is used, so the same
 binary runs on any distribution; prebuilt targets today are x86_64 and aarch64 Linux, x86_64 and
@@ -115,7 +115,8 @@ normal `bash` gate, so approval and the blacklist apply to it.
 Under context pressure an oversized tool result is cut to its head and tail; the full text is
 archived under `~/.llm/observations/` and the marker names its id, so `recall` pages the cut middle
 back (`id`, optional `offset` — the reply's `next_offset` continues) instead of re-running the
-command that produced it.
+command that produced it. Resuming a thread that no longer fits repeats the cut before the first
+request, silently, and the archive is keyed by the result's content, so nothing piles up.
 
 ### The interactive session
 

@@ -152,6 +152,9 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let cwd_str = cwd.display().to_string();
     let mut conversation_id: Option<String> = None;
     let mut seed: Vec<Msg> = Vec::new();
+    // a continued thread is projected down once its Session exists (the
+    // window comes from the resolved model's settings)
+    let mut resumed = false;
     let mut conv_system: Option<String> = None;
     let mut conv_model: Option<String> = None;
     let store = open_store(args)?;
@@ -172,6 +175,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             .ok()
             .and_then(|turns| turns.last().map(|t| t.model.clone()));
         conversation_id = Some(cid);
+        resumed = true;
     } else if args.flag(&["continue"])
         && let Some(store) = store.as_ref()
     {
@@ -199,6 +203,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             conv_system = system;
             conv_model = turns.last().map(|t| t.model.clone());
             conversation_id = Some(cid);
+            resumed = true;
         }
     }
 
@@ -340,6 +345,12 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         last_usage: None,
         json: args.flag(&["json"]),
     };
+
+    // a continued thread may already exceed its window: project it down
+    // before the first request so the first turn does not have to
+    if resumed {
+        session.prune_seed_to_fit();
+    }
 
     // built-ins plus plugin tools, all through the shared rebuild path;
     // --tools filters the combined registry by name

@@ -501,11 +501,15 @@ pub fn run_agent(
             if compact::should_compact(estimate, cfg) {
                 // pressure confirmed: prune oversized tool results first —
                 // it costs no model call and may relieve enough to skip
-                // summarization entirely
+                // summarization entirely. The usage marker covers the
+                // un-pruned prefix, so re-estimating over it would report the
+                // identical number; subtract what the projection frees.
                 let pruned = compact::prune_tool_results(&mut history, &compact::observation_dir());
-                if pruned > 0 {
-                    estimate = compact::estimate_tokens(&history, marker);
-                    on_update(AgentUpdate::ToolResultsPruned { count: pruned });
+                if pruned.count > 0 {
+                    estimate = estimate.saturating_sub(pruned.freed_tokens);
+                    on_update(AgentUpdate::ToolResultsPruned {
+                        count: pruned.count,
+                    });
                 }
             }
             if compact::should_compact(estimate, cfg)

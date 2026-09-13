@@ -53,6 +53,26 @@ impl Session {
         "agent"
     }
 
+    /// A resumed thread can already be over the window. Project its
+    /// oversized tool results down before the first request — the very cut
+    /// the loop's own prune would make at the first turn end, only silent, so
+    /// resuming a big thread does not repeat that notice turn after turn. The
+    /// archive is content-addressed, so this rewrites nothing it did last
+    /// time, and a thread that fits costs one estimate.
+    pub fn prune_seed_to_fit(&mut self) {
+        self.prune_seed_to_fit_at(&crate::agent::compact::observation_dir());
+    }
+
+    fn prune_seed_to_fit_at(&mut self, archive_dir: &std::path::Path) {
+        if self.seed.is_empty() {
+            return;
+        }
+        let estimate = crate::agent::compact::estimate_tokens(&self.seed, None);
+        if crate::agent::compact::should_compact(estimate, &self.compact) {
+            crate::agent::compact::prune_tool_results(&mut self.seed, archive_dir);
+        }
+    }
+
     /// Reset the in-memory session: drop history, forget the conversation id
     /// and token counters. The stored log is untouched.
     pub fn clear(&mut self) {
@@ -247,9 +267,12 @@ impl Session {
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
                     let s = if count == 1 { "" } else { "s" };
+                    let dir = crate::agent::compact::observation_dir();
                     eprintln!(
-                        "{}pruned {count} oversized tool result{s} from context (full text stays in the session log){}",
-                        p.dim, p.reset
+                        "{}pruned {count} oversized tool result{s} from context (full text archived under {}){}",
+                        p.dim,
+                        dir.display(),
+                        p.reset
                     );
                     view.borrow_mut().resume_wait();
                 }
@@ -761,6 +784,109 @@ pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session with a tiny window, so a single stored result is over.
+    fn tight_session(seed: Vec<Msg>) -> Session {
+        Session {
+            compact: CompactConfig {
+                context_window: 4_000,
+                reserve_tokens: 100,
+                keep_recent_tokens: 100,
+            },
+            model: crate::providers::ResolvedModel {
+                provider_name: "mock".into(),
+                kind: "openai-compat".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                api_key: None,
+                model_id: "m".into(),
+                options: vec![],
+            },
+            tools: Vec::new(),
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 4,
+            token_budget: 0,
+            stream: true,
+            no_session: true,
+            store: None,
+            approval: crate::agent::approval::ApprovalConfig::default(),
+            conversation_id: None,
+            seed,
+            thinking: None,
+            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            extensions: crate::agent::ext::Extensions::connect(std::path::Path::new(
+                "/nonexistent",
+            )),
+            tokens: (0, 0),
+            tokens_cached: 0,
+            last_usage: None,
+            json: false,
+        }
+    }
+
+    /// Resuming a thread that no longer fits projects its oversized results
+    /// down once, before the first request — the loop must not have to cut
+    /// them again on the first turn end (and say so every turn).
+    #[test]
+    fn a_resumed_seed_over_the_window_is_projected_down_once() {
+        let dir = std::env::temp_dir().join(format!("llm-seed-prune-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = "z".repeat(40_000);
+        let mut session = tight_session(vec![
+            Msg::user("read the log"),
+            Msg::tool_result("1", "read", big.clone()),
+        ]);
+        session.prune_seed_to_fit_at(&dir);
+        let content = match &session.seed[1] {
+            Msg::ToolResult { content, .. } => content.clone(),
+            _ => panic!("expected the tool result"),
+        };
+        assert!(
+            content.contains("chars of the middle were cut"),
+            "{content}"
+        );
+        assert!(
+            content.starts_with(&"z".repeat(64)),
+            "the head of the result is kept in context"
+        );
+        // the untouched original is on disk under the id the marker names
+        let id = content
+            .split("observation ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("marker carries an observation id")
+            .to_string();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(format!("{id}.txt"))).unwrap(),
+            big
+        );
+        // already-projected and under the window: a second pass changes
+        // nothing at all, so no new file either
+        let before = format!("{:?}", session.seed);
+        session.prune_seed_to_fit_at(&dir);
+        assert_eq!(format!("{:?}", session.seed), before);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    /// A thread that fits is left exactly as loaded — the projection is a
+    /// pressure measure, not a property of every resume.
+    #[test]
+    fn a_resumed_seed_under_the_window_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("llm-seed-keep-{}", crate::core::db::ulid()));
+        let seed = vec![
+            Msg::user("read the log"),
+            Msg::tool_result("1", "read", "q".repeat(40_000)),
+        ];
+        let mut session = tight_session(seed.clone());
+        session.compact = CompactConfig {
+            context_window: 128_000,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 32_000,
+        };
+        session.prune_seed_to_fit_at(&dir);
+        assert_eq!(session.seed, seed);
+        assert!(!dir.exists(), "nothing archived when nothing was cut");
+    }
 
     /// A round that failed late (stream drop after tool rounds) must still
     /// reach the thread file: `/resume` sees the work either way.

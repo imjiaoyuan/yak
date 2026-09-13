@@ -275,6 +275,72 @@ pub fn observation_dir() -> PathBuf {
     crate::core::config::user_dir().join("observations")
 }
 
+/// Archive key for a pruned result, derived from its content rather than
+/// minted per cut. Pruning is part of the load path too (a resumed thread
+/// that no longer fits is projected down again), so the same bytes must land
+/// in the same file: re-pruning rewrites nothing and no two copies of one
+/// result pile up. Not an id or an RNG — a 64-bit content fingerprint, which
+/// is all `recall` needs to find the file back.
+fn content_id(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a
+    for b in text.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Project one over-budget tool result down to head + marker + tail,
+/// archiving the whole original under its content id. `None` when the result
+/// fits (or the archive cannot be written: a marker pointing at nothing
+/// would be worse than the full text). Returns the projected text and the
+/// tokens it keeps out of the next request.
+fn prune_one(content: &str, archive_dir: &Path) -> Option<(String, u64)> {
+    let total = content.chars().count();
+    if total <= PRUNE_THRESHOLD_CHARS {
+        return None;
+    }
+    let id = content_id(content);
+    let path = archive_dir.join(format!("{id}.txt"));
+    if !path.exists()
+        && (std::fs::create_dir_all(archive_dir).is_err()
+            || std::fs::write(&path, content).is_err())
+    {
+        return None;
+    }
+    // char-indexed cuts: byte offsets would split CJK text mid-codepoint
+    let head_end = content
+        .char_indices()
+        .nth(PRUNE_HEAD_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    let tail_start = content
+        .char_indices()
+        .nth_back(PRUNE_TAIL_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let head = &content[..head_end];
+    let tail = &content[tail_start..];
+    let dropped = total - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
+    let projected = format!(
+        "{head}\n[... {dropped} chars of the middle were cut to fit the context window; \
+         the full result is archived as observation {id} — call recall with \
+         id=\"{id}\" and offset={PRUNE_HEAD_CHARS} to page the missing middle back, or \
+         re-read the file if that is cheaper ...]\n{tail}"
+    );
+    let freed = text_tokens(content).saturating_sub(text_tokens(&projected));
+    Some((projected, freed))
+}
+
+/// What one pruning pass did: how many results were projected down, and the
+/// tokens that frees in the next request (the provider usage figure the
+/// estimate rests on still covers the un-pruned prefix).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PrunedResults {
+    pub count: usize,
+    pub freed_tokens: u64,
+}
+
 /// Resolve an observation id to its archive file. The id comes from the
 /// model (a marker in the transcript), so anything that is not a plain
 /// alphanumeric token — a `/`, a `..`, an empty string — is not an id and
@@ -286,58 +352,34 @@ pub fn observation_path(dir: &Path, id: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{id}.txt")))
 }
 
-/// Replace over-budget tool-result text with head + marker + tail; returns
-/// the number of results pruned. Runs only once compaction pressure is
-/// confirmed, before the summarizer picks its cut — it costs no model call
-/// and may relieve enough to skip summarization entirely.
+/// Replace over-budget tool-result text with head + marker + tail. Runs only
+/// once compaction pressure is confirmed, before the summarizer picks its
+/// cut — it costs no model call and may relieve enough to skip
+/// summarization entirely (the caller subtracts `freed_tokens` to see that).
 ///
 /// The cut middle is not lost: the full original is archived under
 /// `archive_dir` and the marker carries its observation id, so the model can
-/// `recall` the exact bytes back instead of re-running the command. The
-/// projected view is what changes; the thread file still keeps each round's
-/// original text.
+/// `recall` the exact bytes back instead of re-running the command.
 ///
 /// Fail open per result: if the archive cannot be written, that result keeps
 /// its full text rather than leave a marker pointing at nothing.
-pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> usize {
-    let mut pruned = 0;
+pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResults {
+    let mut out = PrunedResults {
+        count: 0,
+        freed_tokens: 0,
+    };
     for msg in history.iter_mut() {
         let Msg::ToolResult { content, .. } = msg else {
             continue;
         };
-        let total = content.chars().count();
-        if total <= PRUNE_THRESHOLD_CHARS {
+        let Some((projected, freed)) = prune_one(content, archive_dir) else {
             continue;
-        }
-        let id = crate::core::db::ulid();
-        if std::fs::create_dir_all(archive_dir).is_err()
-            || std::fs::write(archive_dir.join(format!("{id}.txt")), &*content).is_err()
-        {
-            continue;
-        }
-        // char-indexed cuts: byte offsets would split CJK text mid-codepoint
-        let head_end = content
-            .char_indices()
-            .nth(PRUNE_HEAD_CHARS)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let tail_start = content
-            .char_indices()
-            .nth_back(PRUNE_TAIL_CHARS)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let head = &content[..head_end];
-        let tail = &content[tail_start..];
-        let dropped = total - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
-        *content = format!(
-            "{head}\n[... {dropped} chars of the middle were cut to fit the context window; \
-             the full result is archived as observation {id} — call recall with \
-             id=\"{id}\" and offset={PRUNE_HEAD_CHARS} to page the missing middle back, or \
-             re-read the file if that is cheaper ...]\n{tail}"
-        );
-        pruned += 1;
+        };
+        *content = projected;
+        out.count += 1;
+        out.freed_tokens += freed;
     }
-    pruned
+    out
 }
 
 #[cfg(test)]
@@ -554,7 +596,9 @@ mod tests {
             Msg::tool_result("2", "bash", "small"),
         ];
         let dir = obs_dir();
-        assert_eq!(prune_tool_results(&mut history, &dir), 1);
+        let before = estimate_tokens(&history, None);
+        let pruned = prune_tool_results(&mut history, &dir);
+        assert_eq!(pruned.count, 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
             _ => unreachable!(),
@@ -577,8 +621,15 @@ mod tests {
             archived, original,
             "the archive holds the untouched original"
         );
+        // pruning tells the caller what it frees, so a pressure check that
+        // rests on the provider's usage figure (which still covers the
+        // un-pruned prefix) can see the relief
+        let after = estimate_tokens(&history, None);
+        assert_eq!(before - after, pruned.freed_tokens);
+        assert!(pruned.freed_tokens > 3_000, "{}", pruned.freed_tokens);
         // a pruned result is under threshold: the second pass is a no-op
-        assert_eq!(prune_tool_results(&mut history, &dir), 0);
+        let again = prune_tool_results(&mut history, &dir);
+        assert_eq!((again.count, again.freed_tokens), (0, 0));
         // small results are untouched
         match &history[1] {
             Msg::ToolResult { content, .. } => assert_eq!(content, "small"),
@@ -602,11 +653,42 @@ mod tests {
             std::env::temp_dir().join(format!("llm-obs-file-{}", crate::core::db::ulid()));
         std::fs::write(&blocker, "not a directory").unwrap();
         let blocked = blocker.join("observations");
-        assert_eq!(prune_tool_results(&mut history, &blocked), 0);
+        assert_eq!(prune_tool_results(&mut history, &blocked).count, 0);
         match &history[0] {
             Msg::ToolResult { content, .. } => assert_eq!(content.chars().count(), 20_000),
             _ => unreachable!(),
         }
+    }
+
+    /// The archive is keyed by content, so pruning the same bytes twice (one
+    /// thread resumed under pressure over and over) touches one file and the
+    /// marker stays the same.
+    #[test]
+    fn the_archive_is_content_addressed() {
+        let dir = obs_dir();
+        let big = Msg::tool_result("1", "read", "y".repeat(30_000));
+        let mut first = vec![big.clone()];
+        prune_tool_results(&mut first, &dir);
+        let id1 = match &first[0] {
+            Msg::ToolResult { content, .. } => {
+                observation_id_from_marker(content).expect("marker id")
+            }
+            _ => unreachable!(),
+        };
+        // a second, independent view of the same result (a re-read thread):
+        // same archive, same id, no second file
+        let mut second = vec![big];
+        prune_tool_results(&mut second, &dir);
+        assert_eq!(first, second, "identical input, identical projection");
+        let files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            files,
+            vec![format!("{id1}.txt")],
+            "one file per distinct content"
+        );
     }
 
     #[test]
@@ -623,7 +705,7 @@ mod tests {
     fn pruning_cuts_on_codepoint_boundaries() {
         // byte-indexed slicing would split a CJK char mid-codepoint
         let mut history = vec![Msg::tool_result("1", "read", "中".repeat(10_000))];
-        assert_eq!(prune_tool_results(&mut history, &obs_dir()), 1);
+        assert_eq!(prune_tool_results(&mut history, &obs_dir()).count, 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
             _ => unreachable!(),
