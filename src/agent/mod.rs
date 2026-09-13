@@ -53,7 +53,8 @@ pub enum AgentUpdate {
         error: String,
     },
     /// oversized tool results were replaced by head+marker+tail views to
-    /// relieve context pressure (the full text stays in the session log)
+    /// relieve context pressure (the full text stays in the session log and
+    /// is archived for the `recall` tool under its placeholder's id)
     ToolResultsPruned {
         count: usize,
     },
@@ -479,7 +480,7 @@ pub fn run_agent(
                 // pressure confirmed: prune oversized tool results first —
                 // it costs no model call and may relieve enough to skip
                 // summarization entirely
-                let pruned = compact::prune_tool_results(&mut history);
+                let pruned = compact::prune_tool_results(&mut history, &compact::observation_dir());
                 if pruned > 0 {
                     estimate = compact::estimate_tokens(&history, marker);
                     on_update(AgentUpdate::ToolResultsPruned { count: pruned });
@@ -603,15 +604,16 @@ pub fn run_agent(
                 Err(denied) => tools::ToolOutput::err(denied),
                 Ok(out) => out,
             };
-            let _ = fire(
-                opts.hooks,
-                "tool_result",
-                json!({
-                    "tool": call.name,
-                    "summary": summarize(&out.content),
-                    "is_error": out.is_error,
-                }),
-            );
+            // action fusion: an edit/write may fuse its follow-up validation
+            // command into the same result, which removes the extra model
+            // round-trip (the command still passes the normal bash gate, so
+            // approval and the blacklist apply to it)
+            let out = fuse_then_run(out, &call, tools, &opts.cwd, approval, on_approval);
+            // extensions may replace the model-visible result (the enabler for
+            // reducer/observation plugins — see `docs/extensions.md`); the
+            // rewrite is re-capped and fail-open, so a broken plugin costs its
+            // own rewrite and never the tool's result
+            let out = rewrite_tool_result(out, opts.hooks, &call);
             on_update(AgentUpdate::ToolEnd {
                 summary: summarize(&out.content),
                 is_error: out.is_error,
@@ -672,6 +674,83 @@ fn summarize(content: &str) -> String {
         last.push_str(&format!(" … +{more} lines"));
     }
     lines.join("\n")
+}
+
+/// Let a `tool_result` subscriber replace the model-visible tool result
+/// before it enters the transcript. The event carries the full content (the
+/// opt-in), the replacement is re-capped like any tool output so a bad
+/// extension cannot flood the context, and every failure mode — no reply,
+/// timeout, a dead process — leaves the tool's own result untouched.
+fn rewrite_tool_result(
+    mut out: tools::ToolOutput,
+    hooks: Option<&crate::agent::ext::Extensions>,
+    call: &ToolCall,
+) -> tools::ToolOutput {
+    let Some(host) = hooks else {
+        return out;
+    };
+    if !host.subscribes("tool_result") {
+        return out;
+    }
+    let summary = summarize(&out.content);
+    let params = json!({
+        "tool": call.name,
+        "args": call.arguments.clone(),
+        "tool_call_id": call.id,
+        "summary": summary,
+        "is_error": out.is_error,
+        "content": out.content.clone(),
+    });
+    if let Some(replacement) = host.rewrite_tool_result(&params) {
+        out.content = tools::truncate_marked(&replacement, tools::MAX_LINES, tools::MAX_BYTES);
+    }
+    out
+}
+
+/// Action fusion: fold an `edit`/`write` call's optional `then_run` command
+/// into its result. The model's edit-then-validate pattern is one intent, so
+/// running the follow-up here saves a whole model round-trip; the command is
+/// executed as an ordinary `bash` call (same lookup, approval and blacklist),
+/// and a failure is reported in the text without turning the applied edit
+/// into an error.
+fn fuse_then_run(
+    mut out: tools::ToolOutput,
+    call: &ToolCall,
+    tools: &[Box<dyn tools::Tool>],
+    cwd: &std::path::Path,
+    approval: &mut approval::ApprovalConfig,
+    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+) -> tools::ToolOutput {
+    if out.is_error || !matches!(call.name.as_str(), "edit" | "write") {
+        return out;
+    }
+    let Some(command) = call
+        .arguments
+        .get("then_run")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+    else {
+        return out;
+    };
+    let bash = ToolCall {
+        id: format!("{}__then_run", call.id),
+        name: "bash".to_string(),
+        arguments: json!({"command": command}),
+    };
+    let body = match gate_call(&bash, tools, cwd, approval, on_approval, false) {
+        Err(denied) => format!("not run: {denied}"),
+        Ok(cleared) => {
+            cleared
+                .tool
+                .execute(&bash.arguments, cwd, &mut |_: &str| {})
+                .content
+        }
+    };
+    out.content
+        .push_str(&format!("\n\n[then_run] $ {command}\n{body}"));
+    out
 }
 
 /// A cleared tool call: the tool plus the preview and diff already computed
@@ -760,6 +839,111 @@ fn gate_call<'a>(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// A throwaway cwd for the fusion tests (they never touch the repo).
+    fn fuse_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("llm-fuse-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.txt"), "hello\n").unwrap();
+        dir
+    }
+
+    fn edit_call(then_run: &str) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            name: "edit".into(),
+            arguments: json!({
+                "path": "x.txt",
+                "edits": [{"oldText": "hello", "newText": "world"}],
+                "then_run": then_run
+            }),
+        }
+    }
+
+    #[test]
+    fn then_run_fuses_the_command_into_the_mutation_result() {
+        let dir = fuse_dir();
+        let tools = tools::builtin_tools();
+        let mut approval = approval::ApprovalConfig::default();
+        let out = fuse_then_run(
+            tools::ToolOutput::ok("applied 1 edit"),
+            &edit_call("cat x.txt"),
+            &tools,
+            &dir,
+            &mut approval,
+            &mut |_| panic!("yolo mode must not prompt for the fused command"),
+        );
+        assert!(!out.is_error, "the applied edit keeps its status");
+        assert!(out.content.contains("applied 1 edit"));
+        assert!(
+            out.content.contains("[then_run] $ cat x.txt"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("hello"),
+            "the command output rides the same result: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn then_run_never_fires_on_a_failed_mutation_or_a_plain_call() {
+        let dir = fuse_dir();
+        let tools = tools::builtin_tools();
+        let mut approval = approval::ApprovalConfig::default();
+        // the edit failed (bad match): running its validation would be noise
+        let out = fuse_then_run(
+            tools::ToolOutput::err("oldText did not match"),
+            &edit_call("touch ran.txt"),
+            &tools,
+            &dir,
+            &mut approval,
+            &mut |_| panic!("a failed mutation must not run its follow-up"),
+        );
+        assert!(out.is_error);
+        assert!(!out.content.contains("[then_run]"), "{}", out.content);
+        assert!(!dir.join("ran.txt").exists(), "nothing ran");
+        // a bash call carrying then_run is not recursively fused
+        let bash = ToolCall {
+            id: "2".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "echo hi", "then_run": "touch ran.txt"}),
+        };
+        let out = fuse_then_run(
+            tools::ToolOutput::ok("hi\n"),
+            &bash,
+            &tools,
+            &dir,
+            &mut approval,
+            &mut |_| panic!("only edit/write fuse"),
+        );
+        assert_eq!(out.content, "hi\n");
+    }
+
+    #[test]
+    fn then_run_still_passes_the_approval_gate() {
+        // ask mode: the fused command is gated like any other exec call, and
+        // a denial is reported without failing the applied edit
+        let dir = fuse_dir();
+        let tools = tools::builtin_tools();
+        let mut approval = approval::ApprovalConfig::default();
+        approval.mode = approval::Mode::AlwaysAsk;
+        let out = fuse_then_run(
+            tools::ToolOutput::ok("applied 1 edit"),
+            &edit_call("touch ran.txt"),
+            &tools,
+            &dir,
+            &mut approval,
+            &mut |_| ApprovalResponse::Deny,
+        );
+        assert!(!out.is_error, "the edit still landed");
+        assert!(out.content.contains("not run: denied"), "{}", out.content);
+        assert!(
+            !dir.join("ran.txt").exists(),
+            "a denied follow-up did not run"
+        );
+    }
 
     #[test]
     fn summarize_shows_ten_lines_plus_count() {

@@ -46,21 +46,46 @@ for line in sys.stdin:
         break
 """
 
-def write_extension(dir_path, name):
+# one extension: a tool_result subscriber that replaces the model-visible
+# result (the reducer/redactor seam)
+REWRITE_EXT = r"""#!/usr/bin/env python3
+import json, sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    kind = req.get("type")
+    if kind == "initialize":
+        reply = {"events": ["tool_result"]}
+    elif kind == "shutdown":
+        break
+    elif kind == "event":
+        content = req.get("params", {}).get("content", "")
+        reply = {"content": "FOLDED-BY-EXTENSION"} if "NOISE" in content else None
+    else:
+        reply = None
+    sys.stdout.write(json.dumps({"id": req.get("id"), "result": reply}) + "\n")
+    sys.stdout.flush()
+"""
+
+
+def write_extension(dir_path, name, body=ECHO_EXT):
     """Write one extension entry into dir_path. Windows has no shebang
     execution or exec bits, so the entry is a .cmd shim over the python
     script there; the stem stays the extension's name either way."""
     if sys.platform == "win32":
         script = os.path.join(dir_path, name + ".py")
         with open(script, "w") as f:
-            f.write(ECHO_EXT)
+            f.write(body)
         exe = os.path.join(dir_path, name + ".cmd")
         with open(exe, "w") as f:
             f.write(f'@"{sys.executable}" "{script}" %*\r\n')
     else:
         exe = os.path.join(dir_path, name)
         with open(exe, "w") as f:
-            f.write(ECHO_EXT)
+            f.write(body)
         os.chmod(exe, 0o755)
 
 
@@ -122,6 +147,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if body.get("model") == "m-write":
             self.handle_write_tool(body)
+            return
+        if body.get("model") == "m-rw":
+            # rewrite lane: round 1 reads a noisy file, round 2 (recognized
+            # by the role:"tool" result riding back) is where the driver
+            # asserts the extension's replacement reached the transcript
+            if any(m.get("role") == "tool" for m in messages):
+                seen["rw_round2"] = messages
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "read the log"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_rw", "type": "function",
+                         "function": {"name": "read",
+                                      "arguments": '{"path": "big.log"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
             return
         if body.get("tools") and not any(m.get("role") == "tool" for m in messages):
             chunks = [
@@ -263,6 +308,12 @@ def main():
                         "api_key": "sk-ci",
                         "models": ["m-wc"],
                     },
+                    "mock-rw": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-ci",
+                        "models": ["m-rw"],
+                    },
                 },
                 "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
             },
@@ -270,6 +321,7 @@ def main():
         )
     os.makedirs(os.path.join(user, "extensions"))
     write_extension(os.path.join(user, "extensions"), "echo_ext")
+    write_extension(os.path.join(user, "extensions"), "rewriter", REWRITE_EXT)
     # manifest script tool: a plain python file with a comment header; the
     # host spawns it per call and feeds the single argument as argv[1]
     wc = os.path.join(user, "extensions", "wordcount")
@@ -336,6 +388,18 @@ def main():
         f"extension call never ran: {open(fake_log).read() if os.path.exists(fake_log) else 'no log'}"
     assert "final answer after tool" in a.stdout + a.stderr, \
         f"final answer missing: {(a.stdout + a.stderr)[-300:]!r}"
+
+    # tool_result rewrite lane: a subscriber gets the tool's full content and
+    # replaces what the model reads (the reducer/redactor seam)
+    with open(os.path.join(work, "big.log"), "w") as f:
+        f.write("NOISE line\n" * 500)
+    rw = run([binary, "--yolo", "--no-session", "-m", "mock-rw/m-rw", "read the log"],
+             env, cwd=work, stdin=subprocess.DEVNULL)
+    assert rw.returncode == 0, f"rewrite lane rc={rw.returncode} err={rw.stderr[-800:]}"
+    tool_msgs = [m for m in (seen.get("rw_round2") or []) if m.get("role") == "tool"]
+    assert tool_msgs, f"the tool result never rode back: {seen.get('rw_round2')}"
+    assert tool_msgs[0].get("content") == "FOLDED-BY-EXTENSION", \
+        f"the extension's replacement must be what the model reads: {tool_msgs[0].get('content')!r}"
 
     # manifest script tool lane: the host mounts the header-declared tool
     # and runs the script per call (single argument rides as argv[1])

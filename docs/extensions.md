@@ -4,7 +4,8 @@ Extensions are the plugin system: anything the core skips, you build yourself as
 dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or
 `/reload`. This page is the full reference; runnable examples live in
 [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, `repeat_guard.py` —
-a `tool_call` deny gate for stuck loops, plus the `template.js`/`template.py` starter templates).
+a `tool_call` deny gate for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds
+repeated log lines, plus the `template.js`/`template.py` starter templates).
 `websearch.ts` is a TypeScript twin of the python `websearch` (node >= 23.6 runs it directly
 through native type stripping; bun/deno also work) — install one of the two, not both: the
 host dedups extension entries by file stem.
@@ -140,8 +141,8 @@ The reply's `result` should be a string; any other JSON value is serialized as i
 
 `args` is everything after the command name, as one string. The reply prints dim in the session.
 
-**`event`** — see the table below (deadline 5s). Only `tool_call` replies are interpreted; other
-events are fire-and-forget (reply `null` or nothing).
+**`event`** — see the table below (deadline 5s). Only `tool_call` and `tool_result` replies are
+interpreted; other events are fire-and-forget (reply `null` or nothing).
 
 ```json
 → {"id": 4, "type": "event", "v": 1, "name": "tool_call",
@@ -160,7 +161,7 @@ events are fire-and-forget (reply `null` or nothing).
 | `turn_start` | each agent loop turn | `{turn}` |
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs — see gate semantics | `{tool, args}` |
-| `tool_result` | after each tool call (once) | `{tool, summary, is_error}` |
+| `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, content}` — reply `{"content": ..}` to replace it, see below |
 | `agent_end` | task finished or interrupted | `{final_text, interrupted}` |
 
 ### The `tool_call` gate
@@ -176,6 +177,26 @@ A `tool_call` reply may do nothing, deny, rewrite, or pre-allow:
 
 Multiple subscribed extensions fire in order; the first deny wins, and argument rewrites compose
 (last write wins). The gate runs **before** the approval matrix — denials never prompt.
+
+### Replacing a tool result
+
+A `tool_result` subscriber is handed the tool's **full content** and may rewrite what the model
+reads — the seam a log-reducer or redactor plugs into. Subscribing is the opt-in, because the
+payload is the whole result:
+
+```json
+→ {"id": 5, "type": "event", "v": 1, "name": "tool_result",
+    "params": {"tool": "bash", "args": {"command": "cargo test"}, "tool_call_id": "c1",
+               "summary": "…", "is_error": false, "content": "<the full result text>"}}
+← {"id": 5, "result": {"content": "<what the model should read instead>"}}
+```
+
+Reply without a `content` field (or `null`) to observe only. The replacement is re-capped like any
+tool output (2000 lines / 50 KB), the last rewrite wins when several extensions reply, and the
+whole path is **fail-open**: a timeout, a crash or a malformed reply leaves the tool's own result
+exactly as produced. The thread file still keeps the original, so a bad rewrite cannot erase
+evidence from the session log — the model can re-run the command or page the result back with
+`recall`.
 
 ## Approval, tiers and policies
 

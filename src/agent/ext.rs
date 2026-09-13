@@ -710,6 +710,40 @@ impl Extensions {
         }
     }
 
+    /// Does any ready extension subscribe to this event? Callers use it to
+    /// skip building a large payload (a full tool result) when nobody will
+    /// read it.
+    pub fn subscribes(&self, name: &str) -> bool {
+        self.exts.iter().any(|ext| {
+            lock(&ext.state)
+                .as_ref()
+                .is_ok_and(|s| s.events.iter().any(|e| e == name))
+        })
+    }
+
+    /// Fire `tool_result` and return a replacement for the model-visible
+    /// result when an extension offers one (`{"content": ".."}`). The event
+    /// carries the tool's full content, so merely subscribing is the opt-in
+    /// to receive — and be trusted with — it; a reply without `content`
+    /// observes only. Last rewrite wins, and the whole path is fail-open: a
+    /// dead, slow, silent or malformed extension leaves the tool's own
+    /// result exactly as produced. The caller re-caps the replacement.
+    pub fn rewrite_tool_result(&self, params: &Value) -> Option<String> {
+        let mut replacement: Option<String> = None;
+        for ext in &self.exts {
+            match ext.fire("tool_result", params) {
+                Ok(Some(reply)) => {
+                    if let Some(content) = reply.get("content").and_then(Value::as_str) {
+                        replacement = Some(content.to_string());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => ext.note(e),
+            }
+        }
+        replacement
+    }
+
     /// Fire an event on every extension subscribed to it. `tool_call` may
     /// deny (Err carries the reason) or rewrite the arguments (Ok(Some)).
     pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
@@ -1288,8 +1322,12 @@ done
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let ext = connect_one(&script);
-        assert!(lock(&ext.state).is_ok(), "initial handshake must succeed");
+        let ext = connect_stub(&script);
+        assert!(
+            lock(&ext.state).is_ok(),
+            "initial handshake must succeed; state says {:?}",
+            lock(&ext.state).as_ref().err()
+        );
         assert_eq!(ext.call_tool("ping", &json!({})).unwrap(), "alive");
         // the child exited after answering: the next call must respawn it
         let out = ext.call_tool("ping", &json!({}));
@@ -1344,5 +1382,102 @@ done
         std::fs::write(&config, b"{\"a\":1,\"b\":2}").unwrap();
         assert_ne!(hash_roots(&[root], &config), h7, "a config edit moves it");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Write an executable `sh` stub into a fresh temp dir and return its
+    /// path. Discovery is bypassed on purpose: the test connects the script
+    /// directly, so it never reads the real `~/.llm` (which would make the
+    /// test non-hermetic). Plain `sh` like the respawn test above — a python
+    /// stub would start far heavier under a fully parallel test run.
+    #[cfg(unix)]
+    fn write_stub_extension(name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("llm-ext-test-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A resident extension that answers protocol lines: it advertises
+    /// `tool_result` and rewrites any result containing ORIGINAL, answering
+    /// `null` (observe only) otherwise.
+    #[cfg(unix)]
+    const REWRITER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{"id":%s,"result":{"events":["tool_result"]}}\n' "$id" ;;
+    *ORIGINAL*) printf '{"id":%s,"result":{"content":"REWRITTEN log"}}\n' "$id" ;;
+    *) printf '{"id":%s,"result":null}\n' "$id" ;;
+  esac
+done
+"#;
+
+    /// Connect a stub that was just written. `exec` on a file some other
+    /// thread's forked child still holds the inherited write fd for fails
+    /// with ETXTBSY ("Text file busy") — a real hazard only because a fully
+    /// parallel test run forks constantly. The retry fires on that message
+    /// alone, so a genuinely broken stub fails exactly as it would without
+    /// it; the reason still rides the assertion below.
+    #[cfg(unix)]
+    fn connect_stub(path: &Path) -> Arc<Ext> {
+        let mut ext = connect_one(path);
+        for _ in 0..20 {
+            let busy = matches!(lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));
+            if !busy {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            ext = connect_one(path);
+        }
+        ext
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tool_result_subscriber_can_replace_the_result() {
+        let host = Extensions {
+            exts: vec![connect_stub(&write_stub_extension("rewriter", REWRITER))],
+            script_tools: Vec::new(),
+        };
+        assert!(
+            host.subscribes("tool_result"),
+            "handshake advertised it; state says {:?}",
+            lock(&host.exts[0].state).as_ref().err()
+        );
+        assert!(!host.subscribes("turn_end"), "only the advertised event");
+
+        let params = json!({
+            "tool": "bash", "summary": "s", "is_error": false, "content": "ORIGINAL log"
+        });
+        assert_eq!(
+            host.rewrite_tool_result(&params).as_deref(),
+            Some("REWRITTEN log"),
+            "a content reply replaces the model-visible result"
+        );
+        // observe-only: no content in the reply leaves the tool's result alone
+        let untouched =
+            json!({"tool": "bash", "summary": "s", "is_error": false, "content": "plain"});
+        assert_eq!(host.rewrite_tool_result(&untouched), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dead_extension_cannot_swallow_a_tool_result() {
+        // exits the moment an event arrives: the request fails, and the
+        // failure must leave the result untouched (fail-open)
+        let crashes = "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  case \"$line\" in\n    *initialize*) printf '{\"id\":%s,\"result\":{\"events\":[\"tool_result\"]}}\\n' \"$id\" ;;\n    *event*) exit 1 ;;\n  esac\ndone\n";
+        let host = Extensions {
+            exts: vec![connect_stub(&write_stub_extension("crashy", crashes))],
+            script_tools: Vec::new(),
+        };
+        let params = json!({"tool": "bash", "summary": "s", "is_error": false, "content": "x"});
+        assert_eq!(
+            host.rewrite_tool_result(&params),
+            None,
+            "a crashed extension falls back to the tool's own result"
+        );
     }
 }

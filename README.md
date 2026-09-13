@@ -94,8 +94,8 @@ the session. `/yolo` flips the mode on and off mid-session.
 
 ### Tools
 
-Eight built-ins: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`. The agent picks
-them itself; `--tools read,grep` narrows the set.
+Nine built-ins: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `recall`. The
+agent picks them itself; `--tools read,grep` narrows the set.
 
 The `read` tool pages through large files instead of loading them whole. Every answer starts with a
 header naming the file, its size and the range shown; `offset` and `limit` walk through it in
@@ -106,6 +106,16 @@ Parquet/HDF5, `libreoffice --headless --convert-to csv` for old Office files.
 
 `webfetch <url>` grabs a page and returns it as text (HTML stripped, 256 KB cap, http(s) only,
 proxies honoured) so the agent can read docs without a shell.
+
+`write` and `edit` take an optional `then_run`: the command runs in the same tool call once the
+mutation succeeds (skipped on failure; a non-zero exit is reported but keeps the change). The
+edit-then-validate pattern costs one round-trip instead of two, and the command still passes the
+normal `bash` gate, so approval and the blacklist apply to it.
+
+Under context pressure an oversized tool result is cut to its head and tail; the full text is
+archived under `~/.llm/observations/` and the marker names its id, so `recall` pages the cut middle
+back (`id`, optional `offset` — the reply's `next_offset` continues) instead of re-running the
+command that produced it.
 
 ### The interactive session
 

@@ -2,6 +2,8 @@
 //! turn boundary keeping a recent window, and summarize the dropped prefix
 //! with one tool-free LLM call (the reference's single-strategy approach).
 
+use std::path::{Path, PathBuf};
+
 use crate::core::http::{Event, Usage};
 use crate::providers::Msg;
 use crate::providers::PromptInput;
@@ -267,13 +269,37 @@ pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
 pub const PRUNE_HEAD_CHARS: usize = 4096;
 pub const PRUNE_TAIL_CHARS: usize = 1024;
 
+/// Where pruned tool-result originals live, so `recall` can page them back.
+/// Beside the thread store (`~/.llm/observations/`), not inside a project.
+pub fn observation_dir() -> PathBuf {
+    crate::core::config::user_dir().join("observations")
+}
+
+/// Resolve an observation id to its archive file. The id comes from the
+/// model (a marker in the transcript), so anything that is not a plain
+/// alphanumeric token — a `/`, a `..`, an empty string — is not an id and
+/// must never reach the filesystem.
+pub fn observation_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(dir.join(format!("{id}.txt")))
+}
+
 /// Replace over-budget tool-result text with head + marker + tail; returns
 /// the number of results pruned. Runs only once compaction pressure is
 /// confirmed, before the summarizer picks its cut — it costs no model call
-/// and may relieve enough to skip summarization entirely. The projected
-/// view is what changes: the thread file keeps each round's original text,
-/// so a resume re-reads full content and re-prunes on demand.
-pub fn prune_tool_results(history: &mut [Msg]) -> usize {
+/// and may relieve enough to skip summarization entirely.
+///
+/// The cut middle is not lost: the full original is archived under
+/// `archive_dir` and the marker carries its observation id, so the model can
+/// `recall` the exact bytes back instead of re-running the command. The
+/// projected view is what changes; the thread file still keeps each round's
+/// original text.
+///
+/// Fail open per result: if the archive cannot be written, that result keeps
+/// its full text rather than leave a marker pointing at nothing.
+pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> usize {
     let mut pruned = 0;
     for msg in history.iter_mut() {
         let Msg::ToolResult { content, .. } = msg else {
@@ -281,6 +307,12 @@ pub fn prune_tool_results(history: &mut [Msg]) -> usize {
         };
         let total = content.chars().count();
         if total <= PRUNE_THRESHOLD_CHARS {
+            continue;
+        }
+        let id = crate::core::db::ulid();
+        if std::fs::create_dir_all(archive_dir).is_err()
+            || std::fs::write(archive_dir.join(format!("{id}.txt")), &*content).is_err()
+        {
             continue;
         }
         // char-indexed cuts: byte offsets would split CJK text mid-codepoint
@@ -299,8 +331,9 @@ pub fn prune_tool_results(history: &mut [Msg]) -> usize {
         let dropped = total - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
         *content = format!(
             "{head}\n[... {dropped} chars of the middle were cut to fit the context window; \
-             re-read the file with offset/limit or re-run the command if the missing middle \
-             matters ...]\n{tail}"
+             the full result is archived as observation {id} — call recall with \
+             id=\"{id}\" and offset={PRUNE_HEAD_CHARS} to page the missing middle back, or \
+             re-read the file if that is cheaper ...]\n{tail}"
         );
         pruned += 1;
     }
@@ -314,6 +347,14 @@ mod tests {
 
     fn user(s: &str) -> Msg {
         Msg::user(s)
+    }
+
+    /// A throwaway archive dir; each test gets its own so parallel runs do
+    /// not race on the same observation files.
+    fn obs_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("llm-obs-test-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -501,17 +542,19 @@ mod tests {
 
     #[test]
     fn oversized_tool_results_prune_to_head_marker_tail() {
+        let original = "x".repeat(20_000);
         let mut history = vec![
             Msg::ToolResult {
                 call_id: "1".into(),
                 name: "bash".into(),
-                content: "x".repeat(20_000),
+                content: original.clone(),
                 is_error: false,
                 attachments: Vec::new(),
             },
             Msg::tool_result("2", "bash", "small"),
         ];
-        assert_eq!(prune_tool_results(&mut history), 1);
+        let dir = obs_dir();
+        assert_eq!(prune_tool_results(&mut history, &dir), 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
             _ => unreachable!(),
@@ -523,11 +566,19 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.len() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 200,
+            content.len() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 300,
             "pruned content is bounded"
         );
+        // the cut middle is archived and the marker names its id, so recall
+        // can page the exact original back instead of re-running the command
+        let id = observation_id_from_marker(content).expect("marker carries an observation id");
+        let archived = std::fs::read_to_string(observation_path(&dir, &id).unwrap()).unwrap();
+        assert_eq!(
+            archived, original,
+            "the archive holds the untouched original"
+        );
         // a pruned result is under threshold: the second pass is a no-op
-        assert_eq!(prune_tool_results(&mut history), 0);
+        assert_eq!(prune_tool_results(&mut history, &dir), 0);
         // small results are untouched
         match &history[1] {
             Msg::ToolResult { content, .. } => assert_eq!(content, "small"),
@@ -535,11 +586,44 @@ mod tests {
         }
     }
 
+    /// Pull the id back out the way a reader (or the recall tool) would.
+    fn observation_id_from_marker(content: &str) -> Option<String> {
+        let rest = content.split("observation ").nth(1)?;
+        Some(rest.split_whitespace().next()?.to_string())
+    }
+
+    #[test]
+    fn a_failed_archive_keeps_the_full_text() {
+        // a marker must never point at a file that was not written: if the
+        // archive dir cannot be created, pruning leaves the result alone
+        let mut history = vec![Msg::tool_result("1", "bash", "x".repeat(20_000))];
+        // a regular file where the archive directory should be: create_dir_all fails
+        let blocker =
+            std::env::temp_dir().join(format!("llm-obs-file-{}", crate::core::db::ulid()));
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let blocked = blocker.join("observations");
+        assert_eq!(prune_tool_results(&mut history, &blocked), 0);
+        match &history[0] {
+            Msg::ToolResult { content, .. } => assert_eq!(content.chars().count(), 20_000),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn observation_ids_cannot_escape_their_directory() {
+        let dir = std::path::Path::new("/tmp/observations");
+        assert!(observation_path(dir, "01jz5k9h7q2m3n4p5r6s7t8v9w").is_some());
+        // traversal, separators and empty ids are refused, not cleaned up
+        assert_eq!(observation_path(dir, "../../etc/passwd"), None);
+        assert_eq!(observation_path(dir, "a/b"), None);
+        assert_eq!(observation_path(dir, ""), None);
+    }
+
     #[test]
     fn pruning_cuts_on_codepoint_boundaries() {
         // byte-indexed slicing would split a CJK char mid-codepoint
         let mut history = vec![Msg::tool_result("1", "read", "中".repeat(10_000))];
-        assert_eq!(prune_tool_results(&mut history), 1);
+        assert_eq!(prune_tool_results(&mut history, &obs_dir()), 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
             _ => unreachable!(),
@@ -547,7 +631,7 @@ mod tests {
         assert!(content.starts_with("中中中"));
         assert!(content.ends_with("中中中"));
         assert!(
-            content.chars().count() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 200,
+            content.chars().count() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 300,
             "char-count bounded: {}",
             content.chars().count()
         );

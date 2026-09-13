@@ -90,7 +90,83 @@ pub trait Tool: Send + Sync {
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
 }
 
-/// The built-in tool registry: eight handwritten tools.
+/// How much of an archived tool result one `recall` call returns. Paged, so
+/// a follow-up call continues exactly where the first stopped.
+pub(crate) const RECALL_CHARS: usize = 12_000;
+
+/// The `then_run` field shared by `write` and `edit`: the fused follow-up
+/// command (action fusion — the mutation and its validation are one call).
+pub(crate) const THEN_RUN_DESCRIPTION: &str = "Optional command to run next, in the same tool call, after this \
+     mutation succeeds — e.g. run, build, test or restart it. Skipped when the mutation fails; a \
+     non-zero exit is reported but keeps the change.";
+
+struct RecallTool;
+
+impl Tool for RecallTool {
+    fn name(&self) -> &str {
+        "recall"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    fn description(&self) -> &str {
+        "Page back a tool result that context compaction replaced with a placeholder. Pass the \
+         observation id from the placeholder marker and the char offset to start at; the reply's \
+         next_offset continues the read."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Observation id from a placeholder marker"},
+                "offset": {"type": "integer", "description": "Character offset to start at (default 0)"}
+            },
+            "required": ["id"]
+        })
+    }
+    fn preview(&self, args: &Value) -> String {
+        format!(
+            "observation {} from char {}",
+            args["id"].as_str().unwrap_or("?"),
+            args["offset"].as_u64().unwrap_or(0)
+        )
+    }
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+        let id = args["id"].as_str().unwrap_or("");
+        let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+        let dir = super::compact::observation_dir();
+        let Some(path) = super::compact::observation_path(&dir, id) else {
+            return ToolOutput::err(format!("not an observation id: {id}"));
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                return ToolOutput::err(format!(
+                    "unknown observation id: {id} (archives live in {})",
+                    dir.display()
+                ));
+            }
+        };
+        let (start, end, eof, chunk) = recall_page(&text, offset);
+        ToolOutput::ok(format!(
+            "[recall id={id} offset={start} next_offset={end} eof={eof} total_chars={}]\n{chunk}",
+            text.chars().count()
+        ))
+    }
+}
+
+/// One page of an archived observation, as (start, next_offset, eof, text).
+/// Char offsets, not bytes: a CJK slice must not split a codepoint, and
+/// `next_offset` feeds straight back into the next `recall` call.
+fn recall_page(text: &str, offset: usize) -> (usize, usize, bool, String) {
+    let chars: Vec<char> = text.chars().collect();
+    let start = offset.min(chars.len());
+    let end = (start + RECALL_CHARS).min(chars.len());
+    let chunk: String = chars[start..end].iter().collect();
+    (start, end, end >= chars.len(), chunk)
+}
+
+/// The built-in tool registry: nine handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadTool),
@@ -101,6 +177,7 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
+        Box::new(RecallTool),
     ]
 }
 
@@ -439,7 +516,8 @@ impl Tool for WriteTool {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "content": {"type": "string"}
+                "content": {"type": "string"},
+                "then_run": {"type": "string", "description": THEN_RUN_DESCRIPTION}
             },
             "required": ["path", "content"]
         })
@@ -510,6 +588,7 @@ impl Tool for EditTool {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
+                "then_run": {"type": "string", "description": THEN_RUN_DESCRIPTION},
                 "edits": {
                     "type": "array",
                     "items": {
@@ -1339,6 +1418,65 @@ fn gather_files(root: &Path, glob: Option<&crate::gitignore::Pattern>) -> Vec<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_pages_by_char_offset_and_marks_the_end() {
+        let text = "中".repeat(RECALL_CHARS + 5);
+        let (start, next, eof, chunk) = recall_page(&text, 0);
+        assert_eq!((start, eof), (0, false));
+        assert_eq!(next, RECALL_CHARS);
+        assert_eq!(chunk.chars().count(), RECALL_CHARS, "one full page");
+        // continuing from next_offset returns the remainder and stops
+        let (start, next, eof, chunk) = recall_page(&text, next);
+        assert_eq!((start, eof), (RECALL_CHARS, true));
+        assert_eq!(next, RECALL_CHARS + 5);
+        assert_eq!(chunk.chars().count(), 5);
+        // a past-the-end offset is clamped, not a panic
+        let (start, next, eof, chunk) = recall_page("abc", 99);
+        assert_eq!((start, next, eof, chunk.as_str()), (3, 3, true, ""));
+    }
+
+    #[test]
+    fn the_registry_exposes_recall_as_a_read_tier_tool() {
+        let tools = builtin_tools();
+        let recall = tools
+            .iter()
+            .find(|t| t.name() == "recall")
+            .expect("mounted");
+        assert_eq!(
+            recall.tier(),
+            Tier::Read,
+            "reading a local archive is not exec"
+        );
+        // the id is required, the offset optional
+        assert_eq!(recall.parameters()["required"][0], "id");
+        assert!(validate(&recall.parameters(), &json!({"id": "01jz"})).is_ok());
+        assert!(validate(&recall.parameters(), &json!({})).is_err());
+    }
+
+    #[test]
+    fn then_run_is_declared_on_both_mutating_tools() {
+        let tools = builtin_tools();
+        for name in ["write", "edit"] {
+            let tool = tools.iter().find(|t| t.name() == name).unwrap();
+            let props = &tool.parameters()["properties"];
+            assert_eq!(props["then_run"]["type"], "string", "{name}");
+            assert!(
+                props["then_run"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("same tool call"),
+                "{name} must tell the model this is fused, not a second call"
+            );
+            // the fused field passes validation alongside the tool's own args
+            let args = if name == "write" {
+                json!({"path": "x", "content": "y", "then_run": "cargo test"})
+            } else {
+                json!({"path": "x", "edits": [], "then_run": "cargo test"})
+            };
+            assert!(validate(&tool.parameters(), &args).is_ok(), "{name}");
+        }
+    }
 
     #[test]
     fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
