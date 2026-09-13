@@ -281,7 +281,6 @@ impl Session {
                 .map(|mut q| q.drain(..).collect())
                 .unwrap_or_default()
         };
-        let seed_len = self.seed.len();
         let result = run_agent(
             &self.model,
             &self.tools,
@@ -327,7 +326,7 @@ impl Session {
                 let history = std::mem::take(&mut outcome.history);
                 let reasoning = view.into_inner().into_renderer().reasoning;
                 self.persist_turn(
-                    seed_len,
+                    outcome.seed_boundary,
                     &history,
                     &outcome.final_text,
                     outcome.usage,
@@ -346,7 +345,7 @@ impl Session {
             Err(failure) => {
                 let reasoning = view.into_inner().into_renderer().reasoning;
                 self.persist_turn(
-                    seed_len,
+                    failure.seed_boundary,
                     &failure.history,
                     &failure.final_text,
                     None,
@@ -413,7 +412,6 @@ impl Session {
                 .map(|mut q| q.drain(..).collect())
                 .unwrap_or_default()
         };
-        let seed_len = self.seed.len();
         let result = run_agent(
             &self.model,
             &self.tools,
@@ -444,7 +442,7 @@ impl Session {
                 // conversation per task); persistence reads it first
                 let history = std::mem::take(&mut outcome.history);
                 self.persist_turn(
-                    seed_len,
+                    outcome.seed_boundary,
                     &history,
                     &outcome.final_text,
                     outcome.usage,
@@ -463,7 +461,7 @@ impl Session {
                     "text": &failure.final_text,
                 }));
                 self.persist_turn(
-                    seed_len,
+                    failure.seed_boundary,
                     &failure.history,
                     &failure.final_text,
                     None,
@@ -492,20 +490,20 @@ impl Session {
     /// `/resume` sees the work either way.
     fn persist_turn(
         &mut self,
-        seed_len: usize,
+        boundary: usize,
         history: &[Msg],
         response: &str,
         usage: Option<crate::core::http::Usage>,
         reasoning: &str,
         start: std::time::Instant,
     ) {
-        if self.no_session || history.len() <= seed_len.min(history.len()) {
+        if self.no_session || history.len() <= boundary.min(history.len()) {
             return;
         }
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        let mut new_messages: Vec<StoredMsg> = history[seed_len.min(history.len())..]
+        let mut new_messages: Vec<StoredMsg> = history[boundary.min(history.len())..]
             .iter()
             .map(msg_to_stored)
             .collect();
@@ -521,7 +519,7 @@ impl Session {
         // and filter conversations by project directory
         let mut turn_options = self.model.options.clone();
         turn_options.push(("cwd".to_string(), self.cwd.display().to_string()));
-        let attached: Vec<String> = history[seed_len.min(history.len())..]
+        let attached: Vec<String> = history[boundary.min(history.len())..]
             .iter()
             .filter_map(|m| match m {
                 Msg::User { attachments, .. } if !attachments.is_empty() => Some(
@@ -538,7 +536,7 @@ impl Session {
             turn_options.push(("attachments".to_string(), attached.join("; ")));
         }
         // the first user text of the round is the prompt preview
-        let prompt = history[seed_len.min(history.len())..]
+        let prompt = history[boundary.min(history.len())..]
             .iter()
             .find_map(|m| match m {
                 Msg::User { text, .. } if !text.is_empty() => Some(text.clone()),

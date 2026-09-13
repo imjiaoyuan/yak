@@ -127,6 +127,10 @@ pub struct AgentOutcome {
     pub interrupted: bool,
     /// the token budget stopped the run; a follow-up continues seamlessly
     pub budget_exhausted: bool,
+    /// index in `history` where this run's own messages start. Not the
+    /// caller's seed length: compaction rewrites the prefix mid-run and
+    /// shifts every index after the cut (see [`advance_seed_boundary`]).
+    pub seed_boundary: usize,
 }
 
 /// A provider-level failure: the error plus everything already sent, so the
@@ -138,6 +142,20 @@ pub struct AgentFailure {
     pub message: String,
     pub history: Vec<Msg>,
     pub final_text: String,
+    /// see [`AgentOutcome::seed_boundary`]
+    pub seed_boundary: usize,
+}
+
+/// Where a run's own messages start after compaction replaced `cut` prefix
+/// messages with one summary: everything after the cut shifts down by
+/// `cut - 1`, and a boundary inside the dropped prefix lands right after
+/// the summary — every remaining message is then this run's own.
+pub(crate) fn advance_seed_boundary(boundary: usize, cut: usize) -> usize {
+    if boundary > cut {
+        boundary - cut + 1
+    } else {
+        1
+    }
 }
 
 const WRAP_UP_NOTE: &str = "[System] The turn budget is almost exhausted. Finish your current \
@@ -276,6 +294,9 @@ pub fn run_agent(
         0
     };
     let mut history: Vec<Msg> = seed;
+    // persistence slices the turn out of `history`; compaction moves the goal
+    // posts underneath that slice, so track the boundary as history changes
+    let mut seed_boundary = history.len();
     let mut pending: Option<Msg> = Some(Msg::user_with(prompt, attachments));
     let mut repeats = RepeatGuard {
         last: None,
@@ -443,6 +464,7 @@ pub fn run_agent(
                 message: e,
                 history,
                 final_text: final_text.clone(),
+                seed_boundary,
             });
         }
 
@@ -513,6 +535,7 @@ pub fn run_agent(
                     text: compact::compose_summary(task.as_deref(), &s),
                 });
                 history.extend(tail);
+                seed_boundary = advance_seed_boundary(seed_boundary, cut);
                 on_update(AgentUpdate::Compacted { removed: cut });
             }
             // a failed summarization leaves the history untouched:
@@ -648,6 +671,7 @@ pub fn run_agent(
         usage: last_usage,
         interrupted,
         budget_exhausted,
+        seed_boundary,
     })
 }
 
@@ -838,7 +862,18 @@ fn gate_call<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::advance_seed_boundary;
     use serde_json::json;
+
+    /// Compaction drops `cut` messages and inserts one summary, so the run's
+    /// own region moves; a boundary consumed by the cut lands on the summary.
+    #[test]
+    fn compaction_shifts_the_seed_boundary() {
+        assert_eq!(advance_seed_boundary(10, 4), 7); // 6 seed messages survive
+        assert_eq!(advance_seed_boundary(4, 4), 1); // the whole seed was cut
+        assert_eq!(advance_seed_boundary(2, 9), 1);
+        assert_eq!(advance_seed_boundary(0, 3), 1);
+    }
 
     /// A throwaway cwd for the fusion tests (they never touch the repo).
     fn fuse_dir() -> std::path::PathBuf {
