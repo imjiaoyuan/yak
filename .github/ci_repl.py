@@ -264,6 +264,19 @@ def main():
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line one\\nline two\\nline three" in hist, f"history: {hist!r}"
 
+    # -- the answer area is append-only: printed once, never retracted -----
+    # the wait spinner may own an empty row (its `\r\x1b[2K` frame lives and
+    # dies before the first answer byte); from that byte on nothing may erase
+    # and no printed text may be written twice
+    screen = out_bytes()
+    i = screen.find(b"ok from mock")
+    assert i != -1, f"no answer on screen: {screen[-400:]!r}"
+    assert screen.count(b"ok from mock") == 1, "the answer was reprinted"
+    for bad in (b"\x1b[2K", b"\x1b[1A", b"\x1b[J"):
+        assert bad not in screen[i:], (
+            f"the settled answer was redrawn ({bad!r}): {screen[i:][:400]!r}"
+        )
+
     # -- history recall keeps the draft ------------------------------------
     read_until(fd, rb">")
     send(fd, b"\x1b[A")          # up: empty buffer recalls history

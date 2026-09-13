@@ -519,9 +519,14 @@ impl TaskView {
         self.close_thinking();
         self.thinking_announced = false; // next round may announce again
         self.settle();
-        // rounds continue while tools are pending: restart the wait spinner
-        // (footer/abort silence it when the task ends instead)
-        self.relabel(&self.label.clone());
+        // a wait spinner already up keeps ticking under its new-ish label;
+        // starting one here is wrong both ways: when the round was the whole
+        // task (no tool follows) it would blink a frame under the answer that
+        // just settled — a redraw of printed text — and when a tool does
+        // follow, `ToolEnd`/`resume_wait` starts the next wait itself
+        if self.ticker.is_some() {
+            self.relabel(&self.label.clone());
+        }
     }
 
     /// Cleanup without the footer (provider error, interrupt).
