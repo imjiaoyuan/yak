@@ -1322,6 +1322,50 @@ fn is_hr_so_far(t: &[u8]) -> bool {
 /// The first visual row starts with `first_prefix`, continuation rows with
 /// `row_prefix`; with `ansi`, an open SGR span is tracked and re-opened
 /// after each break.
+/// A closing mark hangs on the row above rather than opening the next one:
+/// 禁则処理, so a wrapped Chinese sentence never starts with `。` or `）`.
+fn hangs_back(c: char) -> bool {
+    matches!(
+        c,
+        '。' | '，'
+            | '、'
+            | '；'
+            | '：'
+            | '！'
+            | '？'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '》'
+            | '〉'
+            | '”'
+            | '’'
+            | '·'
+            | '…'
+            | 'ー'
+            | ','
+            | '.'
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | ')'
+            | ']'
+            | '}'
+            | '%'
+    )
+}
+
+/// An opening mark moves down with the text it opens: a row never ends with
+/// `（` or `“`, which would strand it from what it quotes.
+fn moves_down(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '「' | '『' | '【' | '《' | '〈' | '“' | '‘' | '(' | '[' | '{'
+    )
+}
+
 fn wrap_scan(
     text: &str,
     width: usize,
@@ -1353,18 +1397,38 @@ fn wrap_scan(
         let w = char_width(c);
         if cells + w > width && i > seg_start {
             let cut = last_break.filter(|&b| b > seg_start).unwrap_or(i);
-            let emit_end = if cut > seg_start && bytes[cut - 1] == b' ' {
+            let mut emit_end = if cut > seg_start && bytes[cut - 1] == b' ' {
                 cut - 1
             } else {
                 cut
             };
+            // 禁则処理: a row may not open with a closing mark (it hangs off
+            // the row above) nor end with an opening one (it moves down with
+            // the text it opens). Both are bounded: a pathological run of
+            // marks still wraps eventually.
+            for _ in 0..3 {
+                match text[emit_end..].chars().next() {
+                    Some(c) if hangs_back(c) => emit_end += c.len_utf8(),
+                    _ => break,
+                }
+            }
+            for _ in 0..2 {
+                match text[seg_start..emit_end].chars().next_back() {
+                    Some(c) if moves_down(c) && emit_end > seg_start => emit_end -= c.len_utf8(),
+                    _ => break,
+                }
+            }
             out.push_str(&text[seg_start..emit_end]);
+            if emit_end == bytes.len() {
+                // 禁则 hung the last mark off this row: no next row exists
+                return;
+            }
             out.push('\n');
             out.push_str(row_prefix);
             if ansi {
                 out.push_str(&active);
             }
-            let mut next = cut;
+            let mut next = emit_end;
             if next < bytes.len() && bytes[next] == b' ' {
                 next += 1;
             }
@@ -2000,6 +2064,20 @@ mod tests {
         assert_eq!(wrap_block("aaaa bbbb cccc", 12, 2), "  aaaa bbbb\n  cccc");
         assert_eq!(wrap_block("one\ntwo", 12, 2), "  one\n  two");
         assert_eq!(wrap_block("", 12, 2), "");
+    }
+
+    #[test]
+    fn wrapping_honors_cjk_punctuation_rules() {
+        // a closing mark hangs on the row above …
+        assert_eq!(wrap_plain("中中中中。後", 8, 0), "中中中中。\n後");
+        assert_eq!(wrap_plain("中中中中中。", 10, 0), "中中中中中。");
+        // … and an opening mark moves down with what it opens
+        assert_eq!(wrap_plain("中中中（後", 8, 0), "中中中\n（後");
+        // a run of marks cannot hang forever
+        let run = format!("中中中中{}後", "，".repeat(10));
+        let wrapped = wrap_plain(&run, 8, 0);
+        assert!(wrapped.contains('\n'), "got {wrapped:?}");
+        assert_eq!(wrapped.replace('\n', ""), run, "wrapping keeps every char");
     }
 
     #[test]
