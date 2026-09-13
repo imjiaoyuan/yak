@@ -536,7 +536,14 @@ def main():
     # extension mounts, list/remove work
     pkgrepo = os.path.join(work, "pkgrepo")
     os.makedirs(os.path.join(pkgrepo, "extensions"))
+    os.makedirs(os.path.join(pkgrepo, "skills", "demo"))
     write_extension(os.path.join(pkgrepo, "extensions"), "hello")
+    # a repo root SKILL.md is itself one skill (the shape standalone skill
+    # repos ship: SKILL.md + references/ at the top)
+    open(os.path.join(pkgrepo, "SKILL.md"), "w").write(
+        "---\nname: wholegit\ndescription: whole repo skill\n---\nbody\n")
+    open(os.path.join(pkgrepo, "skills", "demo", "SKILL.md"), "w").write(
+        "---\nname: demo\ndescription: skills dir skill\n---\nbody\n")
     subprocess.run(["git", "init", "-q", pkgrepo], check=True)
     subprocess.run(["git", "-C", pkgrepo, "add", "-A"], check=True)
     subprocess.run(["git", "-C", pkgrepo, "-c", "user.email=t@t", "-c",
@@ -544,10 +551,30 @@ def main():
     p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"install rc={p.returncode} err={p.stderr[-400:]}"
+    out = p.stdout + p.stderr
+    assert "skills: wholegit (repo root), demo" in out and "extensions:" in out, \
+        f"install did not report the package layout: {out[-400:]!r}"
     ext_name = "hello.cmd" if sys.platform == "win32" else "hello"
     assert os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo", "extensions", ext_name))
     ls = run([binary, "list"], env, cwd=work, stdin=subprocess.DEVNULL)
-    assert "pkgrepo" in ls.stdout + ls.stderr, f"list: {(ls.stdout + ls.stderr)[-300:]!r}"
+    lsout = ls.stdout + ls.stderr
+    assert "pkgrepo" in lsout and "wholegit (repo root)" in lsout, f"list: {lsout[-300:]!r}"
+    # -s narrows the mount, the choice survives a plain refresh, '*' clears it
+    p = run([binary, "install", "-l", pkgrepo, "-s", "demo"], env, cwd=work,
+            stdin=subprocess.DEVNULL)
+    assert p.returncode == 0, f"install -s rc={p.returncode} err={p.stderr[-300:]}"
+    assert "only: demo" in p.stdout + p.stderr, f"selection not reported: {(p.stdout + p.stderr)[-300:]!r}"
+    p = run([binary, "install", "-l", pkgrepo, "-s", "nope"], env, cwd=work,
+            stdin=subprocess.DEVNULL)
+    assert p.returncode == 2 and "no skill 'nope'" in p.stdout + p.stderr, \
+        f"unknown --skill not rejected: rc={p.returncode} {(p.stdout + p.stderr)[-300:]!r}"
+    p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
+            stdin=subprocess.DEVNULL)
+    assert "only: demo" in p.stdout + p.stderr, \
+        f"refresh dropped the skill selection: {(p.stdout + p.stderr)[-300:]!r}"
+    p = run([binary, "install", "-l", "-g", pkgrepo], env, cwd=work,
+            stdin=subprocess.DEVNULL)
+    assert p.returncode == 2, f"-l and -g must conflict: rc={p.returncode}"
     p = run([binary, "remove", "pkgrepo"], env, cwd=work, stdin=subprocess.DEVNULL)
     assert p.returncode == 0 and not os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo")), \
         f"remove rc={p.returncode}"

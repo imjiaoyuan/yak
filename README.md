@@ -256,15 +256,24 @@ Flags:
 
 Packages bundle extensions, skills and prompt templates into one git repository and share it as a
 unit: `llm install git:github.com/user/repo[@ref]` clones into `~/.llm/pkg/<name>` (`-l` installs
-project-local into `.llm/pkg/`, project winning over user), and its `extensions/`, `skills/` and
-`commands/` directories mount into the normal discovery walks. Re-running `install` refreshes a
-clone (`git fetch` + reset); a pinned `@ref` clone moves only via `install repo@new-ref`. `llm list`
-shows what each package carries, `llm remove NAME` deletes it. There is no npm lane — git only.
+project-local into `.llm/pkg/`, project winning over user; `-g` is the explicit default), and its
+`extensions/`, `skills/` and `commands/` directories mount into the normal discovery walks. A
+`SKILL.md` at the repository root counts too, as a single whole-repo skill — the shape most
+standalone skill repos ship (`SKILL.md` + `references/` at the top), so
+`llm install https://github.com/user/my-skill` lands `/skill:my-skill` with no extra step. `install`
+reports what it recognized (skills, extensions, prompts); a repo carrying none of them is called out
+instead of mounting nothing silently. `-s NAME` (repeatable, `'*'` for all) keeps only those skills
+live; the choice lives in the clone's git config, so a plain re-run keeps it and `'*'` clears it.
+Re-running `install` refreshes a clone (`git fetch` + reset); a pinned `@ref` clone moves only via
+`install repo@new-ref`. `llm list` shows what each package carries, `llm remove NAME` deletes it.
+There is no npm lane — git only.
 Review any third-party package before installing: extensions run with full system access.
 
 ```bash
 llm install git:github.com/user/llm-deploy    # → ~/.llm/pkg/llm-deploy
 llm install git:github.com/user/llm-deploy@v2 # pinned
+llm install -l https://github.com/user/my-skill        # project-local skill
+llm install git:github.com/user/llm-deploy -s deploy   # keep one skill only
 llm list
 llm remove llm-deploy
 ```
@@ -276,6 +285,8 @@ Usage: llm install git:github.com/user/repo[@ref] [OPTIONS] SOURCE
 
 Options:
   -l, --local           Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)
+  -g, --global          Install into the user directory (default)
+  -s, --skill NAME      Keep only these skills by name; '*' keeps all (repeatable)
   -h, --help            Show this message and exit
 ```
 

@@ -58,7 +58,42 @@ pub fn parse_skill_md(text: &str, fallback_name: &str, path: PathBuf) -> Option<
 
 /// Load every skill in one directory: `<dir>/<name>/SKILL.md` (the standard
 /// layout) plus flat `<dir>/<name>.md` files.
-fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
+/// One installed package's skills: its `skills/` entries — filtered to the
+/// names `llm install --skill` kept, when a selection is recorded — plus the
+/// whole-repo skill when `SKILL.md` sits at the package root. That root shape
+/// (SKILL.md + references/ at the top) is how most standalone skill repos
+/// ship, and the plain `skills/` walk alone would mount nothing from them.
+pub(crate) fn load_package(pkg: &Path, out: &mut Vec<SkillDef>) {
+    let mut found: Vec<SkillDef> = Vec::new();
+    if let Some(def) = pack_root_skill(pkg) {
+        found.push(def);
+    }
+    load_dir(&pkg.join("skills"), &mut found);
+    let keep = crate::commands::pkg::selected_skills(pkg);
+    out.extend(keep_selected(found, keep.as_deref()));
+}
+
+/// Apply an `llm install --skill` selection: `None` keeps everything.
+fn keep_selected(found: Vec<SkillDef>, keep: Option<&[String]>) -> Vec<SkillDef> {
+    match keep {
+        None => found,
+        Some(names) => found
+            .into_iter()
+            .filter(|d| names.iter().any(|k| k == &d.name))
+            .collect(),
+    }
+}
+
+/// `SKILL.md` at the package root: the repository itself is one skill, named
+/// by its frontmatter (the directory name is the fallback).
+pub(crate) fn pack_root_skill(pkg: &Path) -> Option<SkillDef> {
+    let path = pkg.join("SKILL.md");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let fallback = pkg.file_name()?.to_str()?;
+    parse_skill_md(&text, fallback, path)
+}
+
+pub(crate) fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -89,16 +124,18 @@ fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
 }
 
 /// Discover skills, lowest priority first so later entries override earlier
-/// by name: `~/.agents/skills`, `~/.llm/skills`, then the nearest project
-/// `.agents/skills`, then the nearest `.llm/skills` (project beats user, our
-/// dirs beat the interop dirs). `disabled` drops entries by name.
+/// by name: installed packages, `~/.agents/skills`, `~/.llm/skills`, then the
+/// nearest project `.agents/skills`, then the nearest `.llm/skills` (project
+/// beats user, our dirs beat the interop dirs). `disabled` drops entries by
+/// name.
 pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDef> {
     let mut defs: Vec<SkillDef> = Vec::new();
-    for d in crate::commands::pkg::skill_dirs(true) {
-        load_dir(&d, &mut defs);
-    }
-    for d in crate::commands::pkg::skill_dirs(false) {
-        load_dir(&d, &mut defs);
+    // packages first (lowest priority): user then project, so a
+    // project-local install shadows the user one
+    for root in [user_dir.join("pkg"), cwd.join(".llm/pkg")] {
+        for pkg in crate::commands::pkg::packages_in(&root) {
+            load_package(&pkg, &mut defs);
+        }
     }
     load_dir(
         &user_dir.parent().unwrap_or(user_dir).join(".agents/skills"),
@@ -208,6 +245,39 @@ mod tests {
         assert!(
             parse_skill_md("# plain notes\nbody", "notes", PathBuf::from("/s/notes.md")).is_none()
         );
+    }
+
+    /// A package installed by `llm install`: the repo root carries SKILL.md
+    /// (a standalone skill repo) and `skills/` holds more of them.
+    #[test]
+    fn package_mounts_a_root_skill_and_filters_by_selection() {
+        let pkg = std::env::temp_dir().join(format!("llm-pkgskill-{}", crate::core::db::ulid()));
+        skill_dir(&pkg, "a", "name: a");
+        skill_dir(&pkg.join("skills"), "b", "name: b");
+        std::fs::write(pkg.join("SKILL.md"), "---\nname: wholegit\n---\nbody").unwrap();
+        // a stray repo without SKILL.md at the root mounts nothing
+        let empty = pkg.join("not-a-skill");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let mut found = Vec::new();
+        load_package(&pkg, &mut found);
+        let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["wholegit", "b"]);
+        assert_eq!(pack_root_skill(&pkg).unwrap().name, "wholegit");
+        assert!(pack_root_skill(&empty).is_none());
+
+        // `--skill b` (or the root skill) narrows the mount
+        let keep = vec!["b".to_string()];
+        let filtered = keep_selected(found.clone(), Some(&keep));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "b");
+        let keep = vec!["wholegit".to_string()];
+        assert_eq!(
+            keep_selected(found.clone(), Some(&keep))[0].name,
+            "wholegit"
+        );
+        assert!(keep_selected(found, Some(&[String::from("nope")])).is_empty());
+        let _ = std::fs::remove_dir_all(&pkg);
     }
 
     #[test]

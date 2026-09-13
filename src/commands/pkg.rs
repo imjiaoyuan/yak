@@ -7,13 +7,24 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
-use crate::flag_spec;
+use crate::{flag_spec, multi_spec};
 
 const INSTALL_SPECS: &[OptSpec] = &[
     flag_spec!(
         "local",
         Some('l'),
         "Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)"
+    ),
+    flag_spec!(
+        "global",
+        Some('g'),
+        "Install into the user directory (default)"
+    ),
+    multi_spec!(
+        "skill",
+        Some('s'),
+        "Keep only these skills by name; '*' keeps all (repeatable)",
+        "NAME"
     ),
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
@@ -144,8 +155,13 @@ fn install(argv: &[String]) -> i32 {
         eprintln!("Error: cannot derive a package name from '{url}'");
         return 2;
     }
+    if args.flag(&["local"]) && args.flag(&["global"]) {
+        eprintln!("Error: --local and --global are mutually exclusive");
+        return 2;
+    }
     let root = pkg_root(args.flag(&["local"]));
     let target = root.join(&name);
+    let p = crate::theme::err();
     if target.exists() {
         // refresh, unless the install is pinned to a ref the caller did
         // not repeat (a pinned clone moves only via install @new-ref)
@@ -154,24 +170,18 @@ fn install(argv: &[String]) -> i32 {
             .is_some_and(|p| !p.trim().is_empty() && ref_.as_deref() != Some(p.trim()));
         if pinned && ref_.is_none() {
             eprintln!(
-                "{}{name} is pinned — re-run with @ref to move it{}",
-                crate::theme::err().dim,
-                crate::theme::err().reset
+                "{} {name} is pinned — re-run with @ref to move it{}",
+                p.dim, p.reset
             );
-            return 0;
-        }
-        if let Err(e) = git(&["fetch", "--tags", "origin"], &target).and_then(|_| {
+        } else if let Err(e) = git(&["fetch", "--tags", "origin"], &target).and_then(|_| {
             let to = ref_.clone().unwrap_or_else(|| "origin/HEAD".to_string());
             git(&["reset", "--hard", &to], &target).map(|_| ())
         }) {
             eprintln!("Error: refresh failed: {e}");
             return 1;
+        } else {
+            eprintln!("{}updated {name}{}", p.dim, p.reset);
         }
-        eprintln!(
-            "{}updated {name}{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
     } else {
         let _ = std::fs::create_dir_all(&root);
         let mut clone = vec!["clone".to_string(), "--depth".to_string(), "1".to_string()];
@@ -196,28 +206,158 @@ fn install(argv: &[String]) -> i32 {
         }
         eprintln!(
             "{}installed {name} → {}{}",
-            crate::theme::err().dim,
+            p.dim,
             target.display(),
-            crate::theme::err().reset
+            p.reset
         );
     }
-    for (dir, label) in [
-        ("skills", "skill(s)"),
-        ("extensions", "extension(s)"),
-        ("commands", "prompt(s)"),
-    ] {
-        let count = std::fs::read_dir(target.join(dir))
-            .map(|rd| rd.flatten().count())
-            .unwrap_or(0);
-        if count > 0 {
+    // a package is whatever its layout says it is: recognize the skills,
+    // extensions and prompts it carries and say so. A repo that mounts
+    // nothing (no hooks dir, no root SKILL.md) is otherwise silent — you
+    // only notice on the next `/help` that nothing showed up
+    let found = carried(&target);
+    let wanted = args.multi(&["skill"]);
+    if wanted.iter().any(|w| w == "*") {
+        set_selected_skills(&target, &[]);
+    } else if !wanted.is_empty() {
+        let available: Vec<&str> = found
+            .root_skill
+            .iter()
+            .map(String::as_str)
+            .chain(found.skills.iter().map(String::as_str))
+            .collect();
+        if let Some(missing) = wanted.iter().find(|w| !available.contains(&w.as_str())) {
+            let carries = if available.is_empty() {
+                "no skills".to_string()
+            } else {
+                available.join(", ")
+            };
             eprintln!(
-                "{}  {count} {label}{}",
-                crate::theme::err().dim,
-                crate::theme::err().reset
+                "Error: no skill '{missing}' in {name} (carries: {carries}) — \
+                 the clone is installed; llm remove {name} to drop it"
             );
+            return 2;
         }
+        set_selected_skills(&target, &wanted);
+    }
+    let selected = selected_skills(&target);
+    for line in notes(&found, selected.as_deref()) {
+        eprintln!("{}  {line}{}", p.dim, p.reset);
     }
     0
+}
+
+/// What an installed package carries, by layout — the same rules the
+/// discovery walks apply: `skills/`, `extensions/`, `commands/`, plus a
+/// `SKILL.md` at the package root (a whole-repo skill, the shape most
+/// standalone skill repos ship: `SKILL.md` + `references/` at the top).
+#[derive(Default)]
+pub struct Carried {
+    /// name of the root `SKILL.md` skill, when the repo itself is one skill
+    pub root_skill: Option<String>,
+    pub skills: Vec<String>,
+    pub extensions: Vec<String>,
+    pub prompts: Vec<String>,
+}
+
+pub fn carried(pkg: &Path) -> Carried {
+    let mut out = Carried::default();
+    if let Some(def) = crate::agent::skills::pack_root_skill(pkg) {
+        out.root_skill = Some(def.name);
+    }
+    let mut defs = Vec::new();
+    crate::agent::skills::load_dir(&pkg.join("skills"), &mut defs);
+    out.skills = defs.into_iter().map(|d| d.name).collect();
+    out.extensions = entry_names(&pkg.join("extensions"));
+    out.prompts = file_stems(&pkg.join("commands"), "md");
+    out
+}
+
+/// The package's `llm.skills` selection: the names `llm install --skill`
+/// kept. `None` (nothing recorded, or `*`) means the whole package is live.
+/// It lives in the clone's git config next to `llm.pinned`, so `git reset
+/// --hard` during a refresh can never clobber it.
+pub fn selected_skills(pkg: &Path) -> Option<Vec<String>> {
+    let raw = git(&["config", "--get", "llm.skills"], pkg).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "*" {
+        return None;
+    }
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Record the selection (`*` = everything, spelled empty). A plain refresh
+/// never touches it, so `install -s a@b` + `install` keeps `a` only.
+fn set_selected_skills(pkg: &Path, names: &[String]) {
+    let value = if names.is_empty() {
+        "*".to_string()
+    } else {
+        names.join(",")
+    };
+    let _ = git(&["config", "llm.skills", &value], pkg);
+}
+
+/// The dim lines `install` and `list` print for one package: what it
+/// carries, what is live of that, or why nothing is.
+fn notes(found: &Carried, selected: Option<&[String]>) -> Vec<String> {
+    let mut skills: Vec<String> = found
+        .root_skill
+        .iter()
+        .map(|s| format!("{s} (repo root)"))
+        .collect();
+    skills.extend(found.skills.iter().cloned());
+    let mut out = Vec::new();
+    for (label, items) in [
+        ("skills", &skills),
+        ("extensions", &found.extensions),
+        ("prompts", &found.prompts),
+    ] {
+        if !items.is_empty() {
+            out.push(format!("{label}: {}", items.join(", ")));
+        }
+    }
+    if let Some(keep) = selected {
+        out.push(format!("only: {}", keep.join(", ")));
+    }
+    if out.is_empty() {
+        out.push(
+            "nothing llm can mount — needs skills/, extensions/, commands/ or a root SKILL.md"
+                .to_string(),
+        );
+    }
+    out
+}
+
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    out.sort();
+    out
+}
+
+fn file_stems(dir: &Path, ext: &str) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    out.sort();
+    out
 }
 
 fn remove(argv: &[String]) -> i32 {
@@ -289,26 +429,14 @@ fn list(argv: &[String]) -> i32 {
                 r = crate::theme::err().reset,
                 d = crate::theme::err().dim
             );
-            for (dir, label) in [
-                ("skills", "skills"),
-                ("extensions", "extensions"),
-                ("commands", "prompts"),
-            ] {
-                let items = std::fs::read_dir(path.join(dir))
-                    .map(|rd| {
-                        rd.flatten()
-                            .filter_map(|e| e.file_name().into_string().ok())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if !items.is_empty() {
-                    eprintln!(
-                        "  {}{label}: {}{}",
-                        crate::theme::err().dim,
-                        items.join(", "),
-                        crate::theme::err().reset
-                    );
-                }
+            let found = carried(&path);
+            let selected = selected_skills(&path);
+            for line in notes(&found, selected.as_deref()) {
+                eprintln!(
+                    "{}  {line}{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
             }
         }
     }
@@ -325,6 +453,28 @@ fn list(argv: &[String]) -> i32 {
 /// Package-carried extension directories, nearest-first roots for the
 /// discovery walks (project pkg wins over user pkg via ordering at the
 /// call site).
+/// The package clones themselves (both scopes), sorted. The skills walk
+/// needs them to find whole-repo `SKILL.md` packages and to apply the
+/// `--skill` selection; the live-reload fingerprint watches them.
+pub fn packages(local: bool) -> Vec<PathBuf> {
+    packages_in(&pkg_root(local))
+}
+
+/// [`packages`] rooted anywhere: the skills walk passes the user dir it was
+/// handed (so discovery stays hermetic in tests) instead of the ambient one.
+pub fn packages_in(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    out.sort();
+    out
+}
+
 pub fn extension_dirs(local: bool) -> Vec<PathBuf> {
     pkg_dirs(local, "extensions")
 }
@@ -354,7 +504,42 @@ fn pkg_dirs(local: bool, sub: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_source;
+    use super::{Carried, carried, notes, parse_source};
+
+    #[test]
+    fn carried_recognizes_every_layout() {
+        let dir = std::env::temp_dir().join(format!("llm-carried-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(dir.join("skills/demo")).unwrap();
+        std::fs::write(dir.join("skills/demo/SKILL.md"), "---\nname: demo\n---\nb").unwrap();
+        std::fs::write(dir.join("skills/flat.md"), "---\nname: flat\n---\nb").unwrap();
+        std::fs::create_dir_all(dir.join("extensions")).unwrap();
+        std::fs::write(dir.join("extensions/wordcount.py"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(dir.join("commands/review.md"), "x").unwrap();
+
+        let found = carried(&dir);
+        assert_eq!(found.root_skill, None);
+        assert_eq!(found.skills, vec!["demo", "flat"]);
+        assert_eq!(found.extensions, vec!["wordcount.py"]);
+        assert_eq!(found.prompts, vec!["review"]);
+        assert!(
+            notes(&found, None)
+                .iter()
+                .any(|l| l == "skills: demo, flat")
+        );
+
+        // the repo itself becomes one skill once SKILL.md sits at the root
+        std::fs::write(dir.join("SKILL.md"), "---\nname: wholegit\n---\nb").unwrap();
+        let found = carried(&dir);
+        assert_eq!(found.root_skill.as_deref(), Some("wholegit"));
+        let lines = notes(&found, Some(&[String::from("wholegit")]));
+        assert!(lines.contains(&"skills: wholegit (repo root), demo, flat".to_string()));
+        assert!(lines.contains(&"only: wholegit".to_string()));
+        // a clone with no hooks at all says why it is silent
+        let empty = notes(&Carried::default(), None);
+        assert!(empty[0].contains("nothing llm can mount"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn github_forms_map_to_https() {

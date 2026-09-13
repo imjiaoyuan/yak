@@ -25,6 +25,9 @@ pub fn fingerprint_roots(cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     let mut roots = discover_dirs(cwd);
     roots.extend(crate::commands::pkg::skill_dirs(true));
     roots.extend(crate::commands::pkg::skill_dirs(false));
+    // whole-repo SKILL.md packages: the skill file sits at the clone root
+    roots.extend(crate::commands::pkg::packages(true));
+    roots.extend(crate::commands::pkg::packages(false));
     let user = crate::core::config::user_dir();
     roots.push(user.join(".agents/skills"));
     roots.push(user.join("skills"));
