@@ -299,11 +299,13 @@ pub fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<S
         .collect())
 }
 
-/// Fetch the model list, swallowing transport/protocol errors (an empty
-/// result means "fall back to the built-in list").
-pub fn try_fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
+/// Fetch the model list; the reason a provider served none is returned, not
+/// swallowed — a rejected key and a provider that publishes no list look
+/// identical once the error is gone, and "no models available" hides which
+/// one it was.
+pub fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
     let (url, headers) = fetch_models_url(kind, base_url, api_key);
-    fetch_model_list(&url, &headers).unwrap_or_default()
+    fetch_model_list(&url, &headers)
 }
 
 #[cfg(test)]

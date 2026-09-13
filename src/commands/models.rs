@@ -60,8 +60,21 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
         crate::theme::err().reset
     );
     let key = cfg.api_key(provider).unwrap_or_default();
-    let live =
-        crate::providers::catalog::try_fetch_models(&provider.kind, &provider.base_url, &key);
+    // a failed fetch is worth saying out loud: the configured list may carry
+    // the picker alone, and a rejected key then looks like a provider that
+    // simply has fewer models
+    let (live, live_error) =
+        match crate::providers::catalog::fetch_models(&provider.kind, &provider.base_url, &key) {
+            Ok(ids) => (ids, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+    if let Some(e) = &live_error {
+        eprintln!(
+            "{}could not list models from {pname}: {e}{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
+    }
     let mut ids: Vec<String> = provider.models.clone();
     for mid in live {
         if !ids.contains(&mid) {
@@ -71,11 +84,20 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        eprintln!(
-            "{}no models available (run /login){}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
+        // name the failure when there is one: with both lists empty, a bad
+        // key and a bad base_url are the whole story
+        match &live_error {
+            Some(e) => eprintln!(
+                "{}no models available for {pname} ({e}) — check the key with /login{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            ),
+            None => eprintln!(
+                "{}no models available (run /login){}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            ),
+        }
         return None;
     }
     let current_model = current.split_once('/').map(|(_, m)| m);
