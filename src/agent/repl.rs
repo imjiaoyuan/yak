@@ -263,12 +263,26 @@ fn run_skill(session: &mut Session, skills: &[crate::agent::skills::SkillDef], n
         );
         return;
     };
-    let prompt = format!(
-        "<skill name=\"{}\">\n{}\n</skill>\n\nApply this skill.",
-        skill.name,
-        body.trim_end()
-    );
+    let prompt = skill_prompt(&skill.name, &skill.path, &body);
     run_task_logged(session, &prompt, &mut Vec::new());
+}
+
+/// The task `/skill:name` submits: the SKILL.md body plus its directory, so
+/// the `references/`, `scripts/` and assets a skill points at resolve from
+/// anywhere in the repo. A skill body is written relative to its own home
+/// (model-invoked skills get the path in the system prompt; a slash
+/// invocation had no path at all, so `references/x.md` read against the cwd).
+fn skill_prompt(name: &str, path: &std::path::Path, body: &str) -> String {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(path);
+    format!(
+        "<skill name=\"{name}\" dir=\"{}\">\n{}\n</skill>\n\nApply this skill. \
+         The files it references (references/, scripts/) live in that dir.",
+        dir.display(),
+        body.trim_end()
+    )
 }
 
 fn restore_default_sigint() {
@@ -1002,6 +1016,19 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slash_skill_prompt_carries_the_skill_dir() {
+        let path = std::path::Path::new("/pkg/shuorenhua/SKILL.md");
+        let prompt = skill_prompt("shuorenhua", path, "body\n");
+        assert!(prompt.starts_with("<skill name=\"shuorenhua\" dir=\"/pkg/shuorenhua\">"));
+        assert!(prompt.contains("\nbody\n</skill>"));
+        assert!(prompt.ends_with("live in that dir."));
+        // a path with no parent still renders (never panic on the dir)
+        assert!(
+            skill_prompt("x", std::path::Path::new("SKILL.md"), "b").contains("dir=\"SKILL.md\"")
+        );
+    }
 
     #[test]
     fn line_start_command_candidates_carry_the_bang() {

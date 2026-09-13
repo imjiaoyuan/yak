@@ -145,6 +145,14 @@ def main():
     work = os.path.realpath(tempfile.mkdtemp())
     with open(os.path.join(work, "hello.txt"), "w") as f:
         f.write("from smoke\n")
+    # a skill for the /skill:<name> lane: its prompt must carry the skill's
+    # own directory, or the references/ a skill points at resolve against cwd
+    skill_dir = os.path.join(work, ".llm", "skills", "probe")
+    os.makedirs(os.path.join(skill_dir, "references"))
+    with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+        f.write("---\nname: probe\ndescription: smoke\n---\nRead references/x.md.\n")
+    with open(os.path.join(skill_dir, "references", "x.md"), "w") as f:
+        f.write("# x\n")
 
     # two stored conversations: one from this directory, one from another.
     # `/resume` must offer only the first (the reference-shaped scoping).
@@ -264,6 +272,15 @@ def main():
     prompts = seen.get("prompts") or []
     assert prompts and prompts[-1] == "from editor", \
         f"editor round-trip on the wire: {prompts!r}"
+
+    # -- /skill:<name> ships the skill's directory on the wire --------------
+    OUT.clear()
+    send(fd, b"/skill:probe\r")
+    time.sleep(1.0)
+    prompts = seen.get("prompts") or []
+    want = f'<skill name="probe" dir="{skill_dir}">'
+    assert prompts and want in prompts[-1], \
+        f"skill prompt: {prompts[-1] if prompts else None!r} (wanted {want!r})"
 
     # -- /resume lists this directory's conversations only -------------------
     OUT.clear()

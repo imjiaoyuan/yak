@@ -194,7 +194,9 @@ Both live in your user directory.
 **Skills** are `SKILL.md` folders, discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest
 `.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). The agent lists
 them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system
-prompt. Turn one off with `disable_model_invocation`, or all of them with `[agent] disabled_skills`.
+prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill
+points at resolve wherever you started the session. Turn one off with `disable_model_invocation`, or
+all of them with `[agent] disabled_skills`.
 
 **Memory** is a plain markdown file: `~/.llm/LLM.md`. The system prompt always names that path —
 even before the file exists — so "remember this" has somewhere to go: ask the agent to remember a
