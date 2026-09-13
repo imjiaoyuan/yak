@@ -1046,8 +1046,9 @@ impl Ext {
         let stderr_tail = Arc::clone(&self.tail);
         let stderr_progress = Arc::clone(&progress);
         std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            for line in lossy_lines(&mut reader, &mut buf) {
                 {
                     let mut p = lock(&stderr_progress);
                     if p.len() >= PROGRESS_LINES {
@@ -1204,14 +1205,37 @@ fn writer_loop(mut stdin: ChildStdin, rx: Receiver<String>) {
 }
 
 /// Read reply lines, correlate by id, dim non-matching lines into the tail.
+/// Decode a newline-delimited reader line by line, lossily: one byte that is
+/// not valid UTF-8 must not end the stream. A legacy-codepage byte on stderr
+/// (a Windows console writing cp1252) would otherwise cost every later
+/// diagnostic, and a garbled line on stdout would cost the replies with it.
+fn lossy_lines<'a>(
+    reader: &'a mut impl BufRead,
+    buf: &'a mut Vec<u8>,
+) -> impl Iterator<Item = String> + 'a {
+    std::iter::from_fn(move || {
+        buf.clear();
+        match reader.read_until(b'\n', buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                Some(String::from_utf8_lossy(buf).into_owned())
+            }
+        }
+    })
+}
+
 fn reader_loop(
     stdout: impl std::io::Read,
     pending: &PendingMap,
     dead: &AtomicBool,
     tail: &Mutex<VecDeque<String>>,
 ) {
-    let reader = BufReader::new(stdout);
-    for line in reader.lines().map_while(Result::ok) {
+    let mut reader = BufReader::new(stdout);
+    let mut buf = Vec::new();
+    for line in lossy_lines(&mut reader, &mut buf) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             let mut t = lock(tail);
             if t.len() >= TAIL_LINES {
@@ -1523,6 +1547,56 @@ done
             lock(&ext.tail).iter().any(|l| l.contains("step two")),
             "the tail must keep stderr too: {:?}",
             *lock(&ext.tail)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line that is not valid UTF-8 is decoded lossily, not treated as the
+    /// end of the stream: an extension under a legacy codepage still answers
+    /// and still reports progress.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_line_does_not_end_the_stream() {
+        let dir = std::env::temp_dir().join(format!("llm-ext-lossy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("codepage");
+        let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      printf '\377\376 cp1252 bytes\n' >&2
+      echo "still here" >&2
+      printf 'garbage \377\376 line\n'
+      sleep 0.2
+      printf '{"id":%s,"result":"done"}\n' "$id"
+      ;;
+  esac
+done
+"#;
+        std::fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ext = connect_stub(&script);
+        let mut log: Vec<String> = Vec::new();
+        let out = ext.call_tool("ping", &json!({}), &mut |line| log.push(line.to_string()));
+        assert_eq!(
+            out.unwrap(),
+            "done",
+            "the reply after the garbled stdout line must still arrive"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("still here")),
+            "stderr must keep flowing after an invalid byte: {log:?}"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("cp1252")),
+            "the invalid line is kept, decoded lossily: {log:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
