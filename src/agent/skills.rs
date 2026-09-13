@@ -69,7 +69,7 @@ pub(crate) fn load_package(pkg: &Path, out: &mut Vec<SkillDef>) {
         found.push(def);
     }
     load_dir(&pkg.join("skills"), &mut found);
-    let keep = crate::commands::pkg::selected_skills(pkg);
+    let keep = crate::commands::pkg::selected(pkg).skills;
     out.extend(keep_selected(found, keep.as_deref()));
 }
 

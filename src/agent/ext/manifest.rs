@@ -34,6 +34,14 @@ pub fn discover(cwd: &Path) -> Discovered {
             if disabled.iter().any(|d| d == stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
+            // a package install can keep individual extensions dormant
+            let file = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or_default();
+            if !crate::commands::pkg::extension_kept(&dir, file) {
+                continue;
+            }
             // a `--- llm-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows

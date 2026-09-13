@@ -17,6 +17,7 @@ import os
 import pty
 import re
 import struct
+import subprocess
 import tempfile
 import termios
 import threading
@@ -105,6 +106,70 @@ def read_until(fd, pattern, timeout=15.0):
 
 def send(fd, data):
     os.write(fd, data)
+
+
+def install_picker_lane(binary, work, env):
+    """Drive `llm install` through both of its pickers on a pty: the scope
+    menu and the checkbox selection. The e2e lane installs with flags (it has
+    no tty), so the keys — and the keep lists they write — are only real
+    here. Returns the recap the picker printed."""
+    pkg = tempfile.mkdtemp()
+    name = os.path.basename(pkg)
+    os.makedirs(os.path.join(pkg, "skills", "demo"))
+    with open(os.path.join(pkg, "SKILL.md"), "w") as f:
+        f.write("---\nname: wholegit\ndescription: smoke\n---\nbody\n")
+    with open(os.path.join(pkg, "skills", "demo", "SKILL.md"), "w") as f:
+        f.write("---\nname: demo\ndescription: smoke\n---\nbody\n")
+    os.makedirs(os.path.join(pkg, "extensions"))
+    for stem in ("hello", "bye"):
+        with open(os.path.join(pkg, "extensions", stem), "w") as f:
+            f.write(
+                "#!/usr/bin/env python3\n"
+                f"# --- llm-tool: {stem}\n"
+                "# description: smoke\n"
+                "# args: text (string) the text\n"
+                "# arg-mode: argv\n"
+                "import sys\n"
+                "print(1)\n"
+            )
+    for argv in (
+        ["git", "init", "-q", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=ci@ci", "-c", "user.name=ci", "commit", "-qm", "pkg"],
+    ):
+        subprocess.run(argv, cwd=pkg, check=True, capture_output=True)
+
+    OUT.clear()
+    OUT_DONE.clear()
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(work)
+        os.execve(binary, [binary, "install", pkg], env)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
+
+    # scope picker: enter takes the highlighted first row (project-local)
+    read_until(fd, rb"install where")
+    send(fd, b"\r")
+    # item picker: uncheck the first row (the repo-root skill), keep the rest
+    read_until(fd, rb"install which of these")
+    send(fd, b" ")
+    send(fd, b"\r")
+    read_until(fd, rb"only skills")
+    time.sleep(0.3)
+    screen = out_bytes()
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, f"install exited {status}"
+
+    clone = os.path.join(work, ".llm", "pkg", name)
+    assert os.path.isdir(clone), f"install did not land in the project (screen {screen[-400:]!r})"
+    config = subprocess.run(
+        ["git", "-C", clone, "config", "--get-regexp", "^llm"],
+        capture_output=True, text=True,
+    ).stdout
+    assert "llm.skills demo" in config, f"unchecked skill not recorded: {config!r}"
+    assert "llm.extensions *" in config, f"fully checked extensions must stay open: {config!r}"
+    return screen
 
 
 def main():
@@ -322,6 +387,10 @@ def main():
     read_until(fd, rb"\x1b\[<u")  # popped on exit
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0, f"exit code {status}"
+
+    # -- install pickers: scope menu, then the checkbox item list -----------
+    screen = install_picker_lane(binary, work, env)
+    assert b"only skills: demo" in screen, f"selection not recapped: {screen[-500:]!r}"
 
     print("repl pty smoke passed")
     return 0

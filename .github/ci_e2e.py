@@ -563,14 +563,14 @@ def main():
     p = run([binary, "install", "-l", pkgrepo, "-s", "demo"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"install -s rc={p.returncode} err={p.stderr[-300:]}"
-    assert "only: demo" in p.stdout + p.stderr, f"selection not reported: {(p.stdout + p.stderr)[-300:]!r}"
+    assert "only skills: demo" in p.stdout + p.stderr, f"selection not reported: {(p.stdout + p.stderr)[-300:]!r}"
     p = run([binary, "install", "-l", pkgrepo, "-s", "nope"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert p.returncode == 2 and "no skill 'nope'" in p.stdout + p.stderr, \
         f"unknown --skill not rejected: rc={p.returncode} {(p.stdout + p.stderr)[-300:]!r}"
     p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)
-    assert "only: demo" in p.stdout + p.stderr, \
+    assert "only skills: demo" in p.stdout + p.stderr, \
         f"refresh dropped the skill selection: {(p.stdout + p.stderr)[-300:]!r}"
     p = run([binary, "install", "-l", "-g", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)

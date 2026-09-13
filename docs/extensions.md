@@ -19,7 +19,7 @@ write code you would run yourself.
 | Home | Notes |
 |---|---|
 | `.llm/extensions/` (nearest walking up from cwd) | project copy, wins by name |
-| `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `llm install` packages |
+| `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `llm install` packages; `llm install`'s item menu can leave one dormant (the clone's `llm.extensions` keep list) |
 | `~/.llm/extensions/` | user-global |
 
 Every file (not directory) in these homes is scanned. Same stem name in two homes: the project

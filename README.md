@@ -264,11 +264,21 @@ project-local into `.llm/pkg/`, project winning over user; `-g` is the explicit 
 standalone skill repos ship (`SKILL.md` + `references/` at the top), so
 `llm install https://github.com/user/my-skill` lands `/skill:my-skill` with no extra step. `install`
 reports what it recognized (skills, extensions, prompts); a repo carrying none of them is called out
-instead of mounting nothing silently. `-s NAME` (repeatable, `'*'` for all) keeps only those skills
-live; the choice lives in the clone's git config, so a plain re-run keeps it and `'*'` clears it.
+instead of mounting nothing silently.
+
+Run it on a terminal with no scope flag and `install` asks: first where the package goes
+(project-local or global), then — when the repo carries more than one thing — which skills,
+extensions and prompts to mount, as a checkbox list (space toggles, enter installs). The keys only
+ever appear on an attended terminal: piped or CI installs keep the plain defaults (global, mount
+everything), so a script never blocks on a menu. `-l`/`-g` answer the scope question up front and
+`-s NAME` (repeatable, `'*'` for all) narrows the skills without any prompt; the choices live in
+the clone's git config (`llm.skills`, `llm.extensions`, `llm.prompts`), so a plain re-run keeps
+them and `'*'` clears them. A group left entirely checked records nothing — an upstream addition
+is live without re-installing.
+
 Re-running `install` refreshes a clone (`git fetch` + reset); a pinned `@ref` clone moves only via
-`install repo@new-ref`. `llm list` shows what each package carries, `llm remove NAME` deletes it.
-There is no npm lane — git only.
+`install repo@new-ref`. `llm list` shows what each package carries and what is live of it,
+`llm remove NAME` deletes it. There is no npm lane — git only.
 Review any third-party package before installing: extensions run with full system access.
 
 ```bash
