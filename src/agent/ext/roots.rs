@@ -19,7 +19,8 @@ pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
 
 /// The plugin-surface roots live-reload watches: every extension root
 /// ([`discover_dirs`]) and skill root (the same walk `skills::discover`
-/// takes), plus config.json (settings, disabled extensions, tool policies).
+/// takes), plus config.json — read through [`config_surface`], not stamped,
+/// so provider churn in that file cannot fake a plugin change.
 pub fn fingerprint_roots(cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     let mut roots = discover_dirs(cwd);
     roots.extend(crate::commands::pkg::skill_dirs(true));
@@ -108,9 +109,64 @@ pub(super) fn hash_roots(roots: &[PathBuf], config: &Path) -> u64 {
             }
         }
     }
-    let (cm, clen) = stamp(config);
-    h.write(config.as_os_str().as_encoded_bytes());
-    h.write_u64(cm);
-    h.write_u64(clen);
+    h.write(config_surface(config).as_bytes());
     h.finish()
+}
+
+/// The plugin-relevant slice of config.json: the `agent` table the reload
+/// re-reads (approval mode, context limits, tool policies, disabled skills)
+/// and the `extensions` table (disabled list, tool timeout). The rest —
+/// `providers`, `models.default`, `models.thinking` — is provider state that
+/// `/model`, `/thinking` and `/login` rewrite in place: holding the file's
+/// mtime/size against it reloaded every *other* running REPL on that churn,
+/// and paging the whole file in would also miss a same-second, same-length
+/// hand-edit. Unparsable JSON falls back to the raw bytes: a broken file is
+/// an unknown surface, so any change to it should still trip.
+fn config_surface(config: &Path) -> String {
+    let Ok(raw) = std::fs::read_to_string(config) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return raw;
+    };
+    let mut out = String::new();
+    for key in ["agent", "extensions"] {
+        if let Some(section) = value.get(key) {
+            out.push_str(key);
+            canonical_json(section, &mut out);
+        }
+    }
+    out
+}
+
+/// Key-order-independent JSON: `serde_json` is built with `preserve_order`,
+/// so reordering a hand-edited table must not read as a plugin change.
+fn canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push(':');
+                canonical_json(&map[key.as_str()], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
 }

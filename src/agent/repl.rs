@@ -133,7 +133,8 @@ pub fn repl(
 }
 
 /// Live-reload at the task boundary: when the plugin-surface fingerprint
-/// moved (an extension or skill file landed, config.json changed), re-run
+/// moved (an extension or skill file landed, the `agent` or `extensions`
+/// table of config.json changed), re-run
 /// the /reload path — the same re-discovery, minus the manual command. A
 /// file the agent writes mid-session is therefore live on its next task:
 /// the reference's reload-runtime without the manual step.

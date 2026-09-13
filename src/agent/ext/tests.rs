@@ -312,10 +312,51 @@ fn fingerprint_tracks_dropped_and_edited_files() {
         "a subdirectory file moves it"
     );
 
-    std::fs::write(&config, b"{\"a\":1}").unwrap();
+    // the watched slice of config.json is the plugin surface: the `agent`
+    // settings table and the `extensions` table
+    std::fs::write(&config, b"{\"agent\":{\"tools\":{\"bash\":\"prompt\"}}}").unwrap();
     let h7 = hash_roots(std::slice::from_ref(&root), &config);
-    std::fs::write(&config, b"{\"a\":1,\"b\":2}").unwrap();
-    assert_ne!(hash_roots(&[root], &config), h7, "a config edit moves it");
+    std::fs::write(&config, b"{\"agent\":{\"tools\":{\"bash\":\"deny\"}}}").unwrap();
+    assert_ne!(
+        hash_roots(std::slice::from_ref(&root), &config),
+        h7,
+        "an agent-settings edit moves it"
+    );
+    std::fs::write(&config, b"{\"extensions\":{\"disabled\":[\"todo\"]}}").unwrap();
+    assert_ne!(
+        hash_roots(std::slice::from_ref(&root), &config),
+        h7,
+        "an extensions-table edit moves it"
+    );
+    // key order is not a change, and neither is the provider churn /model,
+    // /thinking and /login write from every session — which used to reload
+    // every other running REPL
+    std::fs::write(
+        &config,
+        b"{\"agent\":{\"tools\":{\"bash\":\"prompt\"}},\"extensions\":{\"disabled\":[\"todo\"]}}",
+    )
+    .unwrap();
+    let h8 = hash_roots(std::slice::from_ref(&root), &config);
+    std::fs::write(
+        &config,
+        b"{\"extensions\":{\"disabled\":[\"todo\"]},\"providers\":{\"mock\":{\"kind\":\"openai-compat\"}},\"agent\":{\"tools\":{\"bash\":\"prompt\"}},\"models\":{\"default\":\"mock/m-a\",\"thinking\":\"high\"}}",
+    )
+    .unwrap();
+    assert_eq!(
+        hash_roots(std::slice::from_ref(&root), &config),
+        h8,
+        "a model switch or a provider edit leaves the plugin surface alone"
+    );
+
+    // a broken file is an unknown surface: any change to it still trips
+    std::fs::write(&config, b"{not json").unwrap();
+    let h9 = hash_roots(std::slice::from_ref(&root), &config);
+    std::fs::write(&config, b"{not json either").unwrap();
+    assert_ne!(
+        hash_roots(std::slice::from_ref(&root), &config),
+        h9,
+        "a hand-edit of an unparsable file still moves it"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
