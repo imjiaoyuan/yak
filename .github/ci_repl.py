@@ -279,6 +279,22 @@ def main():
     time.sleep(0.3)
     read_until(fd, rb">")
 
+    # -- /export writes the loaded conversation as markdown -----------------
+    OUT.clear()
+    send(fd, b"/resume\r")          # the picker comes up
+    read_until(fd, rb"enter select")
+    send(fd, b"\r")              # a second enter loads the local session
+    time.sleep(0.5)
+    send(fd, b"/status\r")
+    read_until(fd, rb"01localresumeprobe0000000")  # the session is live now
+    exported = os.path.join(user, "exported.md")
+    send(fd, ("/export " + exported).encode() + b"\r")
+    time.sleep(0.8)
+    assert os.path.exists(exported), f"no export written; screen: {out_bytes()[-800:]!r}"
+    md = open(exported).read()
+    assert md.startswith("# local session marker"), f"export: {md[:200]!r}"
+    assert "**Assistant**" in md, f"export body: {md[:400]!r}"
+
     # -- exit: the kitty stack is popped ------------------------------------
     send(fd, b"\x03")
     time.sleep(0.2)

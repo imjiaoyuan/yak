@@ -1,0 +1,329 @@
+//! Conversation export: a stored thread rendered as one markdown document.
+//! The wire messages are the source of truth — the same ones a resume
+//! replays — flattened for reading: user and assistant text as prose, tool
+//! arguments and results in backtick fences long enough to survive any
+//! fence already inside them. Attachment bytes stay out (a base64 payload
+//! would bury the transcript); only their kind and where they came from are
+//! recorded.
+
+use crate::core::threads::{StoredAttachment, StoredMsg, StoredTurn};
+
+/// Render `turns` (thread `id`, oldest first) as markdown.
+pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
+    let mut out = String::new();
+
+    // the first prompt makes the better title; the id is the fallback
+    let title = turns
+        .first()
+        .map(|t| flatten(&t.prompt, 80))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| format!("Conversation {id}"));
+    out.push_str(&format!("# {title}\n\n"));
+
+    let first = turns.first();
+    let mut meta = vec![format!("`{id}`")];
+    if let Some(t) = first {
+        meta.push(t.ts.clone());
+        if let Some(cwd) = t.cwd.as_deref() {
+            meta.push(format!("`{cwd}`"));
+        }
+        if !t.model.is_empty() {
+            meta.push(format!("`{}`", t.model));
+        }
+    }
+    meta.push(format!(
+        "{} turn{}",
+        turns.len(),
+        if turns.len() == 1 { "" } else { "s" }
+    ));
+    out.push_str(&format!("{} — exported by llm\n", meta.join(" · ")));
+
+    let mut last_model = first.map(|t| t.model.clone()).unwrap_or_default();
+    for (n, turn) in turns.iter().enumerate() {
+        out.push_str(&format!("\n---\n\n## {} · {}", n + 1, turn.ts));
+        // the model only when the thread switched mid-way
+        if turn.model != last_model {
+            out.push_str(&format!(" · `{}`", turn.model));
+            last_model = turn.model.clone();
+        }
+        if let Some(ms) = turn.duration_ms {
+            out.push_str(&format!(" · {:.1}s", ms as f64 / 1000.0));
+        }
+        if let Some((input, output)) = turn.usage {
+            out.push_str(&format!(" · ↑{input} ↓{output}"));
+        }
+        out.push_str("\n\n");
+
+        let mut last_answer: Option<String> = None;
+        for m in &turn.messages {
+            if let StoredMsg::Assistant { text, .. } = m
+                && !text.trim().is_empty()
+            {
+                last_answer = Some(text.trim_end().to_string());
+            }
+            render_message(&mut out, m);
+        }
+        if turn.messages.is_empty() {
+            // a turn normally is its messages; a prompt-only round falls
+            // back to the prompt
+            if !turn.prompt.trim().is_empty() {
+                out.push_str(&format!("**User**\n\n{}\n\n", turn.prompt.trim_end()));
+            }
+        }
+        // the round's answer is stored on the turn, popped out of `messages`
+        // — render it unless the last assistant message already was it
+        let answer = turn.response.trim_end();
+        if !answer.trim().is_empty() && last_answer.as_deref() != Some(answer) {
+            out.push_str(&format!("**Assistant**\n\n{answer}\n\n"));
+        }
+        if let Some(reasoning) = turn
+            .reasoning
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            out.push_str("**Thinking**\n\n");
+            out.push_str(&fenced(reasoning, "text"));
+            out.push('\n');
+        }
+    }
+
+    if let Some(system) = first
+        .and_then(|t| t.system.as_deref())
+        .map(str::trim_end)
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("\n---\n\n## System prompt\n\n");
+        out.push_str(&fenced(system, "text"));
+    }
+    out
+}
+
+fn render_message(out: &mut String, m: &StoredMsg) {
+    match m {
+        StoredMsg::User { text, attachments } => {
+            if !text.trim().is_empty() {
+                out.push_str(&format!("**User**\n\n{}\n\n", text.trim_end()));
+            }
+            render_attachments(out, attachments);
+        }
+        StoredMsg::Assistant {
+            text, tool_calls, ..
+        } => {
+            if !text.trim().is_empty() {
+                out.push_str(&format!("**Assistant**\n\n{}\n\n", text.trim_end()));
+            }
+            for call in tool_calls {
+                out.push_str(&format!("**Tool** `{}`\n\n", call.name));
+                let args = serde_json::to_string_pretty(&call.arguments)
+                    .unwrap_or_else(|_| call.arguments.to_string());
+                out.push_str(&fenced(&args, "json"));
+                out.push('\n');
+            }
+        }
+        StoredMsg::Tool {
+            name,
+            content,
+            is_error,
+            attachments,
+            ..
+        } => {
+            let label = if *is_error {
+                "Tool error"
+            } else {
+                "Tool result"
+            };
+            out.push_str(&format!("**{label}** `{name}`\n\n"));
+            if !content.trim().is_empty() {
+                out.push_str(&fenced(content, "text"));
+            }
+            render_attachments(out, attachments);
+            out.push('\n');
+        }
+        StoredMsg::Summary { text } => {
+            if !text.trim().is_empty() {
+                out.push_str(&format!("**Compacted summary**\n\n{}\n\n", text.trim_end()));
+            }
+        }
+    }
+}
+
+/// A `*attachment*` line: kind plus provenance, never the payload.
+fn render_attachments(out: &mut String, attachments: &[StoredAttachment]) {
+    for a in attachments {
+        let kind = a.mime_type.as_deref().unwrap_or("application/octet-stream");
+        let from = match (a.path.as_deref(), a.url.as_deref()) {
+            (Some(path), _) => format!("`{path}`"),
+            (None, Some(url)) => url.to_string(),
+            // inline-only (a pasted image): the bytes stay behind
+            (None, None) => {
+                let kb = a.base64.as_deref().map_or(0, |b| b.len() * 3 / 4 / 1024);
+                format!("inline (~{kb} KB)")
+            }
+        };
+        out.push_str(&format!("*attachment* `{kind}` — {from}\n\n"));
+    }
+}
+
+/// A fence long enough that the body cannot close it: any run of backticks
+/// inside (a tool result quoting markdown, say) stays literal, and a body
+/// line always shorter than the closing bar never ends the block early.
+fn fenced(body: &str, lang: &str) -> String {
+    let body = body.trim_end_matches('\n');
+    let longest = body
+        .split(|c| c != '`')
+        .map(|run| run.len())
+        .max()
+        .unwrap_or(0);
+    let bar = "`".repeat(longest.max(2) + 1);
+    format!("{bar}{lang}\n{body}\n{bar}\n")
+}
+
+/// The first line of `s`, whitespace-collapsed and clipped for a heading.
+fn flatten(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        format!("{}…", flat.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn(messages: Vec<StoredMsg>) -> StoredTurn {
+        StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: "01TESTTURN".into(),
+            ts: "2026-09-13T10:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "openai/gpt-5".into(),
+            cwd: Some("/tmp/project".into()),
+            system: None,
+            prompt: "hello  world".into(),
+            response: String::new(),
+            reasoning: None,
+            usage: Some((1200, 345)),
+            duration_ms: Some(4210),
+            options: Vec::new(),
+            messages,
+        }
+    }
+
+    #[test]
+    fn renders_the_thread_and_its_metadata() {
+        let t = turn(vec![
+            StoredMsg::User {
+                text: "hello  world".into(),
+                attachments: Vec::new(),
+            },
+            StoredMsg::Assistant {
+                text: "hi".into(),
+                tool_calls: vec![crate::core::threads::StoredToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "src/main.rs"}),
+                }],
+                reasoning: None,
+            },
+            StoredMsg::Tool {
+                call_id: "c1".into(),
+                name: "read".into(),
+                content: "fn main() {}".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+        ]);
+        let md = to_markdown("01THREAD", &[t]);
+        assert!(md.starts_with("# hello world\n"), "{md}");
+        assert!(md.contains("`01THREAD` · 2026-09-13T10:00:00+00:00 · `/tmp/project`"));
+        assert!(md.contains("## 1 · 2026-09-13T10:00:00+00:00 · 4.2s · ↑1200 ↓345"));
+        assert!(md.contains("**User**\n\nhello  world"));
+        assert!(md.contains("**Tool** `read`"));
+        assert!(md.contains("\"path\": \"src/main.rs\""));
+        assert!(md.contains("**Tool result** `read`"));
+        // the order of the transcript is the order of the export
+        let user = md.find("**User**").unwrap();
+        let call = md.find("**Tool** `read`").unwrap();
+        let result = md.find("**Tool result**").unwrap();
+        assert!(user < call && call < result);
+    }
+
+    #[test]
+    fn a_fence_outruns_the_one_inside_it() {
+        let body = "```\nstill content\n```";
+        let out = fenced(body, "text");
+        let bar = &out[..out.find('\n').unwrap()];
+        assert_eq!(bar, "````text");
+        assert!(out.trim_end().ends_with("````"));
+        assert!(out.contains(body));
+
+        // an empty body still gets a closed block
+        let empty = fenced("", "json");
+        assert_eq!(empty, "```json\n\n```\n");
+    }
+
+    #[test]
+    fn attachment_payloads_never_reach_the_document() {
+        let t = turn(vec![StoredMsg::User {
+            text: "look at this".into(),
+            attachments: vec![StoredAttachment {
+                path: Some("/tmp/shot.png".into()),
+                url: None,
+                mime_type: Some("image/png".into()),
+                base64: Some("QUJDREVGRw".into()),
+            }],
+        }]);
+        let md = to_markdown("01THREAD", &[t]);
+        assert!(md.contains("*attachment* `image/png` — `/tmp/shot.png`"));
+        assert!(!md.contains("QUJDREVGRw"));
+    }
+
+    #[test]
+    fn the_rounds_answer_never_goes_missing_or_doubles() {
+        // the loop pops the final assistant message out of `messages` and
+        // keeps it as the turn response — the export must not lose it
+        let mut t = turn(vec![
+            StoredMsg::User {
+                text: "hello  world".into(),
+                attachments: Vec::new(),
+            },
+            StoredMsg::Assistant {
+                text: "calling".into(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            },
+        ]);
+        t.response = "the final answer".into();
+        let md = to_markdown("01THREAD", &[t]);
+        assert!(md.contains("**Assistant**\n\ncalling"));
+        assert!(md.contains("**Assistant**\n\nthe final answer"));
+
+        // when the message is still in the transcript it is not repeated
+        let mut t = turn(vec![
+            StoredMsg::User {
+                text: "hello  world".into(),
+                attachments: Vec::new(),
+            },
+            StoredMsg::Assistant {
+                text: "the final answer".into(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            },
+        ]);
+        t.response = "the final answer".into();
+        let md = to_markdown("01THREAD", &[t]);
+        assert_eq!(md.matches("the final answer").count(), 1);
+    }
+
+    #[test]
+    fn a_prompt_only_thread_still_exports() {
+        let mut t = turn(Vec::new());
+        t.response = "done".into();
+        let md = to_markdown("01THREAD", &[t]);
+        assert!(md.contains("**User**\n\nhello  world"));
+        assert!(md.contains("**Assistant**\n\ndone"));
+    }
+}

@@ -714,6 +714,23 @@ def main():
     assert "alpha marker" in body and "beta marker" not in body, \
         f"local continue picked the wrong thread: {body[-300:]!r}"
 
+    # export: the working directory's newest thread as markdown — prose,
+    # fenced tool calls and results; no flag picks the conversation
+    md_path = os.path.join(stray, "exported.md")
+    ex = run([binary, "export", md_path], env, cwd=here, stdin=subprocess.DEVNULL)
+    assert ex.returncode == 0, \
+        f"export rc={ex.returncode} err={(ex.stdout + ex.stderr)[-300:]!r}"
+    md = open(md_path).read()
+    assert md.startswith("# alpha marker"), f"export title: {md[:120]!r}"
+    assert "**User**" in md and "**Assistant**" in md, f"export body: {md[:400]!r}"
+    assert "final answer after tool" in md, "the stored answer must be exported"
+    # no path: llm-<id>.md lands in the working directory
+    dflt = run([binary, "export"], env, cwd=here, stdin=subprocess.DEVNULL)
+    assert dflt.returncode == 0, \
+        f"default export rc={dflt.returncode} err={dflt.stderr[-300:]!r}"
+    named = [f for f in os.listdir(here) if f.startswith("llm-") and f.endswith(".md")]
+    assert named, f"no default-named export in {os.listdir(here)}"
+
     print("e2e smoke passed")
     return 0
 

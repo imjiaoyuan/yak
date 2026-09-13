@@ -337,6 +337,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/logout",
     "/resume",
     "/tree",
+    "/export",
     "/reload",
 ];
 
@@ -678,6 +679,7 @@ fn repl_command(
                 "/logout        remove one",
                 "/resume        load a past session",
                 "/tree          jump between branches of this session",
+                "/export [PATH] write this conversation to markdown",
                 "/clear         fresh session",
                 "/status        usage, context and plugins",
                 "/yolo          toggle auto-approval",
@@ -911,6 +913,25 @@ fn repl_command(
                 eprintln!("Error: {e}");
             }
         }
+        "/export" => match session.conversation_id.clone() {
+            Some(cid) => {
+                let path = (!arg.is_empty()).then_some(arg);
+                match crate::commands::export::export_thread(&cid, &session.cwd, path) {
+                    Ok(path) => eprintln!(
+                        "{}exported {cid} → {}{}",
+                        crate::theme::err().dim,
+                        path.display(),
+                        crate::theme::err().reset
+                    ),
+                    Err(e) => eprintln!("Error: {e}"),
+                }
+            }
+            None => eprintln!(
+                "{}no session yet — nothing to export{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            ),
+        },
         "/reload" => {
             *skills = crate::agent::skills::discover(
                 &crate::core::config::user_dir(),
@@ -1027,14 +1048,14 @@ mod tests {
             .map(|c| c.strip_prefix('/').unwrap())
             .collect();
         for gone in [
-            "memory", "init", "export", "settings", "tools", "ask", "quit", "mcp", "trust",
-            "skills", "compact",
+            "memory", "init", "settings", "tools", "ask", "quit", "mcp", "trust", "skills",
+            "compact",
         ] {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
             "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "yolo",
-            "tree", "help", "exit",
+            "tree", "export", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }

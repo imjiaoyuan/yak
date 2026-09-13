@@ -25,6 +25,7 @@ Bare `llm` opens an interactive agent session; `llm \"task\"` runs the
 agent once with tools.
 
 Available commands:
+  export     Export a conversation as markdown (also: /export)
   install    Install a git package (also: remove, list)
 
 Flags:
@@ -63,6 +64,7 @@ fn dispatch(argv: &[String]) -> i32 {
             print!("{ABOUT}");
             0
         }
+        Some("export") => commands::export::run(argv),
         Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
             commands::pkg::run(argv)
         }

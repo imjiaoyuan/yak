@@ -178,11 +178,14 @@ llm -r                                     # browse and resume past sessions
 llm --session 01ABC... "..."               # pick an exact one (a short prefix works)
 llm --no-session "..."                     # this run only, don't save it
 llm --fork "..."                           # branch this session onto a new thread
+llm export notes.md                        # write the newest session here as markdown
 ```
 
 `-c` looks in the current directory first and falls back to the newest session anywhere, telling you
 which directory it used. `-r` opens one filterable list, newest first; typing filters across the
-preview and the id. `/resume` inside the session opens the same list.
+preview and the id. `/resume` inside the session opens the same list. `/export [PATH]` writes the
+conversation you are in — tool calls and results included — as markdown, `llm-<id>.md` in the
+working directory by default (the same renderer backs `llm export`).
 
 ### Skills and memory
 
@@ -241,6 +244,7 @@ Bare `llm` opens an interactive agent session; `llm "task"` runs the
 agent once with tools.
 
 Available commands:
+  export     Export a conversation as markdown (also: /export)
   install    Install a git package (also: remove, list)
 
 Flags:
@@ -452,7 +456,10 @@ subagents exist.
 Every conversation is saved to `~/.llm/threads/` as a JSONL file, one per session. Each turn records
 its model, options and token usage; in agent sessions the tool calls and results ride along, and
 reasoning is stored beside the answer. Pass `--no-session` for a throwaway run — otherwise
-everything is kept.
+everything is kept. `llm export [PATH]` (or `/export` inside a session) renders one as a single
+markdown document: prose as prose, tool calls and results in fenced blocks, thinking under
+`**Thinking**`, the system prompt as an appendix, and attachments by name and kind rather than as
+bytes.
 
 ## Semantics
 
