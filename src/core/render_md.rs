@@ -311,12 +311,16 @@ fn emit_line(st: &BlockState, content: &str, out: &mut String) {
 /// margin plus `cont` spaces (list markers, quote bars, code indent).
 fn emit_cont(st: &BlockState, content: &str, cont: usize, out: &mut String) {
     let width = st.wrap.saturating_sub(cont);
-    if width == 0 || cell_width(content) <= width {
+    if width == 0 {
         out.push_str(&st.margin);
         out.push_str(content);
         out.push('\n');
         return;
     }
+    // always through the scanner: a line that fits can still be broken early
+    // (a space within WRAP_EARLY cells of the edge, an opening mark that
+    // would end the row), and a tab is measured by column — `cell_width`
+    // cannot do either, so there is no safe shortcut here
     let cont_pad = format!("{}{}", st.margin, " ".repeat(cont));
     wrap_scan(content, width, &st.margin, &cont_pad, true, out);
     out.push('\n');
@@ -338,13 +342,32 @@ fn bare_fence_run(t: &str) -> Option<usize> {
     (run >= 3 && t.len() == run).then_some(run)
 }
 
+/// Byte length of a line's leading whitespace run. Replay trims with
+/// `str::trim`, so a full-width space (U+3000) or a no-break space counts as
+/// marker padding there too, and the live stream must skip it just the same.
+fn pad_run(t: &str) -> usize {
+    t.chars()
+        .take_while(|c| c.is_whitespace())
+        .map(char::len_utf8)
+        .sum()
+}
+
 fn is_hr(t: &str) -> bool {
+    // commonmark wants three or more *matching* markers: `-*-` is prose
+    is_hr_prefix(t) && t.chars().filter(|c| !c.is_whitespace()).count() >= 3
+}
+
+/// The line is nothing but one repeated mark (`-`/`_`/`*`) and whitespace:
+/// it may still grow into a thematic break. Replay asks `str::trim`-style
+/// questions of the line, so any unicode space counts as padding here too.
+fn is_hr_prefix(t: &str) -> bool {
     let mut marks = t.chars().filter(|c| !c.is_whitespace());
     let Some(first) = marks.next() else {
         return false;
     };
-    // commonmark wants three or more *matching* markers: `-*-` is prose
-    matches!(first, '-' | '*' | '_') && marks.clone().count() >= 2 && marks.all(|c| c == first)
+    matches!(first, '-' | '_' | '*')
+        && marks.all(|c| c == first)
+        && t.chars().all(|c| c == first || c.is_whitespace())
 }
 
 /// Returns (marker length including trailing space, is ordered) when the
@@ -511,14 +534,28 @@ pub struct StyleStream {
     margin_cells: usize,
     /// visual row not started: the margin is not yet written
     at_start: bool,
-    /// anything printed at all (drives `finish`)
-    emitted: bool,
+    /// inside a heading's inline content: a whitespace run at the row's end
+    /// is held (a heading trims it, every other block keeps it)
+    heading: bool,
+    /// the held whitespace run of a heading row
+    hold: String,
+    /// any non-blank row emitted yet: a blank run before it is dropped
+    /// (replay's `started`, which suppresses leading blanks)
+    started: bool,
+    /// a source blank line seen and not yet printed: one blank survives
+    /// between blocks (runs collapse) and it is flushed only when the next
+    /// block starts, so a trailing blank never prints
+    pending_blank: bool,
     /// row budget in terminal cells beyond the margin; 0 = never wrap
     wrap: usize,
     /// re-read the terminal width at every line start (resize-safe)
     dynamic: bool,
     /// cells printed on the current row
     cells: usize,
+    /// absolute column the current row's `cells` count starts at (the margin,
+    /// plus the continuation indent on a wrapped row): tabs advance to an
+    /// 8-column stop of the *screen*, so a tab's width needs this column
+    col0: usize,
     /// continuation rows printed for the current line
     rows: usize,
     /// extra indent on continuation rows (list marker / quote bar / code
@@ -567,10 +604,14 @@ impl StyleStream {
             margin: " ".repeat(spaces),
             margin_cells: spaces,
             at_start: true,
-            emitted: false,
+            heading: false,
+            hold: String::new(),
+            started: false,
+            pending_blank: false,
             wrap: 0,
             dynamic: false,
             cells: 0,
+            col0: spaces,
             rows: 0,
             cont: 0,
             open: String::new(),
@@ -659,6 +700,36 @@ impl StyleStream {
 
     /// The line ended: settle whatever is still held (a partial marker, an
     /// open inline span, an HR or fence candidate), then close the row.
+    /// Resolve a line that ended while still being classified: apply the
+    /// EOL decision and print the row it implies.
+    fn finish_classification(&mut self, out: &mut String) {
+        let d = self.decide_eol();
+        self.apply(d, out);
+        // an empty heading (`##` on its own) printed nothing yet, but
+        // replay emits its style codes: match that byte for byte, starting
+        // the row so it carries the left margin like every other row
+        if !self.line_printed && !self.open.is_empty() {
+            if self.at_start {
+                self.begin_row(out);
+            } else {
+                let codes = std::mem::take(&mut self.open);
+                out.push_str(&codes);
+                out.push_str(self.p.reset.as_str());
+            }
+            self.line_printed = true;
+        }
+        match self.st {
+            St::Inline(at) => self.scan_inline(at, out, true),
+            St::Table(at) => {
+                let rest = self.line[at..].to_string();
+                for ch in rest.chars() {
+                    self.putc(ch, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn line_end(&mut self, out: &mut String) {
         if self.in_fence {
             self.fence_line_end(out);
@@ -666,8 +737,16 @@ impl StyleStream {
         }
         // a whitespace-only line is a blank line: no margin, no content
         if !self.line_printed && self.line.trim().is_empty() {
-            self.end_row(out);
+            // hold it for the next block instead of printing a row here
+            self.pending_blank = self.started;
+            self.reset_line();
             return;
+        }
+        if self.pending_blank {
+            // a row that prints no char of its own (an empty heading) still
+            // needs the separating blank before it
+            out.push('\n');
+            self.pending_blank = false;
         }
         match self.st {
             St::FenceOpen => {
@@ -703,27 +782,13 @@ impl StyleStream {
                     self.end_row(out);
                     return;
                 }
-                // not a rule after all: resolve as inline. Replay trims the
-                // line's leading whitespace, so start at the first non-space
-                // char rather than at column zero.
-                let indent = self.line.len() - self.line.trim_start().len();
-                self.scan_inline(indent, out, true);
+                // not a rule after all: nothing was printed for the held
+                // line, so resolve it the way any other line ending in the
+                // classifier is resolved — replay decides at EOL, and a
+                // `- -）` is a list item whose content opens with a dash
+                self.finish_classification(out);
             }
-            St::Classify => {
-                let d = self.decide_eol();
-                self.apply(d, out);
-                // an empty heading (`##` on its own) printed nothing yet, but
-                // replay emits its style codes: match that byte for byte
-                if !self.line_printed && !self.open.is_empty() {
-                    let codes = std::mem::take(&mut self.open);
-                    out.push_str(&codes);
-                    out.push_str(self.p.reset.as_str());
-                    self.line_printed = true;
-                }
-                if let St::Inline(at) = self.st {
-                    self.scan_inline(at, out, true);
-                }
-            }
+            St::Classify => self.finish_classification(out),
             St::Table(at) => {
                 let rest = self.line[at..].to_string();
                 for ch in rest.chars() {
@@ -753,7 +818,7 @@ impl StyleStream {
             out.push_str(self.p.reset.as_str());
         }
         out.push('\n');
-        self.emitted = true;
+        self.started = true;
         self.reset_line();
         if self.dynamic {
             self.refresh_width();
@@ -775,6 +840,8 @@ impl StyleStream {
         self.rows = 0;
         self.cont = 0;
         self.at_start = true;
+        self.heading = false;
+        self.hold.clear();
         self.open.clear();
         self.ctx.clear();
         self.st = St::Classify;
@@ -791,8 +858,7 @@ impl StyleStream {
     /// fence, which must not print as content (the indent is held with it,
     /// so a fence nested in a list item leaves no stray spaces behind).
     fn fence_feed(&mut self, out: &mut String) {
-        let b = self.line.as_bytes();
-        if !b.iter().any(|&c| c != b' ' && c != b'`') {
+        if self.line.trim_start().chars().all(|c| c == '`') {
             return; // still only indent + backticks: hold
         }
         if !self.fence_indented {
@@ -809,13 +875,12 @@ impl StyleStream {
     }
 
     fn fence_line_end(&mut self, out: &mut String) {
-        let b = self.line.as_bytes();
         // the fence body keeps its own leading whitespace, so skip the
         // indent before looking for the closing run: an indented fence (the
         // common case inside a list item) closes like any other
-        let indent = b.iter().take_while(|&&c| c == b' ').count();
-        let line = String::from_utf8_lossy(&b[indent..]).into_owned();
-        if bare_fence_run(&line).is_some() {
+        let indent = pad_run(&self.line);
+        let line = &self.line[indent..];
+        if bare_fence_run(line).is_some() {
             // closing fence: a border line, then leave fence mode (the
             // content ctx must not layer under the border color). Replay
             // prints three backticks whatever the run length: match it.
@@ -853,10 +918,7 @@ impl StyleStream {
 
     fn decide(&self) -> Decision {
         let b = self.line.as_bytes();
-        let mut i = 0;
-        while i < b.len() && b[i] == b' ' {
-            i += 1;
-        }
+        let i = pad_run(&self.line);
         let t = &b[i..];
         if t.is_empty() {
             return Decision::Wait;
@@ -884,9 +946,9 @@ impl StyleStream {
                     Decision::Inline { at: i }
                 } else if t[hashes] == b' ' {
                     // replay trims the run after the hashes: start the content
-                    // there, and wait while only spaces have arrived so they
-                    // never stream as content
-                    let skip = t[hashes..].iter().take_while(|&&c| c == b' ').count();
+                    // there, and wait while only padding has arrived so it
+                    // never streams as content
+                    let skip = pad_run(&self.line[i + hashes..]);
                     if skip == t.len() - hashes {
                         Decision::Wait
                     } else {
@@ -900,18 +962,14 @@ impl StyleStream {
                 }
             }
             b'>' => {
-                if t.len() == 1 {
+                // replay always starts the quote body at its first non-space
+                // char (`>` alone is an empty quote, `>text` has no padding to
+                // skip), and waits while nothing but padding has arrived
+                let skip = pad_run(&self.line[i + 1..]);
+                if skip + 1 == t.len() {
                     Decision::Wait
-                } else if t[1] == b' ' {
-                    // replay trims the run after `>`, so start there
-                    let skip = t[1..].iter().take_while(|&&c| c == b' ').count();
-                    if skip + 1 == t.len() {
-                        Decision::Wait
-                    } else {
-                        Decision::Quote { at: i + 1 + skip }
-                    }
                 } else {
-                    Decision::Quote { at: i + 1 }
+                    Decision::Quote { at: i + 1 + skip }
                 }
             }
             b'|' => Decision::Table,
@@ -921,15 +979,20 @@ impl StyleStream {
                 } else if t[1] == b' ' {
                     // a list marker — but hr-only content (`- - -`) still
                     // makes the whole line a thematic break: hold as Hr
-                    if is_hr_so_far(t) {
+                    if is_hr_candidate(&self.line[i..]) {
                         Decision::Hr
                     } else {
                         self.decide_list(i, t, 2)
                     }
-                } else if t[0] != b'+' && is_hr_so_far(t) {
+                } else if t[0] != b'+' && is_hr_candidate(&self.line[i..]) {
                     // `--`/`**`/`-*-`-shaped: an hr candidate (aborts to
                     // inline as soon as a non-marker char arrives)
                     Decision::Hr
+                } else if t[0] != b'+' && may_be_hr(&self.line[i..]) {
+                    // one mark and padding so far (`-`, then a tab): still
+                    // a prefix of a rule, so hold it — replay decides at the
+                    // end of the line and prints a rule for `-<tab>--`
+                    Decision::Wait
                 } else {
                     Decision::Inline { at: i }
                 }
@@ -937,8 +1000,11 @@ impl StyleStream {
             b'_' => {
                 if t.len() == 1 {
                     Decision::Wait
-                } else if is_hr_so_far(t) {
+                } else if is_hr_candidate(&self.line[i..]) {
                     Decision::Hr
+                } else if may_be_hr(&self.line[i..]) {
+                    // one mark and padding so far (`_` then a tab): hold
+                    Decision::Wait
                 } else {
                     Decision::Inline { at: i }
                 }
@@ -970,17 +1036,11 @@ impl StyleStream {
             return d;
         }
         let b = self.line.as_bytes();
-        let mut i = 0;
-        while i < b.len() && b[i] == b' ' {
-            i += 1;
-        }
-        let t = &b[i..];
-        if t.is_empty() {
-            return Decision::Inline { at: i };
-        }
-        // trailing spaces never stream: replay trims them away
-        let end = t.iter().rposition(|&c| c != b' ').map_or(0, |p| p + 1);
-        let t = &t[..end];
+        let i = pad_run(&self.line);
+        // trailing whitespace never streams: replay trims it away, and its
+        // `str::trim` counts a full-width space (U+3000) as whitespace too
+        let end = i + self.line[i..].trim_end().len();
+        let t = &b[i..end];
         if t.is_empty() {
             return Decision::Inline { at: i };
         }
@@ -996,29 +1056,15 @@ impl StyleStream {
         if t == b">" {
             return Decision::Quote { at: b.len() };
         }
-        // a bare list marker is an empty item
-        if matches!(t[0], b'-' | b'*' | b'+') && (t.len() == 1 || t[1] == b' ') {
-            if t.len() == 1 {
-                // a bare marker: its trailing spaces are the marker's own
-                return Decision::List {
-                    indent: i,
-                    at: b.len(),
-                };
-            }
-            let skip = t[2..].iter().take_while(|&&c| c == b' ').count();
+        // replay asks `list_marker` of the whole line: a marker whose item
+        // never settled (a `[` opening no task box, a line ending right
+        // after the marker) is still an item, its content starting after the
+        // marker's padding. `-\t` is prose to replay, so this is exact.
+        if let Some((marker_len, _ordered)) = list_marker(&self.line[i..]) {
             return Decision::List {
                 indent: i,
-                at: i + 2 + skip,
+                at: i + marker_len + pad_run(&self.line[i + marker_len..]),
             };
-        }
-        if t[0].is_ascii_digit() {
-            let digits = t.iter().take_while(|c| c.is_ascii_digit()).count();
-            if t.len() == digits + 1 && t[digits] == b'.' {
-                return Decision::List {
-                    indent: i,
-                    at: b.len(),
-                };
-            }
         }
         Decision::Inline { at: i }
     }
@@ -1027,41 +1073,32 @@ impl StyleStream {
     /// open a task checkbox (`- [x] `), so the marker holds until the
     /// bracket resolves.
     fn decide_list(&self, indent: usize, t: &[u8], marker_end: usize) -> Decision {
-        if t.len() == marker_end {
-            // the char after the marker has not arrived: it may open a
-            // task checkbox (`- [x] `)
-            return Decision::Wait;
-        }
-        if t.get(marker_end) == Some(&b'[') {
-            if let Some(rb) = t[marker_end..].iter().position(|&c| c == b']') {
-                let close = marker_end + rb;
-                if t.len() > close + 1 {
-                    let inner = &t[marker_end + 1..close];
-                    if matches!(inner, b"x" | b"X" | b" ") && t[close + 1] == b' ' {
-                        return Decision::List {
-                            indent,
-                            at: indent + close + 2,
-                        };
-                    }
-                    return Decision::List {
-                        indent,
-                        at: indent + marker_end,
-                    };
-                }
-                return Decision::Wait; // the char after ']' has not arrived
-            }
-            return Decision::Wait; // no ']' yet
-        }
-        // replay trims the spaces between the marker and its content: wait
-        // until a real char shows up so the run cannot stream as content
-        let skip = t[marker_end..].iter().take_while(|&&c| c == b' ').count();
+        // replay trims the whitespace between the marker and its content
+        // (`str::trim_start`, so a full-width space counts) and only then
+        // looks for a task checkbox — and it waits while nothing but padding
+        // has arrived, so the padding never streams as content
+        let skip = pad_run(&self.line[indent + marker_end..]);
         if skip == t.len() - marker_end {
             return Decision::Wait;
         }
-        Decision::List {
-            indent,
-            at: indent + marker_end + skip,
+        let at = indent + marker_end + skip;
+        let rest = &self.line[at..];
+        if rest.starts_with('[') {
+            let Some(rb) = rest.find(']') else {
+                return Decision::Wait; // no ']' yet
+            };
+            if rest.len() == rb + 1 {
+                return Decision::Wait; // the char after ']' has not arrived
+            }
+            let inner = &rest[1..rb];
+            if matches!(inner, "x" | "X" | " ") && rest.as_bytes()[rb + 1] == b' ' {
+                return Decision::List {
+                    indent,
+                    at: at + rb + 2,
+                };
+            }
         }
+        Decision::List { indent, at }
     }
 
     fn apply(&mut self, d: Decision, out: &mut String) {
@@ -1086,6 +1123,7 @@ impl StyleStream {
                     }
                     self.putc(' ', out);
                 }
+                self.heading = true;
                 self.st = St::Inline(at);
             }
             Decision::Quote { at } => {
@@ -1103,30 +1141,33 @@ impl StyleStream {
             Decision::List { indent, at } => {
                 // the reference nests four spaces per level; two source spaces nest
                 let level = (1 + indent / 2).min(3);
+                // replay scans the nesting lead and the marker as part of the
+                // item's text under the item's continuation budget, so the
+                // budget must be in place before the lead is written
+                let cont = 4 * (level - 1);
+                // replay spells the marker `-` (whatever bullet was typed),
+                // or the ordinal, plus one space plus any task box — never the
+                // raw run between marker and content (`-   x`, `-\tx` and
+                // `-\u{3000}x` all look alike there)
+                let line = &self.line[indent..];
+                let (marker_len, ordered) = list_marker(line).unwrap_or((1, false));
+                let display = if ordered { &line[..marker_len] } else { "-" };
+                let content = &line[marker_len + pad_run(&line[marker_len..])..];
+                let task = if content.starts_with("[x] ")
+                    || content.starts_with("[X] ")
+                    || content.starts_with("[ ] ")
+                {
+                    &content[..4]
+                } else {
+                    ""
+                };
+                let marker = format!("{display} {task}");
+                self.cont = cell_width(&marker) + cont;
                 for _ in 1..level {
                     for _ in 0..4 {
                         self.putc(' ', out);
                     }
                 }
-                // replay prints the marker with a single space before the
-                // content (`-   x` and `- x` look alike there), so collapse
-                // the run between marker and content here too
-                let mut raw = self.line[indent..at].to_string();
-                while raw.contains("  ") {
-                    raw = raw.replace("  ", " ");
-                }
-                let mut marker: String = {
-                    let mut cs = raw.chars();
-                    match cs.next() {
-                        Some('-' | '*' | '+') => format!("-{}", cs.as_str()),
-                        _ => raw,
-                    }
-                };
-                // a bare marker renders with its trailing space (`- `, `1. `)
-                if !marker.ends_with(' ') {
-                    marker.push(' ');
-                }
-                self.cont = cell_width(&marker) + 4 * (level - 1);
                 self.span_open(&p.bullet, out);
                 for ch in marker.chars() {
                     self.putc(ch, out);
@@ -1302,35 +1343,83 @@ impl StyleStream {
     /// stops from the absolute column, hard wrap with the continuation
     /// indent, early break at an edge space (consumed, not printed).
     fn putc(&mut self, c: char, out: &mut String) {
-        let mut w = if c == '\t' {
-            8 - ((self.margin_cells + self.cells) % 8)
-        } else {
-            char_width(c)
-        };
+        // held whitespace goes first, re-decided as if it had never been
+        // held: only a heading holds, and only a non-whitespace char can end
+        // the hold (the end of the line drops it instead)
+        if !c.is_whitespace() {
+            self.replay_hold(out);
+        }
+        self.emit(c, out);
+    }
+
+    /// Re-decide the heading whitespace held so far, in order. A held char
+    /// advances no column, so nothing can have broken the row in the
+    /// meantime: this reproduces exactly what streaming the run would have
+    /// done, except that the run is never held again.
+    fn replay_hold(&mut self, out: &mut String) {
+        if self.hold.is_empty() {
+            return;
+        }
+        let held = std::mem::take(&mut self.hold);
+        let heading = std::mem::replace(&mut self.heading, false);
+        for c in held.chars() {
+            self.emit(c, out);
+        }
+        self.heading = heading;
+    }
+
+    /// Write one character: lazy row start (margin + open codes), tab
+    /// stops from the absolute column, hard wrap with the continuation
+    /// indent, early break at an edge space (consumed, not printed).
+    fn emit(&mut self, c: char, out: &mut String) {
+        if self.heading && c.is_whitespace() {
+            // a heading trims its trailing whitespace, but whether this run
+            // is the line's tail is only known when the next char (or the
+            // line end) arrives: hold it, and decide the wrap rules for it in
+            // `replay_hold` if content follows
+            self.hold.push(c);
+            return;
+        }
+        // the lazy row start comes first: a tab's advance is measured from
+        // the column it lands at, which for the first char of a row is the
+        // margin, never where the previous row happened to end
+        if self.at_start {
+            self.begin_row(out);
+        }
+        let mut w = pad_width(c, self.col0 + self.cells);
         if self.wrap > 0 {
             let budget = self.wrap.saturating_sub(self.cont);
-            if c == ' ' && self.cells + 1 > budget.saturating_sub(WRAP_EARLY) {
+            if c == ' ' && self.cells > 0 && self.cells + 1 > budget.saturating_sub(WRAP_EARLY) {
                 self.break_row(out);
                 return;
             }
-            if self.cells + w > budget && self.cells > 0 {
+            // over the edge, or an opening mark that would leave the row no
+            // room for what it opens (禁则処理): the scanner wraps by this
+            // same rule, so a wrapped answer replays byte for byte
+            if self.cells > 0
+                && (self.cells + w > budget || (moves_down(c) && self.cells + w >= budget))
+            {
                 self.break_row(out);
-                if c == '\t' {
-                    w = 8 - ((self.margin_cells + self.cont) % 8);
-                }
+                // a tab's advance depends on where it lands: recompute from
+                // the fresh row start
+                w = pad_width(c, self.col0);
             }
-        }
-        if self.at_start {
-            self.begin_row(out);
         }
         out.push(c);
         self.cells += w;
         self.line_printed = true;
-        self.emitted = true;
     }
 
     fn begin_row(&mut self, out: &mut String) {
+        // the blank row that separates this block from the last one is
+        // printed here, not when it arrived: replay collapses a blank run
+        // into one row and drops leading and trailing blanks
+        if self.pending_blank {
+            out.push('\n');
+            self.pending_blank = false;
+        }
         out.push_str(&self.margin);
+        self.col0 = self.margin_cells;
         self.at_start = false;
         if !self.open.is_empty() {
             out.push_str(&self.open);
@@ -1345,6 +1434,7 @@ impl StyleStream {
         if self.cont > 0 {
             out.push_str(&" ".repeat(self.cont));
         }
+        self.col0 = self.margin_cells + self.cont;
         self.cells = 0;
         self.rows += 1;
         self.at_start = false;
@@ -1359,6 +1449,9 @@ impl StyleStream {
         if codes.is_empty() {
             return;
         }
+        // held whitespace is content on this row: it belongs before the span
+        // that follows it
+        self.replay_hold(out);
         if !self.at_start {
             out.push_str(codes);
         }
@@ -1368,6 +1461,7 @@ impl StyleStream {
     /// Close the current span: reset, then re-open the line ctx so later
     /// text keeps the heading/quote/fence style.
     fn span_close(&mut self, out: &mut String) {
+        self.replay_hold(out);
         if self.at_start {
             self.open = self.ctx.clone();
             return;
@@ -1407,15 +1501,21 @@ enum Decision {
 /// A thematic break in the making: two or more *matching* markers and
 /// nothing else. Two is enough here because the run may still grow (`**`
 /// becomes `***`); the decision aborts as soon as a real char arrives.
-fn is_hr_so_far(t: &[u8]) -> bool {
-    let mut marks = t.iter().copied().filter(|&c| c != b' ');
-    let Some(first) = marks.next() else {
+/// Two or more marks of one kind, with only whitespace around them: the line
+/// is a thematic break unless a non-marker char turns up, so live holds it.
+fn is_hr_candidate(t: &str) -> bool {
+    is_hr_prefix(t) && t.chars().filter(|c| !c.is_whitespace()).count() >= 2
+}
+
+/// The prefix may still *become* a rule (replay decides on the whole line):
+/// an open run of one mark, which more marks of that kind can extend, or an
+/// [`is_hr_prefix`] that padding may be followed by marks.
+fn may_be_hr(t: &str) -> bool {
+    let mut chars = t.chars();
+    let Some(first) = chars.next() else {
         return false;
     };
-    matches!(first, b'-' | b'_' | b'*')
-        && marks.clone().count() >= 1
-        && marks.all(|c| c == first)
-        && t.iter().all(|&c| matches!(c, b'-' | b'_' | b'*' | b' '))
+    (matches!(first, '-' | '_' | '*') && chars.all(|c| c == first)) || is_hr_prefix(t)
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,41 +1527,6 @@ fn is_hr_so_far(t: &[u8]) -> bool {
 /// The first visual row starts with `first_prefix`, continuation rows with
 /// `row_prefix`; with `ansi`, an open SGR span is tracked and re-opened
 /// after each break.
-/// A closing mark hangs on the row above rather than opening the next one:
-/// 禁则処理, so a wrapped Chinese sentence never starts with `。` or `）`.
-fn hangs_back(c: char) -> bool {
-    matches!(
-        c,
-        '。' | '，'
-            | '、'
-            | '；'
-            | '：'
-            | '！'
-            | '？'
-            | '）'
-            | '」'
-            | '』'
-            | '】'
-            | '》'
-            | '〉'
-            | '”'
-            | '’'
-            | '·'
-            | '…'
-            | 'ー'
-            | ','
-            | '.'
-            | ';'
-            | ':'
-            | '!'
-            | '?'
-            | ')'
-            | ']'
-            | '}'
-            | '%'
-    )
-}
-
 /// An opening mark moves down with the text it opens: a row never ends with
 /// `（` or `“`, which would strand it from what it quotes.
 fn moves_down(c: char) -> bool {
@@ -1471,6 +1536,38 @@ fn moves_down(c: char) -> bool {
     )
 }
 
+/// Cells a char occupies when it lands on the column `col`: a tab advances
+/// to the next 8-column stop, everything else is its own width. The live
+/// stream counts tabs this way, so the scanner must too or a row holding a
+/// tab wraps at a different column live and replay.
+fn pad_width(c: char, col: usize) -> usize {
+    if c == '\t' {
+        8 - (col % 8)
+    } else {
+        char_width(c)
+    }
+}
+
+/// One hard row break: newline, the continuation prefix, the still-open SGR
+/// span re-opened.
+fn row_break(out: &mut String, row_prefix: &str, ansi: bool, active: &str) {
+    out.push('\n');
+    out.push_str(row_prefix);
+    if ansi {
+        out.push_str(active);
+    }
+}
+
+/// The one wrap scanner: writes `text` into `out`, hard-wrapped at `width`
+/// terminal cells by exactly the rule the live stream applies char by char
+/// ([`StyleStream::putc`]) — a space is taken as the break point only when
+/// it lands within [`WRAP_EARLY`] cells of the edge (a space further in
+/// fills the row instead: live cannot ask for printed bytes back), an
+/// opening mark moves down rather than ending a row (禁则処理), and a row
+/// never exceeds `width` (a wider row would soft-wrap and lose its margin).
+/// The first visual row starts with `first_prefix`, continuation rows with
+/// `row_prefix`; with `ansi`, an open SGR span is tracked and re-opened
+/// after each break.
 fn wrap_scan(
     text: &str,
     width: usize,
@@ -1483,7 +1580,7 @@ fn wrap_scan(
     let bytes = text.as_bytes();
     let mut cells = 0usize;
     let mut seg_start = 0usize; // byte offset the current visual row starts at
-    let mut last_break: Option<usize> = None; // byte offset just past a space
+    let mut prefix_cells = cell_width(first_prefix); // absolute column the row starts at
     let mut active = String::new(); // SGR sequences opened on this row
     let mut i = 0usize;
     while i < bytes.len() {
@@ -1499,56 +1596,26 @@ fn wrap_scan(
             continue;
         }
         let c = text[i..].chars().next().unwrap();
-        let w = char_width(c);
-        if cells + w > width && i > seg_start {
-            let cut = last_break.filter(|&b| b > seg_start).unwrap_or(i);
-            let mut emit_end = if cut > seg_start && bytes[cut - 1] == b' ' {
-                cut - 1
-            } else {
-                cut
-            };
-            // 禁则処理: a row may not open with a closing mark (it hangs off
-            // the row above) nor end with an opening one (it moves down with
-            // the text it opens). Both are bounded: a pathological run of
-            // marks still wraps eventually.
-            for _ in 0..3 {
-                match text[emit_end..].chars().next() {
-                    Some(c) if hangs_back(c) => emit_end += c.len_utf8(),
-                    _ => break,
-                }
-            }
-            for _ in 0..2 {
-                match text[seg_start..emit_end].chars().next_back() {
-                    Some(c) if moves_down(c) && emit_end > seg_start => emit_end -= c.len_utf8(),
-                    _ => break,
-                }
-            }
-            out.push_str(&text[seg_start..emit_end]);
-            if emit_end == bytes.len() {
-                // 禁则 hung the last mark off this row: no next row exists
-                return;
-            }
-            out.push('\n');
-            out.push_str(row_prefix);
-            if ansi {
-                out.push_str(&active);
-            }
-            let mut next = emit_end;
-            if next < bytes.len() && bytes[next] == b' ' {
-                next += 1;
-            }
-            if next <= i && next == seg_start {
-                // never stall: force one char onto this row
-                next = i;
-            }
-            seg_start = next;
-            i = next;
+        let mut w = pad_width(c, prefix_cells + cells);
+        if cells > 0 && c == ' ' && cells + 1 > width.saturating_sub(WRAP_EARLY) {
+            // the space itself is the break, and it is consumed
+            out.push_str(&text[seg_start..i]);
+            i += 1;
+            row_break(out, row_prefix, ansi, &active);
+            prefix_cells = cell_width(row_prefix);
             cells = 0;
-            last_break = None;
+            seg_start = i;
             continue;
         }
-        if c == ' ' && cells > 0 {
-            last_break = Some(i + 1);
+        if cells > 0 && (cells + w > width || (moves_down(c) && cells + w >= width)) {
+            out.push_str(&text[seg_start..i]);
+            row_break(out, row_prefix, ansi, &active);
+            prefix_cells = cell_width(row_prefix);
+            // a tab's advance depends on where it lands: recompute from the
+            // fresh row start
+            w = pad_width(c, prefix_cells);
+            cells = 0;
+            seg_start = i;
         }
         cells += w;
         i += c.len_utf8();
@@ -1899,8 +1966,10 @@ mod tests {
         md.wrap_at(12);
         let mut out = String::new();
         md.push_delta("- aaaa bbbb cccc\n", &mut out);
-        // cont 2: continuation rows indent past the marker
-        assert_eq!(out, format!("  {C}- {R}aaaa\n    bbbb cccc\n"));
+        // cont 2: continuation rows indent past the marker. The break point
+        // is the live stream's: the row fills (the space before `bbbb` sits
+        // too far from the edge to be taken early)
+        assert_eq!(out, format!("  {C}- {R}aaaa bbb\n    b cccc\n"));
     }
 
     // ---- StyleStream: live streaming ------------------------------------
@@ -2160,12 +2229,12 @@ mod tests {
     /// must produce the same bytes. Every rendering change must keep this
     /// green — the markdown differential is where the streaming bugs live.
     ///
-    /// Two shapes are deliberately absent because live and replay cannot
-    /// agree on them by construction:
-    ///   * runs of blank lines — the live stream has already printed each one
-    ///     (it never erases), replay collapses a run to a single blank;
-    ///   * setext underlines (`text` then `---`) — replay folds the pair into
-    ///     a heading, live has already emitted the paragraph line.
+    /// One shape is deliberately absent because live and replay cannot
+    /// agree on it by construction: a setext underline (`text` then `---`)
+    /// folds the pair into a heading, and live has already printed that
+    /// paragraph line. Blank runs *are* covered — the live stream holds a
+    /// blank until the next block, like replay, so runs collapse and
+    /// leading/trailing blanks never print.
     #[test]
     fn live_and_replay_agree_on_a_realistic_corpus() {
         let docs = [
@@ -2193,10 +2262,243 @@ mod tests {
             "  - 例子：\n\n    ````\n    x\n    ````\n\n结束\n",
             // a bold-only line, and a fence whose body is all whitespace
             "**验证**\n\n```\n   \n```\n\n尾段\n",
+            // leading, doubled and trailing blank lines: a run collapses to
+            // the one blank replay prints between blocks, the leading and
+            // trailing ones never print on either side
+            "\n\n\n# 开头的空行\n\n\n\n正文\n\n\n",
+            // a blank line inside a quote and inside a list
+            "> 甲\n\n> 乙\n\n- 一\n\n- 二\n",
+            // full-width space padding: replay's `str::trim` counts it as
+            // whitespace in the indent, after a marker and inside a rule
+            "\u{3000}- 项\n\n1. \u{3000}[x] 项\n\n> \u{3000}引用\n",
+            // list markers that never settle: a `[` that opens no task box
+            "1. [。不是复选框\n2. [x\n\n- \t-\n-\t--\n",
         ];
         for doc in docs {
             assert_eq!(live(doc), render(doc), "live vs replay for {doc:?}");
         }
+    }
+
+    /// A deterministic random-markdown differential, the renderer's hard
+    /// rule: the live stream and the replay must agree byte for byte. Blocks
+    /// of every shape (headings, inline spans, lists, quotes, fences —
+    /// indented, tab-indented and long-running —, tables, rules, tab and
+    /// punctuation heavy prose) are composed at random, then rendered three
+    /// ways: char by char, in random chunks, and at several wrap widths and
+    /// left margins. Wrapping must depend on line content only, never on how
+    /// the bytes arrived.
+    #[test]
+    fn fuzz_live_and_replay_agree() {
+        const POOL: &[&str] = &[
+            "# 标题",
+            "## 二级 ##",
+            "#### 深标题",
+            "##\t制表符标题",
+            "段落 `code` 与 **加粗** 结束",
+            "a ~~strike~~ and ~single~ tail",
+            "link [a](http://x) and ![img](i.png)",
+            "先用 `pick_multi` 再 `pick`。",
+            "> 引用",
+            ">  空格引用",
+            "> 第一行\n> 第二行",
+            "> 引用一段很长很长的中文，用来测试引用块的折行与缩进规则是否一致。",
+            "- 甲",
+            "- [x] 乙",
+            "1. 一",
+            "   - 嵌套",
+            "\t- 制表符项",
+            "\t\t- 双制表缩进",
+            "-  空格",
+            "2. **加粗项** —— 说明",
+            "- 一个很长的列表项，里面有不少中文内容，用来测试续行的缩进是不是和最上面那行对齐。",
+            "```",
+            "```rust",
+            "   ```",
+            "````",
+            "````lang",
+            "```\nx\n```",
+            "```python\nprint(1)\n\nprint(2)\n```",
+            "```\naaaa\tbbbb\t中中\tcccc\tdddd\teeee\tffff\tgggg\t中文\t尾巴\n```",
+            "```\n长代码行 a_very_long_identifier_name = another_long_call(arg1, arg2)\n```",
+            "1. 项：\n\n   ```\n   install where:\n   ❯ project-local\n   ```\n\n   后续段落。",
+            "  - 例：\n\n    ````\n    x\n    ````\n\n结束",
+            "| a | b |\n| - | - |\n| 1 | 2 |",
+            "| a | b |\n| - | - |",
+            "| 中 | tab\there |\n| - | - |\n| 1 | 2 |",
+            "---",
+            "* * *",
+            "普通行结尾 **未闭合",
+            "半截 `code",
+            "行尾两个空格  ",
+            "\t制表符开头",
+            "# \u{3000}全角空格标题\u{3000}",
+            "- \u{3000}全角空格项",
+            "> \u{00a0}不断行空格引用",
+            "段落结尾的全角空格\u{3000}",
+            "##\u{3000}没有半角空格的井号",
+            "长英文行 aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo",
+            "中英混排 with a very long english word supercalifragilistic 然后中文结尾。",
+            "aaaa\tbbbb\t中中\tcccc\tdddd\teeee\tffff\tgggg\t中文\t尾巴",
+            "标点密集，逗号很多，所以折行的时候，应该尽量，不要让，标点，出现在，行首。",
+            "括号（里面有一段很长的说明文字，用来测试禁则）后面的内容。",
+            "引号「中文书名」和（括号）交错出现（（嵌套））着。",
+            "超长单词 supercalifragilisticexpialidocious 与结尾",
+            "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        ];
+        // a plain LCG: reproducible without a dependency
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        for case in 0..4000 {
+            let blocks = 1 + next(4);
+            let mut doc = String::new();
+            for b in 0..blocks {
+                if b > 0 {
+                    doc.push('\n'); // one blank line between blocks
+                }
+                doc.push_str(POOL[next(POOL.len())]);
+                doc.push('\n');
+            }
+            for indent in [0usize, 2] {
+                // no wrapping: the marginal case, and where the replay used
+                // to take a no-wrap shortcut
+                assert_eq!(
+                    live_at(indent, 0, &doc, 0),
+                    render_at(indent, 0, &doc),
+                    "case {case} at indent {indent} diverged for {doc:?}"
+                );
+                // random chunk boundaries at several widths: settlement must
+                // depend on line content, never on how the bytes arrived
+                for wrap in [14usize, 20, 29, 40, 72] {
+                    let cout = live_at(indent, wrap, &doc, 1 + next(7));
+                    let rout = render_at(indent, wrap, &doc);
+                    assert_eq!(
+                        cout, rout,
+                        "case {case} at indent {indent} wrap {wrap} diverged for {doc:?}"
+                    );
+                    // a row wider than the wrap width soft-wraps on a real
+                    // terminal, losing the left margin
+                    for row in cout.split('\n') {
+                        assert!(
+                            cell_width(row) <= wrap + indent || row.trim().is_empty(),
+                            "case {case} row over {wrap} cells ({}) for {doc:?}",
+                            cell_width(row)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The one divergence left is by construction: replay folds a paragraph
+    /// line followed by a setext underline into a heading, and the live
+    /// stream has already printed that line. Conservative callers skip such
+    /// docs (it may skip a few that would have agreed, which is harmless).
+    fn setext_upgrade(doc: &str) -> bool {
+        let mut content = false;
+        for raw in doc.lines() {
+            let t = raw.trim_start();
+            if content && is_setext(t) {
+                return true;
+            }
+            content = !t.is_empty();
+        }
+        false
+    }
+
+    /// The same differential over random markdown *garbage*: characters that
+    /// keep re-opening the classifiers (marker runs, half-open spans, tabs,
+    /// CJK punctuation), which is where a streaming renderer usually drifts
+    /// from its replay.
+    #[test]
+    fn fuzz_random_markup_agrees() {
+        const ALPHABET: &[char] = &[
+            '#', '*', '-', '_', '+', '>', '|', '`', '~', '[', ']', '(', ')', '!', '\\', ' ', '\t',
+            'a', 'b', '中', '，', '。', '（', '）', '1', '.',
+        ];
+        // the seed is fixed so CI is reproducible; FUZZ_CASES and FUZZ_SEED
+        // widen the search when investigating a divergence
+        let cases: usize = std::env::var("FUZZ_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6000);
+        let mut seed: u64 = std::env::var("FUZZ_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0x1234_5678_9abc_def0);
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        for case in 0..cases {
+            let lines = 1 + next(4);
+            let mut doc = String::new();
+            for l in 0..lines {
+                if l > 0 && next(2) == 0 {
+                    doc.push('\n');
+                }
+                let len = next(40);
+                for _ in 0..len {
+                    doc.push(ALPHABET[next(ALPHABET.len())]);
+                }
+                doc.push('\n');
+            }
+            if setext_upgrade(&doc) {
+                continue;
+            }
+            for indent in [0usize, 2] {
+                assert_eq!(
+                    live_at(indent, 0, &doc, 0),
+                    render_at(indent, 0, &doc),
+                    "garbage case {case} diverged for {doc:?}"
+                );
+                for wrap in [8usize, 12, 23, 51] {
+                    assert_eq!(
+                        live_at(indent, wrap, &doc, 1 + next(5)),
+                        render_at(indent, wrap, &doc),
+                        "garbage case {case} wrap {wrap} diverged for {doc:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`render`] at a given margin and wrap width.
+    fn render_at(indent: usize, wrap: usize, doc: &str) -> String {
+        let mut md = MdStream::indented(indent, p());
+        md.wrap_at(wrap);
+        let mut out = String::new();
+        md.push_delta(doc, &mut out);
+        md.finish(&mut out);
+        out
+    }
+
+    /// Char-by-char when `chunk` is 0, else in random `chunk`-sized pieces.
+    fn live_at(indent: usize, wrap: usize, doc: &str, mut chunk: usize) -> String {
+        let mut s = StyleStream::indented(indent, p());
+        s.wrap = wrap;
+        let mut out = String::new();
+        let cs: Vec<char> = doc.chars().collect();
+        let mut i = 0;
+        while i < cs.len() {
+            if chunk == 0 {
+                s.push_delta(&cs[i].to_string(), &mut out);
+                i += 1;
+                continue;
+            }
+            let n = chunk.min(cs.len() - i);
+            s.push_delta(&cs[i..i + n].iter().collect::<String>(), &mut out);
+            i += n;
+            chunk = 1 + (chunk * 7) % 11; // deterministic drift
+        }
+        s.finish(&mut out);
+        out
     }
 
     #[test]
@@ -2211,6 +2513,132 @@ mod tests {
     // ---- shared helpers -------------------------------------------------
 
     #[test]
+    fn dbg_bare_hash() {
+        for d in ["#\n", "# \n", "##\n", "####\n", "#### \n", "#\t\n", "#  \n"] {
+            let l = live(d);
+            let r = render(d);
+            println!("SAME={} {d:?}\n  L {l:?}\n  R {r:?}", l == r);
+        }
+    }
+
+    /// Replay trims marker padding with `str::trim`, which counts a
+    /// full-width or no-break space as whitespace: live must skip exactly the
+    /// same bytes, in the indent, after a marker and inside a rule.
+    #[test]
+    fn live_matches_replay_on_unicode_padding() {
+        const CASES: &[&str] = &[
+            "\u{3000}- x\n",
+            "\u{3000}\u{3000}- x\n",
+            "  \u{3000}- x\n",
+            "\u{00a0}- x\n",
+            "\u{3000}> q\n",
+            "\u{3000}# h\n",
+            "> \u{3000}x\n",
+            "-\u{3000}--\n",
+            "_\u{3000}__\n",
+            "*\u{3000}**\n",
+            "- \u{3000}\n",
+            "1. \u{3000}\n",
+            "# \u{3000}\n",
+            "\u{3000}```\ncode\n```\n",
+            "- \u{3000}项\n",
+            "1. \u{3000}[x] 项\n",
+        ];
+        for d in CASES {
+            for indent in [0usize, 2] {
+                for wrap in [0usize, 12, 20] {
+                    for split in 0..3 {
+                        assert_eq!(
+                            live_at(indent, wrap, d, split),
+                            render_at(indent, wrap, d),
+                            "diverge for {d:?} indent={indent} wrap={wrap} split={split}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A marker whose line ends before the item settles (`- [x` with no `]`,
+    /// a bare `1.`) is still an item to replay, and live must say the same at
+    /// the end of the line.
+    #[test]
+    fn live_matches_replay_on_unsettled_list_markers() {
+        const CASES: &[&str] = &[
+            "1. [\n",
+            "1. [x\n",
+            "1. [\u{3000}x\n",
+            "- [x\n",
+            "- [。x\n",
+            "- [x]\n",
+            "-\tprose\n",
+            "1.\tprose\n",
+            "1.\t\n",
+            "-\t-\n",
+            "-\t--\n",
+            "- \t--\n",
+            "\t- \t-\n",
+        ];
+        for d in CASES {
+            for indent in [0usize, 2] {
+                for wrap in [0usize, 8, 12, 20, 51] {
+                    for split in 0..3 {
+                        assert_eq!(
+                            live_at(indent, wrap, d, split),
+                            render_at(indent, wrap, d),
+                            "diverge for {d:?} indent={indent} wrap={wrap} split={split}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The classes of divergence the live stream used to have: trailing and
+    /// unicode whitespace, the row-start column a tab is measured from, and
+    /// markers that are still undecided at the end of a line.
+    #[test]
+    fn live_matches_replay_on_edge_whitespace_and_markers() {
+        const CASES: &[&str] = &[
+            // a heading trims its trailing whitespace, a paragraph keeps it
+            "# H  \n",
+            "# H\u{3000}\n",
+            "## H ##\n",
+            "####  H \t \n",
+            "para \u{3000} \n",
+            // unicode whitespace is marker padding for replay (`str::trim`)
+            "# \u{3000}标题\n",
+            "- \u{3000}项\n",
+            "> \u{00a0}引用\n",
+            ">\t引用\n",
+            "---\n",
+            "  - （-\t\n",
+            "- a\t`b`c\n",
+            "*a `b ` c*\n",
+            "a+）__中1 +。`>\t[-|，\n-\t--\n",
+        ];
+        for d in CASES {
+            for indent in [0usize, 2] {
+                for wrap in [0usize, 8, 12, 20, 51] {
+                    for split in 0..3 {
+                        assert_eq!(
+                            live_at(indent, wrap, d, split),
+                            render_at(indent, wrap, d),
+                            "diverge for {d:?} indent={indent} wrap={wrap} split={split}"
+                        );
+                    }
+                }
+            }
+        }
+        // a tab at the head of a row is measured from the row's own margin,
+        // not from where the previous row ended
+        assert_eq!(
+            live_at(2, 20, "x\t-\taaaa\tbbbb\n", 0),
+            render_at(2, 20, "x\t-\taaaa\tbbbb\n")
+        );
+    }
+
+    #[test]
     fn wrap_block_indents_every_line() {
         assert_eq!(wrap_block("aaaa bbbb cccc", 12, 2), "  aaaa bbbb\n  cccc");
         assert_eq!(wrap_block("one\ntwo", 12, 2), "  one\n  two");
@@ -2219,9 +2647,11 @@ mod tests {
 
     #[test]
     fn wrapping_honors_cjk_punctuation_rules() {
-        // a closing mark hangs on the row above …
-        assert_eq!(wrap_plain("中中中中。後", 8, 0), "中中中中。\n後");
-        assert_eq!(wrap_plain("中中中中中。", 10, 0), "中中中中中。");
+        // a closing mark cannot hang on the row above: that row would be
+        // wider than the wrap width, so the terminal would soft-wrap it —
+        // to the same place, minus the left margin. It moves down instead.
+        assert_eq!(wrap_plain("中中中中。後", 8, 0), "中中中中\n。後");
+        assert_eq!(wrap_plain("中中中中中。", 10, 0), "中中中中中\n。");
         // … and an opening mark moves down with what it opens
         assert_eq!(wrap_plain("中中中（後", 8, 0), "中中中\n（後");
         // a run of marks cannot hang forever
