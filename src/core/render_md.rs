@@ -128,9 +128,12 @@ fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
     let indent = raw.len() - t.len();
 
     if st.in_fence {
-        if t.starts_with("```") && t[3..].trim().is_empty() {
+        if bare_fence_run(t).is_some() {
+            // a closing fence (any run of three or more); the border prints
+            // as three backticks whatever the run, so a longer fence reads
+            // the same as the opener
             st.in_fence = false;
-            emit_line(st, &format!("{}{}```{}", p.code_border, "", p.reset), out);
+            emit_line(st, &format!("{}```{}", p.code_border, p.reset), out);
         } else if raw.trim().is_empty() {
             out.push('\n');
         } else {
@@ -152,7 +155,7 @@ fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
     if let Some(rest) = t.strip_prefix("```") {
         flush_pending(st, out);
         sep(st, out);
-        let info = rest.trim();
+        let info = rest.trim_start_matches('`').trim();
         emit_line(st, &format!("{}```{}{}", p.code_border, info, p.reset), out);
         st.in_fence = true;
         block_done(st);
@@ -324,6 +327,15 @@ fn is_setext(t: &str) -> bool {
         return false;
     };
     (c == '=' || c == '-') && t.chars().all(|ch| ch == c)
+}
+
+/// The backtick run when a left-trimmed line is nothing but a run of at
+/// least three backticks: a closing fence, or an opening one with no info
+/// string. CommonMark lets a closing fence be *longer* than its opener, so
+/// the run length is what identifies it, never an exact "```" prefix.
+fn bare_fence_run(t: &str) -> Option<usize> {
+    let run = t.bytes().take_while(|&b| b == b'`').count();
+    (run >= 3 && t.len() == run).then_some(run)
 }
 
 fn is_hr(t: &str) -> bool {
@@ -660,11 +672,14 @@ impl StyleStream {
         match self.st {
             St::FenceOpen => {
                 let line = self.line.clone();
-                let run = line.bytes().take_while(|&b| b == b'`').count();
-                let info = line[run..].trim().to_string();
+                // an opening fence may be indented (inside a list item);
+                // the border itself prints at the margin, like replay
+                let indent = line.len() - line.trim_start().len();
+                let run = line[indent..].bytes().take_while(|&b| b == b'`').count();
+                let info = line[indent + run..].trim().to_string();
                 let p = self.p;
                 self.span_open(&p.code_border, out);
-                for _ in 0..run {
+                for _ in 0..3 {
                     self.putc('`', out);
                 }
                 for ch in info.chars() {
@@ -771,41 +786,44 @@ impl StyleStream {
     // ---- fenced code ---------------------------------------------------
 
     /// One content char inside a fence: everything streams in the code
-    /// color under a two-space indent, except a leading backtick run —
-    /// held while the whole line so far is backticks, because it may
-    /// still turn out to be the closing fence.
+    /// color under a two-space indent. A line that so far is only indent and
+    /// backticks is held whole — it may still turn out to be the closing
+    /// fence, which must not print as content (the indent is held with it,
+    /// so a fence nested in a list item leaves no stray spaces behind).
     fn fence_feed(&mut self, out: &mut String) {
         let b = self.line.as_bytes();
-        let run = b.iter().take_while(|&&c| c == b'`').count();
-        if run == b.len() {
-            return; // all backticks so far: hold
+        if !b.iter().any(|&c| c != b' ' && c != b'`') {
+            return; // still only indent + backticks: hold
         }
         if !self.fence_indented {
             self.fence_indented = true;
             self.putc(' ', out);
             self.putc(' ', out);
         }
-        while self.fence_flushed < run {
-            self.putc('`', out);
-            self.fence_flushed += 1;
+        while self.fence_flushed < self.line.len() {
+            let rest = self.line[self.fence_flushed..].to_string();
+            let ch = rest.chars().next().unwrap();
+            self.putc(ch, out);
+            self.fence_flushed += ch.len_utf8();
         }
-        let rest = self.line[self.fence_flushed..].to_string();
-        let ch = rest.chars().next().unwrap();
-        self.putc(ch, out);
-        self.fence_flushed += ch.len_utf8();
     }
 
     fn fence_line_end(&mut self, out: &mut String) {
         let b = self.line.as_bytes();
-        let run = b.iter().take_while(|&&c| c == b'`').count();
-        if run == b.len() && run >= 3 {
+        // the fence body keeps its own leading whitespace, so skip the
+        // indent before looking for the closing run: an indented fence (the
+        // common case inside a list item) closes like any other
+        let indent = b.iter().take_while(|&&c| c == b' ').count();
+        let line = String::from_utf8_lossy(&b[indent..]).into_owned();
+        if bare_fence_run(&line).is_some() {
             // closing fence: a border line, then leave fence mode (the
-            // content ctx must not layer under the border color)
+            // content ctx must not layer under the border color). Replay
+            // prints three backticks whatever the run length: match it.
             self.ctx.clear();
             self.open.clear();
             let p = self.p;
             self.span_open(&p.code_border, out);
-            for _ in 0..run {
+            for _ in 0..3 {
                 self.putc('`', out);
             }
             self.span_close(out);
@@ -813,8 +831,9 @@ impl StyleStream {
             self.end_row(out);
             return;
         }
-        // content line: flush anything still held
-        if !b.is_empty() {
+        // content line: flush anything still held (a whitespace-only line
+        // prints nothing, like replay's blank inside a fence)
+        if !self.line.trim().is_empty() {
             if !self.fence_indented {
                 self.fence_indented = true;
                 self.putc(' ', out);
@@ -1987,6 +2006,22 @@ mod tests {
     }
 
     #[test]
+    fn live_fence_inside_a_list_item_closes() {
+        // the fence is indented inside a list item: the closing run must
+        // still be recognized, and the indent held back with it, or the
+        // stream would stay in fence mode for the rest of the answer
+        assert_eq!(
+            live("1. **作用域选择**\n\n   ```\n   x\n   ```\n\n后文\n"),
+            format!("{C}1. {R}{B}作用域选择{R}\n\n{G}```{R}\n{CB}     x{R}\n{G}```{R}\n\n后文\n")
+        );
+        // a whitespace-only line inside the fence prints a bare blank line
+        assert_eq!(
+            live("```\n   \n```\n尾\n"),
+            format!("{G}```{R}\n\n{G}```{R}\n尾\n")
+        );
+    }
+
+    #[test]
     fn live_hr_decides_at_line_end() {
         assert_eq!(live("---\n"), format!("{G}{}{R}\n", "─".repeat(80)));
         // `--` (only two) is not a rule: literal
@@ -2151,6 +2186,13 @@ mod tests {
             "| a | b |\n| - | - |\n| 1 | 2 |\n",
             // inline code, a link and an image-looking bracket
             "见 `改哪里` 与 [链接](http://x) 以及 ![图片](img.png) 结束\n",
+            // a fence indented inside a list item: it must close (and the
+            // text after it keep rendering) on the live stream too
+            "1. **作用域** —— 先弹：\n\n   ```\n   install where:\n   ❯ project-local\n   ```\n\n   给了 `-l` 就跳过。\n\n**验证**\n\n- 见 `pick_multi` 与 `pick`。\n",
+            // a fence indented inside a list item, closing with a longer run
+            "  - 例子：\n\n    ````\n    x\n    ````\n\n结束\n",
+            // a bold-only line, and a fence whose body is all whitespace
+            "**验证**\n\n```\n   \n```\n\n尾段\n",
         ];
         for doc in docs {
             assert_eq!(live(doc), render(doc), "live vs replay for {doc:?}");
