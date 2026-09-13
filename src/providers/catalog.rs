@@ -254,18 +254,23 @@ pub fn models_url(kind: &str, base_url: &str) -> String {
 }
 
 /// The models endpoint plus its auth headers (an empty key sends no
-/// credentials — local runtimes like ollama accept that).
+/// credentials — local runtimes like ollama accept that). The gateway
+/// identity headers ride along too: an opencode.ai host answers `/models`
+/// with `403 Forbidden` without its `x-opencode-session`, which is why a
+/// live list silently stayed empty for those providers.
 pub fn fetch_models_url(
     kind: &str,
     base_url: &str,
     api_key: &str,
 ) -> (String, Vec<(String, String)>) {
-    let headers = if api_key.is_empty() {
+    let url = models_url(kind, base_url);
+    let mut headers = if api_key.is_empty() {
         Vec::new()
     } else {
         super::auth_headers(kind, api_key)
     };
-    (models_url(kind, base_url), headers)
+    headers.extend(crate::core::http::identity_headers(&url));
+    (url, headers)
 }
 
 /// Fetch a provider's model list (OpenAI-compatible `/models` endpoint); the
@@ -299,4 +304,45 @@ pub fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<S
 pub fn try_fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
     let (url, headers) = fetch_models_url(kind, base_url, api_key);
     fetch_model_list(&url, &headers).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn the_models_request_carries_the_gateway_identity_headers() {
+        // opencode.ai refuses /models with 403 unless the session header is
+        // there — a bare "Bearer + user-agent" request cannot list them
+        let (url, headers) =
+            fetch_models_url("openai-compat", "https://opencode.ai/zen/go/v1", "sk-test");
+        assert_eq!(url, "https://opencode.ai/zen/go/v1/models");
+        assert!(header(&headers, "x-opencode-session").is_some());
+        assert!(header(&headers, "user-agent").is_some());
+        assert_eq!(header(&headers, "authorization"), Some("Bearer sk-test"));
+
+        // ...and ordinary hosts get no session header
+        let (url, headers) =
+            fetch_models_url("openai-compat", "https://api.deepseek.com", "sk-test");
+        assert_eq!(url, "https://api.deepseek.com/models");
+        assert!(header(&headers, "x-opencode-session").is_none());
+        assert_eq!(header(&headers, "authorization"), Some("Bearer sk-test"));
+
+        // anthropic hangs its list off /v1 and keeps its version header
+        let (url, headers) = fetch_models_url("anthropic", "https://api.anthropic.com", "k");
+        assert_eq!(url, "https://api.anthropic.com/v1/models");
+        assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+
+        // no key at all (ollama): no credentials, still identified
+        let (_, headers) = fetch_models_url("openai-compat", "http://localhost:11434/v1", "");
+        assert!(header(&headers, "authorization").is_none());
+        assert!(header(&headers, "user-agent").is_some());
+    }
 }
