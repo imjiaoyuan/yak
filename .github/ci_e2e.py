@@ -292,6 +292,72 @@ def run(cmd, env, cwd=None, stdin=None):
     )
 
 
+HANDSHAKE = '{"id":1,"type":"initialize","params":{}}\n'
+
+
+def assert_example_handshake(name, out):
+    """One line of `initialize` must come back as a well-formed result."""
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    assert lines, f"{name} answered nothing to initialize: {out.stderr[-300:]!r}"
+    obj = json.loads(lines[0])
+    result = obj.get("result")
+    assert obj.get("id") == 1 and isinstance(result, dict), \
+        f"{name} handshake is malformed: {lines[0][:200]!r}"
+    assert any(k in result for k in ("tools", "commands", "events")), \
+        f"{name} advertises nothing: {result!r}"
+
+
+def probe_examples(ex_dir, env):
+    """Every shipped example has to parse and, if it speaks the host
+    protocol, answer the handshake. The deeper lanes drive three of them;
+    this is the cheap net over all of them, on every platform. A node-backed
+    example is skipped when node is missing (or too old for `*.ts`)."""
+    node = shutil.which("node")
+    node_ts = False
+    if node:
+        ver = subprocess.run([node, "--version"], capture_output=True, text=True).stdout
+        try:
+            major, minor = (int(x) for x in ver.strip().lstrip("v").split(".")[:2])
+            node_ts = (major, minor) >= (23, 6)  # native type stripping
+        except ValueError:
+            node_ts = False
+    ran, skipped = [], []
+    for name in sorted(os.listdir(ex_dir)):
+        path = os.path.join(ex_dir, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+        shebang = body.split("\n", 1)[0]
+        if "llm-tool:" in body[:400]:
+            # a manifest script tool: argv in, stdout out, no protocol
+            out = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; compile(open(sys.argv[1], encoding='utf-8').read(),"
+                 " sys.argv[1], 'exec')", path],
+                capture_output=True, text=True)
+            assert out.returncode == 0, \
+                f"manifest tool {name} does not parse: {out.stderr[-300:]!r}"
+            ran.append(name)
+            continue
+        if "python" in shebang or name.endswith(".py"):
+            argv, why = [sys.executable, path], None
+        elif ("node" in shebang or name.endswith(".js")):
+            argv, why = ([node, path] if node else None), "node is missing"
+        elif name.endswith(".ts"):
+            argv, why = ([node, path] if node_ts else None), "node >= 23.6 is missing"
+        else:
+            argv, why = None, "unknown interpreter"
+        if argv is None:
+            skipped.append(f"{name} ({why})")
+            continue
+        out = subprocess.run(argv, input=HANDSHAKE, capture_output=True,
+                             text=True, timeout=60, env=env)
+        assert_example_handshake(name, out)
+        ran.append(name)
+    return ran, skipped
+
+
 def main():
     # absolute: some scenarios run with cwd=work, and a relative binary
     # path would resolve against the child's cwd on posix and vanish
@@ -457,6 +523,14 @@ def main():
         )
         assert '"tools"' in out.stdout and '"now"' in out.stdout, \
             f"the reference template handshake broke: {out.stdout[:200]!r} {out.stderr[:200]!r}"
+
+    # examples lane: every shipped example parses and every protocol
+    # extension answers `initialize` — the net under the per-example lanes
+    ex_dir = os.path.join(root, "examples", "extensions")
+    ran, skipped = probe_examples(ex_dir, env)
+    assert "subagent.py" in ran and "fold_repeats.py" in ran, \
+        f"the examples lane lost coverage: ran={ran} skipped={skipped}"
+    print(f"examples: {len(ran)} probed, {len(skipped)} skipped {skipped}")
 
     # package lane: a local git repo installs into .llm/pkg (project), its
     # extension mounts, list/remove work

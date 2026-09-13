@@ -91,7 +91,9 @@ one JSON message per line over stdio. stdout carries only the protocol — anyth
 diagnostics tail. stderr is the human channel, and while a call is in flight it is also **live
 progress**: every line the extension prints is shown in the session's tool log for that call
 (dim, same as a tool's own output) and none of it reaches the model — the tool result stays exactly
-the string your reply carries. Use it for "found 3 of 50 files" reporting from a long tool.
+the string your reply carries. Use it for "found 3 of 50 files" reporting from a long tool; the
+buffer is bounded (the last 64 lines per call) and drained when the next call starts, so stderr is
+progress, never a result channel.
 
 ### Lifecycle
 
