@@ -119,24 +119,24 @@ static ANSI256: LazyLock<Palette> = LazyLock::new(|| build(false));
 static PLAIN: LazyLock<Palette> = LazyLock::new(Palette::default);
 
 /// the reference's exact hex palette (truecolor terminals).
-pub fn truecolor() -> &'static Palette {
+pub(crate) fn truecolor() -> &'static Palette {
     &TRUECOLOR
 }
 
 /// The nearest-256-color palette (every color terminal).
-pub fn ansi256() -> &'static Palette {
+pub(crate) fn ansi256() -> &'static Palette {
     &ANSI256
 }
 
 /// No escapes at all (pipes, `NO_COLOR`, dumb terminals).
-pub fn plain() -> &'static Palette {
+pub(crate) fn plain() -> &'static Palette {
     &PLAIN
 }
 
 static CHROME: LazyLock<Palette> = LazyLock::new(chrome);
 
 /// The chrome palette (the legacy near-monochrome set).
-pub fn legacy() -> &'static Palette {
+pub(crate) fn legacy() -> &'static Palette {
     &CHROME
 }
 

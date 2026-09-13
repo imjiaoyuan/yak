@@ -148,10 +148,10 @@ pub fn resolve(
             "command matches blacklist pattern '{pattern}' — approval required"
         ));
     }
-    if let (Tier::Exec, Some(cmd)) = (tier, bash_command) {
-        if let Some(reason) = forbidden_command(cmd) {
-            return Decision::Deny(reason);
-        }
+    if let (Tier::Exec, Some(cmd)) = (tier, bash_command)
+        && let Some(reason) = forbidden_command(cmd)
+    {
+        return Decision::Deny(reason);
     }
     match cfg.tool_policies.get(name) {
         Some(Policy::Deny) => {
@@ -785,7 +785,6 @@ mod tests {
         ));
     }
 
-    #[test]
     #[test]
     fn a_blacklisted_command_asks_even_in_yolo() {
         let mut c = cfg(Mode::Yolo, &[]);
