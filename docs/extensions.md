@@ -3,9 +3,10 @@
 Extensions are the plugin system: anything the core skips, you build yourself as an executable
 dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or
 `/reload`. This page is the full reference; runnable examples live in
-[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, `repeat_guard.py` —
-a `tool_call` deny gate for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds
-repeated log lines, plus the `template.js`/`template.py` starter templates).
+[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, `subagent.py` — a
+tool that runs another `llm` in its own context window, `repeat_guard.py` — a `tool_call` deny gate
+for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds repeated log lines, plus the
+`template.js`/`template.py` starter templates).
 `websearch.ts` is a TypeScript twin of the python `websearch` (node >= 23.6 runs it directly
 through native type stripping; bun/deno also work) — install one of the two, not both: the
 host dedups extension entries by file stem.
@@ -86,8 +87,11 @@ Invocation contract:
 ## Resident extensions
 
 For hooks, commands and multi-call tools: the process is spawned **once** per session and speaks
-one JSON message per line over stdio. stdout carries only the protocol — anything else goes to
-the diagnostics tail; stderr likewise.
+one JSON message per line over stdio. stdout carries only the protocol — anything else goes to the
+diagnostics tail. stderr is the human channel, and while a call is in flight it is also **live
+progress**: every line the extension prints is shown in the session's tool log for that call
+(dim, same as a tool's own output) and none of it reaches the model — the tool result stays exactly
+the string your reply carries. Use it for "found 3 of 50 files" reporting from a long tool.
 
 ### Lifecycle
 
@@ -111,18 +115,24 @@ may be ignored silently — the host times them out.
      "tools":    [{"name": "deploy", "description": "Deploy the current tree",
                     "parameters": {"type": "object", "properties": {}, "required": []}}],
      "commands": ["guard"],
-     "events":   ["tool_call", "turn_end"]
+     "events":   ["tool_call", "turn_end"],
+     "tool_timeout": 900
    }}
 ```
 
 `parameters` is JSON Schema; `commands` and `events` may be empty lists or omitted. Each tool may
 carry an optional `"tier": "read" | "write" | "exec"` (default `exec`).
 
+`tool_timeout` (seconds, optional) is your own deadline for `call_tool` — ask for it when your tool
+legitimately runs for minutes (spawning a build, running another agent). It replaces the config
+default for this extension and is clamped to one hour; omit it and `extensions.tool_timeout`
+applies. The wait stays interruptible either way.
+
 Tool names are registry-wide: a name that collides with a built-in or another extension is
 exposed as `<extension-stem>__<name>` (the wire protocol keeps the original name).
 
-**`call_tool`** — the model invoked one of your tools (deadline `extensions.tool_timeout`, 120s
-default):
+**`call_tool`** — the model invoked one of your tools (deadline: the `tool_timeout` you asked for
+at `initialize`, else `extensions.tool_timeout`, 120s default):
 
 ```json
 → {"id": 2, "type": "call_tool", "v": 1, "name": "deploy", "args": {}}
@@ -149,6 +159,19 @@ interpreted; other events are fire-and-forget (reply `null` or nothing).
     "params": {"tool": "bash", "args": {"command": "rm -rf build"}}}
 ← {"id": 4, "result": {"decision": "deny", "reason": "build dir is mounted"}}
 ```
+
+**`interrupt`** — the user pressed ctrl+c while your tool call was running, so the host has stopped
+waiting and gone on with the turn:
+
+```json
+→ {"id": 6, "type": "interrupt", "v": 1, "cancelled": 5}
+```
+
+No reply is expected (the request is already abandoned; answer if you like, the reply is dropped as
+unknown). Most extensions can ignore it — your call's deadline is what ends it. It exists for tools
+that own work of their own: stop child processes, release locks, then return early. An extension
+that only learns about it from its main loop hears it late, because that loop is blocked inside the
+call; `subagent.py` reads stdin on a second thread for exactly this reason.
 
 **`shutdown`** — `{"type": "shutdown"}` with no id; clean up and exit.
 
@@ -226,7 +249,7 @@ guardrails regardless of mode, write a `tool_call` gate.
 | Phase | Limit | Override |
 |---|---|---|
 | spawn + initialize | 10s | — |
-| tool call (resident) | 120s | `extensions.tool_timeout` |
+| tool call (resident) | 120s | the extension's `tool_timeout` in its `initialize` reply (≤ 1h), else `extensions.tool_timeout` |
 | script-tool call | `timeout:` manifest field | defaults to the same config value |
 | event hook | 5s | — |
 | tool output | capped like the bash tool (lines + 50KB) | — |
@@ -250,10 +273,38 @@ logic transliterates unchanged in shape — same `todo` tool with `list`/`add`/`
 
 Extension *logic* is portable; extension *chrome* belongs to whichever host renders it.
 
+## Running another llm: the `subagent.py` example
+
+The one example that exercises every part of this page at once: `subagent.py` mounts a `subagent`
+tool that spawns a real `llm` child in its own context window and hands the conclusion back as a
+tool result.
+
+```bash
+llm --json --no-session --approval-mode yolo --tools read,grep \
+    -m <model> --thinking <level> --append-system-prompt "<agent body>" "Task: ..."
+```
+
+- The child's *agent definition* is markdown with frontmatter, from `~/.llm/agents/<name>.md` or the
+  project's `.llm/agents/<name>.md` (nearest wins): `name`, `description`, `tools`, `model`,
+  `thinking`, and the body becomes the appended system prompt. Discovery, parsing and the depth
+  guard live in the extension — the core knows nothing about agents.
+- `--json` is what makes the child observable: one JSON object per line (`text`, `reasoning`,
+  `tool_start`, `tool_log`, `tool_end`, `turn_end`, `result`). The extension turns those into the
+  parent's live tool log and reads the final answer off the `result` object, which is why it needs
+  no parsing of human-facing text.
+- The child is stopped on the host's `interrupt` and on its own deadline, `LLM_SUBAGENT_DEPTH`
+  refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all.
+- Ask mode prompts once for the `subagent` call (exec tier); the child runs `--approval-mode yolo`
+  because nobody is at its terminal, so the definition's `tools:` line — not the child's approval
+  mode — is what bounds it.
+
+`examples/agents/` ships four definitions to copy: `scout` and `reviewer` (read-only), `planner`
+(think-only) and `worker` (can edit and run commands).
+
 ## Debugging checklist
 
 - `/status` lists every extension with state, tool/command counts or the failure reason
 - `/reload` respawns everything after edits
-- print to **stderr** for humans (it lands in the diagnostics tail); keep stdout protocol-only
+- print to **stderr** for humans: it lands in the diagnostics tail, and during a call it streams into that call's tool log line by line
 - a reply that never comes is a timeout: check you `flush()` stdout
 - name the file without an extension for a clean tool/command stem

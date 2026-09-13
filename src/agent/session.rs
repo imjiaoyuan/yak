@@ -42,6 +42,9 @@ pub struct Session {
     /// totals cannot show (a compaction or prefix change makes one round a
     /// full miss while the session average stays high)
     pub last_usage: Option<crate::core::http::Usage>,
+    /// `--json`: write the task as a line-delimited JSON event stream instead
+    /// of driving the terminal UI (one-shot mode only)
+    pub json: bool,
 }
 
 impl Session {
@@ -85,6 +88,9 @@ impl Session {
         prompt: &str,
         attachments: Vec<crate::providers::Attachment>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        if self.json {
+            return self.run_task_json(prompt, attachments);
+        }
         let opts = AgentOptions {
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
@@ -353,6 +359,123 @@ impl Session {
         }
     }
 
+    /// `--json`: the same task, with a line-delimited JSON event stream as
+    /// the output surface instead of the terminal UI. Every [`AgentUpdate`]
+    /// becomes one object and the closing `result` object carries the final
+    /// answer — the shape a supervising process parses (the `subagent`
+    /// example extension, an editor plugin, CI). Approvals still work: their
+    /// prompt goes to stderr, so stdout stays parseable.
+    fn run_task_json(
+        &mut self,
+        prompt: &str,
+        attachments: Vec<crate::providers::Attachment>,
+    ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        let opts = AgentOptions {
+            system: self.system.as_deref(),
+            cwd: self.cwd.clone(),
+            max_turns: self.max_turns,
+            token_budget: self.token_budget,
+            stream: self.stream,
+            compact: Some(self.compact.clone()),
+            reasoning: self.thinking.clone(),
+            hooks: Some(&self.extensions),
+        };
+        let task_start = std::time::Instant::now();
+        // the terminal path renders the reasoning trace through TaskView;
+        // here it is only carried into the stored turn
+        let mut reasoning = String::new();
+        let mut total_in = 0u64;
+        let mut total_out = 0u64;
+        let mut total_cached = 0u64;
+        let mut last_usage: Option<crate::core::http::Usage> = None;
+        let mut on_update = |u: AgentUpdate| {
+            match &u {
+                AgentUpdate::ReasoningDelta(text) => reasoning.push_str(text),
+                // same accounting as the terminal path, so the session totals
+                // and /status agree in both modes
+                AgentUpdate::TurnEnd { usage: Some(usage) } => {
+                    total_in += usage.input;
+                    total_out += usage.output;
+                    total_cached += usage.cached;
+                    last_usage = Some(*usage);
+                }
+                _ => {}
+            }
+            emit_event(&event_json(&u));
+        };
+        let mut on_approval = |req: ApprovalRequest| approval::prompt_approval(&req, Vec::new());
+        // no KeyWatcher here: stdin belongs to the caller (usually a pipe),
+        // and ctrl-c kills this process like any other child
+        let steer_queue = self.steer_queue.clone();
+        let mut steer = move || {
+            steer_queue
+                .lock()
+                .map(|mut q| q.drain(..).collect())
+                .unwrap_or_default()
+        };
+        let seed_len = self.seed.len();
+        let result = run_agent(
+            &self.model,
+            &self.tools,
+            prompt,
+            attachments,
+            std::mem::take(&mut self.seed),
+            &opts,
+            &mut self.approval,
+            &mut on_update,
+            &mut on_approval,
+            &mut steer,
+        );
+        crate::core::http::clear_interrupt();
+        self.tokens.0 += total_in;
+        self.tokens.1 += total_out;
+        self.tokens_cached += total_cached;
+        self.last_usage = last_usage;
+        match result {
+            Ok(mut outcome) => {
+                emit_event(&serde_json::json!({
+                    "type": "result",
+                    "text": &outcome.final_text,
+                    "usage": usage_json(outcome.usage.as_ref()),
+                    "interrupted": outcome.interrupted,
+                    "budget_exhausted": outcome.budget_exhausted,
+                }));
+                // the history moves into the seed (no clone of the whole
+                // conversation per task); persistence reads it first
+                let history = std::mem::take(&mut outcome.history);
+                self.persist_turn(
+                    seed_len,
+                    &history,
+                    &outcome.final_text,
+                    outcome.usage,
+                    &reasoning,
+                    task_start,
+                );
+                self.seed = history;
+                Ok((outcome, reasoning))
+            }
+            // a failed round still saw real work: the stream reports it and
+            // the turn is persisted, exactly as in the terminal path
+            Err(failure) => {
+                emit_event(&serde_json::json!({
+                    "type": "error",
+                    "message": &failure.message,
+                    "text": &failure.final_text,
+                }));
+                self.persist_turn(
+                    seed_len,
+                    &failure.history,
+                    &failure.final_text,
+                    None,
+                    &reasoning,
+                    task_start,
+                );
+                self.seed = failure.history;
+                Err(failure.message)
+            }
+        }
+    }
+
     /// Steering lines that outlived the last run (typed after the final
     /// model call). The REPL submits each as the next task, the reference style.
     pub fn take_steer_leftover(&self) -> Vec<String> {
@@ -450,6 +573,63 @@ impl Session {
             self.conversation_id = Some(thread_id);
         }
     }
+}
+/// One event as the `--json` stream writes it. The mapping is a contract:
+/// the field names are what supervising processes parse, so a new
+/// [`AgentUpdate`] variant gets a new `type` rather than a reshuffle.
+fn event_json(u: &AgentUpdate) -> serde_json::Value {
+    match u {
+        AgentUpdate::Delta(text) => serde_json::json!({"type": "text", "text": text}),
+        AgentUpdate::ReasoningDelta(text) => {
+            serde_json::json!({"type": "reasoning", "text": text})
+        }
+        AgentUpdate::ToolStart {
+            name,
+            preview,
+            diff,
+        } => {
+            let mut v = serde_json::json!({"type": "tool_start", "name": name, "preview": preview});
+            if let Some(diff) = diff {
+                v["diff"] = serde_json::json!(diff);
+            }
+            v
+        }
+        AgentUpdate::ToolLog(line) => serde_json::json!({"type": "tool_log", "line": line}),
+        AgentUpdate::ToolReceiving => serde_json::json!({"type": "tool_receiving"}),
+        AgentUpdate::ToolEnd { summary, is_error } => {
+            serde_json::json!({"type": "tool_end", "summary": summary, "is_error": is_error})
+        }
+        AgentUpdate::TurnEnd { usage } => {
+            serde_json::json!({"type": "turn_end", "usage": usage_json(usage.as_ref())})
+        }
+        AgentUpdate::Compacted { removed } => {
+            serde_json::json!({"type": "compacted", "removed": removed})
+        }
+        AgentUpdate::StreamRecovered { chars, error } => {
+            serde_json::json!({"type": "stream_recovered", "chars": chars, "error": error})
+        }
+        AgentUpdate::ToolResultsPruned { count } => {
+            serde_json::json!({"type": "tool_results_pruned", "count": count})
+        }
+    }
+}
+
+/// Token usage in the stream's shape; `null` when the provider reported none
+/// (the field stays present so consumers never branch on its absence).
+fn usage_json(usage: Option<&crate::core::http::Usage>) -> serde_json::Value {
+    match usage {
+        Some(u) => serde_json::json!({"input": u.input, "output": u.output, "cached": u.cached}),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Write one event line and flush: consumers read the stream live, so a
+/// buffered event would stall their progress display.
+fn emit_event(event: &serde_json::Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{event}");
+    let _ = out.flush();
 }
 
 pub fn msg_to_stored(m: &Msg) -> StoredMsg {
@@ -620,6 +800,7 @@ mod tests {
             tokens: (0, 0),
             tokens_cached: 0,
             last_usage: None,
+            json: false,
         };
         let history = vec![
             Msg::user("write the docs"),
@@ -789,5 +970,96 @@ mod tests {
             _ => panic!("expected final assistant"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn json_events_name_every_update() {
+        use serde_json::json;
+        let cases: Vec<(AgentUpdate, serde_json::Value)> = vec![
+            (
+                AgentUpdate::Delta("hi".into()),
+                json!({"type": "text", "text": "hi"}),
+            ),
+            (
+                AgentUpdate::ReasoningDelta("why".into()),
+                json!({"type": "reasoning", "text": "why"}),
+            ),
+            (
+                AgentUpdate::ToolStart {
+                    name: "bash".into(),
+                    preview: "$ ls".into(),
+                    diff: None,
+                },
+                json!({"type": "tool_start", "name": "bash", "preview": "$ ls"}),
+            ),
+            (
+                AgentUpdate::ToolStart {
+                    name: "edit".into(),
+                    preview: "src/x.rs".into(),
+                    diff: Some("-a\n+b".into()),
+                },
+                json!({"type": "tool_start", "name": "edit", "preview": "src/x.rs", "diff": "-a\n+b"}),
+            ),
+            (
+                AgentUpdate::ToolLog("[exit 1]".into()),
+                json!({"type": "tool_log", "line": "[exit 1]"}),
+            ),
+            (
+                AgentUpdate::ToolReceiving,
+                json!({"type": "tool_receiving"}),
+            ),
+            (
+                AgentUpdate::ToolEnd {
+                    summary: "ok".into(),
+                    is_error: false,
+                },
+                json!({"type": "tool_end", "summary": "ok", "is_error": false}),
+            ),
+            (
+                AgentUpdate::TurnEnd {
+                    usage: Some(crate::core::http::Usage {
+                        input: 10,
+                        output: 2,
+                        cached: 8,
+                    }),
+                },
+                json!({"type": "turn_end", "usage": {"input": 10, "output": 2, "cached": 8}}),
+            ),
+            // a round without a usage report keeps the key, as null
+            (
+                AgentUpdate::TurnEnd { usage: None },
+                json!({"type": "turn_end", "usage": null}),
+            ),
+            (
+                AgentUpdate::Compacted { removed: 12 },
+                json!({"type": "compacted", "removed": 12}),
+            ),
+            (
+                AgentUpdate::StreamRecovered {
+                    chars: 40,
+                    error: "closed".into(),
+                },
+                json!({"type": "stream_recovered", "chars": 40, "error": "closed"}),
+            ),
+            (
+                AgentUpdate::ToolResultsPruned { count: 2 },
+                json!({"type": "tool_results_pruned", "count": 2}),
+            ),
+        ];
+        for (update, want) in cases {
+            assert_eq!(event_json(&update), want, "for {want}");
+        }
+    }
+
+    #[test]
+    fn every_event_line_is_one_json_object() {
+        // the stream's whole contract: no embedded newlines, so a consumer
+        // can split stdout on '\n' and parse each line
+        let line = event_json(&AgentUpdate::Delta("a\nb".into())).to_string();
+        assert_eq!(line.matches('\n').count(), 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["text"],
+            "a\nb"
+        );
     }
 }

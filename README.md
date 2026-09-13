@@ -136,7 +136,15 @@ llm -s "you are a Rust reviewer" "..."     # replace the system prompt
 llm --append-system-prompt "be terse" "..."
 llm --tools read,grep "..."                # limit the toolbox
 llm --token-budget 500000 "..."            # stop after this many input tokens
+llm --json "..."                           # line-delimited events instead of the UI
 ```
+
+`--json` replaces the terminal UI with one JSON object per line — `text`, `reasoning`, `tool_start`,
+`tool_log`, `tool_end`, `turn_end` and a closing `result` — for a supervising process: an editor, a
+CI lane, or another agent driving a child `llm`. The task is the same task (pass one as an
+argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. Sessions,
+usage accounting and persistence are identical to a normal run; the interactive session is what
+`--json` is *not* — it wants a task and exits.
 
 `--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on
 Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the
@@ -372,9 +380,15 @@ Extension tools start at the same trust level as `bash`: they run freely in yolo
 mode each call prompts. You can lower a tool's tier if you have reviewed it — see
 [`docs/extensions.md`](docs/extensions.md). `[agent] tools` policies and `--tools` still apply.
 
+Anything an extension prints to stderr is a human channel: it lands in the diagnostics tail, and
+while a call is in flight it streams into that call's tool log line by line, so a long tool can
+report progress without polluting its own result.
+
 A slow or broken extension prints a dim warning and mounts nothing; it never blocks the session.
-Tool calls time out after 120s (`extensions.tool_timeout` in config), events after 5s.
-`extensions.disabled` skips one by name, and `/reload` restarts them all.
+Tool calls time out after 120s (`extensions.tool_timeout` in config) unless the extension asks for
+its own deadline at `initialize` — an extension that runs a build or another agent needs that —
+and events after 5s. ctrl+c abandons a call and tells a busy extension `interrupt` so it can stop
+its own child processes. `extensions.disabled` skips one by name, and `/reload` restarts them all.
 
 Two self-contained templates ship in `examples/extensions/`: `template.js` (a JavaScript runtime
 whose user section uses a familiar extension API — `registerTool` / `registerCommand` /
@@ -383,10 +397,11 @@ need the process, like UI, editors and hotkeys, raise with a clear message) and 
 same shape in Python). Copy one into the extensions directory and edit its user section.
 
 The full reference is [`docs/extensions.md`](docs/extensions.md) — manifest fields, every message and
-event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has three runnable
-examples to copy: `wordcount` (a script tool), `websearch` (a resident extension offering
-`web_search` + `web_fetch` and a `/web` command — uses `BRAVE_API_KEY` when set, otherwise keyless
-DuckDuckGo/Wikipedia) and `todo`.
+event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has runnable examples
+to copy: `wordcount` (a script tool), `websearch` (a resident extension offering `web_search` +
+`web_fetch` and a `/web` command — uses `BRAVE_API_KEY` when set, otherwise keyless
+DuckDuckGo/Wikipedia), `todo`, `repeat_guard.py` (denies a `tool_call` loop), `fold_repeats.py` (folds
+repeated lines in a tool result) and `subagent.py` (below).
 
 Here is a whole resident extension — a tool that shells out to `deploy.sh`:
 
@@ -413,6 +428,24 @@ for line in sys.stdin:
     elif req.get("type") == "shutdown":
         break
 ```
+
+### Delegating: a subagent extension
+
+[`examples/extensions/subagent.py`](examples/extensions/subagent.py) mounts a `subagent` tool that
+runs another `llm` in its own context window and returns only its conclusion:
+
+```bash
+cp examples/extensions/subagent.py ~/.llm/extensions/subagent && chmod +x ~/.llm/extensions/subagent
+```
+
+Agent definitions are markdown with frontmatter — `~/.llm/agents/scout.md` or the project's
+`.llm/agents/scout.md` (the nearest wins), with `tools`, `model` and `thinking` optional; four ship
+in [`examples/agents/`](examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks`
+batch, or a `chain` where each step gets the previous answer, and the child's tool calls show up in
+your session as it works. The child is a plain `llm --json` process: its own tools, its own system
+prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press
+ctrl+c and unable to spawn further subagents. Copy the file or don't — nothing in the core knows
+subagents exist.
 
 ## Threads
 

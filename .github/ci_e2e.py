@@ -168,7 +168,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ]
             self.sse(chunks)
             return
+        if body.get("model") == "m-sub":
+            # subagent lane: round 1 asks for the subagent tool, round 2 rides
+            # back with whatever the child agent answered
+            if any(m.get("role") == "tool" for m in messages):
+                seen["sub_round2"] = messages
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "parent saw the subagent"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_sub", "type": "function",
+                         "function": {"name": "subagent",
+                                      "arguments": '{"agent": "scout", "task": "count the mocks"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
+            return
         if body.get("tools") and not any(m.get("role") == "tool" for m in messages):
+            # each first round's tool list: the subagent lane asserts the
+            # child ran with its definition's subset
+            seen.setdefault("generic_tools", []).append(
+                [t["function"]["name"] for t in body.get("tools", [])])
             chunks = [
                 {"choices": [{"index": 0, "delta": {"tool_calls": [
                     {"index": 0, "id": "call_1", "type": "function",
@@ -313,6 +336,12 @@ def main():
                         "base_url": f"http://127.0.0.1:{PORT}/v1",
                         "api_key": "sk-ci",
                         "models": ["m-rw"],
+                    },
+                    "mock-sub": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-ci",
+                        "models": ["m-sub"],
                     },
                 },
                 "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
@@ -508,6 +537,64 @@ def main():
     assert ch.returncode == 0 and "final answer after tool" in ch.stdout + ch.stderr, \
         f"chat rc={ch.returncode} err={ch.stderr[-300:]!r}"
     assert "read" in (seen.get("tools") or []), f"agent must send tools: {seen.get('tools')}"
+
+    # --json lane: the same task writes a line-delimited event stream instead
+    # of the terminal UI — the contract the subagent example extension parses
+    js = run([binary, "--json", "--yolo", "--no-session", "-m", "mock/m-a", "hi"],
+             env, stdin=subprocess.DEVNULL)
+    assert js.returncode == 0, f"json lane rc={js.returncode} err={js.stderr[-500:]}"
+    events = []
+    for line in js.stdout.splitlines():
+        assert line.startswith("{") and line.endswith("}"), \
+            f"the JSON stream must stay parseable, got {line!r}"
+        events.append(json.loads(line))
+    kinds = [e["type"] for e in events]
+    assert "tool_start" in kinds and "tool_end" in kinds, f"no tool events: {kinds}"
+    assert "text" in kinds, f"no answer deltas: {kinds}"
+    assert kinds[-1] == "result", f"the stream must end with the result: {kinds[-5:]}"
+    assert events[-1]["text"] == "final answer after tool", f"result text: {events[-1]!r}"
+    assert "\x1b[" not in js.stdout, "no terminal escapes may ride the stream"
+    assert all("usage" in e for e in events if e["type"] == "turn_end"), \
+        "every turn_end carries a usage key (null when the provider reports none)"
+    start = next(e for e in events if e["type"] == "tool_start")
+    assert start["name"] == "echo" and "preview" in start, \
+        f"tool_start names the tool: {start!r}"
+    # the flag replaces the interactive UI, so it needs a task
+    nj = run([binary, "--json"], env, stdin=subprocess.DEVNULL)
+    assert nj.returncode == 1 and "needs a task" in nj.stdout + nj.stderr, \
+        f"--json without a task: rc={nj.returncode} out={(nj.stdout + nj.stderr)[-200:]!r}"
+
+    # subagent lane: examples/extensions/subagent.py mounts a tool that spawns
+    # a real child llm (--json, its own tools and system prompt), reads its
+    # event stream and hands the conclusion back as the tool result
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sub_dst = os.path.join(user, "extensions", "subagent")
+    if sys.platform == "win32":
+        shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"),
+                        sub_dst + ".py")
+        with open(sub_dst + ".cmd", "w") as f:
+            f.write('@"%s" "%s" %%*\r\n' % (sys.executable, sub_dst + ".py"))
+    else:
+        shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"), sub_dst)
+        os.chmod(sub_dst, 0o755)
+    os.makedirs(os.path.join(user, "agents"), exist_ok=True)
+    with open(os.path.join(user, "agents", "scout.md"), "w") as f:
+        f.write("---\nname: scout\ndescription: ci scout\ntools: read, grep\n---\n"
+                "You are the CI scout.\n")
+    sub_env = dict(env, LLM_BIN=os.path.abspath(binary))
+    sb = run([binary, "--yolo", "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
+             sub_env, cwd=work, stdin=subprocess.DEVNULL)
+    assert sb.returncode == 0, f"subagent lane rc={sb.returncode} err={sb.stderr[-800:]}"
+    assert "parent saw the subagent" in sb.stdout + sb.stderr, \
+        f"the parent never finished: {(sb.stdout + sb.stderr)[-300:]!r}"
+    round2 = seen.get("sub_round2") or []
+    tool_msgs = [m for m in round2 if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"the tool result went missing: {json.dumps(round2)[:400]}"
+    result_text = tool_msgs[0].get("content", "")
+    assert "[scout]" in result_text and "final answer after tool" in result_text, \
+        f"the child's answer must reach the parent: {result_text[:400]!r}"
+    assert ["read", "grep"] in (seen.get("generic_tools") or []), \
+        f"the child must run with its definition's tool subset: {seen.get('generic_tools')}"
 
     # sessions land as thread files in the store
     assert any(f.endswith(".jsonl") for f in os.listdir(os.path.join(user, "threads"))), \

@@ -89,6 +89,11 @@ const SPECS: &[OptSpec] = &[
     crate::two_value_spec!("at", "Attachment with explicit mimetype", "PATH MIMETYPE"),
     flag_spec!("resume", Some('r'), "Browse past sessions and continue one"),
     flag_spec!("no-stream", None, "Do not stream output"),
+    flag_spec!(
+        "json",
+        None,
+        "Write a JSON event stream (one object per line) instead of the terminal UI"
+    ),
     value_spec!("key", None, "API key to use", "KEY"),
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
@@ -124,6 +129,14 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let mut prompt = args.positionals.join(" ");
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task
     prompt = crate::core::attachments::read_piped_prompt(args, prompt)?;
+    // checked before anything else so the usage error never hides behind a
+    // missing model or key
+    if args.flag(&["json"]) && prompt.trim().is_empty() {
+        return Err(
+            "--json replaces the terminal UI, so it needs a task (pass one as an argument)"
+                .to_string(),
+        );
+    }
 
     let settings = crate::agent::settings::load();
 
@@ -325,6 +338,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         tokens: (0, 0),
         tokens_cached: 0,
         last_usage: None,
+        json: args.flag(&["json"]),
     };
 
     // built-ins plus plugin tools, all through the shared rebuild path;

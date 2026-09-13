@@ -41,6 +41,9 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// stderr lines kept for diagnostics.
 const TAIL_LINES: usize = 20;
+/// stderr lines held for the live tool log while a call is in flight; a
+/// chatty extension cannot grow the buffer without bound.
+const PROGRESS_LINES: usize = 64;
 /// `recv_timeout` slice; keeps ctrl+c responsive while waiting.
 const POLL_SLICE: Duration = Duration::from_millis(100);
 
@@ -392,6 +395,11 @@ struct Conn {
     writer: Sender<String>,
     pending: PendingMap,
     dead: Arc<AtomicBool>,
+    /// stderr the extension wrote since the last drain: the tool-call waiter
+    /// hands these to the live tool log, so progress a resident extension
+    /// prints is visible while it works and still never enters the model's
+    /// context (the tool result is the protocol reply alone)
+    progress: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Drop for Conn {
@@ -410,6 +418,12 @@ impl Conn {
     /// Asking the OS directly closes it.
     fn exited(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
+    /// Take the progress lines written since the last call, draining the
+    /// buffer (the caller discards them to start a call on a clean slate).
+    fn take_progress(&self) -> Vec<String> {
+        lock(&self.progress).drain(..).collect()
     }
 }
 
@@ -483,14 +497,20 @@ impl Ext {
     }
 
     /// Send one request and await its reply, slicing the wait so ctrl+c
-    /// stays responsive. The connection is revived on demand first.
-    fn request(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
+    /// stays responsive. The connection is revived on demand first. `log`,
+    /// when given, receives the extension's stderr as live progress.
+    fn request<'a, 'b>(
+        &self,
+        msg: &Value,
+        timeout: Duration,
+        mut log: Option<&'a mut (dyn FnMut(&str) + 'b)>,
+    ) -> Result<Value, String> {
         self.ensure_alive()?;
-        match self.request_live(msg, timeout) {
+        match self.request_live(msg, timeout, log.as_deref_mut()) {
             Err(e) if self.should_retry(&e) => {
                 self.respawn();
                 match &*lock(&self.state) {
-                    Ok(_) => self.request_live(msg, timeout),
+                    Ok(_) => self.request_live(msg, timeout, log),
                     Err(reason) => Err(reason.clone()),
                 }
             }
@@ -509,7 +529,12 @@ impl Ext {
     /// The transport half of `request`, for callers that already hold a
     /// live connection (the handshake itself: respawning from inside
     /// `ensure_alive` would re-enter the respawn lock).
-    fn request_live(&self, msg: &Value, timeout: Duration) -> Result<Value, String> {
+    fn request_live<'a, 'b>(
+        &self,
+        msg: &Value,
+        timeout: Duration,
+        mut log: Option<&'a mut (dyn FnMut(&str) + 'b)>,
+    ) -> Result<Value, String> {
         let mut guard = lock(&self.conn);
         let conn = guard
             .as_mut()
@@ -523,6 +548,9 @@ impl Ext {
             .expect("host messages always carry an id");
         let (tx, rx) = sync_channel(1);
         lock(&conn.pending).insert(id, tx);
+        // a call starts on a clean slate: stderr from an earlier call (or an
+        // idle chatty extension) must not replay as this call's progress
+        conn.take_progress();
         let mut frame = serde_json::to_string(msg).unwrap_or_default();
         frame.push('\n');
         if conn.writer.send(frame).is_err() {
@@ -532,10 +560,31 @@ impl Ext {
         let deadline = Instant::now() + timeout;
         loop {
             match rx.recv_timeout(POLL_SLICE) {
-                Ok(result) => return result,
+                Ok(result) => {
+                    // whatever stderr arrived alongside the reply still counts
+                    // as progress for this call
+                    if let Some(f) = log.as_mut() {
+                        for line in conn.take_progress() {
+                            (**f)(&line);
+                        }
+                    }
+                    return result;
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // stderr written while we wait: the human sees the
+                    // extension working; the model never sees these lines
+                    if let Some(f) = log.as_mut() {
+                        for line in conn.take_progress() {
+                            (**f)(&line);
+                        }
+                    }
                     if crate::core::http::interrupted() {
                         lock(&conn.pending).remove(&id);
+                        // the caller is walking away from this call: say so,
+                        // so an extension that owns long-lived work of its
+                        // own (the subagent example's child processes) can
+                        // stop it instead of answering nobody
+                        let _ = conn.writer.send(interrupt_frame(id));
                         return Err("interrupted".to_string());
                     }
                     // the process can vanish without the reader having said
@@ -562,7 +611,12 @@ impl Ext {
     }
 
     /// Run one extension tool: the result string is the tool output.
-    pub fn call_tool(&self, name: &str, args: &Value) -> Result<String, String> {
+    pub fn call_tool(
+        &self,
+        name: &str,
+        args: &Value,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<String, String> {
         let timeout = match &*lock(&self.state) {
             Ok(state) => state.tool_timeout,
             Err(_) => TOOL_TIMEOUT,
@@ -570,6 +624,7 @@ impl Ext {
         let result = self.request(
             &json!({"id": next_id(), "type": "call_tool", "v": 1, "name": name, "args": args}),
             timeout,
+            Some(log),
         )?;
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
@@ -583,6 +638,7 @@ impl Ext {
         let result = self.request(
             &json!({"id": next_id(), "type": "run_command", "v": 1, "name": name, "args": args}),
             TOOL_TIMEOUT,
+            None,
         )?;
         Ok(result
             .get("result")
@@ -604,6 +660,7 @@ impl Ext {
         let result = self.request(
             &json!({"id": next_id(), "type": "event", "v": 1, "name": name, "params": params}),
             EVENT_TIMEOUT,
+            None,
         )?;
         Ok(result.get("result").cloned())
     }
@@ -830,6 +887,27 @@ fn unique_tool_name(
     candidate
 }
 
+/// The host-to-extension notice that a call was abandoned (ctrl+c): the
+/// cancelled request's id, plus a fresh id so the frame keeps the protocol's
+/// shape. No reply is expected, and an extension that ignores it simply
+/// finishes into a reply nobody is waiting for.
+fn interrupt_frame(cancelled: u64) -> String {
+    let mut frame =
+        json!({"id": next_id(), "type": "interrupt", "v": 1, "cancelled": cancelled}).to_string();
+    frame.push('\n');
+    frame
+}
+
+/// A per-extension tool-call budget, when the initialize reply asks for one:
+/// `"tool_timeout": <seconds>`. Zero and non-numeric values are ignored, and
+/// the long end is clamped so a wedged extension cannot park the turn past
+/// an hour (ctrl+c still interrupts a running call at any point).
+fn parse_tool_timeout(result: &Value) -> Option<Duration> {
+    const MAX: u64 = 3600;
+    let secs = result.get("tool_timeout")?.as_u64().filter(|s| *s > 0)?;
+    Some(Duration::from_secs(secs.min(MAX)))
+}
+
 fn failed(name: &str, reason: String) -> Arc<Ext> {
     Arc::new(Ext {
         name: name.to_string(),
@@ -882,6 +960,7 @@ impl Ext {
                     },
                 }),
                 CONNECT_TIMEOUT,
+                None,
             )?;
             let result = result
                 .get("result")
@@ -907,7 +986,11 @@ impl Ext {
                         .collect()
                 })
                 .unwrap_or_default();
-            let tool_timeout = crate::core::config::extension_tool_timeout();
+            // a long-running tool (the subagent example) may ask for its
+            // own call budget in the initialize reply; the config value
+            // stays the default for extensions that do not
+            let tool_timeout = parse_tool_timeout(result)
+                .unwrap_or_else(crate::core::config::extension_tool_timeout);
             *lock(&self.state) = Ok(ExtState {
                 tools,
                 commands,
@@ -951,6 +1034,7 @@ impl Ext {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
+        let progress: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
 
         let reader_pending = Arc::clone(&pending);
         let reader_dead = Arc::clone(&dead);
@@ -960,9 +1044,17 @@ impl Ext {
         });
 
         let stderr_tail = Arc::clone(&self.tail);
+        let stderr_progress = Arc::clone(&progress);
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
+                {
+                    let mut p = lock(&stderr_progress);
+                    if p.len() >= PROGRESS_LINES {
+                        p.pop_front();
+                    }
+                    p.push_back(line.clone());
+                }
                 let mut t = lock(&stderr_tail);
                 if t.len() >= TAIL_LINES {
                     t.pop_front();
@@ -976,6 +1068,7 @@ impl Ext {
             writer: tx,
             pending,
             dead,
+            progress,
         })
     }
 }
@@ -1189,8 +1282,8 @@ impl Tool for ExtTool {
     fn preview(&self, args: &Value) -> String {
         super::tools::args_preview(&self.tool_name, args)
     }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        match self.ext.call_tool(&self.tool_name, args) {
+    fn execute(&self, args: &Value, _cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+        match self.ext.call_tool(&self.tool_name, args, log) {
             Ok(text) => {
                 if text.len() > MAX_BYTES {
                     let (capped, _) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
@@ -1242,6 +1335,42 @@ mod tests {
             bogus.tier,
             Tier::Exec,
             "an unknown tier must not lower trust"
+        );
+    }
+
+    #[test]
+    fn the_interrupt_notice_names_the_abandoned_call() {
+        let frame = interrupt_frame(41);
+        assert!(
+            frame.ends_with('\n'),
+            "frames are newline-terminated: {frame:?}"
+        );
+        let msg: Value = serde_json::from_str(frame.trim()).unwrap();
+        assert_eq!(msg["type"], "interrupt");
+        assert_eq!(msg["cancelled"], 41);
+        assert!(
+            msg["id"].is_u64(),
+            "the frame keeps the protocol shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_extension_may_ask_for_a_longer_call_budget() {
+        // no request: the host's config default rules
+        assert_eq!(parse_tool_timeout(&json!({})), None);
+        // zero, negative and non-numeric requests are ignored
+        assert_eq!(parse_tool_timeout(&json!({"tool_timeout": 0})), None);
+        assert_eq!(parse_tool_timeout(&json!({"tool_timeout": -5})), None);
+        assert_eq!(parse_tool_timeout(&json!({"tool_timeout": "900"})), None);
+        assert_eq!(
+            parse_tool_timeout(&json!({"tool_timeout": 900})),
+            Some(Duration::from_secs(900))
+        );
+        // ...and the ceiling holds, so a wedged call cannot park the turn
+        // for a day
+        assert_eq!(
+            parse_tool_timeout(&json!({"tool_timeout": 86400})),
+            Some(Duration::from_secs(3600))
         );
     }
 
@@ -1328,9 +1457,12 @@ done
             "initial handshake must succeed; state says {:?}",
             lock(&ext.state).as_ref().err()
         );
-        assert_eq!(ext.call_tool("ping", &json!({})).unwrap(), "alive");
+        assert_eq!(
+            ext.call_tool("ping", &json!({}), &mut |_| {}).unwrap(),
+            "alive"
+        );
         // the child exited after answering: the next call must respawn it
-        let out = ext.call_tool("ping", &json!({}));
+        let out = ext.call_tool("ping", &json!({}), &mut |_| {});
         assert_eq!(out.unwrap(), "alive", "respawned, not an error");
         let n: u32 = std::fs::read_to_string(&counter)
             .unwrap()
@@ -1338,6 +1470,60 @@ done
             .parse()
             .unwrap();
         assert!(n >= 2, "the script must have run twice, saw {n}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// stderr written while a call is in flight is live progress: the tool
+    /// log sees it, the model-facing result does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_working_extension_streams_stderr_to_the_tool_log() {
+        let dir = std::env::temp_dir().join(format!("llm-ext-progress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("chatty");
+        let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      echo "step one" >&2
+      echo "step two" >&2
+      sleep 0.3
+      printf '{"id":%s,"result":"done"}\n' "$id"
+      ;;
+  esac
+done
+"#;
+        std::fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ext = connect_stub(&script);
+        assert!(
+            lock(&ext.state).is_ok(),
+            "initial handshake must succeed; state says {:?}",
+            lock(&ext.state).as_ref().err()
+        );
+        let mut log: Vec<String> = Vec::new();
+        let out = ext
+            .call_tool("ping", &json!({}), &mut |line| log.push(line.to_string()))
+            .unwrap();
+        assert_eq!(out, "done", "stderr is progress, never part of the result");
+        assert!(
+            log.iter().any(|l| l.contains("step one"))
+                && log.iter().any(|l| l.contains("step two")),
+            "stderr written during the call must reach the tool log: {log:?}"
+        );
+        // and the diagnostics tail still carries them for /status
+        assert!(
+            lock(&ext.tail).iter().any(|l| l.contains("step two")),
+            "the tail must keep stderr too: {:?}",
+            *lock(&ext.tail)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

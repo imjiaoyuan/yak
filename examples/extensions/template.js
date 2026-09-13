@@ -7,6 +7,9 @@
 
 // ---------------------------------------------------------------- protocol --
 const TOOLS = {};    // name -> {description, parameters, execute}
+// seconds to ask the host for your own call deadline (it defaults to 120s);
+// raise it for a tool that runs a build or another agent
+const TOOL_TIMEOUT = null;
 const COMMANDS = {}; // name -> handler(argText) -> string
 const EVENTS = {};   // event name -> [handler(params) -> reply-or-undefined]
 
@@ -79,6 +82,7 @@ async function dispatch(line) {
         })),
         commands: Object.keys(COMMANDS),
         events: Object.keys(EVENTS),
+        ...(TOOL_TIMEOUT ? { tool_timeout: TOOL_TIMEOUT } : {}),
       },
     });
   } else if (kind === "call_tool") {
@@ -110,6 +114,10 @@ async function dispatch(line) {
       }
     }
     reply({ id: req.id, result: result ?? null });
+  } else if (kind === "interrupt") {
+    // ctrl+c abandoned the call we are running: stop child processes here.
+    // This loop only hears it once the call returns — a tool that owns
+    // children reads stdin on a second thread instead, see subagent.py
   } else if (kind === "shutdown") {
     // let in-flight async handlers land their replies first
     setTimeout(() => process.exit(0), 100);

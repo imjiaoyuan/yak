@@ -9,6 +9,9 @@ import sys
 
 # ---------------------------------------------------------------- protocol --
 TOOLS = {}       # name -> (description, schema, handler(args_dict) -> str)
+# seconds to ask the host for your own call deadline (it defaults to 120s);
+# raise it for a tool that runs a build or another agent
+TOOL_TIMEOUT = None
 COMMANDS = {}    # name -> handler(arg_text) -> str
 EVENTS = {}      # event name -> [handler(params_dict) -> reply-or-None]
 
@@ -75,6 +78,7 @@ def run():
                     ],
                     "commands": list(COMMANDS),
                     "events": list(EVENTS),
+                    **({"tool_timeout": TOOL_TIMEOUT} if TOOL_TIMEOUT else {}),
                 },
             })
         elif kind == "call_tool":
@@ -100,6 +104,12 @@ def run():
                 except Exception as e:
                     sys.stderr.write(f"{req['name']} handler failed: {e}\n")
             reply({"id": req["id"], "result": result})
+        elif kind == "interrupt":
+            # ctrl+c abandoned the call we are running: stop child processes
+            # here. This loop only hears it once the call returns — a tool
+            # that owns children reads stdin on a second thread instead, see
+            # examples/extensions/subagent.py
+            pass
         elif kind == "shutdown":
             break
 
