@@ -581,7 +581,9 @@ def main():
     with open(os.path.join(user, "agents", "scout.md"), "w") as f:
         f.write("---\nname: scout\ndescription: ci scout\ntools: read, grep\n---\n"
                 "You are the CI scout.\n")
-    sub_env = dict(env, LLM_BIN=os.path.abspath(binary))
+    # a legacy codepage is what Windows CI actually runs under; pinning it on
+    # unix too makes the lane prove the example survives one everywhere
+    sub_env = dict(env, LLM_BIN=os.path.abspath(binary), PYTHONIOENCODING="cp1252")
     sb = run([binary, "--yolo", "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
              sub_env, cwd=work, stdin=subprocess.DEVNULL)
     assert sb.returncode == 0, f"subagent lane rc={sb.returncode} err={sb.stderr[-800:]}"

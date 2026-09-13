@@ -67,6 +67,16 @@ import sys
 import threading
 import time
 
+# A Windows console (and a CI runner with a legacy codepage) defaults to
+# cp437/cp1252, where the progress glyphs below raise UnicodeEncodeError —
+# inside a worker thread that costs the child's whole answer. Pin both streams
+# to UTF-8; the host reads them as UTF-8 either way.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
 # Children allowed to run at once for a `tasks` batch.
 MAX_PARALLEL = 4
 # Nesting limit: a child may not delegate further.
@@ -159,8 +169,13 @@ _abandoned = threading.Event()
 
 
 def note(line):
+    line = line.rstrip("\n")
     with _note_lock:
-        sys.stderr.write(line.rstrip("\n") + "\n")
+        try:
+            sys.stderr.write(line + "\n")
+        except UnicodeError:
+            # progress is best-effort: never let a glyph take down a run
+            sys.stderr.write(line.encode("ascii", "replace").decode("ascii") + "\n")
         sys.stderr.flush()
 
 
@@ -444,7 +459,12 @@ def run_batch(binary, agents, steps, mode, depth):
     def one(index, step):
         label = step["agent"] if mode == "single" else "%d/%d %s" % (index + 1, len(steps), step["agent"])
         with gate:
-            results[index] = run_child(binary, agents[step["agent"]], "Task: " + step["task"], label, depth)
+            try:
+                results[index] = run_child(
+                    binary, agents[step["agent"]], "Task: " + step["task"], label, depth
+                )
+            except Exception as e:  # a crashed thread must not read as "never ran"
+                results[index] = (False, "[%s] the subagent runner crashed: %r" % (label, e))
 
     threads = [threading.Thread(target=one, args=(i, s)) for i, s in enumerate(steps)]
     for t in threads:
