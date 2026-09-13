@@ -20,12 +20,20 @@ const WRAP_EARLY: usize = 3;
 /// the reference caps a horizontal rule at 80 cells.
 const HR_MAX: usize = 80;
 
-/// An unclosed inline marker holds at most this many bytes before it
-/// degrades to literal text: a prose `[`, a stray backtick or a very long
-/// unclosed span must not stall the stream until the line ends. Spans
-/// that close within the cap render styled (span text is short in
-/// practice); longer ones stream verbatim.
-const HOLD_CAP: usize = 80;
+/// An open inline marker waits for its closing run while the span it holds
+/// is no longer than this many display cells, then degrades to literal text
+/// so that a prose `[`, a stray backtick or a very long unclosed span cannot
+/// stall the stream until the line ends. The bound is in cells, not bytes: a
+/// CJK character is three bytes but one cell, and a byte bound handed a
+/// Chinese sentence a third of the patience an English one got — a long
+/// `**…**` streamed with its asterisks showing.
+const HOLD_CAP: usize = 240;
+
+/// Is the unsettled tail still short enough to keep waiting for its closing
+/// run? Escape sequences cost no cells, so they never count against it.
+fn within_hold(tail: &str) -> bool {
+    cell_width(tail) <= HOLD_CAP
+}
 
 // ---------------------------------------------------------------------------
 // MdStream: complete-line rendering (replay)
@@ -1067,7 +1075,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol && line.len() - i <= HOLD_CAP {
+                    if !eol && within_hold(&line[i..]) {
                         break;
                     }
                     for _ in 0..run {
@@ -1098,7 +1106,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol && line.len() - i <= HOLD_CAP {
+                    if !eol && within_hold(&line[i..]) {
                         break;
                     }
                     for _ in 0..run {
@@ -1125,7 +1133,7 @@ impl StyleStream {
                             continue;
                         }
                     }
-                    if !eol && line.len() - i <= HOLD_CAP {
+                    if !eol && within_hold(&line[i..]) {
                         break;
                     }
                     for _ in 0..tilde_run.min(2) {
@@ -1139,7 +1147,7 @@ impl StyleStream {
                     if let Some(rb) = line[i + 1..].find(']') {
                         let close = i + 1 + rb;
                         if close + 1 >= line.len() {
-                            if !eol && line.len() - i <= HOLD_CAP {
+                            if !eol && within_hold(&line[i..]) {
                                 break; // ']' is the last char so far
                             }
                         } else if line.as_bytes()[close + 1] != b'(' {
@@ -1170,10 +1178,10 @@ impl StyleStream {
                             self.putc('[', out);
                             i += 1;
                             continue;
-                        } else if !eol && line.len() - i <= HOLD_CAP {
+                        } else if !eol && within_hold(&line[i..]) {
                             break; // `](` seen, ')' pending
                         }
-                    } else if !eol && line.len() - i <= HOLD_CAP {
+                    } else if !eol && within_hold(&line[i..]) {
                         break; // no ']' yet
                     }
                     self.putc('[', out);
@@ -1860,13 +1868,45 @@ mod tests {
     #[test]
     fn long_unclosed_marker_degrades_within_the_cap() {
         // a prose bracket or stray backtick must not hold the rest of the
-        // line: past HOLD_CAP the marker streams literally and the scan
+        // line: past HOLD_CAP cells the marker streams literally and the scan
         // continues (a later closed span still renders)
-        let xs = "x".repeat(100);
+        let xs = "x".repeat(600);
         let doc = format!("see [note {xs} and `code` too\n");
         assert_eq!(live(&doc), format!("see [note {xs} and {C}code{R} too\n"));
-        // and it matches the one-shot resolver for never-closed markers
         assert_eq!(live(&doc), render(&doc));
+        // a never-closed marker settles the same way at the line's end
+        let short = format!("see [note {xs}\n");
+        assert_eq!(live(&short), render(&short));
+    }
+
+    #[test]
+    fn a_long_cjk_span_keeps_its_styling() {
+        // the hold bound counts cells: three bytes a character, so a Chinese
+        // sentence used to spill past a byte bound and show its asterisks
+        let doc = "4. **只作用于 smooth frequency，没把低覆盖位点从 reads 面板剔除** 后文\n";
+        assert_eq!(
+            live(doc),
+            format!(
+                "{C}4. {R}{B}只作用于 smooth frequency，没把低覆盖位点从 reads 面板剔除{R} 后文\n"
+            )
+        );
+        assert_eq!(
+            live("`一段比较长的中文代码片段内容在这里哦真的很长很长很长很长` 后文\n"),
+            format!("{C}一段比较长的中文代码片段内容在这里哦真的很长很长很长很长{R} 后文\n")
+        );
+        assert_eq!(
+            live("前文 **一段足够长的中文强调文本，长到超过旧的字节上限也不该漏出星号** 后文\n"),
+            format!(
+                "前文 {B}一段足够长的中文强调文本，长到超过旧的字节上限也不该漏出星号{R} 后文\n"
+            )
+        );
+        // 100 characters = 300 bytes but only 100 cells: a byte bound cuts
+        // this span off mid-line and the asterisks show
+        let wide = "宽".repeat(100);
+        assert_eq!(
+            live(&format!("4. **{wide}** 后文\n")),
+            format!("{C}4. {R}{B}{wide}{R} 后文\n")
+        );
     }
 
     #[test]
@@ -1935,6 +1975,12 @@ mod tests {
         // single-blank-separated documents: the streamed answer and the
         // replayed transcript render byte-identically
         let doc = "# 标题\n\n段落 `code` 与 **加粗**。\n\n- 甲\n- [x] 乙\n\n> 引用\n\n---\n\n```rust\nfn x() {}\n```\n";
+        assert_eq!(live(doc), render(doc));
+        // a span wider than the old byte bound must render the same way
+        // streamed as replayed (the cap bug: the asterisks stayed on screen)
+        let long =
+            "4. **只作用于 smooth frequency，没把低覆盖位点从 reads 面板剔除**（PDF 101-102）\n";
+        assert_eq!(live(long), render(long));
         assert_eq!(live(doc), render(doc));
     }
 
