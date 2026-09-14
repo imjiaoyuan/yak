@@ -267,7 +267,12 @@ def main():
     # -- the answer area is append-only: printed once, never retracted -----
     # the wait spinner may own an empty row (its `\r\x1b[2K` frame lives and
     # dies before the first answer byte); from that byte on nothing may erase
-    # and no printed text may be written twice
+    # and no printed text may be written twice. the stream is paced, so wait
+    # for the last byte rather than reading a half-arrived answer
+    for _ in range(100):
+        if b"ok from mock" in out_bytes():
+            break
+        time.sleep(0.1)
     screen = out_bytes()
     i = screen.find(b"ok from mock")
     assert i != -1, f"no answer on screen: {screen[-400:]!r}"
