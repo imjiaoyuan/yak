@@ -193,30 +193,23 @@ pub(crate) fn tool_result_content(
     }
 }
 
-/// The follow-up user message carrying a tool result's images: parts with a
-/// leading text label, or `None` when nothing rides (no attachments, or the
+/// The parts of a tool result's images (no leading label): the caller
+/// batches them into a follow-up user message after the run of tool
+/// results. Empty — `None` — when nothing rides (no attachments, or the
 /// model would reject them).
 pub(crate) fn tool_result_images(
     supports_images: bool,
-    content: &str,
     attachments: &[Attachment],
     attachment_block: fn(&Attachment) -> Result<Value, String>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Vec<Value>>, String> {
     if attachments.is_empty() || !supports_images {
         return Ok(None);
     }
-    let mut parts = vec![json!({
-        "type": "text",
-        "text": if content.trim().is_empty() {
-            "Attached image(s) from tool result:"
-        } else {
-            "Attached image(s) from tool result (text portion above):"
-        }
-    })];
+    let mut parts = Vec::with_capacity(attachments.len());
     for a in attachments {
         parts.push(attachment_block(a)?);
     }
-    Ok(Some(Value::Array(parts)))
+    Ok(Some(parts))
 }
 
 /// Merge `-o KEY=VALUE` options into a request body: JSON values pass
@@ -459,6 +452,9 @@ impl ResolvedModel {
             "glm-4v",
             "glm-4.5v",
             "glm-4.6v",
+            // glm-5.3-flash is natively multimodal on the z.ai coding
+            // endpoint (no `v` marker) per the current catalog
+            "glm-5.3-flash",
             "pixtral",
             "llava",
             "vision",
@@ -483,8 +479,9 @@ impl ResolvedModel {
             "glm-4.5-",
             "glm-4.6",
             "glm-4.7",
-            // every glm-5.x on the z.ai coding endpoint is text-only; the
-            // API 400s with code 1210 on any non-text content part
+            // glm-5.x on the z.ai coding endpoint is text-only (the API 400s
+            // with code 1210 on any non-text content part) — except the
+            // natively multimodal glm-5.3-flash whitelisted above
             "glm-5",
             "mistral-small",
             "mistral-medium",
@@ -562,7 +559,8 @@ mod tests {
     fn glm_text_models_are_text_only() {
         // z.ai's coding endpoint 400s (code 1210) on any non-text content
         // part, so glm-4.6/4.7/5.x must be treated as text-only; the -v
-        // vision variants stay multimodal
+        // vision variants and the natively multimodal glm-5.3-flash stay
+        // vision-capable
         for id in [
             "glm-4.6",
             "glm-4.7",
@@ -570,11 +568,14 @@ mod tests {
             "glm-5",
             "glm-5.1",
             "glm-5.2",
+            "glm-5.3",
         ] {
             assert!(!rm("zai", id).supports_images(), "{id} should be text-only");
         }
         assert!(rm("zai", "glm-4.5v").supports_images());
         assert!(rm("zai", "glm-4.6v").supports_images());
+        assert!(rm("zai", "glm-5.3-flash").supports_images());
+        assert!(rm("opencode-go", "glm-5.3-flash").supports_images());
     }
 }
 

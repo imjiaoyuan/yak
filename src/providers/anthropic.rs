@@ -118,31 +118,28 @@ pub fn build_body(
                 attachments,
                 ..
             } => {
-                let content = super::tool_result_content(
-                    m.supports_images(),
-                    content,
-                    attachments,
-                    attachment_block,
-                )?;
+                // Anthropic's tool_result natively takes image blocks — the reference
+                // inlines them too — so the shared string-only helper is
+                // bypassed: text parts first, then attachment blocks
+                let blocks = if attachments.is_empty() {
+                    json!(content)
+                } else if m.supports_images() {
+                    let mut parts = vec![json!({"type": "text", "text": content})];
+                    for a in attachments {
+                        parts.push(attachment_block(a)?);
+                    }
+                    Value::Array(parts)
+                } else {
+                    json!(format!(
+                        "{content}\n[image omitted: current model does not support images]"
+                    ))
+                };
                 pending_results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": content,
+                    "content": blocks,
                     "is_error": is_error,
                 }));
-                // Anthropic tool_result blocks do take image blocks, but the
-                // shared helper keeps the tool content a plain string; ride
-                // the images as their own follow-up user message instead,
-                // after the buffered results flush
-                if let Some(parts) = super::tool_result_images(
-                    m.supports_images(),
-                    content.as_str().unwrap_or(""),
-                    attachments,
-                    attachment_block,
-                )? {
-                    flush_results(&mut messages, &mut pending_results);
-                    messages.push(json!({"role": "user", "content": parts}));
-                }
             }
             Msg::Summary { text } => {
                 flush_results(&mut messages, &mut pending_results);

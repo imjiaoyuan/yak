@@ -62,6 +62,21 @@ pub fn build_body(
     // of the whole conversation per round
     let last_result = super::last_result_index(input.history);
     let mut messages: Vec<Value> = Vec::new();
+    // images from a run of consecutive tool results, flushed as ONE user
+    // message after the run: interleaving a user message between parallel
+    // tool results would break the OpenAI protocol shape
+    let mut pending_images: Vec<Value> = Vec::new();
+    let flush_images = |messages: &mut Vec<Value>, pending: &mut Vec<Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        let mut parts = vec![json!({
+            "type": "text",
+            "text": "Attached image(s) from tool result:"
+        })];
+        parts.append(pending);
+        messages.push(json!({"role": "user", "content": parts}));
+    };
     if let Some(system) = input.system {
         messages.push(json!({"role": "system", "content": system}));
     }
@@ -138,17 +153,16 @@ pub fn build_body(
                     )?
                 }));
                 // gateways (opencode Console Go) reject image parts inside a
-                // tool message, so vision input rides its own user message
-                if let Some(parts) = super::tool_result_images(
-                    m.supports_images(),
-                    content,
-                    attachments,
-                    attachment_block,
-                )? {
-                    messages.push(json!({"role": "user", "content": parts}));
+                // tool message, so vision input rides a user message that
+                // follows the whole run of tool results
+                if let Some(parts) =
+                    super::tool_result_images(m.supports_images(), attachments, attachment_block)?
+                {
+                    pending_images.extend(parts);
                 }
             }
             Msg::Summary { text } => {
+                flush_images(&mut messages, &mut pending_images);
                 messages.push(
                     json!({"role": "user", "content": format!("<summary>\n{text}\n</summary>")}),
                 );
@@ -157,6 +171,7 @@ pub fn build_body(
     }
     // an empty prompt with no attachments means "continue after tool results";
     // don't append an empty user message
+    flush_images(&mut messages, &mut pending_images);
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
             "role": "user",
@@ -408,6 +423,53 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+    }
+
+    #[test]
+    fn parallel_tool_results_flush_images_after_the_whole_run() {
+        // one assistant turn, two calls: the first result carries an image.
+        // The image user message must come after BOTH tool messages —
+        // interleaving it between them breaks the protocol shape.
+        let history = vec![
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: json!({"path": "plot.png"}),
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        name: "bash".into(),
+                        arguments: json!({"command": "ls"}),
+                    },
+                ],
+                reasoning: None,
+            },
+            Msg::ToolResult {
+                call_id: "c1".into(),
+                name: "read".into(),
+                content: "Read image file [image/png]".into(),
+                is_error: false,
+                attachments: vec![att("image/png", Some("plot.png"))],
+            },
+            Msg::ToolResult {
+                call_id: "c2".into(),
+                name: "bash".into(),
+                content: "a.txt b.txt".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+        ];
+        let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["assistant", "tool", "tool", "user", "user"]);
+        // the first user message batches label + one image; the second is
+        // the next-round prompt
+        let parts = msgs[3]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
     }
 
     #[test]
