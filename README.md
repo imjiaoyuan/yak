@@ -202,7 +202,7 @@ all of them with `[agent] disabled_skills`.
 **Memory** is a plain markdown file: `~/.llm/LLM.md`. The system prompt always names that path —
 even before the file exists — so "remember this" has somewhere to go: ask the agent to remember a
 preference and it edits that file for you. Durable preferences live there; repo-specific rules
-belong in `AGENTS.md`/`CLAUDE.md` instead. Nothing is written behind your back — the edit is a normal
+belong in a project `AGENTS.md` instead. Nothing is written behind your back — the edit is a normal
 file change you can review, change or delete.
 
 Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`)
@@ -300,6 +300,15 @@ Options:
   -l, --local           Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)
   -g, --global          Install into the user directory (default)
   -s, --skill NAME      Keep only these skills by name; '*' keeps all (repeatable)
+  -h, --help            Show this message and exit
+```
+
+```
+Export a conversation as a markdown file
+
+Usage: llm export [OPTIONS] PATH
+
+Options:
   -h, --help            Show this message and exit
 ```
 
@@ -416,7 +425,7 @@ A slow or broken extension prints a dim warning and mounts nothing; it never blo
 Tool calls time out after 120s (`extensions.tool_timeout` in config) unless the extension asks for
 its own deadline at `initialize` — an extension that runs a build or another agent needs that —
 and events after 5s. ctrl+c abandons a call and tells a busy extension `interrupt` so it can stop
-its own child processes. `extensions.disabled` skips one by name, and `/reload` restarts them all.
+its own child processes. `extensions.disabled` skips one by file stem or declared tool name, and `/reload` restarts them all.
 
 Two self-contained templates ship in `examples/extensions/`: `template.js` (a JavaScript runtime
 whose user section uses a familiar extension API — `registerTool` / `registerCommand` /

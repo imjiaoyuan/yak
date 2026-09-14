@@ -342,7 +342,7 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
     }
     // the plugin surface, the reference-style: what is actually mounted right now, so a
     // skill or extension that never loaded is visible here and not only in
-    // /help and /tools (a label is 7 cells, matching `session`)
+    // /help and /status (a label is 7 cells, matching `session`)
     let plugins = session.extensions.plugin_names();
     let skills: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
     rows.push_str(&name_row("plugins", pad, &plugins));
@@ -403,7 +403,8 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
         return Ok(());
     };
     let store = crate::core::threads::Store::open()?;
-    let (msgs, system) = crate::agent::session::rebuild_thread(&store, &cid);
+    let turns = store.read_thread(&cid)?;
+    let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
     session.seed = msgs;
     session.system = system;
     session.conversation_id = Some(cid);
@@ -940,13 +941,39 @@ fn repl_command(
                 d = p.dim,
                 r = p.reset
             );
-            let rows = session.extensions.rows().len();
-            if rows > 0 {
+            let rows = session.extensions.rows();
+            if !rows.is_empty() {
+                let total: usize = rows.iter().map(|r| r.2).sum();
+                let commands: usize = rows.iter().map(|r| r.3).sum();
                 eprintln!(
-                    "  {}plugins {}{rows} extension(s) · /reload re-reads them",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
+                    "  {d}plugins {r}{} extension(s) · {} tool(s){} · /reload re-reads them",
+                    rows.len(),
+                    total,
+                    if commands > 0 {
+                        format!(" · {} command(s)", commands)
+                    } else {
+                        String::new()
+                    },
+                    d = p.dim,
+                    r = p.reset
                 );
+                for (name, _target, tools, cmds, reason) in &rows {
+                    if !reason.is_empty() {
+                        eprintln!("  {d}  {name}: {reason}{r}", d = p.dim, r = p.reset);
+                    } else {
+                        eprintln!(
+                            "  {d}  {name}: {} tool(s){}{r}",
+                            tools,
+                            if *cmds > 0 {
+                                format!(", {} command(s)", cmds)
+                            } else {
+                                String::new()
+                            },
+                            d = p.dim,
+                            r = p.reset
+                        );
+                    }
+                }
             }
         }
         "/resume" => {

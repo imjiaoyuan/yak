@@ -2,8 +2,6 @@ use super::*;
 
 /// The extension homes, nearest-first within a root: project (walking up
 /// from cwd) then user. Same name in both → project wins.
-/// The extension homes, nearest-first within a root: project (walking up
-/// from cwd) then user. Same name in both → project wins.
 pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     // packages: project pkg first, then user pkg (the same nearest-wins
