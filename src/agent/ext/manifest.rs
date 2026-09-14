@@ -4,23 +4,35 @@ use super::*;
 /// (spawned once, speaking the protocol) and manifest script tools (one
 /// comment header on any script in any language; the host runs the
 /// protocol around each call). Project wins by stem name across both.
-/// Discovered extension entries, split by form: resident executables
-/// (spawned once, speaking the protocol) and manifest script tools (one
 pub struct Discovered {
     pub resident: Vec<PathBuf>,
     pub script_tools: Vec<crate::agent::ext::ExecToolSpec>,
 }
 
-/// Scan the home directories for extension files.
+/// Scan the home directories for extension files. `extensions.disabled`
+/// matches a file's stem and a script tool's declared name alike: a
+/// package file whose stem says nothing about its tools (or two scripts
+/// declaring the same name) can be disabled by either spelling.
 pub fn discover(cwd: &Path) -> Discovered {
-    let disabled = crate::core::config::disabled_extensions();
+    discover_in(
+        &discover_dirs(cwd),
+        &crate::core::config::disabled_extensions(),
+    )
+}
+
+/// The scan itself over explicit homes, so a test points it at a scratch
+/// directory instead of the real `~/.llm` (the same seam `http.rs` gives
+/// its interrupt flag); `cwd` only picks the homes, it plays no part in
+/// matching.
+pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
+    let is_disabled = |name: &str| disabled.iter().any(|d| d == name);
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Discovered {
         resident: Vec::new(),
         script_tools: Vec::new(),
     };
-    for dir in discover_dirs(cwd) {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in rd.flatten() {
@@ -31,7 +43,7 @@ pub fn discover(cwd: &Path) -> Discovered {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if disabled.iter().any(|d| d == stem) || !seen.insert(stem.to_string()) {
+            if is_disabled(stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
             // a package install can keep individual extensions dormant
@@ -39,14 +51,16 @@ pub fn discover(cwd: &Path) -> Discovered {
                 .file_name()
                 .and_then(|f| f.to_str())
                 .unwrap_or_default();
-            if !crate::commands::pkg::extension_kept(&dir, file) {
+            if !crate::commands::pkg::extension_kept(dir, file) {
                 continue;
             }
             // a `--- llm-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
             if let Some(spec) = exec_tool_manifest(&path) {
-                out.script_tools.push(spec);
+                if !is_disabled(&spec.name) {
+                    out.script_tools.push(spec);
+                }
             } else if is_executable(&path) {
                 out.resident.push(path);
             }

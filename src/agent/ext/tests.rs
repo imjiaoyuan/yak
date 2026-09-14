@@ -1,4 +1,4 @@
-use super::manifest::parse_tool_manifest;
+use super::manifest::{discover_in, parse_tool_manifest};
 use super::roots::hash_roots;
 use super::*;
 
@@ -12,6 +12,52 @@ fn parses_a_python_manifest_header() {
     assert_eq!(spec.interpreter.as_deref(), Some("python"));
     assert_eq!(spec.schema["properties"]["text"]["type"], json!("string"));
     assert_eq!(spec.schema["required"][0], json!("text"));
+}
+
+/// `extensions.disabled` must reach a script tool by its declared name,
+/// not only by the file's stem: packages ship scripts whose stem says
+/// nothing about the tool inside, and two files may declare one name.
+#[test]
+fn disabled_matches_a_script_tool_by_declared_name_too() {
+    let dir = std::env::temp_dir().join(format!("llm-ext-disc-{}", crate::core::db::ulid()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // one script tool named `search`, stem unrelated; one executable
+    // resident named `other` for the stem path
+    std::fs::write(
+        dir.join("helper.py"),
+        "# --- llm-tool: search\n# description: find things\n",
+    )
+    .unwrap();
+    let resident = dir.join("other");
+    std::fs::write(&resident, b"#!/bin/sh\n:").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&resident, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // nothing disabled: both surface
+    let found = discover_in(std::slice::from_ref(&dir), &[]);
+    assert_eq!(found.script_tools.len(), 1);
+    assert_eq!(found.script_tools[0].name, "search");
+    assert_eq!(found.resident.len(), 1, "the executable resident surfaces");
+
+    // by declared tool name: the script tool is gone, the resident stays
+    let found = discover_in(std::slice::from_ref(&dir), &["search".to_string()]);
+    assert!(found.script_tools.is_empty(), "declared name disables");
+    assert_eq!(found.resident.len(), 1);
+
+    // by file stem: the script tool is gone too (the old spelling)
+    let found = discover_in(std::slice::from_ref(&dir), &["helper".to_string()]);
+    assert!(found.script_tools.is_empty(), "stem still disables");
+    assert_eq!(found.resident.len(), 1);
+
+    // and the resident still falls to its own stem
+    let found = discover_in(std::slice::from_ref(&dir), &["other".to_string()]);
+    assert_eq!(found.script_tools.len(), 1);
+    assert!(found.resident.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

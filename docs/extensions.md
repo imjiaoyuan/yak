@@ -36,6 +36,9 @@ copy wins. A file is either a **script tool** (it carries a manifest header, see
 }
 ```
 
+`disabled` matches a file's stem or a script tool's declared manifest name —
+either spelling disables it.
+
 `/reload` re-discovers and respawns everything. A broken or slow extension degrades alone: it
 warns dimly and mounts nothing; `/status` shows the failure reason. Extension stderr is kept in
 a 20-line diagnostics tail — stray stdout that is not valid protocol lands there too.
