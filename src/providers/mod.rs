@@ -151,15 +151,26 @@ pub fn resolve_run_model(
 }
 
 /// A user message body: plain text, or content parts when attachments
-/// ride. The per-wire block builder is passed in — the two adapters differ
-/// only in `attachment_block`.
+/// ride and the model can see them — a text-only model gets the text with
+/// an omission note instead (its API rejects non-text parts wholesale).
 pub(crate) fn user_content(
+    supports_images: bool,
     text: &str,
     attachments: &[Attachment],
     attachment_block: fn(&Attachment) -> Result<Value, String>,
 ) -> Result<Value, String> {
     if attachments.is_empty() {
         return Ok(json!(text));
+    }
+    if !supports_images {
+        let names: Vec<&str> = attachments
+            .iter()
+            .map(|a| a.filename.as_deref().unwrap_or("(image)"))
+            .collect();
+        return Ok(json!(format!(
+            "{text}\n[image omitted: current model does not support images: {}]",
+            names.join(", ")
+        )));
     }
     let mut content = vec![json!({"type": "text", "text": text})];
     for a in attachments {

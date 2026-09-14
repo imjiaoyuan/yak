@@ -79,7 +79,7 @@ pub fn build_body(
                 flush_results(&mut messages, &mut pending_results);
                 messages.push(json!({
                     "role": "user",
-                    "content": super::user_content(text, attachments, attachment_block)?
+                    "content": super::user_content(m.supports_images(), text, attachments, attachment_block)?
                 }));
             }
             Msg::Assistant {
@@ -154,7 +154,7 @@ pub fn build_body(
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": super::user_content(input.prompt, input.attachments, attachment_block)?
+            "content": super::user_content(m.supports_images(), input.prompt, input.attachments, attachment_block)?
         }));
     }
     // breakpoint on the conversation tip (multi-turn pattern: the marker

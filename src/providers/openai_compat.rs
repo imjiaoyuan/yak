@@ -83,7 +83,7 @@ pub fn build_body(
     for (i, msg) in input.history.iter().enumerate() {
         match msg {
             Msg::User { text, attachments } => {
-                messages.push(json!({"role": "user", "content": super::user_content(text, attachments, attachment_block)?}));
+                messages.push(json!({"role": "user", "content": super::user_content(m.supports_images(), text, attachments, attachment_block)?}));
             }
             Msg::Assistant {
                 text,
@@ -175,7 +175,7 @@ pub fn build_body(
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": super::user_content(input.prompt, input.attachments, attachment_block)?
+            "content": super::user_content(m.supports_images(), input.prompt, input.attachments, attachment_block)?
         }));
     }
 
@@ -470,6 +470,26 @@ mod tests {
         // the next-round prompt
         let parts = msgs[3]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn user_pasted_image_on_text_model_degrades_to_a_note() {
+        // the user -a/ctrl+v path rides the prompt's attachments; a
+        // text-only model must get a plain string, not image parts
+        let mut m = model("openai-compat");
+        m.model_id = "glm-5.2".into();
+        m.provider_name = "zai".into();
+        let i = input(&[], &[]);
+        let atts = [att("image/png", Some("plot.png"))];
+        let inp = crate::providers::PromptInput {
+            attachments: &atts,
+            ..i
+        };
+        let body = build_body(&m, &inp, false).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            "go\n[image omitted: current model does not support images: plot.png]"
+        );
     }
 
     #[test]
