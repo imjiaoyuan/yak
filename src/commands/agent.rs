@@ -167,13 +167,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
                 "session id or prefix '{raw}' matches nothing (or is ambiguous)"
             ));
         };
-        let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
+        let turns = store.read_thread(&cid)?;
+        let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
         seed = msgs;
         conv_system = system;
-        conv_model = store
-            .read_thread(&cid)
-            .ok()
-            .and_then(|turns| turns.last().map(|t| t.model.clone()));
+        conv_model = turns.last().map(|t| t.model.clone());
         conversation_id = Some(cid);
         resumed = true;
     } else if args.flag(&["continue"])
@@ -184,7 +182,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         // no history in this directory: the newest anywhere, said out loud so
         // a stray `-c` cannot silently continue another project's session
         if let Some(cid) = local.or_else(|| store.latest_thread(None).ok().flatten()) {
-            let turns = store.read_thread(&cid).unwrap_or_default();
+            let turns = store.read_thread(&cid)?;
             if !from_here {
                 let p = crate::theme::err();
                 let from = turns
@@ -198,7 +196,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
                     p.reset
                 );
             }
-            let (msgs, system) = crate::agent::session::rebuild_thread(store, &cid);
+            let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
             seed = msgs;
             conv_system = system;
             conv_model = turns.last().map(|t| t.model.clone());

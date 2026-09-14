@@ -716,15 +716,13 @@ fn attachment_from_stored(a: &StoredAttachment) -> crate::providers::Attachment 
 
 /// Rebuild a wire-level history (plus the original system prompt) from a
 /// thread's stored turns. The first turn's system is the prompt; later
-/// `Summary` messages are compaction summaries.
-pub fn rebuild_thread(store: &threads::Store, cid: &str) -> (Vec<Msg>, Option<String>) {
-    let turns = match store.read_thread(cid) {
-        Ok(t) => t,
-        Err(_) => return (Vec::new(), None),
-    };
+/// `Summary` messages are compaction summaries. Pure over the turns the
+/// caller already read: `read_thread`'s error (a damaged thread is refused,
+/// never guessed at) stays the caller's to propagate.
+pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
     let mut msgs: Vec<Msg> = Vec::new();
     let mut system: Option<String> = None;
-    for turn in &turns {
+    for turn in turns {
         if system.is_none() {
             system = turn.system.clone();
         }
@@ -1063,7 +1061,8 @@ mod tests {
         };
         store.append_turn(Some("th1"), &turn).unwrap();
 
-        let (msgs, system) = rebuild_thread(&store, "th1");
+        let turns = store.read_thread("th1").unwrap();
+        let (msgs, system) = rebuild_turns(&turns);
         assert_eq!(system.as_deref(), Some("sys"));
         assert_eq!(msgs.len(), 4);
         match &msgs[0] {
@@ -1093,6 +1092,44 @@ mod tests {
             }
             _ => panic!("expected final assistant"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A damaged thread must fail the resume loudly (the caller propagates
+    /// `read_thread`'s error) instead of silently rebuilding an empty
+    /// history and continuing as if nothing was lost.
+    #[test]
+    fn a_damaged_thread_fails_the_rebuild_instead_of_emptying_it() {
+        let dir = std::env::temp_dir().join(format!("llm-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = threads::Store::open_path(&dir).unwrap();
+        let turn = StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: "t1".into(),
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: None,
+            prompt: "hello".into(),
+            response: "hi".into(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![],
+        };
+        store.append_turn(Some("th1"), &turn).unwrap();
+        // corrupt the middle: a non-JSON line with a valid one after it
+        // (a lone bad tail is the bounded torn-tail repair, not damage)
+        let path = dir.join("th1.jsonl");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("not json at all\n");
+        text.push_str(&serde_json::to_string(&turn).unwrap());
+        text.push('\n');
+        std::fs::write(&path, text).unwrap();
+        let err = store.read_thread("th1").unwrap_err();
+        assert!(err.contains("corrupt turn"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

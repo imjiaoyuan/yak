@@ -27,7 +27,13 @@ pub fn run(argv: &[String]) -> i32 {
     let rest: Vec<String> = argv.get(1..).unwrap_or_default().to_vec();
     let (args, code) = crate::core::args::parse_with_help(&rest, SPECS, help);
     let Some(args) = args else { return code };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot read the working directory: {e}");
+            return 1;
+        }
+    };
     match export_latest(&cwd, args.positionals.first().map(String::as_str)) {
         Ok((cid, path)) => {
             println!("exported {cid} to {}", path.display());

@@ -75,7 +75,13 @@ fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
 /// Pick from recent conversations; `Y` on the enter question continues the
 /// chosen one by re-entering the agent with `--session <id>`.
 pub fn browse() -> i32 {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot read the working directory: {e}");
+            return 1;
+        }
+    };
     let cid = match pick_thread(&cwd, "conversations:") {
         Ok(Some(id)) => id,
         Ok(None) => return 0,
