@@ -100,7 +100,7 @@ pub fn build_system_prompt(
                      \"confirm\".\n\
                      \n\
                      Today's date: {date}\
-                     \n                     Memory (user preferences)\n                     - Durable preferences the user asks you to remember go to the user memory file \n                       named in the `<user_memory>` block below — one concise line each. Edit that \n                       file (it is plain markdown the user owns and reviews); reload is not needed \n                       for the next session to pick it up.\n                     - Repo- or directory-scoped rules belong in a project AGENTS.md/CLAUDE.md \n                       instead; do not put project facts in the global memory file.\n                     - Never record secrets, tokens or credentials."
+                     \n                     Memory (user preferences)\n                     - Durable preferences the user asks you to remember go to the user memory file \n                       named in the `<user_memory>` block below — one concise line each. Edit that \n                       file (it is plain markdown the user owns and reviews); reload is not needed \n                       for the next session to pick it up.\n                     - Repo- or directory-scoped rules belong in a project AGENTS.md \n                       instead; do not put project facts in the global memory file.\n                     - Never record secrets, tokens or credentials."
                 )
             }
         },
