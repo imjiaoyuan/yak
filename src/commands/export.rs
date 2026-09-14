@@ -92,22 +92,32 @@ mod tests {
 
     #[test]
     fn output_path_defaults_and_resolves() {
-        let cwd = Path::new("/tmp/project");
+        // real dirs under the platform temp dir: a hardcoded `/tmp` is not an
+        // absolute path on Windows, and whether it is a directory there is
+        // an accident of the drive layout
+        let root = std::env::temp_dir().join(format!("llm-export-{}", crate::core::db::ulid()));
+        let cwd = root.join("project");
+        let dir = root.join("out");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // no argument: the session-named default in cwd
+        assert_eq!(output_path(&cwd, None, "01ABC"), cwd.join("llm-01ABC.md"));
+        // a relative name resolves against cwd
         assert_eq!(
-            output_path(cwd, None, "01ABC"),
-            PathBuf::from("/tmp/project/llm-01ABC.md")
+            output_path(&cwd, Some("notes.md"), "01ABC"),
+            cwd.join("notes.md")
         );
+        // an existing directory takes the default name inside it
+        let as_dir = dir.display().to_string();
         assert_eq!(
-            output_path(cwd, Some("notes.md"), "01ABC"),
-            PathBuf::from("/tmp/project/notes.md")
+            output_path(&cwd, Some(&as_dir), "01ABC"),
+            dir.join("llm-01ABC.md")
         );
-        assert_eq!(
-            output_path(cwd, Some("/elsewhere/notes.md"), "01ABC"),
-            PathBuf::from("/elsewhere/notes.md")
-        );
-        assert_eq!(
-            output_path(cwd, Some("/tmp"), "01ABC"),
-            PathBuf::from("/tmp/llm-01ABC.md")
-        );
+        // an absolute path to a file is used as given
+        let abs = root.join("elsewhere.md");
+        let as_abs = abs.display().to_string();
+        assert_eq!(output_path(&cwd, Some(&as_abs), "01ABC"), abs);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
