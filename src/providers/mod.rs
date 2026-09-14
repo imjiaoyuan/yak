@@ -424,6 +424,7 @@ impl ResolvedModel {
             "qwen3-vl",
             "glm-4v",
             "glm-4.5v",
+            "glm-4.6v",
             "pixtral",
             "llava",
             "vision",
@@ -447,6 +448,10 @@ impl ResolvedModel {
             "qwen2.5-",
             "glm-4.5-",
             "glm-4.6",
+            "glm-4.7",
+            // every glm-5.x on the z.ai coding endpoint is text-only; the
+            // API 400s with code 1210 on any non-text content part
+            "glm-5",
             "mistral-small",
             "mistral-medium",
             "mistral-large",
@@ -506,6 +511,36 @@ mod tests {
         assert_eq!(ORPHAN_RESULT, "No result provided");
         // a result sits at index 3: it pairs calls before it, never after
         assert!(!call_answered(&last, "b", 4));
+    }
+
+    fn rm(provider: &str, model_id: &str) -> ResolvedModel {
+        ResolvedModel {
+            provider_name: provider.into(),
+            kind: "openai-compat".into(),
+            base_url: "http://localhost".into(),
+            api_key: None,
+            model_id: model_id.into(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn glm_text_models_are_text_only() {
+        // z.ai's coding endpoint 400s (code 1210) on any non-text content
+        // part, so glm-4.6/4.7/5.x must be treated as text-only; the -v
+        // vision variants stay multimodal
+        for id in [
+            "glm-4.6",
+            "glm-4.7",
+            "glm-4.7-flash",
+            "glm-5",
+            "glm-5.1",
+            "glm-5.2",
+        ] {
+            assert!(!rm("zai", id).supports_images(), "{id} should be text-only");
+        }
+        assert!(rm("zai", "glm-4.5v").supports_images());
+        assert!(rm("zai", "glm-4.6v").supports_images());
     }
 }
 
