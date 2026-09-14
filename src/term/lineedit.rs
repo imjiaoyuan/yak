@@ -891,18 +891,16 @@ fn load_history_from(path: &Path) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > HISTORY_FILE_LIMIT {
         // rewrite down to the soft cap (raw lines, timestamps intact) so the
-        // trim doesn't refire on every start; temp file + rename so a
-        // concurrent appender never sees a torn or half-truncated file
+        // trim doesn't refire on every start; atomic write so a concurrent
+        // appender never sees a torn or half-truncated file — and 0600 like
+        // the appender itself, so a trim must not widen the file's mode
         let kept = &lines[lines.len() - HISTORY_FILE_KEEP..];
         let mut out = String::new();
         for l in kept {
             out.push_str(l);
             out.push('\n');
         }
-        let tmp = path.with_extension("jsonl.tmp");
-        if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::remove_file(&tmp); // the next trim overwrites it
-        }
+        let _ = crate::core::fsx::write_atomic(path, out.as_bytes(), Some(0o600));
     }
     let start = lines.len().saturating_sub(HISTORY_LIMIT);
     lines[start..]
@@ -1815,6 +1813,24 @@ mod tests {
             loaded.last().cloned(),
             Some(format!("e{}", HISTORY_FILE_LIMIT + 4))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_trim_keeps_the_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("llm-hist-{}", crate::core::db::ulid()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.jsonl");
+        for i in 0..(HISTORY_FILE_LIMIT + 5) {
+            append_history_to(&path, &format!("e{i}"));
+        }
+        // the trim rewrite must not widen the mode: this file is the record
+        // of everything the user typed
+        load_history_from(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "trim rewrote history.jsonl non-private");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

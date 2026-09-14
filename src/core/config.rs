@@ -449,11 +449,18 @@ impl Config {
     }
 
     /// API key for a provider: its config.json api_key field, with ${VAR}
-    /// references expanded.
+    /// references expanded. An unset variable expands to nothing — named as a
+    /// warning here, because an empty key downstream surfaces only as a
+    /// provider 401 that never mentions the variable that was never set.
     pub fn api_key(&self, p: &Provider) -> Option<String> {
         let raw = p.api_key.clone()?;
         let expanded = expand_env(&raw);
         if expanded.is_empty() {
+            if raw.contains("${") {
+                eprintln!(
+                    "Warning: api_key {raw} expands to empty — is that environment variable set?"
+                );
+            }
             None
         } else {
             Some(expanded)

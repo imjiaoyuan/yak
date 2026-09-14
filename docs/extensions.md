@@ -103,8 +103,8 @@ progress, never a result channel.
 1. Host spawns the file (cwd = agent working directory).
 2. Host sends `initialize`; the extension must reply within **10s**.
 3. Requests flow: `call_tool`, `run_command`, `event` — each answered by id.
-4. On exit or `/reload`: host sends `shutdown`, closes stdin, then kills the process.
-   A dead extension is respawned lazily on its next use (tool call, command or hook) — a crash
+4. On exit or `/reload`: host sends `shutdown` and waits up to 0.5s for a clean exit, then kills
+   the process. A dead extension is respawned lazily on its next use (tool call, command or hook) — a crash
    costs one call, not the rest of the session. `/reload` still re-reads the discovery dirs.
 
 ### Messages

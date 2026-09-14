@@ -102,8 +102,25 @@ struct Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        // a polite shutdown first: the extension may want to flush state
-        let _ = self.writer.send("{\"type\":\"shutdown\"}\n".to_string());
+        // a polite shutdown first: hand the frame to the writer thread, then
+        // give it a moment to reach the child and the child a moment to flush
+        // and exit on its own — only then kill. Sending alone never worked:
+        // the writer writes asynchronously and the kill below always won the
+        // race, so the documented shutdown frame never actually arrived.
+        if self
+            .writer
+            .send("{\"type\":\"shutdown\"}\n".to_string())
+            .is_ok()
+        {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return, // exited cleanly, nothing to kill
+                    Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                    Err(_) => break,
+                }
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -249,7 +266,10 @@ impl Ext {
         // a call starts on a clean slate: stderr from an earlier call (or an
         // idle chatty extension) must not replay as this call's progress
         conn.take_progress();
-        let mut frame = serde_json::to_string(msg).unwrap_or_default();
+        // a host-built frame is plain data; a serialization failure would
+        // corrupt the framing (an empty line to the child), so it aborts
+        // loudly instead of degrade silently
+        let mut frame = serde_json::to_string(msg).expect("host-built frame serializes");
         frame.push('\n');
         if conn.writer.send(frame).is_err() {
             lock(&conn.pending).remove(&id);

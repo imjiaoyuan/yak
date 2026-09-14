@@ -22,6 +22,7 @@ pub struct Attachment {
 }
 
 /// An attachment with provenance: feeds both the request and the log store.
+#[derive(Debug)]
 pub struct Loaded {
     pub path: Option<String>,
     pub url: Option<String>,
@@ -138,6 +139,18 @@ pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
         let path = std::path::Path::new(reference);
         if !path.exists() {
             return Err(format!("attachment does not exist: {reference}"));
+        }
+        // refuse before reading: a huge file would otherwise be slurped and
+        // base64-inflated into the request body (provider document limits
+        // sit around 32MB, so nothing past this can be sent anyway)
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > crate::core::http::MAX_ATTACHMENT_BYTES as u64
+        {
+            return Err(format!(
+                "attachment {reference} is {} (over the {} limit)",
+                crate::core::text::human_bytes(meta.len()),
+                crate::core::text::human_bytes(crate::core::http::MAX_ATTACHMENT_BYTES as u64)
+            ));
         }
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
         let mime_type = mime
@@ -275,6 +288,27 @@ pub fn from_bytes(mime: Option<&str>, content: Vec<u8>) -> Attachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_attachments_refuse_an_oversized_file() {
+        let dir = std::env::temp_dir().join(format!("llm-att-{}", crate::core::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        std::fs::write(&path, vec![0u8; 1000]).unwrap();
+        assert!(load(path.to_str().unwrap(), None).is_ok());
+        // simulate oversize without writing 50MB: a metadata-only bound is
+        // what the check reads, so a sparse/heavy file both refuse
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let big = dir.join("huge.bin");
+            let f = std::fs::File::create(&big).unwrap();
+            f.write_all_at(&[0u8], 51 * 1024 * 1024).unwrap();
+            let e = load(big.to_str().unwrap(), None).unwrap_err();
+            assert!(e.contains("over the"), "{e}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sniff_matches_common_magics() {

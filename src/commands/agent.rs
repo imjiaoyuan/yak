@@ -342,6 +342,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         tokens_cached: 0,
         last_usage: None,
         json: args.flag(&["json"]),
+        persist_error: None,
     };
 
     // a continued thread may already exceed its window: project it down

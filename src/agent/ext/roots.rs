@@ -152,7 +152,7 @@ fn canonical_json(value: &serde_json::Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push_str(&serde_json::to_string(key).expect("a string key serializes"));
                 out.push(':');
                 canonical_json(&map[key.as_str()], out);
             }

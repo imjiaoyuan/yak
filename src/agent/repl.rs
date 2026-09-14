@@ -347,6 +347,11 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
     let skills: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
     rows.push_str(&name_row("plugins", pad, &plugins));
     rows.push_str(&name_row("skills ", pad, &skills));
+    // sticky persistence failure: the run continues in memory only, and a
+    // healthy-looking banner would hide lost work until /resume
+    if let Some(e) = &session.persist_error {
+        rows.push_str(&format!("persist{pad}NOT SAVED — {e}\n"));
+    }
     rows
 }
 
@@ -900,6 +905,16 @@ fn repl_command(
                 d = p.dim,
                 r = p.reset
             );
+            if let Some(e) = &session.persist_error {
+                let red = crate::theme::err();
+                eprintln!(
+                    "  {d}persist {r}{}NOT SAVED — {e}{}",
+                    red.bold,
+                    red.reset,
+                    d = p.dim,
+                    r = p.reset
+                );
+            }
             eprintln!(
                 "  {d}context {r}{} / {} ({}%) · {} messages",
                 humanize_tokens(used),

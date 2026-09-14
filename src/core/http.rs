@@ -618,7 +618,15 @@ fn map_error(e: ureq::Error) -> HttpError {
     HttpError::new(0, e.to_string())
 }
 
+/// Cap on an attachment of any kind — a URL fetch (`-a URL`, enforced in
+/// `get_bytes`) and a local file (enforced in `attachments::load`): provider
+/// document limits sit around 32MB, so anything past 50MB cannot ride a
+/// request anyway — refuse it instead of buffering it first.
+pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
 /// GET and read the whole body: (bytes, content-type) after a status check.
+/// The body is capped: a size-limited read refuses an oversized download
+/// instead of buffering it whole first.
 pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     get_with(agent(), url)
 }
@@ -629,6 +637,28 @@ pub fn get_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
 /// instead of hanging to the global timeout (send_sse's rationale, GET-flavored).
 fn get_with(agent: &'static ureq::Agent, url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     get_with_flag(agent, url, crate::platform::interrupt::flag())
+}
+
+/// Read a response body up to `cap` bytes: reading exactly cap+1 proves the
+/// body is oversized and refuses it, so memory stays bounded no matter what
+/// the server sends.
+fn read_capped<R: std::io::Read>(reader: R, cap: usize, url: &str) -> Result<Vec<u8>, HttpError> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let n = reader
+        .take(cap as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| HttpError::new(0, format!("Failed to read {url}: {e}")))?;
+    if n > cap {
+        return Err(HttpError::new(
+            0,
+            format!(
+                "Failed to read {url}: body exceeds {} (got more)",
+                crate::core::text::human_bytes(cap as u64)
+            ),
+        ));
+    }
+    Ok(buf)
 }
 
 /// Flag-as-parameter twin of `get_with`, same test rationale as
@@ -666,10 +696,7 @@ fn get_blocking(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|c| c.split(';').next().unwrap_or(c).to_string());
-    let mut buf = Vec::new();
-    let mut reader = resp.into_body().into_reader();
-    std::io::Read::read_to_end(&mut reader, &mut buf)
-        .map_err(|e| HttpError::new(0, format!("Failed to read {url}: {e}")))?;
+    let buf = read_capped(resp.into_body().into_reader(), MAX_ATTACHMENT_BYTES, url)?;
     Ok((buf, content_type))
 }
 
@@ -680,6 +707,11 @@ pub struct FetchedPage {
     pub content_type: String,
     pub body: String,
 }
+
+/// Download ceiling for the webfetch tool: the model reads at most 256KB of
+/// it, and HTML stripping only shrinks, so 2MB of raw body is generous — a
+/// size-limited read keeps memory bounded while the body streams in.
+const FETCH_DOWNLOAD_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// GET with the short-timeout agent for the agent's webfetch tool: follows
 /// redirects, carries the final URL and mime type, and decodes to UTF-8 —
@@ -718,10 +750,11 @@ fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<Fetched
         .and_then(|v| v.to_str().ok())
         .map(|c| c.split(';').next().unwrap_or(c).trim().to_string())
         .unwrap_or_default();
-    let mut buf = Vec::new();
-    let mut reader = resp.into_body().into_reader();
-    std::io::Read::read_to_end(&mut reader, &mut buf)
-        .map_err(|e| HttpError::new(0, format!("Failed to read {url}: {e}")))?;
+    let buf = read_capped(
+        resp.into_body().into_reader(),
+        FETCH_DOWNLOAD_MAX_BYTES,
+        url,
+    )?;
     let body = String::from_utf8(buf).map_err(|_| {
         HttpError::new(
             0,
@@ -738,6 +771,20 @@ fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<Fetched
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_reads_refuse_an_oversized_body() {
+        let big = vec![b'x'; 10_000];
+        assert_eq!(read_capped(&big[..], 20_000, "u").unwrap().len(), 10_000);
+        let e = read_capped(&big[..], 9_999, "u").unwrap_err();
+        assert!(e.to_string().contains("exceeds"), "{e}");
+        // exactly at the cap is fine: only cap+1 proves oversize
+        assert_eq!(
+            read_capped(&big[..10_000], 10_000, "u").unwrap().len(),
+            10_000
+        );
+        assert!(read_capped(&big[..], 0, "u").is_err());
+    }
 
     #[test]
     fn only_opencode_hosts_get_a_session_header() {

@@ -56,7 +56,7 @@ impl Tool for ScriptTool {
         } else {
             Some(format!(
                 "{}\n",
-                serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string())
+                serde_json::to_string(args).expect("args serialize")
             ))
         };
         let outcome = crate::platform::run_with_progress(

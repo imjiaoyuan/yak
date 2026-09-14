@@ -169,9 +169,17 @@ impl Store {
             _ => crate::core::db::ulid(),
         };
         let path = self.thread_path(&id);
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 on creation: a conversation transcript is as private as
+            // the config (keys) and the input history, and only exists once
+            // created here
+            opts.mode(0o600);
+        }
+        let mut f = opts
             .open(&path)
             .map_err(|e| format!("cannot write thread {id}: {e}"))?;
         let mut line = serde_json::to_string(turn).map_err(|e| e.to_string())?;

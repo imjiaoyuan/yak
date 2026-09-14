@@ -45,6 +45,11 @@ pub struct Session {
     /// `--json`: write the task as a line-delimited JSON event stream instead
     /// of driving the terminal UI (one-shot mode only)
     pub json: bool,
+    /// the last persistence failure, kept sticky: the run continues in
+    /// memory, but the banner and /status must say the transcript is not
+    /// being written — a disk-full session that looks healthy is lost work
+    /// nobody noticed until /resume
+    pub persist_error: Option<String>,
 }
 
 impl Session {
@@ -586,10 +591,16 @@ impl Session {
             options: turn_options,
             messages: new_messages,
         };
-        let thread_id = store
-            .append_turn(self.conversation_id.as_deref(), &turn)
-            .map_err(|e| eprintln!("Warning: {e}"))
-            .unwrap_or_default();
+        let thread_id = match store.append_turn(self.conversation_id.as_deref(), &turn) {
+            Ok(id) => id,
+            Err(e) => {
+                // sticky: the run continues in memory, but the banner and
+                // /status keep saying the transcript is not being written
+                eprintln!("Warning: {e}");
+                self.persist_error = Some(e);
+                String::new()
+            }
+        };
         if self.conversation_id.is_none() && !thread_id.is_empty() {
             self.conversation_id = Some(thread_id);
         }
@@ -819,6 +830,7 @@ mod tests {
             tokens_cached: 0,
             last_usage: None,
             json: false,
+            persist_error: None,
         }
     }
 
@@ -923,6 +935,7 @@ mod tests {
             tokens_cached: 0,
             last_usage: None,
             json: false,
+            persist_error: None,
         };
         let history = vec![
             Msg::user("write the docs"),
@@ -955,6 +968,60 @@ mod tests {
         session.persist_turn(3, &history, "", None, "", std::time::Instant::now());
         let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
         assert_eq!(turns.len(), 1, "an unchanged history persists nothing");
+        assert!(session.persist_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_persist_failure_is_kept_visible() {
+        // an unreadable store location: the run continues, but the sticky
+        // flag must say the transcript is not being written
+        let dir = std::env::temp_dir().join(format!("llm-persist-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = threads::Store::open_path(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut session = Session {
+            compact: CompactConfig::default(),
+            model: crate::providers::ResolvedModel {
+                provider_name: "mock".into(),
+                kind: "openai-compat".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                api_key: None,
+                model_id: "m".into(),
+                options: vec![],
+            },
+            tools: Vec::new(),
+            system: None,
+            cwd: cwd.clone(),
+            max_turns: 4,
+            token_budget: 0,
+            stream: true,
+            no_session: false,
+            store: Some(store),
+            approval: crate::agent::approval::ApprovalConfig::default(),
+            conversation_id: None,
+            seed: Vec::new(),
+            thinking: None,
+            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            extensions: crate::agent::ext::Extensions::connect(&cwd),
+            tokens: (0, 0),
+            tokens_cached: 0,
+            last_usage: None,
+            json: false,
+            persist_error: None,
+        };
+        // a store whose directory vanishes after opening: append_turn cannot
+        // create the thread file (ENOENT), which is exactly the shape of a
+        // disk-full / removed-mount failure at write time
+        let bad = threads::Store::open_path(&cwd.join("blocked")).unwrap();
+        std::fs::remove_dir(cwd.join("blocked")).unwrap();
+        session.store = Some(bad);
+        let history = vec![Msg::user("task")];
+        session.persist_turn(0, &history, "answer", None, "", std::time::Instant::now());
+        let e = session.persist_error.clone().expect("failure recorded");
+        assert!(e.contains("cannot write"), "{e}");
+        assert!(session.conversation_id.is_none(), "no thread was created");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
