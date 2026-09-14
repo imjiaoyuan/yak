@@ -130,6 +130,19 @@ pub fn build_body(
                     "content": content,
                     "is_error": is_error,
                 }));
+                // Anthropic tool_result blocks do take image blocks, but the
+                // shared helper keeps the tool content a plain string; ride
+                // the images as their own follow-up user message instead,
+                // after the buffered results flush
+                if let Some(parts) = super::tool_result_images(
+                    m.supports_images(),
+                    content.as_str().unwrap_or(""),
+                    attachments,
+                    attachment_block,
+                )? {
+                    flush_results(&mut messages, &mut pending_results);
+                    messages.push(json!({"role": "user", "content": parts}));
+                }
             }
             Msg::Summary { text } => {
                 flush_results(&mut messages, &mut pending_results);

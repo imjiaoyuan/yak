@@ -168,21 +168,55 @@ pub(crate) fn user_content(
     Ok(Value::Array(content))
 }
 
-/// Tool-result content: full parts when the model takes images, otherwise
-/// the text with a note that the image was withheld.
+/// Tool-result content: always a plain string on the wire — the images
+/// ride a follow-up user message instead (`tool_result_images`). Gateways
+/// fronting OpenAI-shaped APIs (opencode Console Go) reject non-text parts
+/// inside a `tool` message, so the tool content stays text-only even for
+/// vision models; the text notes that the image was withheld when the model
+/// cannot see it at all.
 pub(crate) fn tool_result_content(
     supports_images: bool,
     content: &str,
     attachments: &[Attachment],
-    attachment_block: fn(&Attachment) -> Result<Value, String>,
+    _attachment_block: fn(&Attachment) -> Result<Value, String>,
 ) -> Result<Value, String> {
-    if attachments.is_empty() || supports_images {
-        user_content(content, attachments, attachment_block)
+    if attachments.is_empty() {
+        return Ok(json!(content));
+    }
+    if supports_images {
+        // images follow in their own user message; keep any text here
+        Ok(json!(content))
     } else {
         Ok(json!(format!(
             "{content}\n[image omitted: current model does not support images]"
         )))
     }
+}
+
+/// The follow-up user message carrying a tool result's images: parts with a
+/// leading text label, or `None` when nothing rides (no attachments, or the
+/// model would reject them).
+pub(crate) fn tool_result_images(
+    supports_images: bool,
+    content: &str,
+    attachments: &[Attachment],
+    attachment_block: fn(&Attachment) -> Result<Value, String>,
+) -> Result<Option<Value>, String> {
+    if attachments.is_empty() || !supports_images {
+        return Ok(None);
+    }
+    let mut parts = vec![json!({
+        "type": "text",
+        "text": if content.trim().is_empty() {
+            "Attached image(s) from tool result:"
+        } else {
+            "Attached image(s) from tool result (text portion above):"
+        }
+    })];
+    for a in attachments {
+        parts.push(attachment_block(a)?);
+    }
+    Ok(Some(Value::Array(parts)))
 }
 
 /// Merge `-o KEY=VALUE` options into a request body: JSON values pass

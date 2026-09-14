@@ -127,13 +127,26 @@ pub fn build_body(
                 ..
             } => {
                 // a text-only model never sees an image it would reject
-                let content = super::tool_result_content(
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": super::tool_result_content(
+                        m.supports_images(),
+                        content,
+                        attachments,
+                        attachment_block,
+                    )?
+                }));
+                // gateways (opencode Console Go) reject image parts inside a
+                // tool message, so vision input rides its own user message
+                if let Some(parts) = super::tool_result_images(
                     m.supports_images(),
                     content,
                     attachments,
                     attachment_block,
-                )?;
-                messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": content}));
+                )? {
+                    messages.push(json!({"role": "user", "content": parts}));
+                }
             }
             Msg::Summary { text } => {
                 messages.push(
@@ -368,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_with_image_attachment_serializes_as_parts() {
+    fn tool_result_image_rides_a_followup_user_message() {
         let history = vec![
             Msg::assistant("read the image"),
             Msg::ToolResult {
@@ -380,11 +393,21 @@ mod tests {
             },
         ];
         let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
-        // the assistant precedes, so the only tool message is index 1
-        let content = body["messages"][1]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        let msgs = body["messages"].as_array().unwrap();
+        // the tool message keeps a plain-string content — gateways fronting
+        // OpenAI-shaped APIs (opencode Console Go) reject image parts there
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["content"], "Read image file [image/png]");
+        // the image follows in its own user message
+        assert_eq!(msgs[2]["role"], "user");
+        let parts = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert!(
+            parts[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]
