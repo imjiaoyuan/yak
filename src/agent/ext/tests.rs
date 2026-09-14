@@ -22,13 +22,17 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
     let dir = std::env::temp_dir().join(format!("llm-ext-disc-{}", crate::core::db::ulid()));
     std::fs::create_dir_all(&dir).unwrap();
     // one script tool named `search`, stem unrelated; one executable
-    // resident named `other` for the stem path
+    // resident (name spelled per platform: Windows recognizes an
+    // executable by extension, unix by the exec bit) for the stem path
     std::fs::write(
         dir.join("helper.py"),
         "# --- llm-tool: search\n# description: find things\n",
     )
     .unwrap();
+    #[cfg(unix)]
     let resident = dir.join("other");
+    #[cfg(windows)]
+    let resident = dir.join("other.bat");
     std::fs::write(&resident, b"#!/bin/sh\n:").unwrap();
     #[cfg(unix)]
     {
