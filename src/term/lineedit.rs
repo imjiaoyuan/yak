@@ -75,14 +75,17 @@ impl LineEditor {
 
     /// Read one line with editing. Tab completes bash-style via `completer`:
     /// a single candidate is inserted, several extend to the common prefix
-    /// and then list the options. A line ending in a lone backslash turns
-    /// Enter into a newline; ctrl+j / alt+enter / shift+enter insert one
-    /// directly.
+    /// and then list the options. `is_command` shapes the echo highlight:
+    /// true paints the whole line bold (slash commands and `!` shell lines
+    /// stand out from task text), false prints plain. A line ending in a
+    /// lone backslash turns Enter into a newline; ctrl+j / alt+enter /
+    /// shift+enter insert one directly.
     pub fn read_line(
         &mut self,
         prompt: &str,
         help: &str,
         completer: &dyn Fn(&str) -> Vec<String>,
+        is_command: &dyn Fn(&str) -> bool,
     ) -> LineResult {
         let mut term = match RawTerm::acquire(1, 0) {
             Some(t) => t,
@@ -115,7 +118,7 @@ impl LineEditor {
                 // the poll timeout is the chance to notice it
                 if crate::core::http::interrupted() {
                     buf.clear();
-                    line.settle(&mut out, prompt, "");
+                    line.settle(&mut out, prompt, "", is_command);
                     return LineResult::Interrupt;
                 }
                 match term.next_byte() {
@@ -132,13 +135,13 @@ impl LineEditor {
             if b == 0x1b {
                 match term.next_byte() {
                     RawByte::Timeout => {
-                        line.settle(&mut out, prompt, "");
+                        line.settle(&mut out, prompt, "", is_command);
                         return LineResult::Interrupt;
                     }
                     // a second ESC inside one poll slice: the first press
                     // was a lone ESC (nothing real starts with ESC ESC)
                     RawByte::Key(0x1b) => {
-                        line.settle(&mut out, prompt, "");
+                        line.settle(&mut out, prompt, "", is_command);
                         return LineResult::Interrupt;
                     }
                     RawByte::Key(first) => match term.escape_from(first) {
@@ -163,14 +166,14 @@ impl LineEditor {
                         buf.push('\n');
                         cursor = buf.len();
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                         continue;
                     }
                     let text = expand_pastes(&buf, &pastes);
                     if record_history(&mut self.history, &text) {
                         append_history(&text);
                     }
-                    line.settle(&mut out, prompt, &buf);
+                    line.settle(&mut out, prompt, &buf, is_command);
                     return LineResult::Line(text);
                 }
                 // ctrl+j: newline (any terminal; the byte is unambiguous)
@@ -178,11 +181,11 @@ impl LineEditor {
                     buf.insert(cursor, '\n');
                     cursor += 1;
                     nav.reset(self.history.len());
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x07 => {
                     // ctrl+g: round-trip the nav.draft through $VISUAL/$EDITOR
-                    line.settle(&mut out, prompt, &buf);
+                    line.settle(&mut out, prompt, &buf, is_command);
                     let _ = writeln!(
                         out,
                         "{}(editing in $EDITOR — save and exit to return){}",
@@ -224,7 +227,7 @@ impl LineEditor {
                     paste_mode = Some(PasteMode::new());
                     kitty = Some(KittyKeys::new());
                     line.rows = 0; // the region restarts below the editor's output
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x16 => {
                     // ctrl+v: pull the clipboard image as a temp-file path
@@ -249,7 +252,7 @@ impl LineEditor {
                                     buf.insert_str(cursor, &text);
                                     cursor += text.len();
                                     nav.reset(self.history.len());
-                                    line.draw(&mut out, prompt, &buf, cursor);
+                                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                                 }
                             }
                             None => {
@@ -260,7 +263,7 @@ impl LineEditor {
                                     crate::theme::err().reset
                                 );
                                 line.rows = 0;
-                                line.draw(&mut out, prompt, &buf, cursor);
+                                line.draw(&mut out, prompt, &buf, cursor, is_command);
                             }
                         },
                         None => {
@@ -271,7 +274,7 @@ impl LineEditor {
                                 crate::theme::err().reset
                             );
                             line.rows = 0;
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
                     }
                 }
@@ -280,19 +283,19 @@ impl LineEditor {
                     let _ = writeln!(out);
                     let _ = writeln!(out, "{help}");
                     line.rows = 0; // the region restarts below the help text
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x03 => {
                     // ctrl-c clears the line; the caller treats two
                     // consecutive presses as "exit"
                     buf.clear();
-                    line.settle(&mut out, prompt, "");
+                    line.settle(&mut out, prompt, "", is_command);
                     return LineResult::Interrupt;
                 }
                 0x04 => {
                     // ctrl-d: eof on empty, otherwise delete forward
                     if buf.is_empty() {
-                        line.settle(&mut out, prompt, "");
+                        line.settle(&mut out, prompt, "", is_command);
                         return LineResult::Eof;
                     }
                     if let Some((i, a, b)) = token_span(&buf, &pastes, cursor)
@@ -312,7 +315,7 @@ impl LineEditor {
                     }
                     nav.history_index = self.history.len();
                     nav.draft = None;
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x01 => {
                     // ctrl-a: line start; already there means end of the
@@ -324,7 +327,7 @@ impl LineEditor {
                         start.saturating_sub(1)
                     };
                     nav.preferred = None;
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x05 => {
                     // ctrl-e: line end; already there means start of the next
@@ -335,7 +338,7 @@ impl LineEditor {
                         (end + 1).min(buf.len())
                     };
                     nav.preferred = None;
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x0b => {
                     // ctrl+k: kill from the cursor to the line end
@@ -344,7 +347,7 @@ impl LineEditor {
                         kill = buf[cursor..end].to_string();
                         buf.replace_range(cursor..end, "");
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                 }
                 0x15 => {
@@ -355,14 +358,14 @@ impl LineEditor {
                         buf.replace_range(start..cursor, "");
                         cursor = start;
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                 }
                 0x17 => {
                     // ctrl-w: kill the word before the cursor
                     kill_word_back(&mut buf, &mut cursor, &mut kill);
                     nav.reset(self.history.len());
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 0x19 => {
                     // ctrl+y: yank the kill buffer
@@ -370,7 +373,7 @@ impl LineEditor {
                         buf.insert_str(cursor, &kill);
                         cursor += kill.len();
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                 }
                 0x7f | 0x08 => {
@@ -393,7 +396,7 @@ impl LineEditor {
                         continue;
                     }
                     nav.reset(self.history.len());
-                    line.draw(&mut out, prompt, &buf, cursor);
+                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
                 b'\t' => {
                     // bash-style: one candidate completes; several first
@@ -419,7 +422,7 @@ impl LineEditor {
                             buf.push_str(&completion);
                             cursor = buf.len();
                             nav.reset(self.history.len());
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
                         None if candidates.len() > 1 => {
                             let _ = writeln!(out);
@@ -436,7 +439,7 @@ impl LineEditor {
                                 crate::theme::err().reset
                             );
                             line.rows = 0; // the region restarts below the listing
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
                         None => {}
                     }
@@ -446,7 +449,7 @@ impl LineEditor {
                         buf.insert(cursor, '\n');
                         cursor += 1;
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Key(cp, m)) => {
                         // kitty CSI-u keys: modified enter, alt+letter and
@@ -454,31 +457,31 @@ impl LineEditor {
                         // keys arrive as (char, 3) through the same shape)
                         if cp == 27 {
                             // the kitty-reported plain ESC key
-                            line.settle(&mut out, prompt, "");
+                            line.settle(&mut out, prompt, "", is_command);
                             return LineResult::Interrupt;
                         } else if cp == 13 {
                             // shift/ctrl/alt+enter: all just break the line
                             buf.insert(cursor, '\n');
                             cursor += 1;
                             nav.reset(self.history.len());
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         } else if cp == 127 && m >= 3 {
                             kill_word_back(&mut buf, &mut cursor, &mut kill);
                             nav.reset(self.history.len());
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         } else if m == 3 {
                             match u8::try_from(cp).ok() {
                                 Some(b'b') => {
                                     // alt+b: back one word
                                     cursor = word_back(&buf, cursor);
                                     nav.preferred = None;
-                                    line.draw(&mut out, prompt, &buf, cursor);
+                                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                                 }
                                 Some(b'f') => {
                                     // alt+f: forward one word
                                     cursor = word_fwd(&buf, cursor);
                                     nav.preferred = None;
-                                    line.draw(&mut out, prompt, &buf, cursor);
+                                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                                 }
                                 Some(b'd') => {
                                     // alt+d: kill the word after the cursor
@@ -488,7 +491,7 @@ impl LineEditor {
                                         buf.replace_range(cursor..end, "");
                                         nav.reset(self.history.len());
                                     }
-                                    line.draw(&mut out, prompt, &buf, cursor);
+                                    line.draw(&mut out, prompt, &buf, cursor, is_command);
                                 }
                                 _ => {}
                             }
@@ -499,7 +502,7 @@ impl LineEditor {
                                 buf.insert(cursor, ch);
                                 cursor += ch.len_utf8();
                                 nav.reset(self.history.len());
-                                line.draw(&mut out, prompt, &buf, cursor);
+                                line.draw(&mut out, prompt, &buf, cursor, is_command);
                             }
                         }
                     }
@@ -512,7 +515,7 @@ impl LineEditor {
                                 word_back(&buf, cursor)
                             };
                             nav.preferred = None;
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
                     }
                     Some(Esc::PasteStart) => {
@@ -558,7 +561,7 @@ impl LineEditor {
                                 cursor += chunk.len();
                             }
                             nav.reset(self.history.len());
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
                     }
                     Some(Esc::PasteEnd) => {}
@@ -577,7 +580,7 @@ impl LineEditor {
                             let col = *nav.preferred.get_or_insert(char_col(&buf, cursor));
                             cursor = up_line(&buf, cursor, Some(col));
                         }
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Down) => {
                         if nav.history_index < self.history.len() {
@@ -594,7 +597,7 @@ impl LineEditor {
                             let col = *nav.preferred.get_or_insert(char_col(&buf, cursor));
                             cursor = down_line(&buf, cursor, Some(col));
                         }
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Left) => {
                         if let Some((_, a, b)) = token_span(&buf, &pastes, cursor)
@@ -608,7 +611,7 @@ impl LineEditor {
                             cursor = cursor.saturating_sub(1);
                         }
                         nav.preferred = None;
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Right) => {
                         if let Some((_, a, b)) = token_span(&buf, &pastes, cursor)
@@ -622,17 +625,17 @@ impl LineEditor {
                             }
                         }
                         nav.preferred = None;
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Home) => {
                         cursor = line_start(&buf, cursor);
                         nav.preferred = None;
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::End) => {
                         cursor = line_end(&buf, cursor);
                         nav.preferred = None;
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                     Some(Esc::Delete) => {
                         // zero when the cursor sits at the end (nothing to delete)
@@ -643,14 +646,14 @@ impl LineEditor {
                             buf.replace_range(a..b, "");
                             nav.history_index = self.history.len();
                             nav.draft = None;
-                            line.draw(&mut out, prompt, &buf, cursor);
+                            line.draw(&mut out, prompt, &buf, cursor, is_command);
                         } else {
                             let rest = buf[cursor..].chars().next().map_or(0, |c| c.len_utf8());
                             if rest > 0 {
                                 buf.replace_range(cursor..cursor + rest, "");
                                 nav.history_index = self.history.len();
                                 nav.draft = None;
-                                line.draw(&mut out, prompt, &buf, cursor);
+                                line.draw(&mut out, prompt, &buf, cursor, is_command);
                             }
                         }
                     }
@@ -680,7 +683,7 @@ impl LineEditor {
                         buf.insert_str(cursor, s);
                         cursor += s.len();
                         nav.reset(self.history.len());
-                        line.draw(&mut out, prompt, &buf, cursor);
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                 }
             }
@@ -1003,12 +1006,19 @@ impl InputLine {
         InputLine { rows: 0 }
     }
 
-    fn draw(&mut self, out: &mut std::io::Stderr, prompt: &str, buf: &str, cursor: usize) {
+    fn draw(
+        &mut self,
+        out: &mut std::io::Stderr,
+        prompt: &str,
+        buf: &str,
+        cursor: usize,
+        is_command: &dyn Fn(&str) -> bool,
+    ) {
         if self.rows > 0 {
             let _ = write!(out, "\x1b[{}A", self.rows);
         }
         let _ = write!(out, "\r");
-        let (crow, ccol, last) = self.render(out, prompt, buf, cursor);
+        let (crow, ccol, last) = self.render(out, prompt, buf, cursor, is_command);
         let _ = write!(out, "\x1b[J");
         if last > crow {
             let _ = write!(out, "\x1b[{}A", last - crow);
@@ -1019,12 +1029,18 @@ impl InputLine {
     }
 
     /// Final render plus newline; the region ends and row tracking resets.
-    fn settle(&mut self, out: &mut std::io::Stderr, prompt: &str, buf: &str) {
+    fn settle(
+        &mut self,
+        out: &mut std::io::Stderr,
+        prompt: &str,
+        buf: &str,
+        is_command: &dyn Fn(&str) -> bool,
+    ) {
         if self.rows > 0 {
             let _ = write!(out, "\x1b[{}A", self.rows);
         }
         let _ = write!(out, "\r");
-        let _ = self.render(out, prompt, buf, buf.len());
+        let _ = self.render(out, prompt, buf, buf.len(), is_command);
         let _ = writeln!(out);
         let _ = out.flush();
         self.rows = 0;
@@ -1039,11 +1055,13 @@ impl InputLine {
         prompt: &str,
         buf: &str,
         cursor: usize,
+        is_command: &dyn Fn(&str) -> bool,
     ) -> (usize, usize, usize) {
         // slash commands and `!` shell lines echo bold, distinguishing them
-        // from ordinary task text
+        // from ordinary task text — the REPL decides what counts as a
+        // command (registered names only, so a `/`-prefixed path stays plain)
         let style = |s: &str| {
-            if buf.starts_with('/') || buf.starts_with('!') {
+            if is_command(buf) {
                 let p = crate::theme::err();
                 format!("{}{s}{}", p.bold, p.reset)
             } else {

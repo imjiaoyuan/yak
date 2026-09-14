@@ -41,6 +41,18 @@ pub fn repl(
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let cwd = session.cwd.display().to_string();
         let command_names = session.extensions.command_names();
+        // the echo highlight rides this predicate: registered names only, so
+        // a `/`-prefixed path (`/home/you/shot.png`) stays plain task text
+        let command_set = {
+            let mut names: Vec<String> = SLASH_COMMANDS
+                .iter()
+                .map(|c| c.strip_prefix('/').unwrap_or(c).to_string())
+                .collect();
+            names.extend(command_names.clone());
+            names.sort();
+            names
+        };
+        let is_command = move |buf: &str| slash_command_line(buf, &command_set);
         let completer = move |buf: &str| {
             let mut out = completions(buf, &skill_names, &cwd);
             if let Some(arg) = buf.strip_prefix('/')
@@ -56,7 +68,7 @@ pub fn repl(
             }
             out
         };
-        let line = match editor.read_line(&prompt, &help, &completer) {
+        let line = match editor.read_line(&prompt, &help, &completer, &is_command) {
             crate::term::lineedit::LineResult::Line(l) => l,
             crate::term::lineedit::LineResult::Eof => break,
             crate::term::lineedit::LineResult::Interrupt => {
@@ -398,6 +410,33 @@ fn slash_hint(word: &str) -> Option<String> {
         .map(|c| c.strip_prefix('/').unwrap_or(c))
         .collect();
     crate::core::text::closest_name(word, &names).map(|n| format!("/{n}"))
+}
+
+/// Is this buffer a command line for the echo highlight? Only when its
+/// first word is a registered command — exact (arguments allowed) or, still
+/// being typed, a prefix of one. A `/`-prefixed path matches no name and
+/// stays plain; a bare `/` is still deciding and counts as typing.
+fn slash_command_line(buf: &str, names: &[String]) -> bool {
+    let Some(rest) = buf.strip_prefix('!') else {
+        return slash_command_word(buf, names);
+    };
+    !rest.trim_end().is_empty()
+}
+
+fn slash_command_word(buf: &str, names: &[String]) -> bool {
+    let Some(rest) = buf.strip_prefix('/') else {
+        return false;
+    };
+    let (word, has_space) = rest
+        .split_once(' ')
+        .map_or((rest, false), |(w, _)| (w, true));
+    if word.is_empty() {
+        return !has_space;
+    }
+    if rest.starts_with("skill:") && !has_space {
+        return true;
+    }
+    names.iter().any(|n| n == word || n.starts_with(word))
 }
 
 /// `/resume`: pick a past conversation — this directory's, newest first —
@@ -1192,5 +1231,26 @@ mod tests {
         assert_eq!(slash_hint("/etc/passwd"), None);
         assert_eq!(slash_hint("/summarize this file"), None);
         assert_eq!(slash_hint("/x"), None);
+    }
+
+    #[test]
+    fn slash_highlight_matches_registered_commands_only() {
+        // the editor's echo bolds only what actually dispatches as a
+        // command; a `/`-prefixed path is ordinary task text
+        let names = [
+            "clear".to_string(),
+            "status".to_string(),
+            "export".to_string(),
+        ];
+        assert!(slash_command_line("/clear", &names));
+        assert!(slash_command_line("/c", &names));
+        assert!(slash_command_line("/export /tmp/a.md", &names));
+        assert!(slash_command_line("/", &names));
+        assert!(slash_command_line("!ls", &names));
+        assert!(!slash_command_line("!", &names));
+        assert!(!slash_command_line("/home/you/paste.png", &names));
+        assert!(!slash_command_line("/no-such-cmd", &names));
+        assert!(!slash_command_line("/x /", &names));
+        assert!(!slash_command_line("task", &names));
     }
 }
