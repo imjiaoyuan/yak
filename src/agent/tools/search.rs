@@ -17,20 +17,20 @@ impl Tool for GrepTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Search file contents for a LITERAL substring (no regex — prefer `rg` via the bash tool, \
-         which is faster and supports regex). \
-         Respects .gitignore. Returns path:line:text matches."
+        "Search file contents. Literal substring by default; `regex: true` for a regular \
+         expression (needs ripgrep). Respects .gitignore. Returns path:line:text matches."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Literal substring to find"},
+                "pattern": {"type": "string", "description": "Substring (or regex with `regex: true`) to find"},
                 "path": {"type": "string", "description": "File or directory to search (default .)"},
                 "glob": {"type": "string", "description": "Only search files matching this glob, e.g. *.rs"},
                 "ignore_case": {"type": "boolean"},
                 "context": {"type": "integer", "description": "Lines of context around each match"},
-                "limit": {"type": "integer", "description": "Maximum matches (default 100)"}
+                "limit": {"type": "integer", "description": "Maximum matches (default 100)"},
+                "regex": {"type": "boolean", "description": "Treat `pattern` as a regular expression via ripgrep (default false)"}
             },
             "required": ["pattern"]
         })
@@ -39,6 +39,9 @@ impl Tool for GrepTool {
         format!("\"{}\"", args["pattern"].as_str().unwrap_or("?"))
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+        if args["regex"].as_bool().unwrap_or(false) {
+            return grep_regex(args, cwd);
+        }
         let pattern = args["pattern"].as_str().unwrap_or("");
         let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
         let context = args["context"].as_u64().unwrap_or(0) as usize;
@@ -114,6 +117,57 @@ impl Tool for GrepTool {
         }
         ToolOutput::ok(truncate_marked(&out, MAX_LINES, MAX_BYTES))
     }
+}
+
+/// Regex search, delegated to ripgrep (the tool the model was previously told
+/// to reach for via bash). Keeping it inside the tool means a regex lookup no
+/// longer forces the model out of the tool surface into a shell pipeline.
+/// `rg` already honors .gitignore and prints `path:line:text` with
+/// `--no-heading`, so the output matches the literal path verbatim.
+fn grep_regex(args: &Value, cwd: &Path) -> ToolOutput {
+    let pattern = args["pattern"].as_str().unwrap_or("");
+    let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+    let mut cmd = std::process::Command::new("rg");
+    cmd.arg("--no-heading")
+        .arg("--line-number")
+        .arg("--color")
+        .arg("never");
+    if args["ignore_case"].as_bool().unwrap_or(false) {
+        cmd.arg("-i");
+    }
+    if let Some(c) = args["context"].as_u64().filter(|c| *c > 0) {
+        cmd.arg("-C").arg(c.to_string());
+    }
+    if let Some(g) = args["glob"].as_str().filter(|g| !g.is_empty()) {
+        cmd.arg("-g").arg(g);
+    }
+    cmd.arg("--")
+        .arg(pattern)
+        .arg(args["path"].as_str().unwrap_or("."));
+    cmd.current_dir(cwd);
+    let Ok(out) = cmd.output() else {
+        return ToolOutput::err(
+            "regex search needs ripgrep (`rg`) on PATH; install it or drop `regex`",
+        );
+    };
+    // rg exits 2 on a bad pattern; 1 means no matches, which is not an error
+    if out.status.code() == Some(2) {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        return ToolOutput::err(truncate_marked(&msg, MAX_LINES, MAX_BYTES));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return ToolOutput::ok("no matches\n");
+    }
+    let more = lines.len().saturating_sub(limit);
+    lines.truncate(limit);
+    let mut out = lines.join("\n");
+    if more > 0 {
+        out.push_str(&format!("\n... +{more} more matches\n"));
+    }
+    out.push('\n');
+    ToolOutput::ok(truncate_marked(&out, MAX_LINES, MAX_BYTES))
 }
 
 pub(super) struct GlobTool;

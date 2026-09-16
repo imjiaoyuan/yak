@@ -407,6 +407,46 @@ fn grep_literal_and_ignore_case() {
 }
 
 #[test]
+fn grep_regex_delegates_to_ripgrep() {
+    // regex mode needs ripgrep; environments without it keep the literal path
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("llm-grep-re-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.rs"), "fn main() {}\nlet x = 42;\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "nothing\n").unwrap();
+
+    let out = GrepTool.execute(
+        &json!({"pattern": "fn\\s+main", "regex": true, "path": dir.display().to_string()}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error, "{}", out.content);
+    // rg prints `path:line:text` (the literal path adds a space after the
+    // line number); both are the same shape for the model to read
+    assert!(
+        out.content.contains("a.rs:1:fn main() {}"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("b.txt"));
+
+    // a bad pattern is reported as an error, never a crash
+    let bad = GrepTool.execute(
+        &json!({"pattern": "(", "regex": true, "path": dir.display().to_string()}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(bad.is_error, "{}", bad.content);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bash_output_beyond_pipe_buffer_does_not_deadlock() {
     // ~108KB of output used to fill the 64KiB pipe and hang until timeout
     let out = BashTool.execute(
