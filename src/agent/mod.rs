@@ -575,99 +575,134 @@ pub fn run_agent(
         if stop != StopReason::ToolUse || tool_calls.is_empty() {
             break;
         }
-        for mut call in tool_calls {
-            if crate::core::http::interrupted() {
-                interrupted = true;
-                history.push(Msg::ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    content: "interrupted by user".to_string(),
-                    is_error: true,
-                    attachments: Vec::new(),
-                });
-                continue;
-            }
-            // extension gate: a subscribed tool_call may deny, rewrite the
-            // arguments, or allow (skip the built-in approval) before the
-            // matrix even sees them
-            let mut denied: Option<String> = None;
-            let mut extension_allowed = false;
-            match fire(
-                opts.hooks,
-                "tool_call",
-                json!({"tool": call.name, "args": call.arguments}),
-            ) {
-                Err(reason) => denied = Some(reason),
-                Ok(Some(reply)) => {
-                    if reply.get("decision").and_then(serde_json::Value::as_str) == Some("allow") {
-                        extension_allowed = true;
-                    }
-                    if let Some(rewritten) = reply.get("args") {
-                        call.arguments = rewritten.clone();
-                    }
-                }
-                Ok(None) => {}
-            }
-            let mut repeat_note: Option<String> = None;
-            let out = if let Some(reason) = denied {
-                Err(reason)
-            } else {
-                match gate_call(
-                    &call,
+        // Read-only calls from one assistant message have no ordering
+        // dependency on each other, so they run concurrently (other agents
+        // do the same); mutating and exec calls stay strictly serial. The
+        // batch is gated first (approvals prompt, extension hooks rewrite
+        // args, ToolStart prints), executed in parallel, then finished in
+        // the original order so history and tool results stay deterministic.
+        // A batched turn therefore emits its `$` action lines before the
+        // results; the renderer's per-tool log state is unaffected because
+        // no built-in read tool streams, and the results themselves still
+        // arrive in call order.
+        let readonly_batch = tool_calls.len() > 1
+            && !crate::core::http::interrupted()
+            && tool_calls.iter().all(|c| {
+                tools
+                    .iter()
+                    .find(|t| t.name() == c.name)
+                    .is_some_and(|t| t.tier() == approval::Tier::Read)
+            });
+        if readonly_batch {
+            let mut prepared: Vec<(ToolCall, Result<ClearedCall, String>)> = Vec::new();
+            for mut call in tool_calls {
+                let cleared = prepare_call(
+                    &mut call,
                     tools,
                     &opts.cwd,
                     approval,
                     on_approval,
-                    extension_allowed,
+                    on_update,
+                    opts.hooks,
+                );
+                prepared.push((call, cleared));
+            }
+            let outs: Vec<(tools::ToolOutput, Vec<String>)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = prepared
+                    .iter()
+                    .map(|(call, cleared)| match cleared {
+                        Ok(cleared) => {
+                            let tool = cleared.tool;
+                            let args = &call.arguments;
+                            let cwd = opts.cwd.as_path();
+                            Some(scope.spawn(move || {
+                                // read-only tools do not stream: buffer any
+                                // lines and replay them in order below
+                                let mut logs: Vec<String> = Vec::new();
+                                let out = tool
+                                    .execute(args, cwd, &mut |l: &str| logs.push(l.to_string()));
+                                (out, logs)
+                            }))
+                        }
+                        Err(_) => None,
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| match h {
+                        Some(h) => h.join().unwrap_or_else(|_| {
+                            (tools::ToolOutput::err("tool panicked"), Vec::new())
+                        }),
+                        None => (tools::ToolOutput::err(String::new()), Vec::new()),
+                    })
+                    .collect()
+            });
+            for ((call, cleared), (out, logs)) in prepared.into_iter().zip(outs) {
+                for line in &logs {
+                    on_update(AgentUpdate::ToolLog(line.clone()));
+                }
+                let (out, repeat_note) = match cleared {
+                    Err(denied) => (tools::ToolOutput::err(denied), None),
+                    Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
+                };
+                finish_call(
+                    &call,
+                    out,
+                    tools,
+                    &opts.cwd,
+                    approval,
+                    on_approval,
+                    on_update,
+                    opts.hooks,
+                    repeat_note,
+                    &mut history,
+                );
+            }
+        } else {
+            for mut call in tool_calls {
+                if crate::core::http::interrupted() {
+                    interrupted = true;
+                    history.push(Msg::ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: "interrupted by user".to_string(),
+                        is_error: true,
+                        attachments: Vec::new(),
+                    });
+                    continue;
+                }
+                let (out, repeat_note) = match prepare_call(
+                    &mut call,
+                    tools,
+                    &opts.cwd,
+                    approval,
+                    on_approval,
+                    on_update,
+                    opts.hooks,
                 ) {
-                    Err(denied) => Err(denied),
+                    Err(denied) => (tools::ToolOutput::err(denied), None),
                     Ok(cleared) => {
-                        on_update(AgentUpdate::ToolStart {
-                            name: call.name.clone(),
-                            preview: cleared.preview,
-                            diff: cleared.diff,
-                        });
                         let mut log =
                             |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
                         let out = cleared.tool.execute(&call.arguments, &opts.cwd, &mut log);
-                        repeat_note = repeats.observe(&call.name, &call.arguments);
-                        // tool_result fires once, after the match below, so
-                        // denied and executed calls notify hooks identically
-                        Ok(out)
+                        // tool_result fires once, in finish_call, so denied
+                        // and executed calls notify hooks identically
+                        (out, repeats.observe(&call.name, &call.arguments))
                     }
-                }
-            };
-            let out = match out {
-                Err(denied) => tools::ToolOutput::err(denied),
-                Ok(out) => out,
-            };
-            // action fusion: an edit/write may fuse its follow-up validation
-            // command into the same result, which removes the extra model
-            // round-trip (the command still passes the normal bash gate, so
-            // approval and the blacklist apply to it)
-            let out = fuse_then_run(out, &call, tools, &opts.cwd, approval, on_approval);
-            // extensions may replace the model-visible result (the enabler for
-            // reducer/observation plugins — see `docs/extensions.md`); the
-            // rewrite is re-capped and fail-open, so a broken plugin costs its
-            // own rewrite and never the tool's result
-            let out = rewrite_tool_result(out, opts.hooks, &call);
-            on_update(AgentUpdate::ToolEnd {
-                summary: summarize(&out.content),
-                is_error: out.is_error,
-            });
-            // the repeat reminder rides the result the model is about to
-            // read; the terminal summary above stays the tool's own output
-            let mut content = out.content;
-            if let Some(note) = repeat_note {
-                content.push_str(&note);
+                };
+                finish_call(
+                    &call,
+                    out,
+                    tools,
+                    &opts.cwd,
+                    approval,
+                    on_approval,
+                    on_update,
+                    opts.hooks,
+                    repeat_note,
+                    &mut history,
+                );
             }
-            history.push(Msg::ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                content,
-                is_error: out.is_error,
-                attachments: out.attachments,
-            });
         }
         if interrupted {
             break;
@@ -872,6 +907,99 @@ fn gate_call<'a>(
         preview,
         diff,
     })
+}
+
+/// Gate one call before execution: fire the extension `tool_call` hook (it
+/// may deny or rewrite the arguments), run the approval matrix, and emit the
+/// ToolStart chrome. `Err` carries the denial/validation text that becomes
+/// an error tool result. Shared by the serial path and the read-only parallel
+/// batch so both gate identically.
+#[allow(clippy::too_many_arguments)]
+fn prepare_call<'a>(
+    call: &mut ToolCall,
+    tools: &'a [Box<dyn tools::Tool>],
+    cwd: &std::path::Path,
+    approval: &mut approval::ApprovalConfig,
+    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    on_update: &mut dyn FnMut(AgentUpdate),
+    hooks: Option<&crate::agent::ext::Extensions>,
+) -> Result<ClearedCall<'a>, String> {
+    // extension gate: a subscribed tool_call may deny, rewrite the
+    // arguments, or allow (skip the built-in approval) before the matrix
+    // even sees them
+    let mut denied: Option<String> = None;
+    let mut extension_allowed = false;
+    match fire(
+        hooks,
+        "tool_call",
+        json!({"tool": call.name, "args": call.arguments}),
+    ) {
+        Err(reason) => denied = Some(reason),
+        Ok(Some(reply)) => {
+            if reply.get("decision").and_then(serde_json::Value::as_str) == Some("allow") {
+                extension_allowed = true;
+            }
+            if let Some(rewritten) = reply.get("args") {
+                call.arguments = rewritten.clone();
+            }
+        }
+        Ok(None) => {}
+    }
+    if let Some(reason) = denied {
+        return Err(reason);
+    }
+    let cleared = gate_call(call, tools, cwd, approval, on_approval, extension_allowed)?;
+    on_update(AgentUpdate::ToolStart {
+        name: call.name.clone(),
+        preview: cleared.preview.clone(),
+        diff: cleared.diff.clone(),
+    });
+    Ok(cleared)
+}
+
+/// Finish one call after execution: fuse an edit/write's `then_run`, let
+/// extensions rewrite the model-visible result, emit ToolEnd, and push the
+/// result onto the history. Shared by both paths so ordering is identical.
+#[allow(clippy::too_many_arguments)]
+fn finish_call(
+    call: &ToolCall,
+    out: tools::ToolOutput,
+    tools: &[Box<dyn tools::Tool>],
+    cwd: &std::path::Path,
+    approval: &mut approval::ApprovalConfig,
+    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    on_update: &mut dyn FnMut(AgentUpdate),
+    hooks: Option<&crate::agent::ext::Extensions>,
+    repeat_note: Option<String>,
+    history: &mut Vec<Msg>,
+) {
+    // action fusion: an edit/write may fuse its follow-up validation command
+    // into the same result, which removes the extra model round-trip (the
+    // command still passes the normal bash gate, so approval and the
+    // blacklist apply to it)
+    let out = fuse_then_run(out, call, tools, cwd, approval, on_approval);
+    // extensions may replace the model-visible result (the enabler for
+    // reducer/observation plugins — see `docs/extensions.md`); the rewrite is
+    // re-capped and fail-open, so a broken plugin costs its own rewrite and
+    // never the tool's result
+    let out = rewrite_tool_result(out, hooks, call);
+    on_update(AgentUpdate::ToolEnd {
+        summary: summarize(&out.content),
+        is_error: out.is_error,
+    });
+    // the repeat reminder rides the result the model is about to read; the
+    // terminal summary above stays the tool's own output
+    let mut content = out.content;
+    if let Some(note) = repeat_note {
+        content.push_str(&note);
+    }
+    history.push(Msg::ToolResult {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        content,
+        is_error: out.is_error,
+        attachments: out.attachments,
+    });
 }
 
 #[cfg(test)]
@@ -1428,5 +1556,134 @@ mod tests {
             "the reminder rides the third result: {}",
             results[2]
         );
+    }
+
+    /// A read-tier probe that records the thread it ran on, so a batched
+    /// read-only turn can be shown to execute off the calling thread.
+    struct ProbeTool(std::sync::Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>);
+    impl tools::Tool for ProbeTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn tier(&self) -> super::approval::Tier {
+            super::approval::Tier::Read
+        }
+        fn description(&self) -> &str {
+            "probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+        fn preview(&self, _args: &serde_json::Value) -> String {
+            "probe".into()
+        }
+        fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _cwd: &std::path::Path,
+            _log: &mut dyn FnMut(&str),
+        ) -> tools::ToolOutput {
+            self.0.lock().unwrap().push(std::thread::current().id());
+            tools::ToolOutput::ok("probed")
+        }
+    }
+
+    /// Two read-only calls in one assistant message run on scope threads
+    /// (not the caller's) and their results still land in call order.
+    #[test]
+    fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for (n, conn) in listener.incoming().flatten().enumerate() {
+                let mut c = conn;
+                read_request(&mut c);
+                let body = if n == 0 {
+                    let first = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[
+                        {"index":0,"id":"c1","function":{"name":"probe","arguments":"{}"}},
+                        {"index":1,"id":"c2","function":{"name":"probe","arguments":"{}"}}
+                    ]}}]})
+                    .to_string();
+                    format!(
+                        "data: {first}\n\n\
+                         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                         data: [DONE]\n\n"
+                    )
+                } else {
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string()
+                };
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                if n >= 1 {
+                    break;
+                }
+            }
+        });
+        use std::io::Write as _;
+
+        let model = crate::providers::ResolvedModel {
+            provider_name: "mock".into(),
+            kind: "openai-compat".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: Some("sk-x".into()),
+            model_id: "m".into(),
+            options: vec![],
+        };
+        let threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(ProbeTool(threads.clone()))];
+        let opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 0,
+            token_budget: 0,
+            stream: true,
+            compact: None,
+            reasoning: None,
+            hooks: None,
+        };
+        let caller = std::thread::current().id();
+        let mut approval = approval::ApprovalConfig::default();
+        let outcome = run_agent(
+            &model,
+            &tools,
+            "go",
+            vec![],
+            vec![],
+            &opts,
+            &mut approval,
+            &mut |_| {},
+            &mut |_| ApprovalResponse::Deny,
+            &mut || vec![],
+        )
+        .expect("a batched read-only turn is not a failure");
+        server.join().unwrap();
+        assert_eq!(outcome.final_text, "done");
+        // both calls ran, each on its own scope thread — never the caller's
+        let ids = threads.lock().unwrap().clone();
+        assert_eq!(ids.len(), 2, "both calls executed");
+        assert!(
+            ids.iter().all(|id| *id != caller),
+            "read-only calls must not run on the calling thread"
+        );
+        assert_ne!(ids[0], ids[1], "the two calls ran concurrently");
+        // results stay in call order
+        let results: Vec<(&str, &str)> = outcome
+            .history
+            .iter()
+            .filter_map(|m| match m {
+                Msg::ToolResult {
+                    call_id, content, ..
+                } => Some((call_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [("c1", "probed"), ("c2", "probed")]);
     }
 }
