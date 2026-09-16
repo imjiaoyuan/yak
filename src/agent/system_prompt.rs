@@ -75,6 +75,9 @@ pub fn build_system_prompt(
                        specific symbol or string, then read only the relevant files or ranges — do \
                        not dump whole files or walk the whole tree.\n\
                      - Do not re-read files or re-run commands you have already run this task.\n\
+                     - Batch independent lookups: when several reads or searches do not depend on \
+                       each other, send them as multiple tool calls in ONE message rather than one \
+                       call per turn — they run concurrently and you save a round-trip each.\n\
                      \n\
                      \n\
                      Changing files\n\
@@ -202,6 +205,10 @@ mod tests {
         assert!(
             out.contains("cargo test`"),
             "a cargo project names its verify command: {out}"
+        );
+        assert!(
+            out.contains("Batch independent lookups"),
+            "the prompt must ask the model to batch independent reads: {out}"
         );
         // stable across builds in the same directory (the prefix cache)
         let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();
