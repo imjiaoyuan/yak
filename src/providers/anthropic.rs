@@ -194,6 +194,10 @@ pub fn build_body(
             last["cache_control"] = json!({"type": "ephemeral"});
         }
         body["tools"] = Value::Array(tools);
+        // no parallel flag here: Anthropic allows parallel tool use by
+        // default (`tool_choice.disable_parallel_tool_use` is false), unlike
+        // the OpenAI-compat wire which wants an explicit
+        // `parallel_tool_calls: true`.
     }
     super::apply_options(&mut body, &m.options);
     // effort level → thinking budget; applied after the -o loop so a

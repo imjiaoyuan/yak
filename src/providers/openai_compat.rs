@@ -199,6 +199,13 @@ pub fn build_body(
                 })
                 .collect(),
         );
+        // Explicitly allow the model to batch independent tool calls into one
+        // assistant message (other agents both send this). Without it, a
+        // gateway may let the model emit only one call per turn, so an
+        // exploratory task costs a full round-trip per lookup. The agent loop
+        // runs read-only calls from one batch concurrently. Applied before the
+        // -o loop so a provider that must opt out can override it.
+        body["parallel_tool_calls"] = json!(true);
     } else if messages.iter().any(|m| m["role"] == "tool") {
         // proxies fronting Anthropic reject tool-result history without the
         // key — checked on the serialized messages so a synthetic orphan
@@ -356,6 +363,19 @@ mod tests {
         crate::providers::testutil::model(kind)
     }
     use serde_json::json;
+
+    #[test]
+    fn tools_declare_parallel_calls_but_a_toolless_body_does_not() {
+        // the model may batch independent reads into one message; the flag is
+        // what lets a gateway emit more than one tool call per turn, and the
+        // agent loop executes those read-only calls concurrently.
+        let tools = [tool_def()];
+        let body = build_body(&model("openai-compat"), &input(&[], &tools), false).unwrap();
+        assert_eq!(body["parallel_tool_calls"], json!(true));
+        // a toolless request must not carry the key: some gateways reject it
+        let body = build_body(&model("openai-compat"), &input(&[], &[]), false).unwrap();
+        assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+    }
 
     #[test]
     fn pdf_attachment_rides_a_file_block() {
