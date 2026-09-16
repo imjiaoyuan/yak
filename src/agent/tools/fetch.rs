@@ -17,9 +17,7 @@ impl Tool for FetchTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Fetch a URL and return its content. HTML pages are stripped to readable text \
-         (title first); JSON, XML and plain text pass through as-is. The body is capped \
-         at 256KB and the final URL is noted when a redirect moved the fetch."
+        "Fetch a URL as text (HTML stripped, 256 KB cap); JSON, XML and plain text pass through."
     }
     fn parameters(&self) -> Value {
         json!({

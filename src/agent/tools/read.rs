@@ -22,10 +22,8 @@ impl Tool for ReadTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Read text files. Pass `path` for one file, or `paths` (up to 5) to read several in one \
-         call — prefer batching over repeated single reads. Text files return lines with line \
-         numbers optionally sliced by offset/limit; image files (png/jpg/gif/webp/bmp) are sent \
-         to the model as a vision attachment. Other binary formats are refused with a hint at \
+        "Read file contents: `path` for one file or `paths` (up to 5) for several. `offset`/`limit` \
+         slice lines; images become vision input. Other binary formats are refused with a hint at \
          local tooling (pdftotext, samtools, ...)."
     }
     fn parameters(&self) -> Value {

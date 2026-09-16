@@ -9,9 +9,7 @@ use super::*;
 pub(super) struct PlanTool;
 
 const DESCRIPTION: &str = "Update the task plan: a list of steps, each with a `step` and a \
-    `status` (`pending`, `in_progress`, or `completed`). At most one step may be `in_progress` \
-    at a time; mark a step completed as soon as it is done and the next one in_progress. Skip \
-    the plan for straightforward tasks, and never make a single-step plan.";
+    `status` (`pending`, `in_progress`, `completed`); at most one `in_progress` at a time.";
 
 impl Tool for PlanTool {
     fn name(&self) -> &str {

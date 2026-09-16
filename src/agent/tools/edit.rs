@@ -11,9 +11,8 @@ impl Tool for EditTool {
         Tier::Write
     }
     fn description(&self) -> &str {
-        "Apply text edits to a file. Each oldText must match exactly once in the original; \
-         a whitespace-flexible pass (trailing spaces, CRLF, smart quotes) rescues a miss. \
-         All edits match the original text, not each other's results."
+        "Make targeted text edits. Each `oldText` must match exactly once in the original (a \
+         whitespace-flexible pass rescues a miss); all edits match the original, not one another."
     }
     fn parameters(&self) -> Value {
         json!({

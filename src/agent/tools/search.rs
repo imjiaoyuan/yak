@@ -180,7 +180,7 @@ impl Tool for GlobTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "List files whose paths match a glob pattern (e.g. src/**/*.rs). Respects .gitignore."
+        "Find files by glob pattern (e.g. src/**/*.rs). Respects .gitignore."
     }
     fn parameters(&self) -> Value {
         json!({

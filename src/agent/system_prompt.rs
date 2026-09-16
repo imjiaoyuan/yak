@@ -73,9 +73,9 @@ pub fn build_system_prompt(
                        restate the plan — the UI shows it.\n\
                      \n\
                      Search & reading\n\
-                     - Prefer `rg`/`rg --files` over grep (faster, regex); use the grep tool ONLY \
-                       when rg is absent.\n\
-                     - Locate before reading: glob/ls → grep/rg the symbol → read ONLY the relevant \
+                     - Inspect with the tools: `grep` (text; `regex: true` for patterns), `glob` \
+                       (files), `ls`, `read`. Keep `bash` for build, test and run.\n\
+                     - Locate before reading: glob/ls → grep the symbol → read ONLY the relevant \
                        range. NEVER dump whole files or walk the tree.\n\
                      - Batch independent lookups as multiple tool calls in ONE message — they run \
                        concurrently. NEVER re-read or re-run what you already have this task.\n\

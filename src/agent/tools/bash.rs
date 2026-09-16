@@ -10,8 +10,8 @@ impl Tool for BashTool {
         Tier::Exec
     }
     fn description(&self) -> &str {
-        "Run a shell command in the working directory. Output merges stdout and \
-         stderr; nonzero exits are reported as errors. Use for anything the file tools cannot do."
+        "Run a shell command (build, test, run). Output merges stdout and stderr; a nonzero exit \
+         is an error."
     }
     fn parameters(&self) -> Value {
         json!({

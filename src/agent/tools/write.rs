@@ -19,7 +19,7 @@ impl Tool for WriteTool {
         Tier::Write
     }
     fn description(&self) -> &str {
-        "Write a file, creating parent directories as needed. Overwrites existing content."
+        "Create or overwrite a file (parent directories are created)."
     }
     fn parameters(&self) -> Value {
         json!({

@@ -14,9 +14,8 @@ impl Tool for RecallTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Page back a tool result that context compaction replaced with a placeholder. Pass the \
-         observation id from the placeholder marker and the char offset to start at; the reply's \
-         next_offset continues the read."
+        "Read back a tool result compaction replaced with a placeholder: pass the observation id \
+         and a char `offset`; the reply's `next_offset` continues."
     }
     fn parameters(&self) -> Value {
         json!({
