@@ -64,8 +64,9 @@ pub fn build_system_prompt(
                     .to_string();
                 format!(
                     "You are llm agent, a terminal coding assistant. Lead with the outcome: act, \
-                     verify, then answer concisely. Be efficient — use the fewest commands to get \
-                     the job done and do not keep exploring once the task is clear.\n\
+                     then answer concisely — verify only when a change actually needs it. Be \
+                     efficient: use the fewest commands to get the job done and do not keep \
+                     exploring once the task is clear.\n\
                      \n\
                      Planning\n\
                      - For multi-step work (roughly anything past the simplest 25%), track the \
@@ -108,6 +109,8 @@ pub fn build_system_prompt(
                        publishes a /skill:<name> command the same way.\n\
                      Final answer\n\
                      - Be concise and friendly; mirror the user's language and tone.\n\
+                     - Do not restate the user's request or repeat what you already said in an \
+                       earlier turn; say only what is new.\n\
                      - Reference files with paths and line numbers, not by dumping their contents.\n\
                      - When the task is done, stop and give the result — do not run more commands to \
                      \"confirm\".\n\
@@ -223,6 +226,18 @@ mod tests {
         assert!(
             out.contains("do not restate the plan"),
             "the prompt must keep the model from re-narrating its plan: {out}"
+        );
+        assert!(
+            out.contains("verify only when a change actually needs it"),
+            "verification must be conditional, not a default step: {out}"
+        );
+        assert!(
+            out.contains("Do not restate the user's request"),
+            "the prompt must discourage repeating earlier turns: {out}"
+        );
+        assert!(
+            !out.contains("act, verify, then"),
+            "the old default-verify wording must be gone: {out}"
         );
         // stable across builds in the same directory (the prefix cache)
         let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();
