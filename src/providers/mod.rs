@@ -385,6 +385,11 @@ pub struct PromptInput<'a> {
     pub tools: &'a [ToolDef],
     /// reasoning effort level (minimal..xhigh); None sends no parameter
     pub reasoning: Option<&'a str>,
+    /// an optional trailing context note (the reference style budget awareness); the
+    /// adapters append it as a final user turn. It is request-only, never
+    /// persisted, and sits at the very end so it does not disturb the
+    /// prompt-cache prefix.
+    pub note: Option<&'a str>,
 }
 
 /// The reasoning-effort levels accepted by --thinking / /thinking.
@@ -613,6 +618,7 @@ pub(crate) mod testutil {
             attachments: &[],
             tools,
             reasoning: None,
+            note: None,
         }
     }
 

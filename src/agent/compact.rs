@@ -165,6 +165,7 @@ pub fn summarize(
         attachments: &[],
         tools: &[],
         reasoning: None,
+        note: None,
     };
     let mut text = String::new();
     model.stream(&input, true, &mut |event| {

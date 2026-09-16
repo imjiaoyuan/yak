@@ -157,12 +157,14 @@ pub fn build_body(
             "content": super::user_content(m.supports_images(), input.prompt, input.attachments, attachment_block)?
         }));
     }
-    // breakpoint on the conversation tip (multi-turn pattern: the marker
-    // rides forward one turn each request; earlier markers stay valid).
-    // First-round-only requests skip it: a one-shot prompt is never resent,
-    // so marking it would buy a cache write nothing ever reads
+    // the reference style budget note closes the request as its own turn. It
+    // rides AFTER the conversation-tip breakpoint: it is volatile, so the
+    // cached tip must stay on the real conversation, not on the note.
     if !input.history.is_empty() {
         mark_conversation_tip(&mut messages);
+    }
+    if let Some(note) = input.note {
+        messages.push(json!({"role": "user", "content": note}));
     }
 
     let mut body = json!({
@@ -492,6 +494,25 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0]["tool_use_id"], "t1");
         assert_eq!(results[1]["is_error"], true);
+    }
+
+    #[test]
+    fn a_note_rides_after_the_conversation_tip() {
+        let history = vec![Msg::user("hi")];
+        let mut i = input(&history, &[]);
+        i.note = Some("<context>10 tokens left</context>");
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"], "<context>10 tokens left</context>");
+        // the cache breakpoint stays on the real prompt, not the note
+        let tip = &msgs[msgs.len() - 2];
+        assert_eq!(
+            tip["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "{tip}"
+        );
     }
 
     #[test]

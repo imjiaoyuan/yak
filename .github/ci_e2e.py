@@ -112,9 +112,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         seen["model"] = body.get("model")
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
         if messages:
-            seen["last_prompt"] = messages[-1].get("content", "")
+            # the agent appends a volatile `<context>…</context>` budget note
+            # as the final turn; the real prompt is the message before it
+            def prompt_of(msgs):
+                last = msgs[-1]
+                if isinstance(last.get("content"), str) and last["content"].startswith(
+                    "<context>"
+                ):
+                    last = msgs[-2] if len(msgs) > 1 else last
+                return last.get("content", "")
+
+            seen["last_prompt"] = prompt_of(messages)
             seen["last_messages"] = messages
-            seen.setdefault("prompts", []).append(messages[-1].get("content", ""))
+            seen.setdefault("prompts", []).append(prompt_of(messages))
         if seen.get("tools") and any(
             t.get("function", {}).get("name") == "wordcount"
             for t in body.get("tools", [])
@@ -627,10 +637,13 @@ def main():
     p2 = run([binary, "-c", "-m", "mock-ant/m-ant", "two"], env, stdin=subprocess.DEVNULL)
     assert p2.returncode == 0, f"anthropic continue rc={p2.returncode} err={p2.stderr[-300:]!r}"
     msgs = seen["ant_bodies"][2]["messages"]
-    assert isinstance(msgs[-1]["content"], list) \
-        and msgs[-1]["content"][-1].get("cache_control", {}).get("type") == "ephemeral", \
-        f"conversation tip unmarked: {json.dumps(msgs[-1])[:300]}"
-    assert not any("cache_control" in json.dumps(m) for m in msgs[:-1]), \
+    # the final turn is the volatile budget note; the tip breakpoint sits on
+    # the real prompt just before it
+    tip = msgs[-2] if len(msgs) > 1 and "<context>" in str(msgs[-1].get("content")) else msgs[-1]
+    assert isinstance(tip["content"], list) \
+        and tip["content"][-1].get("cache_control", {}).get("type") == "ephemeral", \
+        f"conversation tip unmarked: {json.dumps(tip)[:300]}"
+    assert not any("cache_control" in json.dumps(m) for m in msgs if m is not tip), \
         f"marker leaked onto earlier turns: {json.dumps(msgs)[:300]}"
 
     # unknown words are agent tasks now, and the agent always sends tools

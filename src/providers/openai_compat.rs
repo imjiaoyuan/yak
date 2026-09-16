@@ -178,6 +178,11 @@ pub fn build_body(
             "content": super::user_content(m.supports_images(), input.prompt, input.attachments, attachment_block)?
         }));
     }
+    // the reference style budget note closes the request as its own turn: it is
+    // volatile, so it sits after everything cached and never enters history
+    if let Some(note) = input.note {
+        messages.push(json!({"role": "user", "content": note}));
+    }
 
     let mut body = json!({
         "model": m.model_id,
@@ -375,6 +380,20 @@ mod tests {
         // a toolless request must not carry the key: some gateways reject it
         let body = build_body(&model("openai-compat"), &input(&[], &[]), false).unwrap();
         assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+    }
+
+    #[test]
+    fn a_note_closes_the_request_as_its_own_turn() {
+        let mut i = input(&[], &[]);
+        i.note = Some("<context>10 tokens left in this context window</context>");
+        let body = build_body(&model("openai-compat"), &i, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        // the prompt, then the volatile budget note as the final turn
+        assert_eq!(msgs.last().unwrap()["role"], "user");
+        assert_eq!(
+            msgs.last().unwrap()["content"],
+            "<context>10 tokens left in this context window</context>"
+        );
     }
 
     #[test]

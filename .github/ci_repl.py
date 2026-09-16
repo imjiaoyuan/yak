@@ -54,7 +54,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         msgs = body.get("messages", [])
         if msgs:
-            seen.setdefault("prompts", []).append(msgs[-1].get("content", ""))
+            # the agent appends a volatile `<context>…</context>` budget note
+            # as the final turn; the real prompt is the message before it
+            last = msgs[-1]
+            if isinstance(last.get("content"), str) and last["content"].startswith("<context>"):
+                last = msgs[-2] if len(msgs) > 1 else last
+            seen.setdefault("prompts", []).append(last.get("content", ""))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()

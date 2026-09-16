@@ -398,6 +398,11 @@ pub fn run_agent(
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
         // here re-bills the whole history at cache-miss price
+        // the reference style budget awareness: a terse note on how much room is
+        // left rides the end of every request, so the model can decide to
+        // wrap up instead of exploring indefinitely. Request-only: it never
+        // enters the history or the prompt-cache prefix.
+        let note = context_note(&history, opts, spent_input);
         let input = PromptInput {
             system: opts.system,
             history: &history,
@@ -405,6 +410,7 @@ pub fn run_agent(
             attachments: pending_attachments,
             tools: &tool_defs,
             reasoning: opts.reasoning.as_deref(),
+            note: note.as_deref(),
         };
 
         let mut text = String::new();
@@ -726,6 +732,24 @@ pub fn run_agent(
 
 /// Terminal preview of a tool result: the first ten non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
+/// Budget awareness: a terse note reporting how much room the
+/// task has left, in context-window tokens and (when a task budget is set)
+/// input tokens. `None` when neither is known. Kept short and factual — it
+/// exists so the model can choose to wrap up, not to make it narrate.
+fn context_note(history: &[Msg], opts: &AgentOptions, spent_input: u64) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(cfg) = opts.compact.as_ref() {
+        let used = compact::estimate_tokens(history, None);
+        let left = cfg.context_window.saturating_sub(used);
+        parts.push(format!("{left} tokens left in this context window"));
+    }
+    if opts.token_budget > 0 {
+        let left = opts.token_budget.saturating_sub(spent_input);
+        parts.push(format!("{left} of this task's input-token budget left"));
+    }
+    (!parts.is_empty()).then(|| format!("<context>{}</context>", parts.join("; ")))
+}
+
 fn summarize(content: &str) -> String {
     /// lines shown in the user-facing tool-result preview (matches the reference's
     /// collapsed default); the model still receives the full output
@@ -1685,5 +1709,47 @@ mod tests {
             })
             .collect();
         assert_eq!(results, [("c1", "probed"), ("c2", "probed")]);
+    }
+
+    /// Budget awareness: the note reports the context-window room
+    /// and (when set) the task's input-token room, wrapped so the model reads
+    /// it as a system note rather than a user turn.
+    #[test]
+    fn context_note_reports_the_room_left() {
+        let mut opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 0,
+            token_budget: 0,
+            stream: false,
+            compact: Some(compact::CompactConfig {
+                context_window: 100_000,
+                reserve_tokens: 0,
+                keep_recent_tokens: 0,
+            }),
+            reasoning: None,
+            hooks: None,
+        };
+        let history = vec![Msg::user("hi")];
+        let note = context_note(&history, &opts, 0).unwrap();
+        assert!(
+            note.starts_with("<context>") && note.ends_with("</context>"),
+            "{note}"
+        );
+        assert!(
+            note.contains("tokens left in this context window"),
+            "{note}"
+        );
+        // a task budget adds its own clause
+        opts.token_budget = 10_000;
+        let note = context_note(&history, &opts, 3_000).unwrap();
+        assert!(
+            note.contains("7000 of this task's input-token budget left"),
+            "{note}"
+        );
+        // neither a window nor a budget: no note at all
+        opts.compact = None;
+        opts.token_budget = 0;
+        assert!(context_note(&history, &opts, 0).is_none());
     }
 }
