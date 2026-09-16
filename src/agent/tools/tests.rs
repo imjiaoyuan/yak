@@ -677,3 +677,50 @@ fn read_tool_offset_past_end_and_empty_file() {
     assert!(out.content.starts_with("cannot read"), "{}", out.content);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_registry_exposes_update_plan_as_a_read_tier_tool() {
+    let tools = builtin_tools();
+    let plan = tools
+        .iter()
+        .find(|t| t.name() == "update_plan")
+        .expect("mounted");
+    assert_eq!(plan.tier(), Tier::Read, "planning touches nothing");
+    // the shallow shared validator only needs `plan` to be an array; the
+    // tool's own execute does the per-item checks
+    assert!(validate(&plan.parameters(), &json!({"plan": []})).is_ok());
+    assert!(validate(&plan.parameters(), &json!({})).is_err());
+}
+
+#[test]
+fn update_plan_renders_the_checklist_and_bounces_bad_plans() {
+    let tools = builtin_tools();
+    let plan = tools.iter().find(|t| t.name() == "update_plan").unwrap();
+    let run =
+        |args: serde_json::Value| plan.execute(&args, std::path::Path::new("."), &mut |_: &str| {});
+    let ok = run(json!({"plan": [
+        {"step": "read the parser", "status": "completed"},
+        {"step": "fix the offset bug", "status": "in_progress"},
+        {"step": "add a test", "status": "pending"}
+    ]}));
+    assert!(!ok.is_error, "{}", ok.content);
+    assert_eq!(
+        ok.content,
+        "[x] read the parser\n[>] fix the offset bug\n[ ] add a test"
+    );
+    // the chrome preview is one line: counts plus the active step
+    assert_eq!(
+        plan.preview(&json!({"plan": [{"step": "fix the offset bug", "status": "in_progress"}]})),
+        "1 step · 0 done · now: fix the offset bug"
+    );
+    // two in-progress steps violate the one-at-a-time rule
+    let err = run(json!({"plan": [
+        {"step": "a", "status": "in_progress"},
+        {"step": "b", "status": "in_progress"}
+    ]}));
+    assert!(err.is_error);
+    assert!(err.content.contains("at most one"), "{}", err.content);
+    // an empty plan and an unknown status are refused too
+    assert!(run(json!({"plan": []})).is_error);
+    assert!(run(json!({"plan": [{"step": "a", "status": "done"}]})).is_error);
+}

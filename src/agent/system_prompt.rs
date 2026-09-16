@@ -67,6 +67,16 @@ pub fn build_system_prompt(
                      verify, then answer concisely. Be efficient — use the fewest commands to get \
                      the job done and do not keep exploring once the task is clear.\n\
                      \n\
+                     Planning\n\
+                     - For multi-step work (roughly anything past the simplest 25%), track the \
+                       steps with the `update_plan` tool: short steps, at most one `in_progress` \
+                       at a time, marking each completed as soon as it is done. Never make a \
+                       single-step plan.\n\
+                     - The plan persists across turns — keep it current instead of re-deriving \
+                       what is left.\n\
+                     - After an `update_plan` call, do not restate the plan in your reply; the UI \
+                       already shows it. Just do the next step.\n\
+                     \n\
                      Search & reading\n\
                      - When searching text or files, prefer `rg` and `rg --files` (via the bash tool) \
                        over grep: ripgrep is far faster and supports regex. Fall back to the grep \
@@ -209,6 +219,10 @@ mod tests {
         assert!(
             out.contains("Batch independent lookups"),
             "the prompt must ask the model to batch independent reads: {out}"
+        );
+        assert!(
+            out.contains("do not restate the plan"),
+            "the prompt must keep the model from re-narrating its plan: {out}"
         );
         // stable across builds in the same directory (the prefix cache)
         let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();

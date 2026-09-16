@@ -94,8 +94,12 @@ the session. `/yolo` flips the mode on and off mid-session.
 
 ### Tools
 
-Nine built-ins: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `recall`. The
-agent picks them itself; `--tools read,grep` narrows the set.
+Ten built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`,
+`recall`. The agent picks them itself; `--tools read,grep` narrows the set.
+
+`update_plan` is the agent's own checklist for multi-step work: a list of steps, each `pending`,
+`in_progress` or `completed`, with at most one in progress. Marking a step done as it finishes keeps
+a long task from losing track of what is left; it touches nothing, so it never asks for approval.
 
 The `read` tool pages through large files instead of loading them whole. Every answer starts with a
 header naming the file, its size and the range shown; `offset` and `limit` walk through it in

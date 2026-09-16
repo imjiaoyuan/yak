@@ -15,6 +15,7 @@ use bash::BashTool;
 use edit::EditTool;
 use fetch::FetchTool;
 use fs::LsTool;
+use plan::PlanTool;
 use read::ReadTool;
 use recall::RecallTool;
 use search::{GlobTool, GrepTool};
@@ -103,9 +104,10 @@ pub(crate) const THEN_RUN_DESCRIPTION: &str = "Optional command to run next, in 
      mutation succeeds — e.g. run, build, test or restart it. Skipped when the mutation fails; a \
      non-zero exit is reported but keeps the change.";
 
-/// The built-in tool registry: nine handwritten tools.
+/// The built-in tool registry: ten handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
+        Box::new(PlanTool),
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
@@ -301,6 +303,7 @@ mod bash;
 mod edit;
 mod fetch;
 mod fs;
+mod plan;
 mod read;
 mod recall;
 mod search;
