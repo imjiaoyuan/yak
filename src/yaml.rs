@@ -264,7 +264,19 @@ fn parse_map(lines: &[&str], pos: &mut usize, base: usize) -> Result<Yaml, YamlE
                     parse_block(lines, pos, base + 1)?
                 }
             } else {
-                parse_scalar(value_raw)
+                // a non-empty plain scalar may continue on indented lines
+                // (`description: a\n  b`): fold them in instead of leaving
+                // them unparsed, which would drop the whole frontmatter and
+                // silently blank the skill's trigger.
+                let mut s = value_raw.to_string();
+                if text_block_ahead(lines, *pos, base + 1)
+                    && let Yaml::Str(more) = parse_plain_block(lines, pos, base + 1)
+                    && !more.is_empty()
+                {
+                    s.push(' ');
+                    s.push_str(&more);
+                }
+                parse_scalar(&s)
             };
         pairs.push((key, value));
     }
@@ -456,6 +468,21 @@ items:
             Some("first line second line")
         );
         assert_eq!(y.get("other").unwrap().as_str(), Some("y"));
+    }
+
+    #[test]
+    fn plain_scalar_continues_on_indented_lines() {
+        // the shape a hand-written SKILL.md often uses: `description: a`
+        // followed by indented continuation lines. Without folding these
+        // lines the whole frontmatter fails and the trigger is lost.
+        let text =
+            "name: pdf\ndescription: Extract tables\n  from scanned PDFs\n  and CSV exports\n";
+        let y = parse(text).unwrap();
+        assert_eq!(
+            y.get("description").unwrap().as_str(),
+            Some("Extract tables from scanned PDFs and CSV exports")
+        );
+        assert_eq!(y.get("name").unwrap().as_str(), Some("pdf"));
     }
 
     #[test]
