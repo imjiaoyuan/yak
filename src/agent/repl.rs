@@ -108,7 +108,13 @@ pub fn repl(
             continue;
         }
         if text.starts_with('/') {
-            if repl_command(&mut session, &mut settings, text, &mut skills) {
+            if repl_command(
+                &mut session,
+                &mut settings,
+                text,
+                &mut skills,
+                &mut plugin_fp,
+            ) {
                 break;
             }
             continue;
@@ -755,6 +761,7 @@ fn repl_command(
     settings: &mut crate::agent::settings::AgentSettings,
     text: &str,
     skills: &mut Vec<crate::agent::skills::SkillDef>,
+    plugin_fp: &mut u64,
 ) -> bool {
     let (cmd, arg) = match text.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
@@ -1068,6 +1075,9 @@ fn repl_command(
             *settings = crate::agent::settings::load();
             session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
             session.rebuild_tools();
+            // the manual command settles the live-reload baseline too, or the
+            // next task boundary re-detects the same change and redoes this
+            *plugin_fp = crate::agent::ext::plugin_fingerprint(&session.cwd);
             eprintln!(
                 "{}reloaded skills, plugin tools and settings{}",
                 crate::theme::err().dim,
