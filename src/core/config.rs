@@ -223,8 +223,6 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 // the default model — the "models" object in config.json:
 // {"default": "provider/model", "thinking": "high"}. One default serves
 // every mode (prompt/agent); -m and LLM_MODEL override per run.
-// Legacy per-mode entries migrate on read: the prompt entry wins, then any
-// set mode; the first write collapses the file onto the new shape.
 
 /// The shared default model every mode runs on.
 pub fn default_model() -> Option<String> {
@@ -233,24 +231,11 @@ pub fn default_model() -> Option<String> {
 }
 
 fn default_model_from(value: &serde_json::Value) -> Option<String> {
-    if let Some(m) = value
+    value
         .get("models")
         .and_then(|m| m.get("default"))
         .and_then(|m| m.as_str())
-    {
-        return Some(m.to_string());
-    }
-    for mode in ["prompt", "agent"] {
-        if let Some(m) = value
-            .get("models")
-            .and_then(|m| m.get(mode))
-            .and_then(|e| e.get("model"))
-            .and_then(|m| m.as_str())
-        {
-            return Some(m.to_string());
-        }
-    }
-    None
+        .map(str::to_string)
 }
 
 /// The global reasoning level riding the default model.
@@ -260,38 +245,20 @@ pub fn default_thinking() -> Option<String> {
 }
 
 fn default_thinking_from(value: &serde_json::Value) -> Option<String> {
-    if let Some(t) = value
+    value
         .get("models")
         .and_then(|m| m.get("thinking"))
         .and_then(|t| t.as_str())
-    {
-        return Some(t.to_string());
-    }
-    for mode in ["prompt", "agent"] {
-        if let Some(t) = value
-            .get("models")
-            .and_then(|m| m.get(mode))
-            .and_then(|e| e.get("thinking"))
-            .and_then(|t| t.as_str())
-        {
-            return Some(t.to_string());
-        }
-    }
-    None
+        .map(str::to_string)
 }
 
-/// Write `models.default`, collapsing any legacy per-mode entries — the
-/// first write moves an old install onto the new shape. Callers report
-/// errors themselves (`/model` in the REPL reports write failures).
+/// Write `models.default`.
 pub fn try_set_default_model(model: &str) -> std::io::Result<()> {
     edit_mode_default(|root| set_default_model_in(root, model))
 }
 
 fn set_default_model_in(value: &mut serde_json::Value, model: &str) {
     let map = models_map_mut(value);
-    for mode in ["prompt", "agent"] {
-        map.remove(mode);
-    }
     map.insert(
         "default".to_string(),
         serde_json::Value::String(model.to_string()),
@@ -330,7 +297,7 @@ pub fn clear_default_for(provider: &str) -> std::io::Result<bool> {
     Ok(cleared)
 }
 
-/// The pure edit: drop the default/thinking/mode entries when they point at
+/// The pure edit: drop the default/thinking entries when they point at
 /// `provider`. Returns true when anything was removed.
 fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
     let prefix = format!("{provider}/");
@@ -340,9 +307,6 @@ fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
         {
             map.remove("default");
             map.remove("thinking");
-            for mode in ["prompt", "agent"] {
-                map.remove(mode);
-            }
         }
         true
     } else {
@@ -474,21 +438,14 @@ mod default_model_tests {
     use serde_json::json;
 
     #[test]
-    fn set_default_model_collapses_legacy_per_mode_entries() {
+    fn set_default_model_writes_the_default_and_keeps_siblings() {
         let mut v = json!({
             "providers": {"p": {"kind": "openai-compat"}},
-            "models": {
-                "prompt": {"model": "old/a", "thinking": "high"},
-                "agent": {"model": "old/b"},
-                "options": {}
-            }
+            "models": {"options": {}}
         });
         set_default_model_in(&mut v, "new/m");
         assert_eq!(v["models"]["default"], json!("new/m"));
-        for mode in ["prompt", "agent"] {
-            assert!(v["models"].get(mode).is_none(), "{mode} survived");
-        }
-        // the options table is a sibling, not a mode: it stays
+        // the options table is a sibling, not the default: it stays
         assert!(v["models"].get("options").is_some());
         assert_eq!(v["providers"]["p"]["kind"], json!("openai-compat"));
     }
@@ -504,19 +461,13 @@ mod default_model_tests {
     }
 
     #[test]
-    fn legacy_per_mode_defaults_migrate_on_read() {
-        // the new single-default shape wins
+    fn default_model_reads_the_single_default() {
         let root = serde_json::json!({"models": {"default": "a/x", "thinking": "high"}});
         assert_eq!(default_model_from(&root).as_deref(), Some("a/x"));
         assert_eq!(default_thinking_from(&root).as_deref(), Some("high"));
-        // legacy per-mode entries: prompt wins, then agent
-        let root = serde_json::json!({"models": {
-            "prompt": {"model": "p/x"}, "agent": {"model": "a/y", "thinking": "low"}
-        }});
-        assert_eq!(default_model_from(&root).as_deref(), Some("p/x"));
-        assert_eq!(default_thinking_from(&root).as_deref(), Some("low"));
         // nothing set anywhere
         assert_eq!(default_model_from(&serde_json::json!({})), None);
+        assert_eq!(default_thinking_from(&serde_json::json!({})), None);
     }
 
     #[test]

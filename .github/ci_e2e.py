@@ -410,7 +410,7 @@ def main():
                         "models": ["m-sub"],
                     },
                 },
-                "models": {"prompt": {"model": "mock/m-a"}, "agent": {"model": "mock/m-a"}},
+                "models": {"default": "mock/m-a"},
             },
             f,
         )

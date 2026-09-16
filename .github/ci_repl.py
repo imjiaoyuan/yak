@@ -192,7 +192,7 @@ def main():
                         "models": ["m-a"],
                     }
                 },
-                "models": {"agent": {"model": "mock/m-a"}},
+                "models": {"default": "mock/m-a"},
             },
             f,
         )

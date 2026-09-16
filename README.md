@@ -373,8 +373,8 @@ Everything lives under `~/.llm`:
 
 `/model` picks the model and its thinking depth, saved for future sessions; `/thinking` changes the
 depth alone. Both live in the `models` object of config.json. `-m` and `LLM_MODEL` override per run,
-and `--thinking` beats the stored depth. Configs from older versions migrate on first read; if the
-saved model no longer resolves, you get a warning and a fallback.
+and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning
+and a fallback.
 
 ## Plugins
 
