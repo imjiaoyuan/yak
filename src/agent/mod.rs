@@ -384,6 +384,16 @@ pub fn run_agent(
         // attachments older than the last few messages become notes now,
         // before the request is built (the idempotent pass is cheap)
         compact::trim_old_attachments(&mut history);
+        // the same reasoning one step further: a huge tool result from
+        // earlier in the task is re-sent every single round, so an outright
+        // dump in the stale prefix is projected down now rather than waited
+        // for until compaction pressure. Recent results stay verbatim, and
+        // the pass is idempotent, so the notice fires at most once per
+        // result (a resume replays the same archived id)
+        let stale = compact::prune_stale_tool_results(&mut history, &compact::observation_dir());
+        if stale.count > 0 {
+            on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
+        }
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix

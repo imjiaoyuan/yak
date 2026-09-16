@@ -23,6 +23,13 @@ use write::WriteTool;
 /// Shared truncation constants (the reference's values).
 pub(crate) const MAX_LINES: usize = 2000;
 pub(crate) const MAX_BYTES: usize = 50 * 1024;
+/// Token-estimate cap on one tool result, applied after the byte cut. The
+/// byte cap alone is not a bound on cost: 50KB of ASCII is ~12k tokens, but
+/// 50KB of Chinese is ~17k (see `compact::text_tokens`, which counts CJK at
+/// ~1 token/char), and that result is re-sent every subsequent round. The
+/// cut takes from the front so the tail — where a command's failure lands —
+/// survives.
+pub(crate) const MAX_TOKENS: u64 = 12_000;
 
 pub struct ToolOutput {
     pub content: String,
@@ -174,6 +181,26 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
         let start = crate::core::text::ceil_boundary(&out, out.len() - max_bytes);
         out = out[start..].to_string();
         truncated = true;
+    }
+    // the byte cap is not a token cap: a CJK dump of the same size costs
+    // 3-4x more, so enforce the estimate too (binary search over char
+    // boundaries keeps this cheap and never splits a codepoint)
+    let tokens = crate::agent::compact::text_tokens;
+    if tokens(&out) > MAX_TOKENS {
+        let bounds: Vec<usize> = out.char_indices().map(|(i, _)| i).collect();
+        let (mut lo, mut hi) = (0usize, bounds.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if tokens(&out[bounds[mid]..]) <= MAX_TOKENS {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo < bounds.len() && lo > 0 {
+            out = out[bounds[lo]..].to_string();
+            truncated = true;
+        }
     }
     (out, truncated)
 }

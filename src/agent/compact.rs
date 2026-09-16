@@ -28,7 +28,7 @@ impl Default for CompactConfig {
 /// Token cost of text: ASCII ≈ 1 token per 4 chars, CJK/fullwidth ≈ 1 token
 /// per char (a space-free Chinese sentence would otherwise be undercounted
 /// 3-4x, making `/status` and compaction trigger too late).
-fn text_tokens(text: &str) -> u64 {
+pub(crate) fn text_tokens(text: &str) -> u64 {
     let mut ascii = 0u64;
     let mut wide = 0u64;
     for ch in text.chars() {
@@ -269,6 +269,17 @@ pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
 pub const PRUNE_HEAD_CHARS: usize = 4096;
 pub const PRUNE_TAIL_CHARS: usize = 1024;
 
+/// The stale-prefix pass only touches outright dumps: 32k chars is ~8k
+/// tokens of ASCII (more of CJK) — a result that big re-sent every round is
+/// the single most expensive thing a session can carry, while results below
+/// it may still be read verbatim by the model and are left alone until
+/// compaction pressure lowers the bar to [`PRUNE_THRESHOLD_CHARS`].
+pub const STALE_PRUNE_THRESHOLD_CHARS: usize = 32_768;
+/// How many trailing messages count as fresh (never stale-pruned): the
+/// current task's recent tool results, which the model is most likely to
+/// still need verbatim.
+pub const KEEP_FRESH_MESSAGES: usize = 6;
+
 /// Where pruned tool-result originals live, so `recall` can page them back.
 /// Beside the thread store (`~/.llm/observations/`), not inside a project.
 pub fn observation_dir() -> PathBuf {
@@ -295,9 +306,9 @@ fn content_id(text: &str) -> String {
 /// fits (or the archive cannot be written: a marker pointing at nothing
 /// would be worse than the full text). Returns the projected text and the
 /// tokens it keeps out of the next request.
-fn prune_one(content: &str, archive_dir: &Path) -> Option<(String, u64)> {
+fn prune_one(content: &str, archive_dir: &Path, threshold: usize) -> Option<(String, u64)> {
     let total = content.chars().count();
-    if total <= PRUNE_THRESHOLD_CHARS {
+    if total <= threshold {
         return None;
     }
     let id = content_id(content);
@@ -364,15 +375,42 @@ pub fn observation_path(dir: &Path, id: &str) -> Option<PathBuf> {
 /// Fail open per result: if the archive cannot be written, that result keeps
 /// its full text rather than leave a marker pointing at nothing.
 pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResults {
+    let len = history.len();
+    prune_matching(history, archive_dir, PRUNE_THRESHOLD_CHARS, len)
+}
+
+/// The every-round pass, run before each request regardless of compaction
+/// pressure: results over [`STALE_PRUNE_THRESHOLD_CHARS`] in the stale
+/// prefix (everything before the last [`KEEP_FRESH_MESSAGES`] messages) are
+/// projected down too. Recent results stay verbatim — the model usually
+/// needs those — while a huge one from earlier in the task stops being
+/// re-sent every round. Same archive, same idempotence as the pressure
+/// pass, so the notice fires once per result.
+pub fn prune_stale_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResults {
+    let stale_up_to = history.len().saturating_sub(KEEP_FRESH_MESSAGES);
+    prune_matching(
+        history,
+        archive_dir,
+        STALE_PRUNE_THRESHOLD_CHARS,
+        stale_up_to,
+    )
+}
+
+fn prune_matching(
+    history: &mut [Msg],
+    archive_dir: &Path,
+    threshold: usize,
+    up_to: usize,
+) -> PrunedResults {
     let mut out = PrunedResults {
         count: 0,
         freed_tokens: 0,
     };
-    for msg in history.iter_mut() {
+    for msg in history[..up_to].iter_mut() {
         let Msg::ToolResult { content, .. } = msg else {
             continue;
         };
-        let Some((projected, freed)) = prune_one(content, archive_dir) else {
+        let Some((projected, freed)) = prune_one(content, archive_dir, threshold) else {
             continue;
         };
         *content = projected;
@@ -635,6 +673,44 @@ mod tests {
             Msg::ToolResult { content, .. } => assert_eq!(content, "small"),
             _ => unreachable!(),
         }
+    }
+
+    /// The stale pass is the pressure-independent one: a big dump older
+    /// than the fresh window is projected down even when nothing is close
+    /// to compacting, while a same-size result inside the window (and a
+    /// small old one) survives verbatim.
+    #[test]
+    fn stale_pruning_takes_only_old_dumps() {
+        let big = || Msg::tool_result("1", "bash", "x".repeat(40_000));
+        let small = Msg::tool_result("2", "bash", "tiny");
+        let filler = |n: usize| {
+            (0..n)
+                .map(|i| Msg::assistant(format!("step {i}")))
+                .collect::<Vec<_>>()
+        };
+        // the dump sits well before the fresh window
+        let mut history = vec![small.clone(), big()];
+        history.extend(filler(KEEP_FRESH_MESSAGES + 2));
+        let dir = obs_dir();
+        let pruned = prune_stale_tool_results(&mut history, &dir);
+        assert_eq!(pruned.count, 1, "only the old dump");
+        assert!(pruned.freed_tokens > 8_000);
+        match (&history[0], &history[1]) {
+            (Msg::ToolResult { content: a, .. }, Msg::ToolResult { content: b, .. }) => {
+                assert_eq!(a, "tiny", "a small old result is not worth cutting");
+                assert!(b.contains("chars of the middle were cut"), "{b}");
+            }
+            _ => unreachable!(),
+        }
+        // idempotent: the next round changes nothing and reports nothing
+        let again = prune_stale_tool_results(&mut history, &dir);
+        assert_eq!((again.count, again.freed_tokens), (0, 0));
+
+        // a result of the same size inside the fresh window stays whole
+        let mut fresh = filler(1);
+        fresh.push(big());
+        let untouched = prune_stale_tool_results(&mut fresh, &obs_dir());
+        assert_eq!(untouched.count, 0, "recent results stay verbatim");
     }
 
     /// Pull the id back out the way a reader (or the recall tool) would.
