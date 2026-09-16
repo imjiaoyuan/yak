@@ -163,7 +163,10 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
 
 /// The system-prompt section: one line per skill that the model may pick up
 /// on its own. Capped at LIST_CHAR_CAP; entries that no longer fit are
-/// dropped with a count note.
+/// dropped with a count note. Descriptions are injected first-line only:
+/// the list exists so the model knows which skill to open, and the full
+/// description (a paragraph in most SKILL.md frontmatters) would cost every
+/// round of every session for a sentence the file itself already states.
 pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     let visible: Vec<&SkillDef> = skills.iter().filter(|s| s.model_invocation).collect();
     if visible.is_empty() {
@@ -173,10 +176,11 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
         String::from("Available skills (to use one, read its file first, then follow it):\n");
     let mut added = 0usize;
     for s in &visible {
-        let line = if s.description.is_empty() {
+        let summary = first_line(&s.description);
+        let line = if summary.is_empty() {
             format!("- {} ({})\n", s.name, s.path.display())
         } else {
-            format!("- {}: {} ({})\n", s.name, s.description, s.path.display())
+            format!("- {}: {} ({})\n", s.name, summary, s.path.display())
         };
         if out.len() + line.len() > LIST_CHAR_CAP {
             break;
@@ -191,6 +195,18 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
         ));
     }
     Some(out)
+}
+
+/// The first non-empty line of a description, trimmed and capped so one
+/// generous frontmatter cannot dominate the list.
+fn first_line(description: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    crate::core::text::truncate_chars(line, MAX_CHARS)
 }
 
 #[cfg(test)]
