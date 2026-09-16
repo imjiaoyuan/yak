@@ -163,20 +163,21 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
 
 /// The system-prompt section: one line per skill that the model may pick up
 /// on its own. Capped at LIST_CHAR_CAP; entries that no longer fit are
-/// dropped with a count note. Descriptions are injected first-line only:
-/// the list exists so the model knows which skill to open, and the full
-/// description (a paragraph in most SKILL.md frontmatters) would cost every
-/// round of every session for a sentence the file itself already states.
+/// dropped with a count note. Each line carries the skill's whole trigger
+/// (the description is what the model matches a task against, so it is not
+/// cut to the first line), whitespace collapsed and capped.
 pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     let visible: Vec<&SkillDef> = skills.iter().filter(|s| s.model_invocation).collect();
     if visible.is_empty() {
         return None;
     }
-    let mut out =
-        String::from("Available skills (to use one, read its file first, then follow it):\n");
+    let mut out = String::from(
+        "Available skills (read a skill's file before following it; resolve any relative path it \
+         mentions against the skill's directory):\n",
+    );
     let mut added = 0usize;
     for s in &visible {
-        let summary = first_line(&s.description);
+        let summary = trigger(&s.description);
         let line = if summary.is_empty() {
             format!("- {} ({})\n", s.name, s.path.display())
         } else {
@@ -197,16 +198,14 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     Some(out)
 }
 
-/// The first non-empty line of a description, trimmed and capped so one
-/// generous frontmatter cannot dominate the list.
-fn first_line(description: &str) -> String {
-    const MAX_CHARS: usize = 200;
-    let line = description
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
-    crate::core::text::truncate_chars(line, MAX_CHARS)
+/// The skill's trigger text for the list. The description is what the model
+/// matches a task against, so the whole thing is kept (whitespace collapsed
+/// onto one line) and only a generous cap trims it — cutting to the first
+/// line can drop the very words that say what the skill does.
+fn trigger(description: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let collapsed: String = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::core::text::truncate_chars(&collapsed, MAX_CHARS)
 }
 
 #[cfg(test)]
@@ -357,5 +356,26 @@ mod tests {
         let mut hidden = mk(0);
         hidden.model_invocation = false;
         assert!(skills_block(&[hidden]).is_none());
+    }
+
+    #[test]
+    fn skill_line_keeps_the_whole_trigger_and_teaches_path_resolution() {
+        // a multi-line description keeps every line in one collapsed run:
+        // the first line alone may not name what the skill does
+        let def = SkillDef {
+            name: "pdf".into(),
+            description: "Extract tables\nfrom scanned PDFs and CSV exports".into(),
+            path: PathBuf::from("/s/pdf/SKILL.md"),
+            model_invocation: true,
+        };
+        let block = skills_block(&[def]).unwrap();
+        assert!(
+            block.contains("Extract tables from scanned PDFs and CSV exports"),
+            "{block}"
+        );
+        assert!(
+            block.contains("resolve any relative path"),
+            "a skill that references its own files must be told where to resolve them: {block}"
+        );
     }
 }
