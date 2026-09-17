@@ -307,6 +307,12 @@ pub fn run_agent(
     let mut spent_input = 0u64;
     let mut budget_exhausted = false;
     let mut last_usage = None;
+    // the usage marker carried across turns: the provider's reported count
+    // covers `history[..covered]`, so per-round estimates (the context note
+    // and the compaction gate) only price the tail instead of rescanning
+    // the whole history each round (O(n²) over a long task). Reset to None
+    // wherever history is rebuilt (a compaction) so indices stay honest.
+    let mut usage_marker: Option<(usize, Usage)> = None;
     let mut final_text = String::new();
     let mut interrupted = false;
     // mid-stream drops recovered so far; the cap keeps a link that drops
@@ -402,7 +408,7 @@ pub fn run_agent(
         // left rides the end of every request, so the model can decide to
         // wrap up instead of exploring indefinitely. Request-only: it never
         // enters the history or the prompt-cache prefix.
-        let note = context_note(&history, opts, spent_input);
+        let note = context_note(&history, opts, spent_input, usage_marker);
         let input = PromptInput {
             system: opts.system,
             history: &history,
@@ -499,6 +505,11 @@ pub fn run_agent(
         if let Some(u) = usage {
             spent_input += u.input;
         }
+        // the assistant just pushed is the only message the report does not
+        // name as input: mark everything up to and including it as covered
+        // by u.input + u.output (the tail estimate prices it again at
+        // chars/4, matching the compaction gate's conservative math)
+        usage_marker = usage.map(|u| (history.len().saturating_sub(1), u));
         on_update(AgentUpdate::TurnEnd { usage });
         let _ = fire(
             opts.hooks,
@@ -511,9 +522,8 @@ pub fn run_agent(
 
         // compaction check after each completed turn; the usage report
         // covered everything except the assistant we just pushed
-        if let (Some(u), Some(cfg)) = (usage, opts.compact.as_ref()) {
-            let marker = Some((history.len().saturating_sub(1), u));
-            let mut estimate = compact::estimate_tokens(&history, marker);
+        if let (Some(marker), Some(cfg)) = (usage_marker, opts.compact.as_ref()) {
+            let mut estimate = compact::estimate_tokens(&history, Some(marker));
             if compact::should_compact(estimate, cfg) {
                 // pressure confirmed: prune oversized tool results first —
                 // it costs no model call and may relieve enough to skip
@@ -557,6 +567,10 @@ pub fn run_agent(
                 history.extend(tail);
                 seed_boundary = advance_seed_boundary(seed_boundary, cut);
                 on_update(AgentUpdate::Compacted { removed: cut });
+                // the rebuild moved every index: the marker's covered length
+                // no longer names anything real, so drop it until the next
+                // usage report re-establishes one
+                usage_marker = None;
             }
             // a failed summarization leaves the history untouched:
             // the run continues, possibly hitting the window later
@@ -736,10 +750,18 @@ pub fn run_agent(
 /// task has left, in context-window tokens and (when a task budget is set)
 /// input tokens. `None` when neither is known. Kept short and factual — it
 /// exists so the model can choose to wrap up, not to make it narrate.
-fn context_note(history: &[Msg], opts: &AgentOptions, spent_input: u64) -> Option<String> {
+fn context_note(
+    history: &[Msg],
+    opts: &AgentOptions,
+    spent_input: u64,
+    usage_marker: Option<(usize, Usage)>,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(cfg) = opts.compact.as_ref() {
-        let used = compact::estimate_tokens(history, None);
+        // the marker prices the covered prefix at the provider's reported
+        // count and estimates only the tail — a full-history rescan here
+        // was the loop's last O(n²) (the note rides every round)
+        let used = compact::estimate_tokens(history, usage_marker);
         let left = cfg.context_window.saturating_sub(used);
         parts.push(format!("{left} tokens left in this context window"));
     }
@@ -1731,7 +1753,7 @@ mod tests {
             hooks: None,
         };
         let history = vec![Msg::user("hi")];
-        let note = context_note(&history, &opts, 0).unwrap();
+        let note = context_note(&history, &opts, 0, None).unwrap();
         assert!(
             note.starts_with("<context>") && note.ends_with("</context>"),
             "{note}"
@@ -1742,7 +1764,7 @@ mod tests {
         );
         // a task budget adds its own clause
         opts.token_budget = 10_000;
-        let note = context_note(&history, &opts, 3_000).unwrap();
+        let note = context_note(&history, &opts, 3_000, None).unwrap();
         assert!(
             note.contains("7000 of this task's input-token budget left"),
             "{note}"
@@ -1750,6 +1772,42 @@ mod tests {
         // neither a window nor a budget: no note at all
         opts.compact = None;
         opts.token_budget = 0;
-        assert!(context_note(&history, &opts, 0).is_none());
+        assert!(context_note(&history, &opts, 0, None).is_none());
+    }
+
+    /// The marker prices the covered prefix at the provider's reported count
+    /// and only the tail at the chars/4 estimate: with a marker naming the
+    /// whole history, the note must carry exactly the reported total, and
+    /// the None path keeps its whole-history estimate.
+    #[test]
+    fn context_note_uses_the_usage_marker_for_the_covered_prefix() {
+        let opts = AgentOptions {
+            system: None,
+            cwd: std::env::temp_dir(),
+            max_turns: 0,
+            token_budget: 0,
+            stream: false,
+            compact: Some(compact::CompactConfig {
+                context_window: 100_000,
+                reserve_tokens: 0,
+                keep_recent_tokens: 0,
+            }),
+            reasoning: None,
+            hooks: None,
+        };
+        let history = vec![Msg::user("hi"), Msg::user("there")];
+        let marker = Some((
+            history.len(),
+            Usage {
+                input: 7_000,
+                output: 0,
+                cached: 0,
+            },
+        ));
+        let note = context_note(&history, &opts, 0, marker).unwrap();
+        assert!(
+            note.contains("93000 tokens left"),
+            "the marker total must flow through: {note}"
+        );
     }
 }
