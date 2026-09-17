@@ -90,8 +90,8 @@ pub fn build_system_prompt(
                        .llm/extensions): a `# --- llm-tool: <name>` header (`description:`, \
                        `args: name (type) desc`, `interpreter: python3`) makes any script a tool; \
                        an executable speaking line-delimited JSON on stdio becomes a resident \
-                       extension (tools, commands, event hooks). Live from the next task — no \
-                       restart, no /reload.\n\
+                       extension (tools, commands, event hooks). Restart llm or type /reload \
+                       to pick a new one up.\n\
                      - A directory with SKILL.md under {skills_dir} (or the project's .llm/skills) \
                        publishes /skill:<name>.\n\
                      \n\

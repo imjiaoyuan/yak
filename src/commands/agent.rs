@@ -138,6 +138,14 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         );
     }
 
+    let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd_str = cwd.display().to_string();
+    // extensions start connecting now, on a background thread: discovery is
+    // a few readdirs (synchronous), but the spawn+handshake is slow — the
+    // attachments, thread store and system prompt below load while the
+    // children boot. The join settles the handshake before the tool registry
+    let extensions_connecting = crate::agent::ext::Extensions::connect_async(&cwd);
+
     let settings = crate::agent::settings::load();
 
     // attachments: -a path|URL|- and --at path mimetype ride the first task
@@ -148,8 +156,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     // session continuation: -c = most recent (this directory's, else the
     // newest anywhere), --session/--cid = given id
-    let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
-    let cwd_str = cwd.display().to_string();
     let mut conversation_id: Option<String> = None;
     let mut seed: Vec<Msg> = Vec::new();
     // a continued thread is projected down once its Session exists (the
@@ -296,18 +302,8 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         }
     };
 
-    let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
-
-    // extensions: user executables registering tools (and, later, commands
-    // and event hooks). A failed extension warns and mounts nothing, never
-    // aborting the session
-    let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
-        csv.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    let extensions = crate::agent::ext::Extensions::connect(&cwd);
+    // skills and the system prompt load here, still underneath the
+    // extension handshakes; the join below settles whatever is left
     let skills = crate::agent::skills::discover(
         &crate::core::config::user_dir(),
         &cwd,
@@ -320,6 +316,15 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conv_system.as_deref(),
         &skills,
     );
+    // extensions: the background connect from the top joins here. A failed
+    // extension warns and mounts nothing, never aborting the session
+    let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
+        csv.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let extensions = extensions_connecting.join();
 
     let mut session = crate::agent::session::Session {
         compact: settings.compact_config(&model.qualified_id(), &model.model_id),

@@ -1,5 +1,4 @@
 use super::manifest::{discover_in, parse_tool_manifest};
-use super::roots::hash_roots;
 use super::*;
 
 #[test]
@@ -322,90 +321,6 @@ done
     assert!(
         log.iter().any(|l| l.contains("cp1252")),
         "the invalid line is kept, decoded lossily: {log:?}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn fingerprint_tracks_dropped_and_edited_files() {
-    let dir = std::env::temp_dir().join(format!("llm-fp-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let config = dir.join("config.json");
-    std::fs::write(&config, b"{}").unwrap();
-    let root = dir.join("extensions");
-    std::fs::create_dir_all(&root).unwrap();
-
-    let h1 = hash_roots(std::slice::from_ref(&root), &config);
-    assert_eq!(
-        h1,
-        hash_roots(std::slice::from_ref(&root), &config),
-        "stable with no changes"
-    );
-
-    std::fs::write(root.join("tool.py"), b"# --- llm-tool: t\n").unwrap();
-    let h3 = hash_roots(std::slice::from_ref(&root), &config);
-    assert_ne!(h3, h1, "a dropped file moves the fingerprint");
-
-    std::fs::write(root.join("tool.py"), b"# --- llm-tool: t2\n").unwrap();
-    let h4 = hash_roots(std::slice::from_ref(&root), &config);
-    assert_ne!(h4, h3, "an edit moves it too");
-
-    // skills live one level down: a SKILL.md in a subdirectory counts
-    let sk = dir.join("skills");
-    std::fs::create_dir_all(sk.join("mine")).unwrap();
-    let h5 = hash_roots(&[root.clone(), sk.clone()], &config);
-    std::fs::write(sk.join("mine/SKILL.md"), b"x").unwrap();
-    assert_ne!(
-        hash_roots(&[root.clone(), sk], &config),
-        h5,
-        "a subdirectory file moves it"
-    );
-
-    // the watched slice of config.json is the plugin surface: the `agent`
-    // settings table and the `extensions` table
-    std::fs::write(&config, b"{\"agent\":{\"tools\":{\"bash\":\"prompt\"}}}").unwrap();
-    let h7 = hash_roots(std::slice::from_ref(&root), &config);
-    std::fs::write(&config, b"{\"agent\":{\"tools\":{\"bash\":\"deny\"}}}").unwrap();
-    assert_ne!(
-        hash_roots(std::slice::from_ref(&root), &config),
-        h7,
-        "an agent-settings edit moves it"
-    );
-    std::fs::write(&config, b"{\"extensions\":{\"disabled\":[\"todo\"]}}").unwrap();
-    assert_ne!(
-        hash_roots(std::slice::from_ref(&root), &config),
-        h7,
-        "an extensions-table edit moves it"
-    );
-    // key order is not a change, and neither is the provider churn /model,
-    // /thinking and /login write from every session — which used to reload
-    // every other running REPL
-    std::fs::write(
-        &config,
-        b"{\"agent\":{\"tools\":{\"bash\":\"prompt\"}},\"extensions\":{\"disabled\":[\"todo\"]}}",
-    )
-    .unwrap();
-    let h8 = hash_roots(std::slice::from_ref(&root), &config);
-    std::fs::write(
-        &config,
-        b"{\"extensions\":{\"disabled\":[\"todo\"]},\"providers\":{\"mock\":{\"kind\":\"openai-compat\"}},\"agent\":{\"tools\":{\"bash\":\"prompt\"}},\"models\":{\"default\":\"mock/m-a\",\"thinking\":\"high\"}}",
-    )
-    .unwrap();
-    assert_eq!(
-        hash_roots(std::slice::from_ref(&root), &config),
-        h8,
-        "a model switch or a provider edit leaves the plugin surface alone"
-    );
-
-    // a broken file is an unknown surface: any change to it still trips
-    std::fs::write(&config, b"{not json").unwrap();
-    let h9 = hash_roots(std::slice::from_ref(&root), &config);
-    std::fs::write(&config, b"{not json either").unwrap();
-    assert_ne!(
-        hash_roots(std::slice::from_ref(&root), &config),
-        h9,
-        "a hand-edit of an unparsable file still moves it"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

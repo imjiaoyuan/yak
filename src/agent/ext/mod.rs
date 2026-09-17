@@ -22,7 +22,7 @@
 //! This file is the host itself — connection state, request dispatch and the
 //! tool wrappers. `manifest.rs` parses the `# --- llm-tool:` headers (and the
 //! argv execution of those scripts), `proto.rs` holds the two stdio loops the
-//! connections run on, and `roots.rs` finds and fingerprints the homes.
+//! connections run on, and `roots.rs` finds the homes.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -402,41 +402,76 @@ pub struct Extensions {
     script_tools: Vec<ExecToolSpec>,
 }
 
-impl Extensions {
-    /// Spawn and handshake every discovered extension in parallel; a slow
-    /// or broken one costs at most `CONNECT_TIMEOUT` and never aborts the
-    /// others — it lands in the list as Failed with a reason.
-    pub fn connect(cwd: &Path) -> Extensions {
-        let found = discover(cwd);
-        let exts = std::thread::scope(|scope| {
-            let handles: Vec<_> = found
-                .resident
-                .iter()
-                .map(|p| scope.spawn(|| connect_one(p)))
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join().unwrap_or_else(|_| {
-                        failed("extension", "connect thread panicked".to_string())
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
-        for ext in &exts {
-            if let Err(reason) = &*lock(&ext.state) {
-                eprintln!(
-                    "{}extension '{}' failed: {reason}{}",
-                    crate::theme::err().dim,
-                    ext.name,
-                    crate::theme::err().reset
-                );
-            }
-        }
+/// A background connect started by [`Extensions::connect_async`]: discovery
+/// has already run, the handshakes are still in flight. `join` settles them
+/// into a ready host — until then the caller keeps doing its own startup
+/// work, so the spawn cost overlaps instead of stacking.
+pub struct ExtensionsConnecting {
+    handle: Option<std::thread::JoinHandle<Vec<Arc<Ext>>>>,
+    script_tools: Vec<ExecToolSpec>,
+}
+
+impl ExtensionsConnecting {
+    pub fn join(mut self) -> Extensions {
+        let exts = match self.handle.take() {
+            Some(h) => h.join().unwrap_or_else(|_| {
+                vec![failed("extension", "connect thread panicked".to_string())]
+            }),
+            None => Vec::new(),
+        };
         Extensions {
             exts,
+            script_tools: self.script_tools,
+        }
+    }
+}
+
+impl Extensions {
+    /// Discover everything, and spawn+handshake the resident extensions on
+    /// a background thread while the caller keeps doing startup work
+    /// (stdin, attachments, the thread store, the system prompt); `join`
+    /// settles the handshake. A slow or broken one costs at most
+    /// `CONNECT_TIMEOUT` and never aborts the others — it lands in the
+    /// list as Failed with a reason.
+    pub fn connect_async(cwd: &Path) -> ExtensionsConnecting {
+        let found = discover(cwd);
+        let resident = found.resident;
+        let handle = std::thread::spawn(move || {
+            let exts = std::thread::scope(|scope| {
+                let handles: Vec<_> = resident
+                    .iter()
+                    .map(|p| scope.spawn(|| connect_one(p)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            failed("extension", "connect thread panicked".to_string())
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            for ext in &exts {
+                if let Err(reason) = &*lock(&ext.state) {
+                    eprintln!(
+                        "{}extension '{}' failed: {reason}{}",
+                        crate::theme::err().dim,
+                        ext.name,
+                        crate::theme::err().reset
+                    );
+                }
+            }
+            exts
+        });
+        ExtensionsConnecting {
+            handle: Some(handle),
             script_tools: found.script_tools,
         }
+    }
+
+    /// The synchronous form: discovery plus handshake, all on this thread.
+    pub fn connect(cwd: &Path) -> Extensions {
+        Self::connect_async(cwd).join()
     }
 
     /// Append one `ExtTool` per tool of every ready extension, plus one
@@ -897,7 +932,7 @@ mod roots;
 mod script;
 
 pub use manifest::{ExecToolSpec, discover};
-pub use roots::{discover_dirs, plugin_fingerprint};
+pub use roots::discover_dirs;
 
 #[cfg(test)]
 mod tests;

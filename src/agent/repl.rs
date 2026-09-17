@@ -14,9 +14,6 @@ pub fn repl(
 ) -> Result<i32, String> {
     let mut settings = crate::agent::settings::load();
     let mut editor = crate::term::lineedit::LineEditor::new();
-    // the plugin-surface baseline: taken after Session::new connected the
-    // extensions, so a file dropped later trips exactly one live-reload
-    let mut plugin_fp = crate::agent::ext::plugin_fingerprint(&session.cwd);
 
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
@@ -108,19 +105,12 @@ pub fn repl(
             continue;
         }
         if text.starts_with('/') {
-            if repl_command(
-                &mut session,
-                &mut settings,
-                text,
-                &mut skills,
-                &mut plugin_fp,
-            ) {
+            if repl_command(&mut session, &mut settings, text, &mut skills) {
                 break;
             }
             continue;
         }
 
-        reload_if_changed(&mut session, &mut settings, &mut skills, &mut plugin_fp);
         attach_local_files(text, &mut attachments, session.model.kind == "anthropic");
         run_task_logged(&mut session, text, &mut attachments);
 
@@ -141,45 +131,12 @@ pub fn repl(
                     crate::theme::err().dim,
                     crate::theme::err().reset
                 );
-                reload_if_changed(&mut session, &mut settings, &mut skills, &mut plugin_fp);
                 run_task_logged(&mut session, &line, &mut Vec::new());
             }
         }
     }
     restore_default_sigint();
     Ok(0)
-}
-
-/// Live-reload at the task boundary: when the plugin-surface fingerprint
-/// moved (an extension or skill file landed, the `agent` or `extensions`
-/// table of config.json changed), re-run
-/// the /reload path — the same re-discovery, minus the manual command. A
-/// file the agent writes mid-session is therefore live on its next task:
-/// the reference's reload-runtime without the manual step.
-fn reload_if_changed(
-    session: &mut Session,
-    settings: &mut crate::agent::settings::AgentSettings,
-    skills: &mut Vec<crate::agent::skills::SkillDef>,
-    last: &mut u64,
-) {
-    let fp = crate::agent::ext::plugin_fingerprint(&session.cwd);
-    if fp == *last {
-        return;
-    }
-    *last = fp;
-    *skills = crate::agent::skills::discover(
-        &crate::core::config::user_dir(),
-        &session.cwd,
-        &settings.disabled_skills,
-    );
-    *settings = crate::agent::settings::load();
-    session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
-    session.rebuild_tools();
-    let p = crate::theme::err();
-    eprintln!(
-        "{}plugin files changed — reloaded skills, plugin tools and settings{}",
-        p.dim, p.reset
-    );
 }
 
 /// Local file paths mentioned in a prompt ride the message automatically:
@@ -761,7 +718,6 @@ fn repl_command(
     settings: &mut crate::agent::settings::AgentSettings,
     text: &str,
     skills: &mut Vec<crate::agent::skills::SkillDef>,
-    plugin_fp: &mut u64,
 ) -> bool {
     let (cmd, arg) = match text.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
@@ -1075,9 +1031,6 @@ fn repl_command(
             *settings = crate::agent::settings::load();
             session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
             session.rebuild_tools();
-            // the manual command settles the live-reload baseline too, or the
-            // next task boundary re-detects the same change and redoes this
-            *plugin_fp = crate::agent::ext::plugin_fingerprint(&session.cwd);
             eprintln!(
                 "{}reloaded skills, plugin tools and settings{}",
                 crate::theme::err().dim,

@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::yaml;
 
 /// Cap on the skill list injected into the system prompt; overflow drops
-/// whole entries with a count note (matching the reference's context budget).
-const LIST_CHAR_CAP: usize = 8000;
+/// whole entries with a count note. 2000 chars ≈ 500 tokens — the list rides
+/// every request, and the model reads the full SKILL.md on use anyway, so
+/// only the trigger line earns its tokens here.
+const LIST_CHAR_CAP: usize = 2000;
 
 #[derive(Clone)]
 pub struct SkillDef {
@@ -200,10 +202,10 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
 
 /// The skill's trigger text for the list. The description is what the model
 /// matches a task against, so the whole thing is kept (whitespace collapsed
-/// onto one line) and only a generous cap trims it — cutting to the first
-/// line can drop the very words that say what the skill does.
+/// onto one line) — but the list rides every request, so a generous cap
+/// trims it; the full text is one `read` away when the skill is picked up.
 fn trigger(description: &str) -> String {
-    const MAX_CHARS: usize = 300;
+    const MAX_CHARS: usize = 160;
     let collapsed: String = description.split_whitespace().collect::<Vec<_>>().join(" ");
     crate::core::text::truncate_chars(&collapsed, MAX_CHARS)
 }

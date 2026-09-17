@@ -631,15 +631,9 @@ fn list(argv: &[String]) -> i32 {
 /// Package-carried extension directories, nearest-first roots for the
 /// discovery walks (project pkg wins over user pkg via ordering at the
 /// call site).
-/// The package clones themselves (both scopes), sorted. The skills walk
-/// needs them to find whole-repo `SKILL.md` packages and to apply the
-/// `--skill` selection; the live-reload fingerprint watches them.
-pub fn packages(local: bool) -> Vec<PathBuf> {
-    packages_in(&pkg_root(local))
-}
-
-/// [`packages`] rooted anywhere: the skills walk passes the user dir it was
-/// handed (so discovery stays hermetic in tests) instead of the ambient one.
+/// The package clones rooted anywhere: the skills walk passes the user
+/// dir it was handed (so discovery stays hermetic in tests) instead of the
+/// ambient one.
 pub fn packages_in(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -655,10 +649,6 @@ pub fn packages_in(root: &Path) -> Vec<PathBuf> {
 
 pub fn extension_dirs(local: bool) -> Vec<PathBuf> {
     pkg_dirs(local, "extensions")
-}
-
-pub fn skill_dirs(local: bool) -> Vec<PathBuf> {
-    pkg_dirs(local, "skills")
 }
 
 pub fn command_dirs(local: bool) -> Vec<PathBuf> {
