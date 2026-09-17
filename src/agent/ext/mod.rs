@@ -419,6 +419,19 @@ impl ExtensionsConnecting {
             }),
             None => Vec::new(),
         };
+        // failure notes print here, on the caller's thread: from inside the
+        // background connect they race the caller's own startup output
+        // (banners, fork notices) on stderr and can tear a line in half
+        for ext in &exts {
+            if let Err(reason) = &*lock(&ext.state) {
+                eprintln!(
+                    "{}extension '{}' failed: {reason}{}",
+                    crate::theme::err().dim,
+                    ext.name,
+                    crate::theme::err().reset
+                );
+            }
+        }
         Extensions {
             exts,
             script_tools: self.script_tools,
@@ -433,11 +446,16 @@ impl Extensions {
     /// settles the handshake. A slow or broken one costs at most
     /// `CONNECT_TIMEOUT` and never aborts the others — it lands in the
     /// list as Failed with a reason.
+    ///
+    /// An error return before `join` exits without waiting: the children
+    /// see stdin EOF when this process dies and exit per the protocol —
+    /// the same contract a crash or kill -9 already relies on. `Drop` must
+    /// not join instead: a flag error would then block on a slow handshake.
     pub fn connect_async(cwd: &Path) -> ExtensionsConnecting {
         let found = discover(cwd);
         let resident = found.resident;
         let handle = std::thread::spawn(move || {
-            let exts = std::thread::scope(|scope| {
+            std::thread::scope(|scope| {
                 let handles: Vec<_> = resident
                     .iter()
                     .map(|p| scope.spawn(|| connect_one(p)))
@@ -450,18 +468,7 @@ impl Extensions {
                         })
                     })
                     .collect::<Vec<_>>()
-            });
-            for ext in &exts {
-                if let Err(reason) = &*lock(&ext.state) {
-                    eprintln!(
-                        "{}extension '{}' failed: {reason}{}",
-                        crate::theme::err().dim,
-                        ext.name,
-                        crate::theme::err().reset
-                    );
-                }
-            }
-            exts
+            })
         });
         ExtensionsConnecting {
             handle: Some(handle),
