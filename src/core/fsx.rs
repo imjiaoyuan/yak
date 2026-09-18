@@ -45,9 +45,7 @@ mod tests {
     use super::*;
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("fsx-test-{tag}-{}", crate::core::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::core::testutil::scratch_dir(&format!("fsx-test-{tag}"))
     }
 
     #[test]

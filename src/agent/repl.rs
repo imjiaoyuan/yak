@@ -1235,7 +1235,7 @@ mod tests {
 
     #[test]
     fn path_files_complete_as_typed_with_dir_slashes() {
-        let dir = std::env::temp_dir().join(format!("llm-tab-{}", crate::core::db::ulid()));
+        let dir = crate::core::testutil::scratch_dir("tab");
         std::fs::create_dir_all(dir.join("gamma")).unwrap();
         std::fs::write(dir.join("alpha.txt"), "a").unwrap();
         std::fs::write(dir.join(".hid"), "h").unwrap();

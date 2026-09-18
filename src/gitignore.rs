@@ -412,7 +412,7 @@ mod gitignore_tests {
 
     #[test]
     fn scopes_include_git_root_but_stop_above_it() {
-        let tmp = std::env::temp_dir().join(format!("llm-scopes-{}", std::process::id()));
+        let tmp = crate::core::testutil::scratch_dir("scopes");
         let repo = tmp.join("repo");
         let sub = repo.join("src");
         std::fs::create_dir_all(&sub).unwrap();

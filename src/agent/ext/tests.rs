@@ -18,8 +18,7 @@ fn parses_a_python_manifest_header() {
 /// nothing about the tool inside, and two files may declare one name.
 #[test]
 fn disabled_matches_a_script_tool_by_declared_name_too() {
-    let dir = std::env::temp_dir().join(format!("llm-ext-disc-{}", crate::core::db::ulid()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("ext-disc");
     // one script tool named `search`, stem unrelated; one executable
     // resident (name spelled per platform: Windows recognizes an
     // executable by extension, unix by the exec bit) for the stem path
@@ -169,9 +168,7 @@ fn colliding_tool_names_are_namespaced_not_shadowed() {
 #[cfg(unix)]
 #[test]
 fn a_dead_extension_is_respawned_on_next_use() {
-    let dir = std::env::temp_dir().join(format!("llm-ext-respawn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("ext-respawn");
     let script = dir.join("flaky");
     let counter = dir.join("count");
     // plain shell: reply to initialize, answer the first call_tool then
@@ -227,9 +224,7 @@ done
 #[cfg(unix)]
 #[test]
 fn a_working_extension_streams_stderr_to_the_tool_log() {
-    let dir = std::env::temp_dir().join(format!("llm-ext-progress-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("ext-progress");
     let script = dir.join("chatty");
     let body = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -281,9 +276,7 @@ done
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_line_does_not_end_the_stream() {
-    let dir = std::env::temp_dir().join(format!("llm-ext-lossy-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("ext-lossy");
     let script = dir.join("codepage");
     let body = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -333,8 +326,7 @@ done
 #[cfg(unix)]
 fn write_stub_extension(name: &str, body: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("llm-ext-test-{}", crate::core::db::ulid()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("ext-test");
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();

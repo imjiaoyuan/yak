@@ -11,7 +11,7 @@ Command semantics, flags, storage, and output formats are specified in the docs.
 ## Commands
 
 - `cargo build` / `cargo build --release` (release profile: thin LTO, strip, codegen-units=1)
-- `cargo test` — unit tests live inline as `#[cfg(test)]` modules across the tree, one behavior per test under a descriptive name (`boundaries_clamp_to_char_edges`, never `test_foo`); run a single one with `cargo test <name>`
+- `cargo test` — unit tests live inline as `#[cfg(test)]` modules across the tree, one behavior per test under a descriptive name (`boundaries_clamp_to_char_edges`, never `test_foo`); run a single one with `cargo test <name>`. A test that needs a scratch directory takes one from `core/testutil` (`scratch_dir` creates it empty, `scratch_path` hands back an absent path for the tests that assert on what a missing tree does) — never hand-roll `env::temp_dir().join(...)`, and never key a name on `process::id()` (it does not separate the parallel threads of one test binary)
 - `cargo fmt` before committing; keep `cargo clippy --all-targets` at zero warnings
 - CI (`.github/workflows/ci.yml`) runs test → build → `ci_e2e.py` → `ci_repl.py` on ubuntu, macOS
   and windows-latest; the two Python scripts are CI-local harnesses, not shipped code. `ci_repl.py`

@@ -462,9 +462,7 @@ mod tests {
     /// A throwaway archive dir; each test gets its own so parallel runs do
     /// not race on the same observation files.
     fn obs_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("llm-obs-test-{}", crate::core::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::core::testutil::scratch_dir("obs-test")
     }
 
     /// The prefix-rewrite gate must sit strictly below the compaction gate:
@@ -821,8 +819,7 @@ mod tests {
         // archive dir cannot be created, pruning leaves the result alone
         let mut history = vec![Msg::tool_result("1", "bash", "x".repeat(20_000))];
         // a regular file where the archive directory should be: create_dir_all fails
-        let blocker =
-            std::env::temp_dir().join(format!("llm-obs-file-{}", crate::core::db::ulid()));
+        let blocker = crate::core::testutil::scratch_path("obs-file");
         std::fs::write(&blocker, "not a directory").unwrap();
         let blocked = blocker.join("observations");
         assert_eq!(prune_tool_results(&mut history, &blocked).count, 0);

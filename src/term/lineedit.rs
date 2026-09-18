@@ -1813,8 +1813,7 @@ mod tests {
 
     #[test]
     fn history_file_round_trims_and_loads_the_tail() {
-        let dir = std::env::temp_dir().join(format!("llm-hist-{}", crate::core::db::ulid()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_dir("hist");
         let path = dir.join("history.jsonl");
         append_history_to(&path, "first");
         append_history_to(&path, "second");
@@ -1838,8 +1837,7 @@ mod tests {
     #[test]
     fn history_trim_keeps_the_file_private() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("llm-hist-{}", crate::core::db::ulid()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_dir("hist");
         let path = dir.join("history.jsonl");
         for i in 0..(HISTORY_FILE_LIMIT + 5) {
             append_history_to(&path, &format!("e{i}"));

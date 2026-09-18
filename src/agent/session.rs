@@ -737,8 +737,7 @@ mod tests {
     /// them again on the first turn end (and say so every turn).
     #[test]
     fn a_resumed_seed_over_the_window_is_projected_down_once() {
-        let dir = std::env::temp_dir().join(format!("llm-seed-prune-{}", crate::core::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::core::testutil::scratch_dir("seed-prune");
         let big = "z".repeat(40_000);
         let mut session = tight_session(vec![
             Msg::user("read the log"),
@@ -780,7 +779,8 @@ mod tests {
     /// pressure measure, not a property of every resume.
     #[test]
     fn a_resumed_seed_under_the_window_is_left_alone() {
-        let dir = std::env::temp_dir().join(format!("llm-seed-keep-{}", crate::core::db::ulid()));
+        // the seed fits, so nothing is archived and this tree must stay absent
+        let dir = crate::core::testutil::scratch_path("seed-keep");
         let seed = vec![
             Msg::user("read the log"),
             Msg::tool_result("1", "read", "q".repeat(40_000)),
@@ -800,8 +800,7 @@ mod tests {
     /// reach the thread file: `/resume` sees the work either way.
     #[test]
     fn a_failed_round_persists_its_tool_rounds() {
-        let dir = std::env::temp_dir().join(format!("llm-persist-fail-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_path("persist-fail");
         let store = threads::Store::open_path(&dir).unwrap();
         let cwd = dir.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -875,8 +874,7 @@ mod tests {
     fn a_persist_failure_is_kept_visible() {
         // an unreadable store location: the run continues, but the sticky
         // flag must say the transcript is not being written
-        let dir = std::env::temp_dir().join(format!("llm-persist-err-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_path("persist-err");
         let store = threads::Store::open_path(&dir).unwrap();
         let cwd = dir.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -974,8 +972,7 @@ mod tests {
 
     #[test]
     fn rebuild_thread_restores_final_response_and_attachments() {
-        let dir = std::env::temp_dir().join(format!("llm-rebuild-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_path("rebuild");
         let store = threads::Store::open_path(&dir).unwrap();
 
         // user (with attachment) → assistant tool_call → tool result (with
@@ -1070,8 +1067,7 @@ mod tests {
     /// history and continuing as if nothing was lost.
     #[test]
     fn a_damaged_thread_fails_the_rebuild_instead_of_emptying_it() {
-        let dir = std::env::temp_dir().join(format!("llm-damaged-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::core::testutil::scratch_path("damaged");
         let store = threads::Store::open_path(&dir).unwrap();
         let turn = StoredTurn {
             v: crate::core::threads::THREAD_FORMAT_VERSION,

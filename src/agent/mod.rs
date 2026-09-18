@@ -1096,8 +1096,7 @@ mod tests {
 
     /// A throwaway cwd for the fusion tests (they never touch the repo).
     fn fuse_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("llm-fuse-{}", crate::core::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::core::testutil::scratch_dir("fuse");
         std::fs::write(dir.join("x.txt"), "hello\n").unwrap();
         dir
     }

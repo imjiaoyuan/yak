@@ -66,9 +66,7 @@ fn then_run_is_declared_on_both_mutating_tools() {
 
 #[test]
 fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
-    let dir = std::env::temp_dir().join(format!("llm-atomic-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("atomic");
     let path = dir.join("doc.md");
     std::fs::write(&path, "old").unwrap();
 
@@ -92,9 +90,7 @@ fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
 #[test]
 fn atomic_write_keeps_the_existing_mode_over_the_rename() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("llm-atomic-mode-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("atomic-mode");
     let path = dir.join("run.sh");
     std::fs::write(&path, "#!/bin/sh\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -294,8 +290,7 @@ fn extract_title_collapses_and_decodes() {
 
 #[test]
 fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
-    let dir = std::env::temp_dir().join(format!("llm-editfz-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("editfz");
     // trailing spaces on both lines, CRLF endings: the model's oldText
     // (clean, LF-only) still applies
     let file = dir.join("a.txt");
@@ -334,8 +329,7 @@ fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
 
 #[test]
 fn edit_fuzzy_matching_folds_smart_punctuation() {
-    let dir = std::env::temp_dir().join(format!("llm-editfq-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("editfq");
     let file = dir.join("q.txt");
     std::fs::write(&file, "msg = “hello” — ok\n").unwrap();
     // the model retypes the line with ASCII quotes and a hyphen
@@ -353,8 +347,7 @@ fn edit_fuzzy_matching_folds_smart_punctuation() {
 
 #[test]
 fn edit_fuzzy_duplicate_matches_still_error() {
-    let dir = std::env::temp_dir().join(format!("llm-editfd-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("editfd");
     let file = dir.join("d.txt");
     // "x \ny" exists twice after normalization, and never exactly
     std::fs::write(&file, "x \ny\nz\nx \ny\n").unwrap();
@@ -377,8 +370,7 @@ fn edit_fuzzy_duplicate_matches_still_error() {
 
 #[test]
 fn edit_requires_unique_matches_and_no_overlap() {
-    let dir = std::env::temp_dir().join(format!("llm-edit-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("edit");
     let file = dir.join("a.txt");
     std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
 
@@ -421,8 +413,7 @@ fn edit_requires_unique_matches_and_no_overlap() {
 
 #[test]
 fn grep_literal_and_ignore_case() {
-    let dir = std::env::temp_dir().join(format!("llm-grep-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("grep");
     std::fs::write(dir.join("one.txt"), "Hello world\nbye\n").unwrap();
     std::fs::write(dir.join("two.txt"), "nope\n").unwrap();
 
@@ -458,8 +449,7 @@ fn grep_regex_delegates_to_ripgrep() {
     {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("llm-grep-re-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("grep-re");
     std::fs::write(dir.join("a.rs"), "fn main() {}\nlet x = 42;\n").unwrap();
     std::fs::write(dir.join("b.txt"), "nothing\n").unwrap();
 
@@ -528,7 +518,7 @@ fn a_timed_out_command_keeps_its_partial_output() {
 
 #[test]
 fn glob_finds_matching_files() {
-    let dir = std::env::temp_dir().join(format!("llm-glob-{}", std::process::id()));
+    let dir = crate::core::testutil::scratch_dir("glob");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/a.rs"), "").unwrap();
     std::fs::write(dir.join("b.txt"), "").unwrap();
@@ -544,8 +534,7 @@ fn glob_finds_matching_files() {
 
 #[test]
 fn grep_context_dedups_overlapping_matches() {
-    let dir = std::env::temp_dir().join(format!("llm-grepctx-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("grepctx");
     // hits on adjacent lines with context 1: every line appears exactly
     // once, shared context included
     std::fs::write(
@@ -576,8 +565,7 @@ fn grep_context_dedups_overlapping_matches() {
 
 #[test]
 fn grep_survives_a_directory_symlink_cycle() {
-    let dir = std::env::temp_dir().join(format!("llm-greplink-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("greplink");
     std::fs::write(dir.join("needle.txt"), "find me\n").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
@@ -598,8 +586,7 @@ fn read_execute(dir: &std::path::Path, args: Value) -> ToolOutput {
 
 #[test]
 fn read_tool_windows_with_meta_header_and_note() {
-    let dir = std::env::temp_dir().join(format!("llm-read-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("read");
     let file = dir.join("notes.txt");
     let body: Vec<String> = (1..=10).map(|i| format!("line-{i}")).collect();
     std::fs::write(&file, body.join("\n")).unwrap();
@@ -631,8 +618,7 @@ fn read_tool_windows_with_meta_header_and_note() {
 
 #[test]
 fn read_paths_batches_several_files_in_one_call() {
-    let dir = std::env::temp_dir().join(format!("llm-readmulti-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readmulti");
     std::fs::write(dir.join("a.rs"), "fn a() {}").unwrap();
     std::fs::write(dir.join("b.md"), "# b\nbody").unwrap();
     let out = read_execute(&dir, json!({"paths": ["a.rs", "b.md", "nope.txt"]}));
@@ -656,8 +642,7 @@ fn read_paths_batches_several_files_in_one_call() {
 
 #[test]
 fn read_tool_caps_at_read_max_lines() {
-    let dir = std::env::temp_dir().join(format!("llm-readcap-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readcap");
     let body: Vec<String> = (1..=2600).map(|i| format!("row-{i}")).collect();
     std::fs::write(dir.join("big.txt"), body.join("\n")).unwrap();
     let out = read_execute(&dir, json!({"path": "big.txt"}));
@@ -673,8 +658,7 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
     // 600 wide lines ≈ 184KB: the 500-line window cuts at line 500 and
     // the 50KB byte cap cuts around line ~170 — the note must resume at
     // the first line the model has not actually seen, not at 501
-    let dir = std::env::temp_dir().join(format!("llm-readcut-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readcut");
     let body: Vec<String> = (0..600).map(|_| "x".repeat(300)).collect();
     std::fs::write(dir.join("wide.txt"), body.join("\n")).unwrap();
     let out = read_execute(&dir, json!({"path": "wide.txt"}));
@@ -697,8 +681,7 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
 
 #[test]
 fn read_tool_refuses_binary_with_hint() {
-    let dir = std::env::temp_dir().join(format!("llm-readbin-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readbin");
     std::fs::write(dir.join("aln.bam"), b"BAM\x01data").unwrap();
     std::fs::write(dir.join("paper.pdf"), b"%PDF-1.4 fake").unwrap();
     std::fs::write(dir.join("blob.dat"), b"xx\0yy").unwrap();
@@ -722,8 +705,7 @@ fn read_tool_refuses_binary_with_hint() {
 
 #[test]
 fn read_tool_attaches_image_for_vision_models() {
-    let dir = std::env::temp_dir().join(format!("llm-readimg-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readimg");
     // a tiny PNG signature; the read tool routes by extension, so the
     // exact body is irrelevant to the test
     std::fs::write(dir.join("pic.png"), b"\x89PNG\r\n\x1a\n").unwrap();
@@ -738,8 +720,7 @@ fn read_tool_attaches_image_for_vision_models() {
 
 #[test]
 fn read_tool_offset_past_end_and_empty_file() {
-    let dir = std::env::temp_dir().join(format!("llm-readend-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::core::testutil::scratch_dir("readend");
     std::fs::write(dir.join("small.txt"), b"a\nb\n").unwrap();
     std::fs::write(dir.join("empty.txt"), b"").unwrap();
 

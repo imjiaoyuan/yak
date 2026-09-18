@@ -268,7 +268,7 @@ mod tests {
     /// (a standalone skill repo) and `skills/` holds more of them.
     #[test]
     fn package_mounts_a_root_skill_and_filters_by_selection() {
-        let pkg = std::env::temp_dir().join(format!("llm-pkgskill-{}", crate::core::db::ulid()));
+        let pkg = crate::core::testutil::scratch_dir("pkgskill");
         skill_dir(&pkg, "a", "name: a");
         skill_dir(&pkg.join("skills"), "b", "name: b");
         std::fs::write(pkg.join("SKILL.md"), "---\nname: wholegit\n---\nbody").unwrap();
@@ -299,8 +299,7 @@ mod tests {
 
     #[test]
     fn project_overrides_user_and_llm_beats_agents() {
-        let tmp = std::env::temp_dir().join(format!("llm-skills-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::core::testutil::scratch_path("skills");
         let user = tmp.join("userdir"); // plays ~/.llm
         let proj = tmp.join("proj");
         std::fs::create_dir_all(user.join("skills")).unwrap();
@@ -333,8 +332,7 @@ mod tests {
 
     #[test]
     fn disabled_names_are_dropped() {
-        let tmp = std::env::temp_dir().join(format!("llm-skills-d-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::core::testutil::scratch_path("skills-d");
         let user = tmp.join("userdir");
         std::fs::create_dir_all(user.join("skills")).unwrap();
         skill_dir(&user.join("skills"), "nope", "description: x");

@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn carried_recognizes_every_layout() {
-        let dir = std::env::temp_dir().join(format!("llm-carried-{}", crate::core::db::ulid()));
+        let dir = crate::core::testutil::scratch_dir("carried");
         std::fs::create_dir_all(dir.join("skills/demo")).unwrap();
         std::fs::write(dir.join("skills/demo/SKILL.md"), "---\nname: demo\n---\nb").unwrap();
         std::fs::write(dir.join("skills/flat.md"), "---\nname: flat\n---\nb").unwrap();

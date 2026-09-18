@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("llm-threads-{name}-{}", std::process::id()));
+        let dir = crate::core::testutil::scratch_dir(&format!("threads-{name}"));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

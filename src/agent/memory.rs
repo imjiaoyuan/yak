@@ -46,9 +46,7 @@ mod tests {
 
     #[test]
     fn section_wraps_and_truncates() {
-        let tmp = std::env::temp_dir().join(format!("llm-memory-s-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::core::testutil::scratch_dir("memory-s");
         let file = tmp.join("LLM.md");
         std::fs::write(&file, "x".repeat(20 * 1024)).unwrap();
         let s = section_at(&file);
@@ -60,9 +58,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_empty_file_still_names_the_path() {
-        let tmp = std::env::temp_dir().join(format!("llm-memory-e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::core::testutil::scratch_dir("memory-e");
         let file = tmp.join("LLM.md");
         for absent in [true, false] {
             if !absent {

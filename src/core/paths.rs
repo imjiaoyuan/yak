@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn nearest_dir_up_prefers_the_closest_match() {
-        let dir = std::env::temp_dir().join(format!("llm-paths-{}", crate::core::db::ulid()));
+        let dir = crate::core::testutil::scratch_dir("paths");
         let deep = dir.join("a").join("b");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(dir.join("a").join("mark")).unwrap();
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn a_git_root_stops_the_upward_search() {
-        let dir = std::env::temp_dir().join(format!("llm-paths-git-{}", crate::core::db::ulid()));
+        let dir = crate::core::testutil::scratch_dir("paths-git");
         let deep = dir.join("a").join("b");
         std::fs::create_dir_all(&deep).unwrap();
         // the marker sits above the repo boundary: only the stop matters

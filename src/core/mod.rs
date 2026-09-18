@@ -17,5 +17,7 @@ pub mod http;
 pub mod paths;
 pub mod render_md;
 pub mod templates;
+#[cfg(test)]
+pub mod testutil;
 pub mod text;
 pub mod threads;

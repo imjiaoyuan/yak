@@ -101,7 +101,7 @@ mod tests {
         // real dirs under the platform temp dir: a hardcoded `/tmp` is not an
         // absolute path on Windows, and whether it is a directory there is
         // an accident of the drive layout
-        let root = std::env::temp_dir().join(format!("llm-export-{}", crate::core::db::ulid()));
+        let root = crate::core::testutil::scratch_dir("export");
         let cwd = root.join("project");
         let dir = root.join("out");
         std::fs::create_dir_all(&cwd).unwrap();

@@ -313,8 +313,7 @@ mod tests {
 
     #[test]
     fn local_attachments_refuse_an_oversized_file() {
-        let dir = std::env::temp_dir().join(format!("llm-att-{}", crate::core::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::core::testutil::scratch_dir("att");
         let path = dir.join("big.bin");
         std::fs::write(&path, vec![0u8; 1000]).unwrap();
         assert!(load(path.to_str().unwrap(), None).is_ok());

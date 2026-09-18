@@ -265,8 +265,7 @@ mod tests {
 
     #[test]
     fn fresh_prompt_carries_the_environment_line() {
-        let dir = std::env::temp_dir().join(format!("llm-env-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::core::testutil::scratch_dir("env");
         std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
         let out = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         assert!(out.contains("Environment: "), "{}", out);
