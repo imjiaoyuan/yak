@@ -24,13 +24,13 @@ impl Tool for GrepTool {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Substring (or regex with `regex: true`) to find"},
+                "pattern": {"type": "string", "description": "Text to find"},
                 "path": {"type": "string", "description": "File or directory to search (default .)"},
                 "glob": {"type": "string", "description": "Only search files matching this glob, e.g. *.rs"},
                 "ignore_case": {"type": "boolean"},
-                "context": {"type": "integer", "description": "Lines of context around each match"},
-                "limit": {"type": "integer", "description": "Maximum matches (default 100)"},
-                "regex": {"type": "boolean", "description": "Treat `pattern` as a regular expression via ripgrep (default false)"}
+                "context": {"type": "integer", "description": "Lines of context"},
+                "limit": {"type": "integer", "description": "Max matches (default 100)"},
+                "regex": {"type": "boolean", "description": "Treat `pattern` as a regex via ripgrep (default false)"}
             },
             "required": ["pattern"]
         })

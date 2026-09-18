@@ -30,10 +30,10 @@ impl Tool for ReadTool {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Single file path, relative to the working directory"},
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Several file paths (max 5) read in one call"},
-                "offset": {"type": "integer", "description": "1-based line to start from (applies to each file)"},
-                "limit": {"type": "integer", "description": "Maximum number of lines to return per file"},
+                "path": {"type": "string", "description": "One file path"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Up to 5 paths, one call"},
+                "offset": {"type": "integer", "description": "1-based start line"},
+                "limit": {"type": "integer", "description": "Max lines per file"},
             },
             "required": []
         })

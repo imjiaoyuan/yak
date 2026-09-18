@@ -764,3 +764,29 @@ fn update_plan_renders_the_checklist_and_bounces_bad_plans() {
     assert!(run(json!({"plan": []})).is_error);
     assert!(run(json!({"plan": [{"step": "a", "status": "done"}]})).is_error);
 }
+
+/// The tool definitions ride the head of every request, so they are the
+/// clearest fixed cost in the loop: a slack sentence here is paid on every
+/// round of every session. They sit inside the cached prefix, which makes it
+/// easy to let them grow unnoticed (the first round pays, the rest are cache
+/// reads), so the budget is asserted rather than left to review.
+#[test]
+fn tool_defs_stay_under_the_wire_budget() {
+    let mut total = 0;
+    for t in builtin_tools() {
+        let one = serde_json::json!({
+            "name": t.name(), "description": t.description(), "parameters": t.parameters()
+        });
+        let n = one.to_string().len();
+        assert!(
+            n < 900,
+            "`{}` serializes to {n} bytes; trim its description or schema",
+            t.name()
+        );
+        total += n;
+    }
+    assert!(
+        total < 4_800,
+        "tool definitions total {total} bytes (budget 4800) — trim before adding"
+    );
+}

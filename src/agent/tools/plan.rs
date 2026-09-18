@@ -29,15 +29,14 @@ impl Tool for PlanTool {
             "properties": {
                 "plan": {
                     "type": "array",
-                    "description": "The ordered steps.",
-                    "items": {
+                                        "items": {
                         "type": "object",
                         "properties": {
-                            "step": {"type": "string", "description": "Task step text."},
+                            "step": {"type": "string", "description": "Step text"},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "Step status."
+                                "description": "Status"
                             }
                         },
                         "required": ["step", "status"]
