@@ -201,7 +201,10 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("{}updated {name}{}", p.dim, p.reset);
         }
     } else {
-        let _ = std::fs::create_dir_all(&root);
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            eprintln!("Error: cannot create {}: {e}", root.display());
+            return 1;
+        }
         let mut clone = vec!["clone".to_string(), "--depth".to_string(), "1".to_string()];
         if let Some(ref_) = &ref_ {
             clone.push("--branch".to_string());
@@ -214,12 +217,15 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("Error: clone failed: {e}");
             return 1;
         }
-        if ref_.is_none() {
-            let _ = git(&["config", "llm.pinned", ""], &target);
-        } else {
-            let _ = git(
-                &["config", "llm.pinned", ref_.unwrap_or_default().as_str()],
-                &target,
+        // the pin marker decides whether a later refresh may move the clone:
+        // a lost marker reads as "unpinned", so a failed write must say so
+        // — silence here would have the next install reset a pinned clone
+        let pinned_value = ref_.as_deref().unwrap_or("");
+        if let Err(e) = git(&["config", "llm.pinned", pinned_value], &target) {
+            eprintln!(
+                "{}Warning: installed {name} but could not record its pin ({e}) — \
+                 a later `llm install {name}` will refresh it like an unpinned clone{}",
+                p.dim, p.reset
             );
         }
         eprintln!(
@@ -439,18 +445,32 @@ fn keep_list(pkg: &Path, key: &str) -> Option<Vec<String>> {
 }
 
 /// Record a keep list: `-` for "none of this group", else the names.
+/// The clone is already installed when this runs, so a failed write warns
+/// about the consequence (the whole group mounts) instead of aborting.
 fn set_keep_list(pkg: &Path, key: &str, names: &[String]) {
     let value = if names.is_empty() {
         "-".to_string()
     } else {
         names.join(",")
     };
-    let _ = git(&["config", key, &value], pkg);
+    if let Err(e) = git(&["config", key, &value], pkg) {
+        eprintln!(
+            "{}Warning: could not record {key} ({e}) — the whole group mounts{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
+    }
 }
 
 /// Forget a keep list (`*`): the whole group mounts again.
 fn clear_keep_list(pkg: &Path, key: &str) {
-    let _ = git(&["config", key, "*"], pkg);
+    if let Err(e) = git(&["config", key, "*"], pkg) {
+        eprintln!(
+            "{}Warning: could not clear {key} ({e}){}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
+    }
 }
 
 /// Is `file` inside a package's `extensions/` directory switched on? The

@@ -46,6 +46,8 @@ pub enum Error {
     Binary {
         ext: String,
     },
+    /// the bytes are not UTF-8 — reported instead of transliterated.
+    NonUtf8,
 }
 
 pub struct Window {
@@ -71,13 +73,14 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
     if is_binary(reader.fill_buf().map_err(io_err)?) {
         return Err(Error::Binary { ext });
     }
-    let w = lines::window_reader(&mut reader, offset.max(1), limit.max(1)).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::Interrupted {
-            Error::Interrupted
-        } else {
-            io_err(e)
-        }
-    })?;
+    let w =
+        lines::window_reader(&mut reader, offset.max(1), limit.max(1)).map_err(|e| match e {
+            lines::WindowError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                Error::Interrupted
+            }
+            lines::WindowError::Io(e) => io_err(e),
+            lines::WindowError::NonUtf8 => Error::NonUtf8,
+        })?;
     Ok(Window {
         lines: w.lines,
         total: w.total,

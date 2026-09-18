@@ -125,10 +125,14 @@ impl Blacklist {
     }
 
     /// Seed the user's file with the two default rules when there is none.
+    /// A failed seed says so: the guard is weaker than the user thinks, and
+    /// a silent miss would only surface as a command that never asked.
     pub fn ensure_default() {
         let path = crate::core::config::user_dir().join("blacklist");
-        if !path.exists() {
-            let _ = std::fs::write(&path, Self::default_file());
+        if !path.exists()
+            && let Err(e) = std::fs::write(&path, Self::default_file())
+        {
+            eprintln!("Warning: cannot write {}: {e}", path.display());
         }
     }
 

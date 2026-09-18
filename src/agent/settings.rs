@@ -37,8 +37,25 @@ impl AgentSettings {
     }
 }
 
+/// Load the `[agent]` section of config.json. A missing file (or a missing
+/// `agent` object) yields defaults; an unreadable or unparsable file fails
+/// loudly — the same file, the same rules as `core::config::load`.
 pub fn load() -> AgentSettings {
-    let raw = fs::read_to_string(config_path()).unwrap_or_default();
+    let path = config_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AgentSettings::default(),
+        Err(e) => {
+            eprintln!("Error: cannot read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    // an empty file behaves like a missing one; anything else must parse —
+    // silently defaulting here would hide a corrupt config from the run
+    if !raw.trim().is_empty() && serde_json::from_str::<serde_json::Value>(&raw).is_err() {
+        eprintln!("Error: failed to parse {}: not valid JSON", path.display());
+        std::process::exit(1);
+    }
     parse(&raw)
 }
 

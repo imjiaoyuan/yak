@@ -21,25 +21,36 @@ pub(super) struct WindowResult {
     pub eof: bool,
 }
 
+/// Read-side errors: transport, and content the tool refuses to hand the
+/// model.
+#[derive(Debug)]
+pub(super) enum WindowError {
+    Io(std::io::Error),
+    /// a line in the window is genuinely not UTF-8 — reported, never
+    /// transliterated (a latin-1 byte→char pass would hand the model
+    /// mojibake it cannot know is mojibake)
+    NonUtf8,
+}
+
 /// Skip `offset-1` lines, collect `limit`, read one line past the window to
 /// learn whether the input ends.
 pub(super) fn window_reader(
     r: &mut dyn BufRead,
     offset: usize,
     limit: usize,
-) -> std::io::Result<WindowResult> {
+) -> Result<WindowResult, WindowError> {
     let mut lines: Vec<String> = Vec::new();
     let mut count = 0usize;
     loop {
         // honor ctrl-c mid-read: a huge windowed file must not keep chewing
         // lines after the user asked to stop (see ReadTool interrupt path)
         if crate::core::http::interrupted() {
-            return Err(std::io::Error::new(
+            return Err(WindowError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "interrupted by user",
-            ));
+            )));
         }
-        let Some(raw) = read_line(r)? else {
+        let Some(raw) = read_line(r).map_err(WindowError::Io)? else {
             return Ok(WindowResult {
                 total: LineCount::Exact(count),
                 start: if lines.is_empty() { 0 } else { offset },
@@ -60,7 +71,7 @@ pub(super) fn window_reader(
                 lines,
             });
         }
-        let mut line = decode_line(&raw, count == 1);
+        let mut line = decode_line(&raw, count == 1)?;
         cap_line(&mut line);
         lines.push(line);
     }
@@ -94,29 +105,23 @@ fn read_line(r: &mut dyn BufRead) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 /// Decode one raw line: strip the UTF-8 BOM on the first line, drop a
-/// trailing carriage return, then utf-8 with a latin-1 byte fallback (the
-/// same semantics as a typical encoding probe). Splitting bytes on
+/// trailing carriage return, then require UTF-8. Splitting bytes on
 /// `\n` is safe for multibyte sequences: 0x0A never appears inside one.
-fn decode_line(raw: &[u8], first: bool) -> String {
+fn decode_line(raw: &[u8], first: bool) -> Result<String, WindowError> {
     let mut raw = raw;
     if first {
         raw = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
     }
     raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-    decode_utf8_or_latin1(raw)
-}
-
-/// utf-8 where an incomplete multibyte char at the very end counts as a cut
-/// (the budget or the line cap may have split it): decode the valid prefix
-/// instead of garbling the whole buffer. Genuinely non-utf-8 input falls
-/// back to latin-1 byte→char, which never fails.
-fn decode_utf8_or_latin1(raw: &[u8]) -> String {
     match std::str::from_utf8(raw) {
-        Ok(s) => s.to_string(),
-        Err(e) if e.error_len().is_none() => std::str::from_utf8(&raw[..e.valid_up_to()])
+        Ok(s) => Ok(s.to_string()),
+        // an incomplete multibyte char at the very end is a cut, not a
+        // corruption: the line-cap or scan-cap split it mid-char, so the
+        // valid prefix is the whole truth there is
+        Err(e) if e.error_len().is_none() => Ok(std::str::from_utf8(&raw[..e.valid_up_to()])
             .unwrap_or_default()
-            .to_string(),
-        Err(_) => raw.iter().map(|&b| b as char).collect(),
+            .to_string()),
+        Err(_) => Err(WindowError::NonUtf8),
     }
 }
 
@@ -178,14 +183,17 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_line_bom_crlf_and_latin1() {
-        assert_eq!(decode_line(b"\xEF\xBB\xBFhi", true), "hi");
+    fn test_decode_line_bom_crlf_and_cuts() {
+        assert_eq!(decode_line(b"\xEF\xBB\xBFhi", true).unwrap(), "hi");
         // the BOM only strips on the first line
-        assert_eq!(decode_line(b"\xEF\xBB\xBFhi", false), "\u{feff}hi");
-        assert_eq!(decode_line(b"hi\r", false), "hi");
-        // 0xE4 alone is invalid utf-8: latin-1 fallback
-        assert_eq!(decode_line(&[0xE4, 0x62], false), "\u{e4}b");
-        assert_eq!(decode_line("中文".as_bytes(), false), "中文");
+        assert_eq!(decode_line(b"\xEF\xBB\xBFhi", false).unwrap(), "\u{feff}hi");
+        assert_eq!(decode_line(b"hi\r", false).unwrap(), "hi");
+        // genuinely non-utf-8 bytes are refused, never transliterated
+        assert!(matches!(
+            decode_line(&[0xE4, 0x62], false),
+            Err(WindowError::NonUtf8)
+        ));
+        assert_eq!(decode_line("中文".as_bytes(), false).unwrap(), "中文");
     }
 
     #[test]
@@ -204,9 +212,16 @@ mod tests {
 
     #[test]
     fn test_incomplete_tail_decodes_valid_prefix() {
-        assert_eq!(decode_utf8_or_latin1(b"ab\xe4\xb8"), "ab");
-        assert_eq!(decode_utf8_or_latin1(b"\xe4\xb8\xad"), "中");
-        // genuinely non-utf-8 bytes still fall back to latin-1
-        assert_eq!(decode_utf8_or_latin1(&[0xE4, 0x62]), "\u{e4}b");
+        // a multibyte char cut mid-sequence is a cap artifact, not
+        // corruption: the valid prefix is the answer
+        assert!(matches!(
+            window_reader(&mut Cursor::new(b"ab\xe4\xb8"), 1, 10),
+            Ok(w) if w.lines == ["ab"]
+        ));
+        // but a complete non-utf-8 sequence is refused outright
+        assert!(matches!(
+            window_reader(&mut Cursor::new(&[0xE4, 0x62, b'\n']), 1, 10),
+            Err(WindowError::NonUtf8)
+        ));
     }
 }

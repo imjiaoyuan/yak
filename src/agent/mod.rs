@@ -96,28 +96,14 @@ pub struct AgentOptions<'a> {
     pub compact: Option<compact::CompactConfig>,
     /// reasoning effort level; None sends no parameter
     pub reasoning: Option<String>,
-    /// the extension host, when extensions exist; event hooks fire at turn
-    /// and tool boundaries (None when nothing was discovered)
-    pub hooks: Option<&'a crate::agent::ext::Extensions>,
+    /// the extension host; event hooks fire at turn and tool boundaries.
+    /// An empty host (nothing discovered) fires none and mounts nothing.
+    pub hooks: &'a crate::agent::ext::Extensions,
     /// opaque id sent with every request so a multi-replica gateway routes
     /// one conversation to the same backend; automatic prefix caching is
     /// per-replica, so without it a round-robin hop re-bills the whole
     /// prompt. None for a one-shot call with no stable conversation.
     pub cache_key: Option<&'a str>,
-}
-
-/// Fire an event on the host, swallowing failures into the extension's
-/// diagnostics tail (events never abort a run; only `tool_call` denials
-/// surface, as an error tool result).
-fn fire(
-    hooks: Option<&crate::agent::ext::Extensions>,
-    name: &str,
-    params: serde_json::Value,
-) -> Result<Option<serde_json::Value>, String> {
-    match hooks {
-        Some(host) => host.fire(name, &params),
-        None => Ok(None),
-    }
 }
 
 pub struct AgentOutcome {
@@ -331,10 +317,9 @@ pub fn run_agent(
     let mut recoveries = 0;
     const MAX_STREAM_RECOVERIES: usize = 5;
 
-    let _ = fire(
-        opts.hooks,
+    opts.hooks.fire(
         "agent_start",
-        json!({"cwd": opts.cwd.display().to_string(), "task": prompt}),
+        &json!({"cwd": opts.cwd.display().to_string(), "task": prompt}),
     );
     let mut turn = 0;
     loop {
@@ -376,12 +361,11 @@ pub fn run_agent(
         if pending.is_some() {
             repeats.reset();
         }
-        let _ = fire(opts.hooks, "turn_start", json!({"turn": turn}));
+        opts.hooks.fire("turn_start", &json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
-            let _ = fire(
-                opts.hooks,
+            opts.hooks.fire(
                 "input",
-                json!({
+                &json!({
                     "text": text,
                     "attachments": attachments.iter().map(|a| json!({
                         "path": a.path, "url": a.url, "mime_type": a.mime_type,
@@ -546,10 +530,9 @@ pub fn run_agent(
         // the next one will extend, so it is the next request's cache anchor
         cache_stable = Some(history.len());
         on_update(AgentUpdate::TurnEnd { usage });
-        let _ = fire(
-            opts.hooks,
+        opts.hooks.fire(
             "turn_end",
-            json!({
+            &json!({
                 "turn": turn,
                 "usage": usage.map(|u| json!([u.input, u.output, u.cached])),
             }),
@@ -766,10 +749,9 @@ pub fn run_agent(
         }
     }
 
-    let _ = fire(
-        opts.hooks,
+    opts.hooks.fire(
         "agent_end",
-        json!({"final_text": final_text, "interrupted": interrupted}),
+        &json!({"final_text": final_text, "interrupted": interrupted}),
     );
     Ok(AgentOutcome {
         history,
@@ -833,13 +815,10 @@ fn summarize(content: &str) -> String {
 /// timeout, a dead process — leaves the tool's own result untouched.
 fn rewrite_tool_result(
     mut out: tools::ToolOutput,
-    hooks: Option<&crate::agent::ext::Extensions>,
+    hooks: &crate::agent::ext::Extensions,
     call: &ToolCall,
 ) -> tools::ToolOutput {
-    let Some(host) = hooks else {
-        return out;
-    };
-    if !host.subscribes("tool_result") {
+    if !hooks.subscribes("tool_result") {
         return out;
     }
     let summary = summarize(&out.content);
@@ -851,7 +830,7 @@ fn rewrite_tool_result(
         "is_error": out.is_error,
         "content": out.content.clone(),
     });
-    if let Some(replacement) = host.rewrite_tool_result(&params) {
+    if let Some(replacement) = hooks.rewrite_tool_result(&params) {
         out.content = tools::truncate_marked(&replacement, tools::MAX_LINES, tools::MAX_BYTES);
     }
     out
@@ -999,31 +978,15 @@ fn prepare_call<'a>(
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     on_update: &mut dyn FnMut(AgentUpdate),
-    hooks: Option<&crate::agent::ext::Extensions>,
+    hooks: &crate::agent::ext::Extensions,
 ) -> Result<ClearedCall<'a>, String> {
     // extension gate: a subscribed tool_call may deny, rewrite the
     // arguments, or allow (skip the built-in approval) before the matrix
-    // even sees them
-    let mut denied: Option<String> = None;
-    let mut extension_allowed = false;
-    match fire(
-        hooks,
-        "tool_call",
-        json!({"tool": call.name, "args": call.arguments}),
-    ) {
-        Err(reason) => denied = Some(reason),
-        Ok(Some(reply)) => {
-            if reply.get("decision").and_then(serde_json::Value::as_str) == Some("allow") {
-                extension_allowed = true;
-            }
-            if let Some(rewritten) = reply.get("args") {
-                call.arguments = rewritten.clone();
-            }
-        }
-        Ok(None) => {}
-    }
-    if let Some(reason) = denied {
-        return Err(reason);
+    // even sees them; a deny is the Err that becomes an error tool result
+    let (extension_allowed, rewritten) =
+        hooks.gate_tool_call(&json!({"tool": call.name, "args": call.arguments}))?;
+    if let Some(rewritten) = rewritten {
+        call.arguments = rewritten;
     }
     let cleared = gate_call(call, tools, cwd, approval, on_approval, extension_allowed)?;
     on_update(AgentUpdate::ToolStart {
@@ -1046,7 +1009,7 @@ fn finish_call(
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     on_update: &mut dyn FnMut(AgentUpdate),
-    hooks: Option<&crate::agent::ext::Extensions>,
+    hooks: &crate::agent::ext::Extensions,
     repeat_note: Option<String>,
     history: &mut Vec<Msg>,
 ) {
@@ -1387,7 +1350,7 @@ mod tests {
             stream: true,
             compact: None,
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
@@ -1478,7 +1441,7 @@ mod tests {
             stream: true,
             compact: None,
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
@@ -1595,7 +1558,7 @@ mod tests {
             stream: true,
             compact: None,
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
@@ -1725,7 +1688,7 @@ mod tests {
             stream: true,
             compact: None,
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let caller = std::thread::current().id();
@@ -1784,7 +1747,7 @@ mod tests {
                 keep_recent_tokens: 0,
             }),
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let note = context_note(Some(0), &opts, 0).unwrap();
@@ -1827,7 +1790,7 @@ mod tests {
                 keep_recent_tokens: 0,
             }),
             reasoning: None,
-            hooks: None,
+            hooks: &crate::agent::ext::Extensions::empty(),
             cache_key: None,
         };
         let history = vec![Msg::user("hi"), Msg::user("there")];

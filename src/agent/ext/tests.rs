@@ -412,3 +412,23 @@ fn a_dead_extension_cannot_swallow_a_tool_result() {
         "a crashed extension falls back to the tool's own result"
     );
 }
+
+/// A reply carrying neither `result` nor `error` broke the protocol — the
+/// strict reply contract says so instead of handing back an empty success
+/// the caller cannot distinguish from a real empty result.
+#[test]
+#[cfg(unix)]
+fn a_reply_without_a_result_is_an_error() {
+    // answers every request with a bare {"ok": true}: no result, no error
+    let mute = "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  case \"$line\" in\n    *initialize*) printf '{\"id\":%s,\"result\":{\"tools\":[{\"name\":\"ping\",\"parameters\":{}}]}}\n' \"$id\" ;;\n    *) printf '{\"id\":%s,\"ok\":true}\n' \"$id\" ;;\n  esac\ndone\n";
+    let ext = connect_stub(&write_stub_extension("mute", mute));
+    assert!(lock(&ext.state).is_ok());
+    let err = ext
+        .call_tool("ping", &json!({}), &mut |_| {})
+        .expect_err("a reply without result must fail");
+    assert!(err.contains("replied without a result"), "{err}");
+    let err = ext
+        .run_command("web", "query")
+        .expect_err("same contract on run_command");
+    assert!(err.contains("replied without a result"), "{err}");
+}

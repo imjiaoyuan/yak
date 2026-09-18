@@ -123,7 +123,7 @@ impl Session {
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
-            hooks: Some(&self.extensions),
+            hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
         };
         let model_id = self.model.model_id.clone();
@@ -237,8 +237,7 @@ impl Session {
                     }
                     view.borrow_mut().turn_end(usage);
                 }
-                AgentUpdate::Compacted { removed } => {
-                    let _ = removed;
+                AgentUpdate::Compacted { .. } => {
                     // settle the streaming partial line; auto-compaction is
                     // silent on the terminal
                     view.borrow_mut().pause();
@@ -393,7 +392,7 @@ impl Session {
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
-            hooks: Some(&self.extensions),
+            hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
         };
         let task_start = std::time::Instant::now();

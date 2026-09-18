@@ -154,6 +154,12 @@ impl ReadTool {
                     path.display()
                 ));
             }
+            Err(crate::read::Error::NonUtf8) => {
+                return ToolOutput::err(format!(
+                    "{}: not UTF-8 text — use bash to inspect or convert it (e.g. iconv)",
+                    path.display()
+                ));
+            }
         };
         if w.lines.is_empty() {
             return match w.total {

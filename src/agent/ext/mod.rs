@@ -347,7 +347,15 @@ impl Ext {
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
             Some(other) => crate::jsonfmt::dumps_indent(other, 2),
-            None => String::new(),
+            // an error frame already surfaced as Err from `request`, so a
+            // reply with neither result nor error broke the protocol — say
+            // so instead of handing the model an empty success
+            None => {
+                return Err(format!(
+                    "extension '{}' replied without a result",
+                    self.name
+                ));
+            }
         })
     }
 
@@ -358,11 +366,14 @@ impl Ext {
             TOOL_TIMEOUT,
             None,
         )?;
-        Ok(result
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        match result.get("result") {
+            Some(Value::String(s)) => Ok(s.clone()),
+            Some(other) => Ok(crate::jsonfmt::dumps_indent(other, 2)),
+            None => Err(format!(
+                "extension '{}' replied without a result",
+                self.name
+            )),
+        }
     }
 
     /// Fire an event hook. `tool_call` expects a reply — the extension may
@@ -440,6 +451,19 @@ impl ExtensionsConnecting {
 }
 
 impl Extensions {
+    /// An empty host: no residents, no script tools. The agent loop holds
+    /// one unconditionally — with nothing discovered it fires no events and
+    /// mounts nothing, which replaces the old `Option<&Extensions>`.
+    /// Production paths always hold a real connected host; only tests need
+    /// the empty one.
+    #[cfg(test)]
+    pub fn empty() -> Extensions {
+        Extensions {
+            exts: Vec::new(),
+            script_tools: Vec::new(),
+        }
+    }
+
     /// Discover everything, and spawn+handshake the resident extensions on
     /// a background thread while the caller keeps doing startup work
     /// (stdin, attachments, the thread store, the system prompt); `join`
@@ -561,30 +585,51 @@ impl Extensions {
         replacement
     }
 
-    /// Fire an event on every extension subscribed to it. `tool_call` may
-    /// deny (Err carries the reason) or rewrite the arguments (Ok(Some)).
-    pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
-        let mut outcome: Option<Value> = None;
+    /// Fire an event on every extension subscribed to it. Replies are
+    /// fire-and-forget: per the protocol only `tool_call` and `tool_result`
+    /// replies are interpreted (here via [`Extensions::gate_tool_call`] and
+    /// in `rewrite_tool_result`) — an extension answering any other event
+    /// with a `decision` is out of contract and the reply is dropped, not
+    /// acted on. Failures land in the extension's diagnostics tail.
+    pub fn fire(&self, name: &str, params: &Value) {
         for ext in &self.exts {
-            match ext.fire(name, params) {
-                Ok(reply) => {
-                    if let Some(reply) = reply {
-                        if reply.get("decision").and_then(Value::as_str) == Some("deny") {
-                            let reason = reply
-                                .get("reason")
-                                .and_then(Value::as_str)
-                                .unwrap_or("denied by extension");
-                            return Err(reason.to_string());
-                        }
-                        if let Some(args) = reply.get("args") {
-                            outcome = Some(args.clone());
-                        }
+            if let Err(e) = ext.fire(name, params) {
+                ext.note(e);
+            }
+        }
+    }
+
+    /// The `tool_call` gate across every subscriber: `Err` carries the deny
+    /// reason (the call does not run; the model reads the reason as an
+    /// error result), `Ok((pre_allowed, rewritten_args))` reports whether an
+    /// extension pre-allowed the call (skipping the approval prompt) and
+    /// the last argument rewrite, if any. The first deny wins.
+    pub fn gate_tool_call(&self, params: &Value) -> Result<(bool, Option<Value>), String> {
+        let mut pre_allowed = false;
+        let mut args: Option<Value> = None;
+        for ext in &self.exts {
+            match ext.fire("tool_call", params) {
+                Ok(Some(reply)) => {
+                    let decision = reply.get("decision").and_then(Value::as_str);
+                    if decision == Some("deny") {
+                        let reason = reply
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("denied by extension");
+                        return Err(reason.to_string());
+                    }
+                    if decision == Some("allow") {
+                        pre_allowed = true;
+                    }
+                    if let Some(rewritten) = reply.get("args") {
+                        args = Some(rewritten.clone());
                     }
                 }
+                Ok(None) => {}
                 Err(e) => ext.note(e),
             }
         }
-        Ok(outcome)
+        Ok((pre_allowed, args))
     }
 
     /// The extension that registered a slash command, if any.
