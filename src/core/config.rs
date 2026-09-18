@@ -32,26 +32,24 @@ pub struct Provider {
 }
 
 /// Platform user directory: LLM_USER_PATH env override, else ~/.llm
-/// (matching the project-level .llm/ convention).
+/// (matching the project-level .llm/ convention). Resolved once per process:
+/// the env never changes mid-run (no code writes it) and the directory is
+/// created on first use, so the ~20 call sites — several per request, all the
+/// way down to `observation_dir` on every agent round — pay neither the env
+/// lookup nor the `create_dir_all` syscall again.
 pub fn user_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("LLM_USER_PATH") {
-        let path = PathBuf::from(dir);
+    static DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let path = match std::env::var_os("LLM_USER_PATH") {
+            Some(dir) => PathBuf::from(dir),
+            None => match crate::core::paths::home_dir() {
+                Some(home) => home.join(".llm"),
+                None => PathBuf::from(".llm"),
+            },
+        };
         let _ = fs::create_dir_all(&path);
-        return path;
-    }
-    let home = std::env::var_os("HOME").or_else(|| {
-        if cfg!(windows) {
-            std::env::var_os("USERPROFILE")
-        } else {
-            None
-        }
+        path
     });
-    let path = match home {
-        Some(home) => PathBuf::from(home).join(".llm"),
-        None => PathBuf::from(".llm"),
-    };
-    let _ = fs::create_dir_all(&path);
-    path
+    DIR.clone()
 }
 
 pub fn config_path() -> PathBuf {
