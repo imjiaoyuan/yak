@@ -266,9 +266,9 @@ fn restore_default_sigint() {
 
 /// Home-directory abbreviation for the status line.
 fn abbrev_home(path: &str) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = home.to_string_lossy().to_string();
-        if let Some(rest) = path.strip_prefix(&home) {
+    if let Some(home) = crate::core::paths::home_dir() {
+        let home = home.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(home.as_ref()) {
             return format!("~{rest}");
         }
     }

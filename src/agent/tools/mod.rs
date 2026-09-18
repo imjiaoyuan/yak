@@ -270,12 +270,10 @@ pub fn display_verb(name: &str) -> &str {
 /// Resolve a tool path argument against cwd with `~` expansion.
 pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
     let expanded = if let Some(rest) = arg.strip_prefix("~/") {
-        // windows homes live in USERPROFILE; HOME covers the unix world
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-        if let Some(home) = home {
-            return Path::new(&home).join(rest);
-        }
-        arg
+        let Some(home) = crate::core::paths::home_dir() else {
+            return PathBuf::from(arg);
+        };
+        return home.join(rest);
     } else {
         arg
     };
