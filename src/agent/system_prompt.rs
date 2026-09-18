@@ -29,8 +29,40 @@ pub fn project_context(cwd: &Path) -> Option<String> {
     Some(format!(
         "<project_instructions path=\"{}\">\n{}\n</project_instructions>",
         p.display(),
-        text
+        clip_project_text(&text)
     ))
+}
+
+/// Cap on the embedded project instructions, in bytes of file text. A repo's
+/// AGENTS.md/CLAUDE.md rides the system prompt verbatim, which makes it the
+/// largest fixed cost of a session: in this repo the file is 14.5KB of a 17KB
+/// assembled prompt, and the whole thing is re-sent (or cache-read) on every
+/// round. Past the cap the head is kept and the rest stays on disk, named by
+/// the block's own `path`, so the model reads the range it needs instead of
+/// paying for every line up front.
+const PROJECT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
+
+/// Clip file text to [`PROJECT_INSTRUCTIONS_MAX_BYTES`] on a line boundary
+/// (so a markdown section is never cut mid-sentence) and name the shortfall.
+/// Whole lines also keep the cut from orphaning a heading from its body.
+fn clip_project_text(text: &str) -> String {
+    if text.len() <= PROJECT_INSTRUCTIONS_MAX_BYTES {
+        return text.to_string();
+    }
+    let cap = crate::core::text::floor_boundary(text, PROJECT_INSTRUCTIONS_MAX_BYTES);
+    // back up to the last newline so the cut lands between lines; a file with
+    // no newline in the whole head just cuts at the char boundary
+    let end = match text[..cap].rfind('\n') {
+        Some(i) if i > 0 => i,
+        _ => cap,
+    };
+    format!(
+        "{}\n\n[Truncated: showing the first {} of {} bytes. Use the `read` tool on the file \
+         named in this block's `path` for the rest.]",
+        &text[..end],
+        end,
+        text.len()
+    )
 }
 
 /// Assemble the agent system prompt: built-ins plus project
@@ -189,6 +221,46 @@ mod tests {
         // resuming the resumed prompt must be a fixed point: no compounding
         let again = build_system_prompt(cwd, None, None, Some(&out), &[]).unwrap();
         assert_eq!(again, out);
+    }
+
+    #[test]
+    fn project_instructions_are_capped_on_a_line_boundary() {
+        // small enough: untouched, no marker
+        let small = "# Notes\n\nshort";
+        assert_eq!(clip_project_text(small), small);
+        // exactly at the cap: still untouched
+        let exact = "x".repeat(PROJECT_INSTRUCTIONS_MAX_BYTES);
+        assert_eq!(clip_project_text(&exact), exact);
+
+        // oversize: the head survives, the cut lands between lines, and the
+        // model is told how to get the rest
+        let mut big = String::new();
+        for i in 0..2_000 {
+            big.push_str(&format!("## section {i}\nbody line for {i}\n"));
+        }
+        assert!(big.len() > PROJECT_INSTRUCTIONS_MAX_BYTES);
+        let clipped = clip_project_text(&big);
+        assert!(clipped.starts_with("## section 0\nbody line for 0\n"));
+        assert!(clipped.len() < big.len());
+        assert!(clipped.contains("[Truncated: showing the first"));
+        assert!(clipped.contains(&format!("of {} bytes", big.len())));
+        assert!(clipped.contains("`read` tool"));
+        // a section heading is never separated from nothing: the kept part
+        // ends on a complete line
+        let kept = clipped.split("\n\n[Truncated").next().unwrap();
+        assert!(
+            !kept.ends_with('\n'),
+            "the trailing newline is the boundary"
+        );
+        assert!(kept.lines().all(|l| !l.is_empty()));
+
+        // CJK: the cut is a byte cap but must never split a codepoint
+        let cjk = "中".repeat(PROJECT_INSTRUCTIONS_MAX_BYTES);
+        let clipped = clip_project_text(&cjk);
+        let kept = clipped.split("\n\n[Truncated").next().unwrap();
+        assert!(kept.chars().all(|c| c == '中'));
+        // no newline anywhere: falls back to the char boundary
+        assert!(kept.len() <= PROJECT_INSTRUCTIONS_MAX_BYTES);
     }
 
     #[test]
