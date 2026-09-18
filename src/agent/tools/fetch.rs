@@ -1,8 +1,5 @@
 use super::*;
 
-/// Cap on the response body returned to the model (bytes).
-pub(super) const FETCH_MAX_BYTES: usize = 256 * 1024;
-
 /// Fetch a URL and hand the model readable text: HTML is stripped to text
 /// with its <title> extracted, JSON/XML/plain text pass through untouched, and
 /// the final URL is reported when redirects moved the fetch. Reads are
@@ -17,7 +14,7 @@ impl Tool for FetchTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Fetch a URL as text (HTML stripped, 256 KB cap); JSON, XML and plain text pass through."
+        "Fetch a URL as text (HTML stripped); JSON, XML and plain text pass through."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -64,16 +61,11 @@ impl Tool for FetchTool {
             // JSON, XML, plain text, CSV, … — pass through untouched
             page.body.trim().to_string()
         };
-        if out.len() > FETCH_MAX_BYTES {
-            let end = crate::core::text::floor_boundary(&out, FETCH_MAX_BYTES);
-            return ToolOutput::ok(format!(
-                "{}…\n[truncated: {} bytes, showing first {}]",
-                &out[..end],
-                out.len(),
-                end
-            ));
-        }
-        ToolOutput::ok(out)
+        // the shared head cut: a fetched page reads top-down, so keep the
+        // beginning, and enforce the same line/byte/token caps every other
+        // tool result obeys — a 256KB page used to ride into history whole
+        // and be re-sent on every later round
+        ToolOutput::ok(truncate_head_marked(&out))
     }
 }
 

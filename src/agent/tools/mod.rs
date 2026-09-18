@@ -229,6 +229,53 @@ pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) ->
     out
 }
 
+/// Head-truncate and mark: the ending for content whose *beginning* is the
+/// part worth keeping (a fetched page reads top-down; a command's error reads
+/// bottom-up, which is why `truncate_marked` cuts the tail instead). Applies
+/// the same three caps as the tail version — lines, bytes, and the token
+/// estimate that makes the bound hold for CJK too — so no tool can hand the
+/// model a result the others are capped below.
+pub(crate) fn truncate_head_marked(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = lines[..lines.len().min(MAX_LINES)].join("\n");
+    let mut truncated = lines.len() > MAX_LINES;
+    if out.len() > MAX_BYTES {
+        let end = crate::core::text::floor_boundary(&out, MAX_BYTES);
+        out.truncate(end);
+        truncated = true;
+    }
+    let tokens = crate::agent::compact::text_tokens;
+    if tokens(&out) > MAX_TOKENS {
+        // largest char-boundary prefix that fits. The token count is
+        // nondecreasing in prefix length, so the valid cuts are a prefix of
+        // the boundary list: binary-search the first that overflows and cut
+        // one boundary back. `out.len()` is in the list to make the full
+        // string searchable, and the guard above rules it out as the answer.
+        let bounds: Vec<usize> = out
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([out.len()])
+            .collect();
+        let (mut lo, mut hi) = (0usize, bounds.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if tokens(&out[..bounds[mid]]) <= MAX_TOKENS {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo > 0 {
+            out.truncate(bounds[lo - 1]);
+            truncated = true;
+        }
+    }
+    if truncated {
+        out.push_str("\n[output truncated]\n");
+    }
+    out
+}
+
 /// Merge captured process output into one stream: stderr rides under
 /// stdout. Shared by the bash tool's normal and timed-out endings.
 fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {

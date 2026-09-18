@@ -108,7 +108,7 @@ cannot flood the context). `paths` reads up to five files at once. Binary format
 hint at the right local tool — `pdftotext` for PDFs, `samtools` for BAM/CRAM, `duckdb` for
 Parquet/HDF5, `libreoffice --headless --convert-to csv` for old Office files.
 
-`webfetch <url>` grabs a page and returns it as text (HTML stripped, 256 KB cap, http(s) only,
+`webfetch <url>` grabs a page and returns it as text (HTML stripped, http(s) only,
 proxies honoured) so the agent can read docs without a shell.
 
 `write` and `edit` take an optional `then_run`: the command runs in the same tool call once the

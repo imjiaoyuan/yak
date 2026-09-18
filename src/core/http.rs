@@ -708,9 +708,10 @@ pub struct FetchedPage {
     pub body: String,
 }
 
-/// Download ceiling for the webfetch tool: the model reads at most 256KB of
-/// it, and HTML stripping only shrinks, so 2MB of raw body is generous — a
-/// size-limited read keeps memory bounded while the body streams in.
+/// Download ceiling for the webfetch tool: the tool result itself is cut to
+/// the shared line/byte/token limits before it reaches the model, and HTML
+/// stripping only shrinks, so 2MB of raw body is generous — a size-limited
+/// read keeps memory bounded while the body streams in.
 const FETCH_DOWNLOAD_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// GET with the short-timeout agent for the agent's webfetch tool: follows

@@ -185,6 +185,48 @@ fn truncate_tail_caps_lines_and_bytes() {
     assert!(tail.len() <= MAX_BYTES + 300);
 }
 
+/// A fetched page reads top-down, so its cut keeps the head — the opposite
+/// of a command's output. Same three caps either way, so no tool can hand the
+/// model a result the others are capped below.
+#[test]
+fn the_head_cut_keeps_the_beginning_and_holds_every_cap() {
+    // line cap: the first lines survive, the tail is dropped
+    let text = (1..=3000)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let head = truncate_head_marked(&text);
+    assert!(head.starts_with("1\n2\n3\n"), "{}…", &head[..20]);
+    assert!(head.ends_with("[output truncated]\n"));
+    assert_eq!(
+        head.lines().count(),
+        MAX_LINES + 1,
+        "2000 lines + the marker"
+    );
+
+    // byte cap: one huge line, cut on a char boundary
+    let wide = "x".repeat(MAX_BYTES * 2);
+    let head = truncate_head_marked(&wide);
+    assert!(head.len() < MAX_BYTES + 64, "{} bytes", head.len());
+
+    // token cap: the byte cap is not a token cap, and CJK costs ~1 token per
+    // char, so without this the same byte count would cost 3-4x more
+    let cjk = "中".repeat(MAX_BYTES);
+    let head = truncate_head_marked(&cjk);
+    assert!(
+        crate::agent::compact::text_tokens(&head) <= MAX_TOKENS + 64,
+        "CJK must be cut by the token estimate too"
+    );
+    // a char boundary: the cut must never split a codepoint
+    assert!(!head.trim_end_matches("[output truncated]\n").is_empty());
+    let body = head.trim_end_matches("\n[output truncated]\n");
+    assert!(body.chars().all(|c| c == '中'));
+
+    // under the caps: returned untouched, with no marker
+    let small = "hello";
+    assert_eq!(truncate_head_marked(small), "hello");
+}
+
 #[test]
 fn validation_bounces_bad_args() {
     let schema = json!({
