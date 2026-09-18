@@ -25,6 +25,22 @@ impl Default for CompactConfig {
     }
 }
 
+impl CompactConfig {
+    /// The keep-recent window this context size can actually honor. A fixed
+    /// `keep_recent_tokens` is only meaningful against the window it was
+    /// chosen for: on a smaller model (an 8k local one, say) a 32k window is
+    /// larger than everything the budget leaves, so `find_cut` finds no
+    /// boundary that holds it and returns `None` — compaction then silently
+    /// never runs and the run dies on the provider's context error instead.
+    /// Half the usable window is the ceiling: enough that a cut can always be
+    /// found once pressure is real, small enough that the kept tail does not
+    /// crowd out the summary that replaces everything before it.
+    pub fn effective_keep_recent(&self) -> u64 {
+        let usable = self.context_window.saturating_sub(self.reserve_tokens);
+        self.keep_recent_tokens.min(usable / 2)
+    }
+}
+
 /// Token cost of text: ASCII ≈ 1 token per 4 chars, CJK/fullwidth ≈ 1 token
 /// per char (a space-free Chinese sentence would otherwise be undercounted
 /// 3-4x, making `/status` and compaction trigger too late).
@@ -567,6 +583,42 @@ mod tests {
         assert!(est >= 150);
         let all = estimate_tokens(&history, None);
         assert!(all > est);
+    }
+
+    #[test]
+    fn keep_recent_never_outgrows_the_window_it_guards() {
+        // the default window honors the full configured value
+        let big = CompactConfig::default();
+        assert_eq!(big.effective_keep_recent(), 32_000);
+        // a small model clamps it to half the usable window, so a cut always
+        // exists once compaction is due (before the clamp, find_cut returned
+        // None forever and the run died on a provider context error)
+        let small = CompactConfig {
+            context_window: 16_000,
+            reserve_tokens: 4_000,
+            keep_recent_tokens: 32_000,
+        };
+        assert_eq!(small.effective_keep_recent(), 6_000);
+        // a small configured value is left alone
+        let tiny = CompactConfig {
+            context_window: 16_000,
+            reserve_tokens: 4_000,
+            keep_recent_tokens: 1_000,
+        };
+        assert_eq!(tiny.effective_keep_recent(), 1_000);
+        // a reserve that eats the whole window degrades to zero, not a panic
+        let degenerate = CompactConfig {
+            context_window: 1_000,
+            reserve_tokens: 8_000,
+            keep_recent_tokens: 32_000,
+        };
+        assert_eq!(degenerate.effective_keep_recent(), 0);
+        // the clamped value really does let find_cut succeed: the kept tail
+        // must itself hold the window, so the last message is the big one
+        let history = vec![Msg::user("x".repeat(4_000)), Msg::user("y".repeat(28_000))];
+        assert!(find_cut(&history, small.effective_keep_recent()).is_some());
+        // and the unclamped 32k would not have found that cut
+        assert_eq!(find_cut(&history, 32_000), None);
     }
 
     #[test]

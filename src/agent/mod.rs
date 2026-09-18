@@ -574,7 +574,7 @@ pub fn run_agent(
                 }
             }
             if compact::should_compact(estimate, cfg)
-                && let Some(cut) = compact::find_cut(&history, cfg.keep_recent_tokens)
+                && let Some(cut) = compact::find_cut(&history, cfg.effective_keep_recent())
                 && let Ok(s) = compact::summarize(model, &history[..cut])
                 && !s.is_empty()
             {
