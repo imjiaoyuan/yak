@@ -34,6 +34,16 @@ const ACCEL_DIV: usize = 24;
 /// several accelerated ticks instead.
 const MAX_GRANT: usize = 24;
 
+/// How long the settle wait plays the paced backlog out before flushing the
+/// rest. That wait runs on the *agent* thread (`turn_end` settles before the
+/// next tool round starts, `pause` before chrome prints), so whatever it
+/// costs is latency real work pays for a cosmetic effect — at the drain rate
+/// a 10k-char backlog would stall the loop for ~7s, and the old cap let it
+/// run to 30. Sized to let a typical answer tail finish typing; past it the
+/// remainder is written at once, which changes only *when* bytes land, not
+/// what lands (write-once holds either way).
+const SETTLE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub struct Renderer {
     /// accumulated visible output
     pub output: String,
@@ -358,11 +368,12 @@ impl TaskView {
     }
 
     /// Type the paced backlog out and stop the heartbeat: chrome (tool
-    /// result, next round, footer) must never land over untyped text. The
-    /// cap only guards a pathological giant tail — past it, finish_stream
-    /// dumps the rest.
+    /// result, next round, footer) must never land over untyped text. Bounded
+    /// by [`SETTLE_GRACE`] — the wait is on the agent thread, so a long tail
+    /// must not hold the next round hostage; whatever remains is flushed by
+    /// `finish_stream`.
     fn settle(&mut self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + SETTLE_GRACE;
         loop {
             let more = self.renderer.lock().unwrap().pump_due();
             if !more || std::time::Instant::now() > deadline {
@@ -602,6 +613,32 @@ mod tests {
         }
         r.finish_stream();
         assert!(r.pending.is_empty() && r.backlog.is_empty());
+    }
+
+    /// The settle wait is on the agent thread, so it must stay bounded: a
+    /// giant backlog is flushed rather than typed out at cosmetic cadence.
+    /// 20k chars would take ~15s at the drain rate; the grace caps it.
+    #[test]
+    fn settle_never_holds_the_agent_thread() {
+        // `live: false` keeps a spinner thread out of the test
+        let mut v = TaskView::new(0, "", false);
+        let text: String = "x".repeat(20_000);
+        {
+            let mut r = v.renderer.lock().unwrap();
+            r.backlog = text.clone();
+            r.output = text.clone();
+        }
+        let started = std::time::Instant::now();
+        v.settle();
+        let waited = started.elapsed();
+        assert!(
+            waited < SETTLE_GRACE + std::time::Duration::from_millis(600),
+            "settle must not type a 20k backlog out: waited {waited:?}"
+        );
+        // write-once still holds: nothing is lost, the rest lands at once
+        let r = v.into_renderer();
+        assert!(r.backlog.is_empty(), "the remainder is flushed");
+        assert_eq!(r.output, text, "every byte is still accumulated");
     }
 
     /// An escape sequence is never cut in half by the char budget: the
