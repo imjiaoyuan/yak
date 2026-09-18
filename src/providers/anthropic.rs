@@ -397,6 +397,7 @@ pub fn run(
     if let Some(key) = &m.api_key {
         headers.extend(super::auth_headers(&m.kind, key));
     }
+    headers.extend(super::gateway_headers(&url));
     super::dispatch(
         HttpRequest {
             url,

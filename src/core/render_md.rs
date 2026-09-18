@@ -417,116 +417,192 @@ fn layer_style(inner: &str, codes: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Inline resolver: one-shot (replay) — the streaming mirror lives in
-// StyleStream::scan_inline; the two must stay behaviorally identical.
+// Inline resolver — one decision layer, two emitters (replay and stream)
 // ---------------------------------------------------------------------------
 
-/// Inline scanner over a complete string: bold/italic emphasis, strike,
-/// code spans, links (the styles: strong = bold, em = italic, no hues).
-/// Unterminated markers stay literal; `_` is never an emphasis marker.
-fn render_inline_pal(s: &str, p: &Palette) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        match s.as_bytes()[i] {
+/// The styled spans the resolver produces; each renderer maps a span to
+/// palette codes its own way (`span_codes`).
+#[derive(Clone, Copy)]
+enum InlSpan {
+    Code,
+    Bold,
+    Italic,
+    BoldItalic,
+    Strike,
+    Link,
+    LinkUrl,
+}
+
+/// One unit of resolved inline output: a literal character, or a styled
+/// run the emitter opens, prints and closes itself.
+enum InlEvent<'a> {
+    Lit(char),
+    Styled(InlSpan, &'a str),
+}
+
+/// SGR codes for a span (the styles: strong = bold, em = italic, no hues).
+fn span_codes(p: &Palette, span: InlSpan) -> String {
+    match span {
+        InlSpan::Code => p.code.clone(),
+        InlSpan::Bold => p.bold.clone(),
+        InlSpan::Italic => p.italic.clone(),
+        InlSpan::BoldItalic => format!("{}{}", p.bold, p.italic),
+        InlSpan::Strike => p.strike.clone(),
+        InlSpan::Link => format!("{}{}", p.link, p.underline),
+        InlSpan::LinkUrl => p.link_url.clone(),
+    }
+}
+
+/// The inline decision layer: bold/italic emphasis, strike, code spans and
+/// links (`_` is never an emphasis marker), scanned from `at` and handed to
+/// `emit` — the one-shot replay resolver and the streaming scanner share
+/// these matching rules verbatim, so the two cannot drift. `eol` says the
+/// line is complete: mid-line an unclosed marker holds — the scan stops
+/// before it and returns that position so the caller resumes once more text
+/// settles — while at end of line the same marker flushes literally, which
+/// is all the one-shot resolver ever does. Returns the stop position.
+fn scan_inline_events(
+    line: &str,
+    at: usize,
+    eol: bool,
+    emit: &mut impl FnMut(InlEvent<'_>),
+) -> usize {
+    let mut i = at;
+    while i < line.len() {
+        match line.as_bytes()[i] {
             b'`' => {
-                let run = s[i..].chars().take_while(|&c| c == '`').count();
-                if let Some(rel) = s[i + run..].find(&"`".repeat(run)) {
-                    let content = &s[i + run..i + run + rel];
+                let run = line[i..].chars().take_while(|&c| c == '`').count();
+                if let Some(rel) = line[i + run..].find(&"`".repeat(run)) {
+                    let content = &line[i + run..i + run + rel];
                     if !content.is_empty() {
-                        out.push_str(&p.code);
-                        out.push_str(content);
-                        out.push_str(&p.reset);
+                        emit(InlEvent::Styled(InlSpan::Code, content));
                         i += run + rel + run;
                         continue;
                     }
                 }
+                if !eol && within_hold(&line[i..]) {
+                    return i;
+                }
                 for _ in 0..run {
-                    out.push('`');
+                    emit(InlEvent::Lit('`'));
                 }
                 i += run;
             }
             b'*' => {
-                let run = s[i..].chars().take_while(|&c| c == '*').count().min(3);
-                if let Some(rel) = s[i + run..].find(&"*".repeat(run)) {
-                    let content = &s[i + run..i + run + rel];
+                let run = line[i..].chars().take_while(|&c| c == '*').count().min(3);
+                if let Some(rel) = line[i + run..].find(&"*".repeat(run)) {
+                    let content = &line[i + run..i + run + rel];
                     if !content.is_empty()
                         && !content.starts_with(' ')
                         && !content.ends_with(' ')
                         && !content.contains('*')
                     {
-                        match run {
-                            3 => out.push_str(&format!("{}{}", p.bold, p.italic)),
-                            2 => out.push_str(&p.bold),
-                            _ => out.push_str(&p.italic),
-                        }
-                        out.push_str(content);
-                        out.push_str(&p.reset);
+                        let span = match run {
+                            3 => InlSpan::BoldItalic,
+                            2 => InlSpan::Bold,
+                            _ => InlSpan::Italic,
+                        };
+                        emit(InlEvent::Styled(span, content));
                         i += run + rel + run;
                         continue;
                     }
                 }
+                if !eol && within_hold(&line[i..]) {
+                    return i;
+                }
                 for _ in 0..run {
-                    out.push('*');
+                    emit(InlEvent::Lit('*'));
                 }
                 i += run;
             }
             b'~' => {
-                let run = s[i..].chars().take_while(|&c| c == '~').count().min(2);
-                if run == 2
-                    && let Some(rel) = s[i + 2..].find("~~")
-                {
-                    let content = &s[i + 2..i + 2 + rel];
+                let tilde_run = line[i..].chars().take_while(|&c| c == '~').count();
+                if tilde_run < 2 {
+                    // one `~` so far: a second may still arrive and open a
+                    // strike span, so hold it until the next char shows up
+                    if !eol && i + 1 >= line.len() {
+                        return i;
+                    }
+                    emit(InlEvent::Lit('~'));
+                    i += 1;
+                    continue;
+                }
+                if let Some(rel) = line[i + 2..].find("~~") {
+                    let content = &line[i + 2..i + 2 + rel];
                     if !content.is_empty() && !content.contains('~') {
-                        out.push_str(&p.strike);
-                        out.push_str(content);
-                        out.push_str(&p.reset);
+                        emit(InlEvent::Styled(InlSpan::Strike, content));
                         i += 2 + rel + 2;
                         continue;
                     }
                 }
-                for _ in 0..s[i..].chars().take_while(|&c| c == '~').count().min(2) {
-                    out.push('~');
+                if !eol && within_hold(&line[i..]) {
+                    return i;
                 }
-                i += run;
+                for _ in 0..tilde_run.min(2) {
+                    emit(InlEvent::Lit('~'));
+                }
+                i += tilde_run.min(2);
             }
             b'[' => {
                 // this bracket's own `]`: a link only when `](url)` closes
-                if let Some(rb) = s[i + 1..].find(']') {
+                // — otherwise the `[` is settled literal text
+                if let Some(rb) = line[i + 1..].find(']') {
                     let close = i + 1 + rb;
-                    if s.as_bytes().get(close + 1) == Some(&b'(')
-                        && let Some(end) = s[close + 2..].find(')')
-                    {
-                        let text = &s[i + 1..close];
-                        let href = &s[close + 2..close + 2 + end];
+                    if close + 1 >= line.len() {
+                        if !eol && within_hold(&line[i..]) {
+                            return i; // ']' is the last char so far
+                        }
+                    } else if line.as_bytes()[close + 1] != b'(' {
+                        emit(InlEvent::Lit('['));
+                        i += 1;
+                        continue;
+                    } else if let Some(end) = line[close + 2..].find(')') {
+                        let text = &line[i + 1..close];
+                        let href = &line[close + 2..close + 2 + end];
                         if !text.is_empty() {
-                            out.push_str(&p.link);
-                            out.push_str(&p.underline);
-                            out.push_str(text);
-                            out.push_str(&p.reset);
+                            emit(InlEvent::Styled(InlSpan::Link, text));
                             if text != href {
-                                out.push_str(&p.link_url);
-                                out.push_str(&format!(" ({href})"));
-                                out.push_str(&p.reset);
+                                emit(InlEvent::Styled(InlSpan::LinkUrl, &format!(" ({href})")));
                             }
                             i = close + 2 + end + 1;
                             continue;
                         }
+                        emit(InlEvent::Lit('['));
+                        i += 1;
+                        continue;
+                    } else if !eol && within_hold(&line[i..]) {
+                        return i; // `](` seen, ')' pending
                     }
+                } else if !eol && within_hold(&line[i..]) {
+                    return i; // no ']' yet
                 }
-                out.push('[');
+                emit(InlEvent::Lit('['));
                 i += 1;
             }
             _ => {
-                let ch = s[i..].chars().next().unwrap();
-                out.push(ch);
+                let ch = line[i..].chars().next().unwrap();
+                emit(InlEvent::Lit(ch));
                 i += ch.len_utf8();
             }
         }
     }
-    out
+    i
 }
 
+/// Inline scanner over a complete string: the shared resolver run at
+/// `eol` (nothing holds), rendered straight into one styled string.
+fn render_inline_pal(s: &str, p: &Palette) -> String {
+    let mut out = String::with_capacity(s.len());
+    scan_inline_events(s, 0, true, &mut |ev| match ev {
+        InlEvent::Lit(ch) => out.push(ch),
+        InlEvent::Styled(span, content) => {
+            out.push_str(&span_codes(p, span));
+            out.push_str(content);
+            out.push_str(&p.reset);
+        }
+    });
+    out
+}
 // ---------------------------------------------------------------------------
 // StyleStream: live write-once styled streaming
 // ---------------------------------------------------------------------------
@@ -1191,161 +1267,30 @@ impl StyleStream {
         }
     }
 
-    // ---- inline resolver (streaming mirror of render_inline_pal) -------
+    // ---- inline resolver (streaming emitter over the shared rules) -----
 
-    /// Resolve inline markup from `at` while it is settled: plain text
-    /// streams char-by-char; a closed code/emphasis/link span emits as
-    /// one styled burst; an unclosed marker holds until `eol`, where it
-    /// flushes literally and the scan continues (matching the one-shot
-    /// resolver byte for byte).
+    /// Resolve inline markup from `at` while it is settled: the matching
+    /// rules live in `scan_inline_events`, shared with the one-shot
+    /// resolver; this side only routes events through the row emitter
+    /// (`putc`, so wrapping and heading holds apply). An unclosed marker
+    /// stops the scan until more text settles or the line ends.
     fn scan_inline(&mut self, at: usize, out: &mut String, eol: bool) {
-        // the scan reads the line while `putc` mutates the stream: move it out
-        // for the duration instead of cloning it on every delta
+        // the scan reads the line while `putc` mutates the stream: move it
+        // out for the duration instead of cloning it on every delta
         let line = std::mem::take(&mut self.line);
         let p = self.p;
-        let mut i = at;
-        while i < line.len() {
-            match line.as_bytes()[i] {
-                b'`' => {
-                    let run = line[i..].chars().take_while(|&c| c == '`').count();
-                    if let Some(rel) = line[i + run..].find(&"`".repeat(run)) {
-                        let content = &line[i + run..i + run + rel];
-                        if !content.is_empty() {
-                            self.span_open(&p.code, out);
-                            for ch in content.chars() {
-                                self.putc(ch, out);
-                            }
-                            self.span_close(out);
-                            i += run + rel + run;
-                            continue;
-                        }
-                    }
-                    if !eol && within_hold(&line[i..]) {
-                        break;
-                    }
-                    for _ in 0..run {
-                        self.putc('`', out);
-                    }
-                    i += run;
-                }
-                b'*' => {
-                    let run = line[i..].chars().take_while(|&c| c == '*').count().min(3);
-                    if let Some(rel) = line[i + run..].find(&"*".repeat(run)) {
-                        let content = &line[i + run..i + run + rel];
-                        if !content.is_empty()
-                            && !content.starts_with(' ')
-                            && !content.ends_with(' ')
-                            && !content.contains('*')
-                        {
-                            let codes = match run {
-                                3 => format!("{}{}", p.bold, p.italic),
-                                2 => p.bold.clone(),
-                                _ => p.italic.clone(),
-                            };
-                            self.span_open(&codes, out);
-                            for ch in content.chars() {
-                                self.putc(ch, out);
-                            }
-                            self.span_close(out);
-                            i += run + rel + run;
-                            continue;
-                        }
-                    }
-                    if !eol && within_hold(&line[i..]) {
-                        break;
-                    }
-                    for _ in 0..run {
-                        self.putc('*', out);
-                    }
-                    i += run;
-                }
-                b'~' => {
-                    let tilde_run = line[i..].chars().take_while(|&c| c == '~').count();
-                    if tilde_run < 2 {
-                        // one `~` so far: a second may still arrive and open a
-                        // strike span, so hold it until the next char shows up
-                        if !eol && i + 1 >= line.len() {
-                            break;
-                        }
-                        self.putc('~', out);
-                        i += 1;
-                        continue;
-                    }
-                    if let Some(rel) = line[i + 2..].find("~~") {
-                        let content = &line[i + 2..i + 2 + rel];
-                        if !content.is_empty() && !content.contains('~') {
-                            self.span_open(&p.strike, out);
-                            for ch in content.chars() {
-                                self.putc(ch, out);
-                            }
-                            self.span_close(out);
-                            i += 2 + rel + 2;
-                            continue;
-                        }
-                    }
-                    if !eol && within_hold(&line[i..]) {
-                        break;
-                    }
-                    for _ in 0..tilde_run.min(2) {
-                        self.putc('~', out);
-                    }
-                    i += tilde_run.min(2);
-                }
-                b'[' => {
-                    // this bracket's own `]`: a link only when `](url)`
-                    // closes — otherwise the `[` is settled literal text
-                    if let Some(rb) = line[i + 1..].find(']') {
-                        let close = i + 1 + rb;
-                        if close + 1 >= line.len() {
-                            if !eol && within_hold(&line[i..]) {
-                                break; // ']' is the last char so far
-                            }
-                        } else if line.as_bytes()[close + 1] != b'(' {
-                            self.putc('[', out);
-                            i += 1;
-                            continue;
-                        } else if let Some(end) = line[close + 2..].find(')') {
-                            let text = &line[i + 1..close];
-                            let href = &line[close + 2..close + 2 + end];
-                            if !text.is_empty() {
-                                let codes = format!("{}{}", p.link, p.underline);
-                                self.span_open(&codes, out);
-                                for ch in text.chars() {
-                                    self.putc(ch, out);
-                                }
-                                self.span_close(out);
-                                if text != href {
-                                    let tail = format!(" ({href})");
-                                    self.span_open(&p.link_url, out);
-                                    for ch in tail.chars() {
-                                        self.putc(ch, out);
-                                    }
-                                    self.span_close(out);
-                                }
-                                i = close + 2 + end + 1;
-                                continue;
-                            }
-                            self.putc('[', out);
-                            i += 1;
-                            continue;
-                        } else if !eol && within_hold(&line[i..]) {
-                            break; // `](` seen, ')' pending
-                        }
-                    } else if !eol && within_hold(&line[i..]) {
-                        break; // no ']' yet
-                    }
-                    self.putc('[', out);
-                    i += 1;
-                }
-                _ => {
-                    let ch = line[i..].chars().next().unwrap();
+        let i = scan_inline_events(&line, at, eol, &mut |ev| match ev {
+            InlEvent::Lit(ch) => self.putc(ch, out),
+            InlEvent::Styled(span, content) => {
+                self.span_open(&span_codes(p, span), out);
+                for ch in content.chars() {
                     self.putc(ch, out);
-                    i += ch.len_utf8();
                 }
+                self.span_close(out);
             }
-        }
+        });
         self.st = St::Inline(i);
-        // broke early = a marker still holds its span
+        // stopped early = a marker still holds its span
         self.marker_open = i < line.len();
         self.line = line;
     }

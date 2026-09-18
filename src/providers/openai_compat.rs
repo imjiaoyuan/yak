@@ -347,8 +347,9 @@ pub fn run(
     let url = format!("{}/chat/completions", m.base_url.trim_end_matches('/'));
     let mut headers = vec![("Content-Type".into(), "application/json".into())];
     if let Some(key) = &m.api_key {
-        headers.push(super::auth_header(&m.kind, key));
+        headers.extend(super::auth_headers(&m.kind, key));
     }
+    headers.extend(super::gateway_headers(&url));
     super::dispatch(
         HttpRequest {
             url,

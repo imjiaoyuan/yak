@@ -85,51 +85,37 @@ pub fn expand_env(value: &str) -> String {
 }
 
 pub fn load() -> Config {
-    let path = config_path();
-    if !path.exists() {
-        return Config::default();
-    }
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            eprintln!("Error: cannot read {}: {e}", path.display());
-            std::process::exit(1);
-        }
+    let root = read_root_or_die();
+    // aliases ride the same parsed root (Config skips them): one read and
+    // one parse of the file, not a second full parse for one key
+    let aliases = match root.get("aliases") {
+        None | Some(serde_json::Value::Null) => BTreeMap::new(),
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| {
+                eprintln!(
+                    "Warning: cannot read aliases from {}: {e}",
+                    config_path().display()
+                )
+            })
+            .unwrap_or_default(),
     };
-    // an empty file behaves like a missing one (empty JSON is a parse error)
-    if raw.trim().is_empty() {
-        return Config::default();
-    }
-    let mut config: Config = serde_json::from_str(&raw).unwrap_or_else(|e| {
-        eprintln!("Error: failed to parse {}: {e}", path.display());
+    let mut config: Config = serde_json::from_value(root).unwrap_or_else(|e| {
+        eprintln!(
+            "Error: {} does not hold a valid config: {e}",
+            config_path().display()
+        );
         std::process::exit(1);
     });
-    // aliases off the same bytes: a one-key view of the file (unknown
-    // fields ignored), so load() costs one read + two parses, not two reads
-    #[derive(Deserialize)]
-    struct AliasRoot {
-        #[serde(default)]
-        aliases: BTreeMap<String, String>,
-    }
-    config.aliases = serde_json::from_str::<AliasRoot>(&raw)
-        .map_err(|e| eprintln!("Warning: cannot read aliases from {}: {e}", path.display()))
-        .map(|a| a.aliases)
-        .unwrap_or_default();
+    config.aliases = aliases;
     config
 }
 
-/// One silently-degrading read of a config value: a missing file, unparsable
-/// JSON or a missing key all yield None — optional tables are never fatal.
-/// Extension names come from the config `extensions.disabled` list.
+/// Extension names from the config `extensions.disabled` list. A missing
+/// file or key is simply empty — optional tables are never fatal — but a
+/// corrupt file is loud: silently enabling disabled extensions would be a
+/// trust change nobody asked for.
 pub fn disabled_extensions() -> Vec<String> {
-    let raw = match fs::read_to_string(config_path()) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
-    };
-    value
+    read_root_or_die()
         .get("extensions")
         .and_then(|e| e.get("disabled"))
         .and_then(|v| v.as_array())
@@ -144,14 +130,10 @@ pub fn disabled_extensions() -> Vec<String> {
 /// Per-tool-call timeout for extension tools (config
 /// `extensions.tool_timeout`, seconds; default 120).
 pub fn extension_tool_timeout() -> Duration {
-    let secs = fs::read_to_string(config_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| {
-            v.get("extensions")
-                .and_then(|e| e.get("tool_timeout"))
-                .and_then(|t| t.as_u64())
-        });
+    let secs = read_root_or_die()
+        .get("extensions")
+        .and_then(|e| e.get("tool_timeout"))
+        .and_then(|t| t.as_u64());
     Duration::from_secs(secs.unwrap_or(120).max(1))
 }
 
@@ -160,19 +142,30 @@ pub fn extension_tool_timeout() -> Duration {
 // the default the flip had nothing left to do (it would only override an
 // explicit ask), so the file is ignored entirely.
 
-/// Read config.json as an object for a merge-preserving rewrite: a missing
-/// or empty file yields an empty object, anything unparsable or non-object
-/// aborts instead of being wiped.
+/// The one loud reader: a missing or empty file is an empty object, anything
+/// unparsable or non-object aborts the process exactly like `load()` — no
+/// reader of this file may silently degrade past a corrupt config.
+fn read_root_or_die() -> serde_json::Value {
+    match read_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Read config.json as an object (single reader for every config access —
+/// typed loads, optional-table peeks and merge-preserving rewrites alike):
+/// a missing or empty file yields an empty object, anything unparsable or
+/// non-object is an error instead of a wiped or imagined config.
 fn read_root() -> std::io::Result<serde_json::Value> {
     let path = config_path();
     if !path.exists() {
         return Ok(serde_json::Value::Object(Default::default()));
     }
     let raw = fs::read_to_string(&path).map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!("refusing to rewrite {}: {e}", path.display()),
-        )
+        std::io::Error::new(e.kind(), format!("cannot read {}: {e}", path.display()))
     })?;
     if raw.trim().is_empty() {
         return Ok(serde_json::Value::Object(Default::default()));
@@ -180,16 +173,13 @@ fn read_root() -> std::io::Result<serde_json::Value> {
     let root: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{} is not valid JSON, not overwriting: {e}", path.display()),
+            format!("{} is not valid JSON: {e}", path.display()),
         )
     })?;
     if !root.is_object() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "{} root is not a JSON object, not overwriting",
-                path.display()
-            ),
+            format!("{} root is not a JSON object", path.display()),
         ));
     }
     Ok(root)
@@ -224,8 +214,7 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 
 /// The shared default model every mode runs on.
 pub fn default_model() -> Option<String> {
-    let value = read_root().ok()?;
-    default_model_from(&value)
+    default_model_from(&read_root_or_die())
 }
 
 fn default_model_from(value: &serde_json::Value) -> Option<String> {
@@ -238,8 +227,7 @@ fn default_model_from(value: &serde_json::Value) -> Option<String> {
 
 /// The global reasoning level riding the default model.
 pub fn default_thinking() -> Option<String> {
-    let value = read_root().ok()?;
-    default_thinking_from(&value)
+    default_thinking_from(&read_root_or_die())
 }
 
 fn default_thinking_from(value: &serde_json::Value) -> Option<String> {
@@ -346,10 +334,7 @@ fn options_from(value: &serde_json::Value) -> Option<BTreeMap<String, BTreeMap<S
 
 /// Per-model default options, stored as the `models.options` table.
 pub fn load_model_options() -> BTreeMap<String, BTreeMap<String, String>> {
-    read_root()
-        .ok()
-        .and_then(|root| options_from(&root))
-        .unwrap_or_default()
+    options_from(&read_root_or_die()).unwrap_or_default()
 }
 
 /// Remember a provider model seen in the wild (e.g. picked from a live

@@ -294,25 +294,34 @@ fn sleep_interruptible(d: Duration) {
     }
 }
 
+/// One configured agent: dial-phase bounds so the connect phase fails on
+/// its own — ureq leaves these unlimited, and OS defaults stretch into
+/// minutes (Linux SYN retransmits ≈ 2min) or to the global ceiling (a TLS
+/// handshake to a black-holed host) — minutes of dead spinner before the
+/// retry loop even starts — plus a global ceiling. `http_status_as_error`
+/// stays off: status is a value the caller reads, not a panic path.
+fn mk_agent(resolve: Duration, connect: Duration, global: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_resolve(Some(resolve))
+        .timeout_connect(Some(connect))
+        .timeout_global(Some(global))
+        .build()
+        .into()
+}
+
 /// The shared agent: a process-wide connection pool so repeated requests
 /// (agent loops, ping, model lists) reuse TLS connections instead of paying
-/// a fresh handshake per call.
+/// a fresh handshake per call. The 1800s global still covers generation;
+/// the dial bounds only affect a black-holed host.
 pub fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            // the connect phase must fail on its own: ureq leaves these
-            // unlimited, and OS defaults stretch into minutes (Linux SYN
-            // retransmits ≈ 2min) or to the global ceiling (a TLS handshake
-            // to a black-holed host) — minutes of dead spinner before the
-            // retry loop even starts. A real stream is unaffected: these
-            // bound dialing only, the 1800s global still covers generation.
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(1800)))
-            .build()
-            .into()
+        mk_agent(
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(1800),
+        )
     })
 }
 
@@ -320,11 +329,11 @@ pub fn agent() -> &'static ureq::Agent {
 pub fn short_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(10)))
-            .build()
-            .into()
+        mk_agent(
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        )
     })
 }
 
@@ -334,13 +343,11 @@ pub fn short_agent() -> &'static ureq::Agent {
 pub fn fetch_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into()
+        mk_agent(
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
     })
 }
 
@@ -488,42 +495,16 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
     }
 }
 
-/// Client identity for every provider request: a real user agent (gateways
-/// triage abuse by client, and an HTTP-library default reads as a script), plus
-/// the stable conversation id OpenCode's Go/Zen gateway demands in
-/// `x-opencode-session` — without it every chat request is a 400
-/// `MissingSessionID`, and with it the gateway can pin routing and prompt cache.
-pub fn identity_headers(url: &str) -> Vec<(String, String)> {
-    let mut headers = vec![(
+/// Client identity for every outbound request: a real user agent — gateways
+/// triage abuse by client, and an HTTP-library default reads as a script.
+/// Vendor-specific headers (OpenCode's `x-opencode-session`) are added by
+/// the provider adapters that know they are talking to that vendor
+/// (`providers::gateway_headers`), not sniffed here for every URL.
+pub fn identity_headers() -> Vec<(String, String)> {
+    vec![(
         "user-agent".to_string(),
         format!("llm/{}", env!("CARGO_PKG_VERSION")),
-    )];
-    if is_opencode(url) {
-        headers.push(("x-opencode-session".to_string(), session_id()));
-    }
-    headers
-}
-
-/// The opencode.ai host, wherever it sits in the URL (zen, go, a path prefix).
-fn is_opencode(url: &str) -> bool {
-    let authority = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let host = authority.split(['/', '?', '#']).next().unwrap_or(authority);
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    host.eq_ignore_ascii_case("opencode.ai") || host.ends_with(".opencode.ai")
-}
-
-/// One session id per process, so every turn and retry of a run shares it.
-/// `LLM_SESSION_ID` pins it across processes for a caller that keeps one
-/// conversation alive; otherwise a fresh ulid stands in for this run.
-pub fn session_id() -> String {
-    static SESSION: OnceLock<String> = OnceLock::new();
-    SESSION
-        .get_or_init(|| match std::env::var("LLM_SESSION_ID") {
-            Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-            _ => crate::core::db::ulid(),
-        })
-        .clone()
+    )]
 }
 
 /// One blocking network attempt — DNS, TCP, TLS, body upload, response
@@ -584,7 +565,7 @@ fn send_raw(
     req: &HttpRequest,
 ) -> Result<ureq::http::Response<ureq::Body>, HttpError> {
     let mut request = agent.post(&req.url);
-    for (k, v) in req.headers.iter().chain(identity_headers(&req.url).iter()) {
+    for (k, v) in req.headers.iter().chain(identity_headers().iter()) {
         request = request.header(k, v);
     }
     let response = request.send(&req.body).map_err(map_error)?;
@@ -690,7 +671,7 @@ fn get_blocking(
     url: &str,
 ) -> Result<(Vec<u8>, Option<String>), HttpError> {
     let mut request = agent.get(url);
-    for (k, v) in identity_headers(url) {
+    for (k, v) in identity_headers() {
         request = request.header(k, v);
     }
     let resp = request
@@ -742,7 +723,7 @@ pub fn fetch_page(url: &str) -> Result<FetchedPage, String> {
 /// The blocking body of `fetch_page`, running on its worker thread.
 fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<FetchedPage, HttpError> {
     let mut request = agent.get(url);
-    for (k, v) in identity_headers(url) {
+    for (k, v) in identity_headers() {
         request = request.header(k, v);
     }
     let resp = request
@@ -825,31 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn only_opencode_hosts_get_a_session_header() {
-        assert!(is_opencode(
-            "https://opencode.ai/zen/go/v1/chat/completions"
-        ));
-        assert!(is_opencode("https://opencode.ai/zen/go/v1/messages"));
-        assert!(is_opencode("https://api.opencode.ai/v1"));
-        assert!(!is_opencode("https://opencode.ai.evil.test/v1"));
-        assert!(!is_opencode("https://evil.test/?u=opencode.ai"));
-        assert!(!is_opencode("https://api.deepseek.com/chat/completions"));
-    }
-
-    #[test]
-    fn identity_headers_name_the_client_and_gate_the_session() {
-        let go = identity_headers("https://opencode.ai/zen/go/v1/chat/completions");
-        assert_eq!(go[0].0, "user-agent");
-        assert!(go[0].1.starts_with("llm/"));
-        assert_eq!(go[1].0, "x-opencode-session");
-        assert!(!go[1].1.is_empty());
-        let other = identity_headers("https://api.openai.com/v1/chat/completions");
-        assert_eq!(other.len(), 1);
-    }
-
-    #[test]
-    fn one_session_id_is_reused_for_the_whole_process() {
-        assert_eq!(session_id(), session_id());
+    fn identity_headers_name_the_client() {
+        let h = identity_headers();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "user-agent");
+        assert!(h[0].1.starts_with("llm/"));
     }
 
     #[test]

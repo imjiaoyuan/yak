@@ -1037,7 +1037,7 @@ fn repl_command(
         "/export" => match session.conversation_id.clone() {
             Some(cid) => {
                 let path = (!arg.is_empty()).then_some(arg);
-                match crate::commands::export::export_thread(&cid, &session.cwd, path) {
+                match crate::core::export::export_thread(&cid, &session.cwd, path) {
                     Ok(path) => eprintln!(
                         "{}exported {cid} → {}{}",
                         crate::theme::err().dim,

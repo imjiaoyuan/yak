@@ -269,7 +269,8 @@ pub fn fetch_models_url(
     } else {
         super::auth_headers(kind, api_key)
     };
-    headers.extend(crate::core::http::identity_headers(&url));
+    headers.extend(crate::core::http::identity_headers());
+    headers.extend(super::gateway_headers(&url));
     (url, headers)
 }
 
