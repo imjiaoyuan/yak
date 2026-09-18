@@ -245,16 +245,10 @@ pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32)
     }
 }
 
-/// Truncate to 60 chars with a single ellipsis glyph (the plugin preview
+/// Truncate to 60 chars with the single ellipsis glyph (the plugin preview
 /// shape, now shared by script/MCP tool chrome).
 pub(crate) fn short(s: &str) -> String {
-    let mut out = crate::core::text::truncate_chars(s, 60);
-    if let Some(stripped) = out.strip_suffix("...") {
-        // truncate_chars appends "..." but the preview surface has always
-        // used the single ellipsis glyph; keep the bytes it renders today.
-        out = format!("{stripped}…");
-    }
-    out
+    crate::core::text::truncate_chars(s, 60)
 }
 
 /// `{prefix} {args-as-json-truncated}` — the preview line for plugin tools.

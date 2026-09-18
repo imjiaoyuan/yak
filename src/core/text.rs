@@ -25,13 +25,15 @@ pub fn ceil_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-/// Truncate to at most `max` chars, appending "..." when anything was cut.
+/// Truncate to at most `max` chars, appending `…` when anything was cut.
+/// Chars, not cells: callers that care about terminal width use
+/// [`crate::core::render_md::truncate_cells`] instead.
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
         let cut: String = text.chars().take(max).collect();
-        format!("{cut}...")
+        format!("{cut}…")
     }
 }
 
@@ -159,7 +161,7 @@ mod tests {
 
     #[test]
     fn truncate_appends_ellipsis() {
-        assert_eq!(truncate_chars("abcd", 3), "abc...");
+        assert_eq!(truncate_chars("abcd", 3), "abc…");
         assert_eq!(truncate_chars("ab", 3), "ab");
     }
 
