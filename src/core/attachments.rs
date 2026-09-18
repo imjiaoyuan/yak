@@ -2,23 +2,45 @@
 //! into bytes with a mime type, feeding the wire `Attachment` and the thread
 //! store. Shared by prompt and agent.
 
+use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Read};
 
 /// The wire form of an attachment, carried on user messages and tool
 /// results: mime, base64 bytes and a display name. `path`/`url` ride along
 /// as storage provenance (where the bytes came from) — the provider
-/// adapters never read them, but the log store needs them so a stored
-/// attachment can point back at its source.
-#[derive(Clone, Debug, PartialEq)]
+/// adapters never read them, but the thread store needs them so a stored
+/// attachment can point back at its source. The serde shape is the stored
+/// one: the same struct the request carries is what a thread file holds, so
+/// there is no second type and no converter between them. A legacy thread
+/// line wrote the payload as `base64` and a nullable `mime_type`; both are
+/// accepted on read so an old thread still resumes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Attachment {
+    #[serde(default, deserialize_with = "mime_or_default")]
     pub mime_type: String,
+    /// base64 payload; empty for a metadata-only record (a resumed thread
+    /// whose bytes were never reloaded)
+    #[serde(default, alias = "base64", skip_serializing_if = "String::is_empty")]
     pub base64_data: String,
     /// display name for file-typed wire blocks; None for stdin/clipboard bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     /// the local path the bytes were loaded from, when they were
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// the URL the bytes were fetched from, when they were
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// A missing or `null` mime reads as the empty string: the old stored shape
+/// had no mime on a bytes-only record, and every consumer treats empty as
+/// "unknown" rather than failing the whole resume.
+fn mime_or_default<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(de)?.unwrap_or_default())
 }
 
 /// An attachment with provenance: feeds both the request and the log store.

@@ -6,7 +6,8 @@
 //! would bury the transcript); only their kind and where they came from are
 //! recorded.
 
-use crate::core::threads::{StoredAttachment, StoredMsg, StoredTurn};
+use crate::core::threads::StoredTurn;
+use crate::providers::{Attachment, Msg};
 
 /// Render `turns` (thread `id`, oldest first) as markdown.
 pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
@@ -56,7 +57,7 @@ pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
 
         let mut last_answer: Option<String> = None;
         for m in &turn.messages {
-            if let StoredMsg::Assistant { text, .. } = m
+            if let Msg::Assistant { text, .. } = m
                 && !text.trim().is_empty()
             {
                 last_answer = Some(text.trim_end().to_string());
@@ -99,15 +100,15 @@ pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
     out
 }
 
-fn render_message(out: &mut String, m: &StoredMsg) {
+fn render_message(out: &mut String, m: &Msg) {
     match m {
-        StoredMsg::User { text, attachments } => {
+        Msg::User { text, attachments } => {
             if !text.trim().is_empty() {
                 out.push_str(&format!("**User**\n\n{}\n\n", text.trim_end()));
             }
             render_attachments(out, attachments);
         }
-        StoredMsg::Assistant {
+        Msg::Assistant {
             text, tool_calls, ..
         } => {
             if !text.trim().is_empty() {
@@ -121,7 +122,7 @@ fn render_message(out: &mut String, m: &StoredMsg) {
                 out.push('\n');
             }
         }
-        StoredMsg::Tool {
+        Msg::ToolResult {
             name,
             content,
             is_error,
@@ -140,7 +141,7 @@ fn render_message(out: &mut String, m: &StoredMsg) {
             render_attachments(out, attachments);
             out.push('\n');
         }
-        StoredMsg::Summary { text } => {
+        Msg::Summary { text } => {
             if !text.trim().is_empty() {
                 out.push_str(&format!("**Compacted summary**\n\n{}\n\n", text.trim_end()));
             }
@@ -149,15 +150,19 @@ fn render_message(out: &mut String, m: &StoredMsg) {
 }
 
 /// A `*attachment*` line: kind plus provenance, never the payload.
-fn render_attachments(out: &mut String, attachments: &[StoredAttachment]) {
+fn render_attachments(out: &mut String, attachments: &[Attachment]) {
     for a in attachments {
-        let kind = a.mime_type.as_deref().unwrap_or("application/octet-stream");
+        let kind = if a.mime_type.is_empty() {
+            "application/octet-stream"
+        } else {
+            &a.mime_type
+        };
         let from = match (a.path.as_deref(), a.url.as_deref()) {
             (Some(path), _) => format!("`{path}`"),
             (None, Some(url)) => url.to_string(),
             // inline-only (a pasted image): the bytes stay behind
             (None, None) => {
-                let kb = a.base64.as_deref().map_or(0, |b| b.len() * 3 / 4 / 1024);
+                let kb = a.base64_data.len() * 3 / 4 / 1024;
                 format!("inline (~{kb} KB)")
             }
         };
@@ -193,7 +198,7 @@ fn flatten(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn turn(messages: Vec<StoredMsg>) -> StoredTurn {
+    fn turn(messages: Vec<Msg>) -> StoredTurn {
         StoredTurn {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "01TESTTURN".into(),
@@ -215,20 +220,17 @@ mod tests {
     #[test]
     fn renders_the_thread_and_its_metadata() {
         let t = turn(vec![
-            StoredMsg::User {
-                text: "hello  world".into(),
-                attachments: Vec::new(),
-            },
-            StoredMsg::Assistant {
+            Msg::user("hello  world"),
+            Msg::Assistant {
                 text: "hi".into(),
-                tool_calls: vec![crate::core::threads::StoredToolCall {
+                tool_calls: vec![crate::providers::ToolCall {
                     id: "c1".into(),
                     name: "read".into(),
                     arguments: serde_json::json!({"path": "src/main.rs"}),
                 }],
                 reasoning: None,
             },
-            StoredMsg::Tool {
+            Msg::ToolResult {
                 call_id: "c1".into(),
                 name: "read".into(),
                 content: "fn main() {}".into(),
@@ -267,15 +269,16 @@ mod tests {
 
     #[test]
     fn attachment_payloads_never_reach_the_document() {
-        let t = turn(vec![StoredMsg::User {
-            text: "look at this".into(),
-            attachments: vec![StoredAttachment {
+        let t = turn(vec![Msg::user_with(
+            "look at this",
+            vec![Attachment {
                 path: Some("/tmp/shot.png".into()),
                 url: None,
-                mime_type: Some("image/png".into()),
-                base64: Some("QUJDREVGRw".into()),
+                mime_type: "image/png".into(),
+                base64_data: "QUJDREVGRw".into(),
+                filename: None,
             }],
-        }]);
+        )]);
         let md = to_markdown("01THREAD", &[t]);
         assert!(md.contains("*attachment* `image/png` — `/tmp/shot.png`"));
         assert!(!md.contains("QUJDREVGRw"));
@@ -286,11 +289,8 @@ mod tests {
         // the loop pops the final assistant message out of `messages` and
         // keeps it as the turn response — the export must not lose it
         let mut t = turn(vec![
-            StoredMsg::User {
-                text: "hello  world".into(),
-                attachments: Vec::new(),
-            },
-            StoredMsg::Assistant {
+            Msg::user("hello  world"),
+            Msg::Assistant {
                 text: "calling".into(),
                 tool_calls: Vec::new(),
                 reasoning: None,
@@ -303,11 +303,8 @@ mod tests {
 
         // when the message is still in the transcript it is not repeated
         let mut t = turn(vec![
-            StoredMsg::User {
-                text: "hello  world".into(),
-                attachments: Vec::new(),
-            },
-            StoredMsg::Assistant {
+            Msg::user("hello  world"),
+            Msg::Assistant {
                 text: "the final answer".into(),
                 tool_calls: Vec::new(),
                 reasoning: None,

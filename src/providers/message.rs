@@ -1,6 +1,7 @@
 //! The conversation model: messages, tool definitions and calls, request
 //! inputs — the vocabulary both provider adapters serialize.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Attachment;
@@ -15,7 +16,7 @@ pub struct ToolDef {
 }
 
 /// A tool call emitted by the model.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -23,28 +24,36 @@ pub struct ToolCall {
 }
 
 /// Unified conversation message; each provider adapter serializes these to its
-/// own wire format. `text` may be empty on an Assistant that only calls tools.
-#[derive(Clone, Debug, PartialEq)]
+/// own wire format, and the thread store persists the same struct (one
+/// vocabulary, no second translation layer). `text` may be empty on an
+/// Assistant that only calls tools.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Msg {
     User {
         text: String,
         /// images/PDFs/audio riding this message (multimodal input)
+        #[serde(default)]
         attachments: Vec<Attachment>,
     },
     Assistant {
         text: String,
+        #[serde(default)]
         tool_calls: Vec<ToolCall>,
         /// reasoning trace the model produced with this message (thinking
         /// models via gateways that require it back on replay). None on
         /// non-thinking models and legacy histories.
+        #[serde(default)]
         reasoning: Option<String>,
     },
     ToolResult {
         call_id: String,
         name: String,
         content: String,
+        #[serde(default)]
         is_error: bool,
         /// images/PDFs a vision-capable read produced, riding this result
+        #[serde(default)]
         attachments: Vec<Attachment>,
     },
     /// compaction summary replacing the dropped conversation prefix

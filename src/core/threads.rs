@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::core::config;
+use crate::providers::Msg;
 
 /// The on-disk turn format this binary writes and reads. The stamp lives on
 /// every stored line; a line without one (written before versioning
@@ -22,62 +22,6 @@ pub const THREAD_FORMAT_VERSION: u32 = 1;
 /// pre-versioning lines keep their exact shape.
 fn v_is_zero(v: &u32) -> bool {
     *v == 0
-}
-
-/// Attachment provenance, metadata only — thread files store no bytes, and
-/// resume replays text only.
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct StoredAttachment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-    /// base64 payload (present when the attachment's content was loaded)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base64: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct StoredToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
-}
-
-/// A stored wire-level message (user/assistant/tool/summary), mirroring
-/// `providers::Msg` — attachment payloads ride as base64 on the user/tool
-/// variants so a resume rebuilds the exact conversation.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "role", rename_all = "snake_case")]
-pub enum StoredMsg {
-    User {
-        text: String,
-        #[serde(default)]
-        attachments: Vec<StoredAttachment>,
-    },
-    Assistant {
-        text: String,
-        #[serde(default)]
-        tool_calls: Vec<StoredToolCall>,
-        /// reasoning trace (thinking models); replayed to gateways that
-        /// require it back
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<String>,
-    },
-    Tool {
-        call_id: String,
-        name: String,
-        content: String,
-        #[serde(default)]
-        is_error: bool,
-        #[serde(default)]
-        attachments: Vec<StoredAttachment>,
-    },
-    Summary {
-        text: String,
-    },
 }
 
 /// One completed turn, appended as a single JSON line.
@@ -114,7 +58,7 @@ pub struct StoredTurn {
     #[serde(default)]
     pub options: Vec<(String, String)>,
     /// the full wire messages of the round (agent replay fidelity)
-    pub messages: Vec<StoredMsg>,
+    pub messages: Vec<Msg>,
 }
 
 /// One row of the browser list.
@@ -435,10 +379,7 @@ mod tests {
             usage: None,
             duration_ms: None,
             options: Vec::new(),
-            messages: vec![StoredMsg::User {
-                text: prompt.to_string(),
-                attachments: Vec::new(),
-            }],
+            messages: vec![Msg::user(prompt.to_string())],
         }
     }
 
@@ -615,6 +556,47 @@ mod tests {
         let forked = store.fork_thread(&id).unwrap().unwrap();
         assert_ne!(forked, id);
         assert_eq!(store.read_thread(&forked).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A line written before the message types were merged (attachment
+    /// payloads as `base64`, a nullable `mime_type`) still resumes: the read
+    /// side accepts both spellings, so the merge costs no old thread.
+    #[test]
+    fn a_thread_written_before_the_merge_still_reads() {
+        let dir = scratch("legacy");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let legacy = serde_json::json!({
+            "v": 1,
+            "id": "t1",
+            "ts": "2026-08-23T01:00:00+00:00",
+            "mode": "agent",
+            "model": "prov/m",
+            "prompt": "look",
+            "response": "ok",
+            "options": [],
+            "messages": [{
+                "role": "user",
+                "text": "look",
+                "attachments": [{
+                    "path": "/tmp/shot.png",
+                    "mime_type": serde_json::Value::Null,
+                    "base64": "aGk="
+                }]
+            }]
+        });
+        fs::write(&path, format!("{legacy}\n")).unwrap();
+        let turns = store.read_thread(&id).unwrap();
+        let Msg::User { attachments, .. } = &turns[0].messages[0] else {
+            panic!("expected a user message");
+        };
+        assert_eq!(attachments[0].base64_data, "aGk=");
+        assert_eq!(attachments[0].mime_type, "");
+        assert_eq!(attachments[0].path.as_deref(), Some("/tmp/shot.png"));
         let _ = fs::remove_dir_all(&dir);
     }
 

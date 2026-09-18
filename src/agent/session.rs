@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::agent::approval::{self, ApprovalConfig};
 use crate::agent::compact::CompactConfig;
 use crate::agent::{AgentOptions, AgentUpdate, ApprovalRequest, ApprovalResponse, run_agent};
-use crate::core::threads::{self, StoredAttachment, StoredMsg, StoredToolCall, StoredTurn};
-use crate::providers::{Msg, ResolvedModel, ToolCall};
+use crate::core::threads::{self, StoredTurn};
+use crate::providers::{Msg, ResolvedModel};
 
 /// Everything one agent task needs; the interactive REPL reuses this across
 /// tasks, evolving `seed`/`conversation_id`/`approval` as it goes.
@@ -531,10 +531,7 @@ impl Session {
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        let mut new_messages: Vec<StoredMsg> = history[boundary.min(history.len())..]
-            .iter()
-            .map(msg_to_stored)
-            .collect();
+        let mut new_messages: Vec<Msg> = history[boundary.min(history.len())..].to_vec();
         // the final no-tool assistant message doubles as the turn response
         let ends_plain = matches!(
             history.last(),
@@ -664,72 +661,12 @@ fn emit_event(event: &serde_json::Value) {
     let _ = out.flush();
 }
 
-pub fn msg_to_stored(m: &Msg) -> StoredMsg {
-    match m {
-        Msg::User { text, attachments } => StoredMsg::User {
-            text: text.clone(),
-            attachments: attachments.iter().map(attachment_to_stored).collect(),
-        },
-        Msg::Summary { text } => StoredMsg::Summary { text: text.clone() },
-        Msg::Assistant {
-            text,
-            tool_calls,
-            reasoning,
-        } => StoredMsg::Assistant {
-            text: text.clone(),
-            tool_calls: tool_calls
-                .iter()
-                .map(|c| StoredToolCall {
-                    id: c.id.clone(),
-                    name: c.name.clone(),
-                    arguments: c.arguments.clone(),
-                })
-                .collect(),
-            reasoning: reasoning.clone(),
-        },
-        Msg::ToolResult {
-            call_id,
-            name,
-            content,
-            is_error,
-            attachments,
-        } => StoredMsg::Tool {
-            call_id: call_id.clone(),
-            name: name.clone(),
-            content: content.clone(),
-            is_error: *is_error,
-            attachments: attachments.iter().map(attachment_to_stored).collect(),
-        },
-    }
-}
-
-fn attachment_to_stored(a: &crate::providers::Attachment) -> StoredAttachment {
-    StoredAttachment {
-        path: a.path.clone(),
-        url: a.url.clone(),
-        mime_type: Some(a.mime_type.clone()),
-        base64: (!a.base64_data.is_empty()).then(|| a.base64_data.clone()),
-    }
-}
-
-fn attachment_from_stored(a: &StoredAttachment) -> crate::providers::Attachment {
-    crate::providers::Attachment {
-        mime_type: a
-            .mime_type
-            .clone()
-            .unwrap_or_else(|| "application/octet-stream".into()),
-        base64_data: a.base64.clone().unwrap_or_default(),
-        filename: None,
-        path: a.path.clone(),
-        url: a.url.clone(),
-    }
-}
-
 /// Rebuild a wire-level history (plus the original system prompt) from a
-/// thread's stored turns. The first turn's system is the prompt; later
-/// `Summary` messages are compaction summaries. Pure over the turns the
-/// caller already read: `read_thread`'s error (a damaged thread is refused,
-/// never guessed at) stays the caller's to propagate.
+/// thread's stored turns. The messages *are* `Msg` — the thread stores the
+/// same struct the request carries — so the walk only filters empty user
+/// turns and restores the final assistant answer, which the store pops out
+/// of `messages` and keeps as the turn's `response` field. The first turn's
+/// system is the prompt; later `Summary` messages are compaction summaries.
 pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
     let mut msgs: Vec<Msg> = Vec::new();
     let mut system: Option<String> = None;
@@ -738,48 +675,15 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
             system = turn.system.clone();
         }
         for m in &turn.messages {
-            match m {
-                StoredMsg::User { text, attachments } => {
-                    if !text.is_empty() || !attachments.is_empty() {
-                        msgs.push(Msg::user_with(
-                            text.clone(),
-                            attachments.iter().map(attachment_from_stored).collect(),
-                        ));
-                    }
-                }
-                StoredMsg::Assistant {
-                    text,
-                    tool_calls,
-                    reasoning,
-                } => {
-                    msgs.push(Msg::Assistant {
-                        text: text.clone(),
-                        tool_calls: tool_calls
-                            .iter()
-                            .map(|c| ToolCall {
-                                id: c.id.clone(),
-                                name: c.name.clone(),
-                                arguments: c.arguments.clone(),
-                            })
-                            .collect(),
-                        reasoning: reasoning.clone(),
-                    });
-                }
-                StoredMsg::Tool {
-                    call_id,
-                    name,
-                    content,
-                    is_error,
-                    attachments,
-                } => msgs.push(Msg::ToolResult {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                    attachments: attachments.iter().map(attachment_from_stored).collect(),
-                }),
-                StoredMsg::Summary { text } => msgs.push(Msg::Summary { text: text.clone() }),
+            // a user turn with neither text nor attachments carries nothing
+            // into the request, so it never enters the replay
+            if let Msg::User { text, attachments } = m
+                && text.is_empty()
+                && attachments.is_empty()
+            {
+                continue;
             }
+            msgs.push(m.clone());
         }
         // the final plain assistant was popped out of `messages` (it doubles
         // as the turn response); ride it back in so a resume sees the answer
@@ -941,7 +845,7 @@ mod tests {
             Msg::user("write the docs"),
             Msg::Assistant {
                 text: String::new(),
-                tool_calls: vec![ToolCall {
+                tool_calls: vec![crate::providers::ToolCall {
                     id: "c1".into(),
                     name: "write".into(),
                     arguments: serde_json::json!({"path": "a.md", "content": "x"}),
@@ -1026,49 +930,50 @@ mod tests {
     }
 
     #[test]
-    fn user_attachments_keep_their_real_provenance_in_storage() {
-        // a wire attachment carrying loader provenance stores the path/url
-        // it came from — never the bare display filename as a path
-        let msg = crate::providers::Msg::user_with(
-            "look",
-            vec![crate::providers::Attachment {
-                mime_type: "image/png".into(),
-                base64_data: crate::b64::encode(b"pngbytes"),
-                filename: Some("shot.png".into()),
-                path: Some("/tmp/cam/2026/shot.png".into()),
-                url: None,
-            }],
-        );
-        let stored = msg_to_stored(&msg);
-        let StoredMsg::User { attachments, .. } = &stored else {
-            panic!("expected a user message");
-        };
-        assert_eq!(
-            attachments[0].path.as_deref(),
-            Some("/tmp/cam/2026/shot.png")
-        );
-        assert_eq!(attachments[0].url, None);
+    fn attachments_keep_their_provenance_through_a_serde_round_trip() {
+        // the stored shape *is* the wire shape: a thread file round-trips an
+        // attachment's path/url (never the bare display filename as a path),
+        // and the base64 payload rides along so a resume rebuilds the request
+        for (path, url) in [
+            (Some("/tmp/cam/2026/shot.png"), None),
+            (None, Some("https://example.com/shot.png?token=1")),
+        ] {
+            let msg = crate::providers::Msg::user_with(
+                "look",
+                vec![crate::providers::Attachment {
+                    mime_type: "image/png".into(),
+                    base64_data: crate::b64::encode(b"pngbytes"),
+                    filename: Some("shot.png".into()),
+                    path: path.map(str::to_string),
+                    url: url.map(str::to_string),
+                }],
+            );
+            let line = serde_json::to_string(&msg).unwrap();
+            let back: Msg = serde_json::from_str(&line).unwrap();
+            assert_eq!(back, msg, "{line}");
+        }
+    }
 
-        // a URL attachment stores the URL
-        let msg = crate::providers::Msg::user_with(
-            "look",
-            vec![crate::providers::Attachment {
-                mime_type: "image/png".into(),
-                base64_data: crate::b64::encode(b"pngbytes"),
-                filename: Some("shot.png".into()),
-                path: None,
-                url: Some("https://example.com/shot.png?token=1".into()),
-            }],
+    /// The stored line keeps the wire `role` tags and omits empty payload
+    /// fields, so a thread file stays small and readable.
+    #[test]
+    fn a_stored_message_omits_empty_attachment_fields() {
+        let msg = Msg::user("plain");
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"role":"user","text":"plain","attachments":[]}"#
         );
-        let stored = msg_to_stored(&msg);
-        let StoredMsg::User { attachments, .. } = &stored else {
-            panic!("expected a user message");
+        let msg = Msg::ToolResult {
+            call_id: "c1".into(),
+            name: "read".into(),
+            content: "bytes".into(),
+            is_error: false,
+            attachments: Vec::new(),
         };
         assert_eq!(
-            attachments[0].url.as_deref(),
-            Some("https://example.com/shot.png?token=1")
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"role":"tool_result","call_id":"c1","name":"read","content":"bytes","is_error":false,"attachments":[]}"#
         );
-        assert_eq!(attachments[0].path, None);
     }
 
     #[test]
@@ -1094,34 +999,36 @@ mod tests {
             duration_ms: None,
             options: Vec::new(),
             messages: vec![
-                StoredMsg::User {
-                    text: "look at this".into(),
-                    attachments: vec![StoredAttachment {
+                Msg::user_with(
+                    "look at this",
+                    vec![crate::providers::Attachment {
+                        mime_type: "image/png".into(),
+                        base64_data: "aGk=".into(),
+                        filename: None,
                         path: None,
                         url: None,
-                        mime_type: Some("image/png".into()),
-                        base64: Some("aGk=".into()),
                     }],
-                },
-                StoredMsg::Assistant {
+                ),
+                Msg::Assistant {
                     text: String::new(),
-                    tool_calls: vec![StoredToolCall {
+                    tool_calls: vec![crate::providers::ToolCall {
                         id: "c1".into(),
                         name: "read".into(),
                         arguments: serde_json::json!({"path": "a.png"}),
                     }],
                     reasoning: None,
                 },
-                StoredMsg::Tool {
+                Msg::ToolResult {
                     call_id: "c1".into(),
                     name: "read".into(),
                     content: "bytes".into(),
                     is_error: false,
-                    attachments: vec![StoredAttachment {
+                    attachments: vec![crate::providers::Attachment {
+                        mime_type: "image/png".into(),
+                        base64_data: "aGk=".into(),
+                        filename: None,
                         path: Some("a.png".into()),
                         url: None,
-                        mime_type: Some("image/png".into()),
-                        base64: Some("aGk=".into()),
                     }],
                 },
             ],
