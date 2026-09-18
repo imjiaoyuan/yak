@@ -124,7 +124,7 @@ pub fn run(argv: &[String]) -> i32 {
 
 fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     if args.flag(&["resume"]) {
-        return Ok(crate::commands::logs::browse());
+        return Ok(crate::commands::threads::browse());
     }
     let mut prompt = args.positionals.join(" ");
     // an `-a -` attachment claims stdin; otherwise piped stdin is the task

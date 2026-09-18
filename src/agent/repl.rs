@@ -406,7 +406,7 @@ fn slash_command_word(buf: &str, names: &[String]) -> bool {
 /// and load it into this session (history replays, the next task appends to
 /// the same thread).
 fn resume_pick(session: &mut Session) -> Result<(), String> {
-    let Some(cid) = crate::commands::logs::pick_thread(&session.cwd, "resume:")? else {
+    let Some(cid) = crate::commands::threads::pick_thread(&session.cwd, "resume:")? else {
         return Ok(());
     };
     let store = crate::core::threads::Store::open()?;

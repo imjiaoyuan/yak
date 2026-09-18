@@ -55,11 +55,11 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// The model a command run resolves to — the one shared chain for prompt,
-/// agent and chat: `-m` > `LLM_MODEL` > `context` (a template's pinned
-/// model or the conversation's last model) > the stored default. A
-/// dangling default warns and drops out instead of erroring. Saved
-/// per-model options ride under CLI `-o` pairs.
+/// The model a command run resolves to — the one shared chain for every
+/// agent entry point: `-m` > `LLM_MODEL` > `context` (the conversation's
+/// last model, when one is resumed) > the stored default. A dangling
+/// default warns and drops out instead of erroring. Saved per-model
+/// options ride under CLI `-o` pairs.
 pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
     use crate::core::config;
     let cfg = config::load();

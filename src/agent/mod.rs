@@ -19,7 +19,7 @@ use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef}
 use serde_json::json;
 
 /// Progress events surfaced by the loop; `llm agent` renders these as text
-/// or JSONL depending on --mode.
+/// or JSONL (with --json) depending on the entry point.
 pub enum AgentUpdate {
     Delta(String),
     ReasoningDelta(String),

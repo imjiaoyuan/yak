@@ -7,7 +7,7 @@
 /// One catalogued provider.
 pub struct Entry {
     pub id: &'static str,
-    /// our adapter kind: openai-compat | anthropic | image | tts
+    /// our adapter kind: openai-compat | anthropic
     pub kind: &'static str,
     pub base_url: &'static str,
     /// the env var the ecosystem shares for the API key

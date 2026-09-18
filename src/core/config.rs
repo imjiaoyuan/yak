@@ -372,8 +372,6 @@ pub fn add_model(provider: &str, model_id: &str) {
     }
 }
 
-// logging gate — the config.json `logging` bool
-
 impl Config {
     /// Resolve a model id (either `provider/model` or a bare name/alias)
     /// to (provider_name, provider, model_id). `Ok(None)` means the name is
