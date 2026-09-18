@@ -40,15 +40,10 @@ fn attachment_block(a: &Attachment) -> Result<Value, String> {
     }
 }
 
-/// Mark the last content block of the final message as a prompt-cache
-/// breakpoint: every later round resends this exact prefix, so the next
-/// request reads the whole conversation back instead of re-billing it.
+/// Mark one message's last content block as a prompt-cache breakpoint.
 /// Caching is opt-in on the Messages API; without a marker nothing caches.
-fn mark_conversation_tip(messages: &mut [Value]) {
-    let Some(last) = messages.last_mut() else {
-        return;
-    };
-    let content = &mut last["content"];
+fn mark_message(msg: &mut Value) {
+    let content = &mut msg["content"];
     if content.is_string() {
         let text = content.as_str().unwrap_or("").to_string();
         *content = json!([{
@@ -63,6 +58,28 @@ fn mark_conversation_tip(messages: &mut [Value]) {
     }
 }
 
+/// Cache breakpoints for one request. The API allows four; a conversation
+/// breakpoint only ever *reads* for the rounds that follow it, so a single
+/// marker on the moving tip caches almost nothing — every round rewrites the
+/// whole history at write price (1.25x) and reads none of it back. Two
+/// markers fix that: the anchor is the message the previous request ended on
+/// (stable, so this round reads everything up to it) and the tip is where
+/// this request ends (so the next round reads this one in turn). The system
+/// block carries the third, which covers tools+system together.
+fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>) {
+    let Some(last) = messages.len().checked_sub(1) else {
+        return;
+    };
+    // the anchor is an index into the *conversation*, which the assembled
+    // message list may only extend (a trailing user turn); an index at or
+    // past the tip is not a stable prefix and would collide with the tip
+    // marker (the API refuses more than one breakpoint per block)
+    if let Some(i) = anchor.filter(|i| *i < last) {
+        mark_message(&mut messages[i]);
+    }
+    mark_message(&mut messages[last]);
+}
+
 pub fn build_body(
     m: &ResolvedModel,
     input: &PromptInput<'_>,
@@ -73,7 +90,16 @@ pub fn build_body(
     let last_result = super::last_result_index(input.history);
     let mut messages: Vec<Value> = Vec::new();
     let mut pending_results: Vec<Value> = Vec::new();
+    // assembled position of the last message the previous request carried:
+    // the stable anchor a cache breakpoint can read back. The caller names a
+    // prefix length n, which at the top of iteration n is exactly what the
+    // flushes so far have produced (a trailing tool-result run included).
+    let mut anchor: Option<usize> = None;
     for (i, msg) in input.history.iter().enumerate() {
+        if input.cache_anchor == Some(i) {
+            flush_results(&mut messages, &mut pending_results);
+            anchor = messages.len().checked_sub(1);
+        }
         match msg {
             Msg::User { text, attachments } => {
                 flush_results(&mut messages, &mut pending_results);
@@ -150,6 +176,11 @@ pub fn build_body(
         }
     }
     flush_results(&mut messages, &mut pending_results);
+    // the caller named the whole history as stable: the anchor is its last
+    // assembled message, which the final flush above may just have produced
+    if input.cache_anchor == Some(input.history.len()) {
+        anchor = messages.len().checked_sub(1);
+    }
     // an empty prompt with no attachments means "continue after tool results"
     if !input.prompt.is_empty() || !input.attachments.is_empty() {
         messages.push(json!({
@@ -161,7 +192,7 @@ pub fn build_body(
     // rides AFTER the conversation-tip breakpoint: it is volatile, so the
     // cached tip must stay on the real conversation, not on the note.
     if !input.history.is_empty() {
-        mark_conversation_tip(&mut messages);
+        mark_cache_breakpoints(&mut messages, anchor);
     }
     if let Some(note) = input.note {
         messages.push(json!({"role": "user", "content": note}));
@@ -513,6 +544,89 @@ mod tests {
             json!({"type": "ephemeral"}),
             "{tip}"
         );
+    }
+
+    /// The two-marker scheme across the shapes a conversation takes: first
+    /// request, a request extending a persisted turn, and the case where the
+    /// anchor and the tip coincide (a tool round) — that one must collapse to
+    /// a single marker, because the API refuses two on one block.
+    #[test]
+    fn cache_breakpoints_pin_the_stable_prefix_and_the_tip() {
+        fn marked(b: &Value) -> usize {
+            b["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| {
+                    m["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|b| b.get("cache_control").is_some())
+                    })
+                })
+                .count()
+        }
+
+        // first request: nothing is stable, so only the tip is marked
+        let history = vec![Msg::user("hi")];
+        let mut i = input(&history, &[]);
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        // history(1) then the live prompt
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(marked(&body), 1, "the tip alone: {body}");
+
+        // round 2: the previous request carried the whole conversation, so
+        // its last message is the anchor while the new prompt is the tip
+        let history = vec![
+            Msg::user("hi"),
+            Msg::Assistant {
+                text: "hello".into(),
+                tool_calls: vec![],
+                reasoning: None,
+            },
+        ];
+        i.history = &history;
+        i.cache_anchor = Some(2);
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "history(2) then the live prompt");
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "the persisted turn is the anchor: {body}"
+        );
+        assert_eq!(
+            msgs[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "the live prompt is the tip: {body}"
+        );
+        assert!(
+            msgs[0]["content"][0].get("cache_control").is_none(),
+            "the oldest turn is covered by the anchor, not marked again: {body}"
+        );
+        assert_eq!(marked(&body), 2);
+
+        // an anchor that already covers everything still resolves to the
+        // last persisted message, one behind the live prompt
+        i.cache_anchor = Some(1);
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            msgs[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(marked(&body), 2);
+
+        // a tool round adds no user turn, so the anchor resolves onto the tip
+        // itself and must collapse to one marker
+        let only = vec![Msg::user("hi")];
+        let mut i = input(&only, &[]);
+        i.prompt = "";
+        i.cache_anchor = Some(1);
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        assert_eq!(marked(&body), 1, "anchor and tip coincide: {body}");
     }
 
     #[test]

@@ -389,6 +389,13 @@ pub struct PromptInput<'a> {
     /// persisted, and sits at the very end so it does not disturb the
     /// prompt-cache prefix.
     pub note: Option<&'a str>,
+    /// how much of `history` the previous request in this conversation
+    /// already carried, as a prefix length (None on the first request).
+    /// Cache breakpoints are placed from it: the prefix is stable, the tail
+    /// is not, and a provider that caches by input prefix (Anthropic
+    /// explicit markers, OpenAI-compatible automatic caching) reads the
+    /// stable part back instead of rewriting the whole prompt every round.
+    pub cache_anchor: Option<usize>,
 }
 
 /// The reasoning-effort levels accepted by --thinking / /thinking.
@@ -618,6 +625,7 @@ pub(crate) mod testutil {
             tools,
             reasoning: None,
             note: None,
+            cache_anchor: None,
         }
     }
 

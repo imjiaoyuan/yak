@@ -313,6 +313,11 @@ pub fn run_agent(
     // the whole history each round (O(n²) over a long task). Reset to None
     // wherever history is rebuilt (a compaction) so indices stay honest.
     let mut usage_marker: Option<(usize, Usage)> = None;
+    // prefix length that has stopped changing (see PromptInput::cache_anchor):
+    // set after each completed round, cleared wherever the loop edits history
+    // in place, so a provider reading its own cache back never sees a prefix
+    // that was rewritten under it.
+    let mut cache_stable: Option<usize> = None;
     let mut final_text = String::new();
     let mut interrupted = false;
     // mid-stream drops recovered so far; the cap keeps a link that drops
@@ -417,6 +422,7 @@ pub fn run_agent(
             tools: &tool_defs,
             reasoning: opts.reasoning.as_deref(),
             note: note.as_deref(),
+            cache_anchor: cache_stable,
         };
 
         let mut text = String::new();
@@ -510,6 +516,9 @@ pub fn run_agent(
         // by u.input + u.output (the tail estimate prices it again at
         // chars/4, matching the compaction gate's conservative math)
         usage_marker = usage.map(|u| (history.len().saturating_sub(1), u));
+        // the round is complete: this request's whole conversation is what
+        // the next one will extend, so it is the next request's cache anchor
+        cache_stable = Some(history.len());
         on_update(AgentUpdate::TurnEnd { usage });
         let _ = fire(
             opts.hooks,
@@ -571,6 +580,8 @@ pub fn run_agent(
                 // no longer names anything real, so drop it until the next
                 // usage report re-establishes one
                 usage_marker = None;
+                // the rebuild rewrote everything below the summary too
+                cache_stable = None;
             }
             // a failed summarization leaves the history untouched:
             // the run continues, possibly hitting the window later
