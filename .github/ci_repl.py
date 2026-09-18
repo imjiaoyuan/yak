@@ -60,6 +60,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if isinstance(last.get("content"), str) and last["content"].startswith("<context>"):
                 last = msgs[-2] if len(msgs) > 1 else last
             seen.setdefault("prompts", []).append(last.get("content", ""))
+            # the assembled system prompt, so a lane can assert a
+            # commands-dir `system:` really shipped (and did not replace the
+            # agent's own guidance)
+            for m in msgs:
+                if m.get("role") == "system":
+                    c = m.get("content")
+                    seen["system"] = c if isinstance(c, str) else json.dumps(c)
+                    break
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -224,6 +232,14 @@ def main():
     with open(os.path.join(skill_dir, "references", "x.md"), "w") as f:
         f.write("# x\n")
 
+    # a commands-dir prompt carrying a frontmatter `system`: `/review <arg>`
+    # must ship the substituted body *and* the system line, appended to the
+    # agent's own prompt rather than replacing it
+    cmds = os.path.join(user, "commands")
+    os.makedirs(cmds)
+    with open(os.path.join(cmds, "review.md"), "w") as f:
+        f.write("---\nsystem: SYSTEM-MARKER about $input\n---\nReview $input\n")
+
     # two stored conversations: one from this directory, one from another.
     # `/resume` must offer only the first (the reference-shaped scoping).
     os.makedirs(os.path.join(user, "threads"), exist_ok=True)
@@ -369,6 +385,19 @@ def main():
     want = f'<skill name="probe" dir="{skill_dir}">'
     assert prompts and want in prompts[-1], \
         f"skill prompt: {prompts[-1] if prompts else None!r} (wanted {want!r})"
+
+    # -- a commands-dir prompt ships its body and frontmatter system --------
+    OUT.clear()
+    send(fd, b"/review the-diff-arg\r")
+    time.sleep(1.0)
+    prompts = seen.get("prompts") or []
+    assert prompts and prompts[-1] == "Review the-diff-arg", \
+        f"commands-dir prompt on the wire: {prompts[-1] if prompts else None!r}"
+    system = seen.get("system") or ""
+    assert "SYSTEM-MARKER about the-diff-arg" in system, \
+        f"frontmatter system missing from the wire: {system[:300]!r}"
+    assert "update_plan" in system, \
+        "a command's system must append to the agent prompt, not replace it"
 
     # -- /resume lists this directory's conversations only -------------------
     OUT.clear()

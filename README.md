@@ -236,8 +236,9 @@ and `.llm/blacklist` for one project (its lines win; the two are concatenated). 
 
 Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in
 `~/.llm/commands/` (or the nearest `.llm/commands/` — the project copy wins) and `/name` runs it: the
-body is the prompt, optional frontmatter can pin `system`, and `$input` receives everything after the
-command name. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
+body is the prompt, optional frontmatter can add a `system` prompt on top of the agent's own, and
+`$input` receives everything after the command name. Both are substituted, so `$input` works in the
+`system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
 
 ### Help
 
