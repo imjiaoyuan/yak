@@ -1,6 +1,6 @@
-//! Prompt templates: YAML files under the user dir, original-llm style —
-//! loading, `$var` substitution and application. Internal engine behind
-//! custom commands; there is no `llm templates` CLI.
+//! The internal `$var` / `$input` substitution engine behind commands-dir
+//! prompts (`core/commands_md.rs`). Not a file loader and not a CLI: the
+//! `llm templates` family is gone, and nothing here reads the user dir.
 
 use std::collections::BTreeMap;
 
@@ -70,16 +70,14 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// string.Template-style substitution of `$name` / `${name}`.
-pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> Result<String, String> {
-    let vars = template_vars(text);
-    let missing: Vec<String> = vars
-        .iter()
-        .filter(|v| !params.contains_key(*v))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        return Err(format!("Missing variables: {}", missing.join(", ")));
-    }
+///
+/// A name that is not in `params` stays literal rather than failing: the one
+/// caller is a commands-dir prompt, where `$input` is the only variable and
+/// there is no `--param` mechanism to bind another. Erroring would abandon
+/// the whole expansion — `$input` included — over a stray `$HOME` or `$PATH`
+/// in a body, so a body writing about the shell would reach the model with
+/// its placeholder unexpanded.
+pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -98,7 +96,11 @@ pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> Result<Strin
                     name.push(c);
                 }
                 if is_ident(&name) {
-                    out.push_str(params.get(&name).map(|s| s.as_str()).unwrap_or(""));
+                    match params.get(&name) {
+                        Some(v) => out.push_str(v),
+                        // unbound: the placeholder survives verbatim
+                        None => out.push_str(&format!("${{{name}}}")),
+                    }
                 } else {
                     // an invalid braced name stays literal text
                     out.push_str(&format!("${{{name}}}"));
@@ -116,12 +118,18 @@ pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> Result<Strin
                         break;
                     }
                 }
-                out.push_str(params.get(&name).map(|s| s.as_str()).unwrap_or(""));
+                // unbound: the placeholder survives verbatim
+                if let Some(v) = params.get(&name) {
+                    out.push_str(v);
+                } else {
+                    out.push('$');
+                    out.push_str(&name);
+                }
             }
             _ => out.push('$'),
         }
     }
-    Ok(out)
+    out
 }
 
 /// Evaluate a template against user input and params (original `_apply_template`).
@@ -129,7 +137,7 @@ pub fn apply(
     t: &Template,
     input: &str,
     params: &BTreeMap<String, String>,
-) -> Result<(Option<String>, Option<String>), String> {
+) -> (Option<String>, Option<String>) {
     let mut all: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in params {
         all.insert(k.clone(), v.clone());
@@ -137,7 +145,7 @@ pub fn apply(
     all.insert("input".to_string(), input.to_string());
     let prompt = match &t.prompt {
         Some(p) => {
-            let evaluated = substitute(p, &all)?;
+            let evaluated = substitute(p, &all);
             if template_vars(p).contains(&"input".to_string()) || input.is_empty() {
                 Some(evaluated)
             } else {
@@ -146,11 +154,8 @@ pub fn apply(
         }
         None => None,
     };
-    let system = match &t.system {
-        Some(s) => Some(substitute(s, &all)?),
-        None => None,
-    };
-    Ok((prompt, system))
+    let system = t.system.as_ref().map(|s| substitute(s, &all));
+    (prompt, system)
 }
 
 #[cfg(test)]
@@ -162,12 +167,9 @@ mod tests {
         // Python's string.Template idstart rule: a leading digit is not a
         // variable, so a command body may quote prices unpunished
         let params = BTreeMap::new();
+        assert_eq!(substitute("costs $5 or $100", &params), "costs $5 or $100");
         assert_eq!(
-            substitute("costs $5 or $100", &params).unwrap(),
-            "costs $5 or $100"
-        );
-        assert_eq!(
-            substitute("regex groups: $1 and $2", &params).unwrap(),
+            substitute("regex groups: $1 and $2", &params),
             "regex groups: $1 and $2"
         );
     }
@@ -176,12 +178,28 @@ mod tests {
     fn invalid_braced_names_stay_literal() {
         let params = BTreeMap::new();
         assert_eq!(
-            substitute("shell ${HOME-ish}", &params).unwrap(),
+            substitute("shell ${HOME-ish}", &params),
             "shell ${HOME-ish}"
         );
         // valid names still substitute
         let mut p = BTreeMap::new();
         p.insert("name".to_string(), "x".to_string());
-        assert_eq!(substitute("hi ${name}!", &p).unwrap(), "hi x!");
+        assert_eq!(substitute("hi ${name}!", &p), "hi x!");
+    }
+
+    #[test]
+    fn unbound_variables_survive_verbatim() {
+        // `$input` is the only variable the commands-dir path binds; every
+        // other name is literal text, not a reason to drop the expansion
+        let params = BTreeMap::new();
+        assert_eq!(substitute("echo $HOME", &params), "echo $HOME");
+        assert_eq!(substitute("${PATH}:/x", &params), "${PATH}:/x");
+        // and an unbound name does not disturb a bound one beside it
+        let mut p = BTreeMap::new();
+        p.insert("input".to_string(), "the diff".to_string());
+        assert_eq!(
+            substitute("in $HOME, review $input", &p),
+            "in $HOME, review the diff"
+        );
     }
 }

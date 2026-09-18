@@ -1094,12 +1094,19 @@ fn repl_command(
             // (plus any trailing words) becomes one agent task
             if let Some(cmd) = crate::core::commands_md::find(name) {
                 let input = arg.trim();
-                let prompt = if input.is_empty() {
-                    cmd.body.clone()
-                } else {
-                    crate::core::commands_md::expand(&cmd, input)
-                };
+                let (prompt, system) = crate::core::commands_md::expand(&cmd, input);
+                // frontmatter `system` rides this task only, appended to the
+                // session prompt (the `--append-system-prompt` semantic) so
+                // the agent keeps its tool guidance; restored afterwards
+                let base = session.system.clone();
+                if let Some(s) = &system {
+                    session.system = Some(match &base {
+                        Some(b) => format!("{b}\n\n{s}"),
+                        None => s.clone(),
+                    });
+                }
                 run_task_logged(session, &prompt, &mut Vec::new());
+                session.system = base;
                 return false;
             }
             // not a builtin and not a commands-dir command: plain task text

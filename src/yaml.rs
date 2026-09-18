@@ -1,4 +1,7 @@
-//! Minimal YAML subset parser/emitter — enough for template files, zero deps.
+//! Minimal YAML subset parser — zero deps, no emitter (nothing writes YAML).
+//!
+//! One consumer shape: the frontmatter of a `SKILL.md` or a commands-dir
+//! prompt, always reduced through `as_map` to flat string pairs.
 //!
 //! Supported: nested maps, string/int/bool/null scalars, quoted strings,
 //! block scalars (`|` and `>`), `- item` string lists, comments.

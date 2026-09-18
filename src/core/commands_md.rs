@@ -1,9 +1,8 @@
 //! User commands: `~/.llm/commands/*.md` (plus the nearest project
 //! `.llm/commands/`, which wins) turning `llm <name> [args...]` into a
 //! prompt-template invocation — a declarative subcommand with no code.
-//! Markdown frontmatter (`model`, `system`, `attachments`,
-//! `attachment_types`) plus the body as the prompt; `$input` receives the
-//! trailing args.
+//! Markdown frontmatter carries `system` (the body is the prompt, and
+//! `$input` receives the trailing args).
 
 use crate::core::config::user_dir;
 
@@ -67,8 +66,8 @@ pub fn find(name: &str) -> Option<CommandMd> {
         .map(|text| parse(&text))
 }
 
-/// Build the agent-tool-style template from a command file: the body is the
-/// prompt, frontmatter supplies model/system.
+/// Build the substitution template from a command file: the body is the
+/// prompt, frontmatter supplies the system prompt.
 pub fn template(cmd: &CommandMd) -> crate::core::templates::Template {
     crate::core::templates::Template {
         prompt: Some(cmd.body.clone()),
@@ -76,16 +75,19 @@ pub fn template(cmd: &CommandMd) -> crate::core::templates::Template {
     }
 }
 
-/// Expand a command into a ready prompt (used by the REPLs): `$input`
-/// substitution, args appended when the body has no `$input`.
-pub fn expand(cmd: &CommandMd, input: &str) -> String {
+/// Expand a command into a ready prompt and its system prompt (used by the
+/// REPL): `$input` substitution, args appended when the body has no
+/// `$input`. The system prompt is substituted too, so it may reference
+/// `$input` as well.
+pub fn expand(cmd: &CommandMd, input: &str) -> (String, Option<String>) {
+    // an empty input sends both the body and the system verbatim rather
+    // than substituting an `$input` that was never supplied
     if input.trim().is_empty() {
-        return cmd.body.clone();
+        return (cmd.body.clone(), cmd.system.clone());
     }
-    match crate::core::templates::apply(&template(cmd), input, &std::collections::BTreeMap::new()) {
-        Ok((Some(prompt), _)) => prompt,
-        _ => cmd.body.clone(),
-    }
+    let (prompt, system) =
+        crate::core::templates::apply(&template(cmd), input, &std::collections::BTreeMap::new());
+    (prompt.unwrap_or_else(|| cmd.body.clone()), system)
 }
 
 #[cfg(test)]
@@ -127,11 +129,31 @@ mod tests {
     #[test]
     fn expand_substitutes_appends_or_uses_bare_body() {
         let cmd = parse("Review: $input");
-        assert_eq!(expand(&cmd, "the diff"), "Review: the diff");
+        assert_eq!(expand(&cmd, "the diff").0, "Review: the diff");
         let plain = parse("Summarize the code");
         // apply() appends the input when the body lacks $input
-        assert!(expand(&plain, "now").contains("Summarize the code"));
+        assert!(expand(&plain, "now").0.contains("Summarize the code"));
         // empty input sends the body as-is
-        assert_eq!(expand(&cmd, ""), "Review: $input");
+        assert_eq!(expand(&cmd, "").0, "Review: $input");
+    }
+
+    #[test]
+    fn a_stray_variable_does_not_abandon_the_input_substitution() {
+        // a body quoting the shell must still expand its `$input`; the
+        // unbound name is what it is, not a hard error
+        let cmd = parse("Explain $HOME and then: $input");
+        let (prompt, _) = expand(&cmd, "the diff");
+        assert!(prompt.ends_with("the diff"), "{prompt}");
+        assert!(prompt.contains("$HOME"), "{prompt}");
+    }
+
+    #[test]
+    fn frontmatter_system_reaches_the_expansion() {
+        let cmd = parse("---\nsystem: Be terse about $input\n---\nReview $input");
+        let (prompt, system) = expand(&cmd, "the diff");
+        assert_eq!(prompt, "Review the diff");
+        assert_eq!(system.as_deref(), Some("Be terse about the diff"));
+        // and it survives an empty input too
+        assert_eq!(expand(&cmd, "").1.as_deref(), Some("Be terse about $input"));
     }
 }
