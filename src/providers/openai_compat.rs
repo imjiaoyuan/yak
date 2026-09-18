@@ -149,7 +149,6 @@ pub fn build_body(
                         m.supports_images(),
                         content,
                         attachments,
-                        attachment_block,
                     )?
                 }));
                 // gateways (opencode Console Go) reject image parts inside a

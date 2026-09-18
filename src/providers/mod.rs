@@ -189,7 +189,6 @@ pub(crate) fn tool_result_content(
     supports_images: bool,
     content: &str,
     attachments: &[Attachment],
-    _attachment_block: fn(&Attachment) -> Result<Value, String>,
 ) -> Result<Value, String> {
     if attachments.is_empty() {
         return Ok(json!(content));
