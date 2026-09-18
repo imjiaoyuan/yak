@@ -352,22 +352,35 @@ fn pad_run(t: &str) -> usize {
         .sum()
 }
 
-fn is_hr(t: &str) -> bool {
-    // commonmark wants three or more *matching* markers: `-*-` is prose
-    is_hr_prefix(t) && t.chars().filter(|c| !c.is_whitespace()).count() >= 3
+/// The shared answer to every thematic-break question: `Some(markers)` when
+/// the text is nothing but one repeated mark (`-`/`_`/`*`) and whitespace,
+/// where `markers` is how many marks it holds; `None` as soon as any other
+/// character appears. The four predicates below are all this one walk at
+/// different thresholds — replay asks it of a whole line, the live stream of
+/// the line so far — so the count is what decides, and the walk lives once.
+/// Replay asks `str::trim`-style questions of the line, so any unicode space
+/// counts as padding here too.
+fn hr_markers(t: &str) -> Option<usize> {
+    let mut mark: Option<char> = None;
+    let mut count = 0usize;
+    for c in t.chars() {
+        if c.is_whitespace() {
+            continue;
+        }
+        match mark {
+            None if matches!(c, '-' | '_' | '*') => mark = Some(c),
+            None => return None,
+            Some(m) if m != c => return None,
+            Some(_) => {}
+        }
+        count += 1;
+    }
+    (count > 0).then_some(count)
 }
 
-/// The line is nothing but one repeated mark (`-`/`_`/`*`) and whitespace:
-/// it may still grow into a thematic break. Replay asks `str::trim`-style
-/// questions of the line, so any unicode space counts as padding here too.
-fn is_hr_prefix(t: &str) -> bool {
-    let mut marks = t.chars().filter(|c| !c.is_whitespace());
-    let Some(first) = marks.next() else {
-        return false;
-    };
-    matches!(first, '-' | '_' | '*')
-        && marks.all(|c| c == first)
-        && t.chars().all(|c| c == first || c.is_whitespace())
+fn is_hr(t: &str) -> bool {
+    // commonmark wants three or more *matching* markers: `-*-` is prose
+    hr_markers(t).is_some_and(|n| n >= 3)
 }
 
 /// Returns (marker length including trailing space, is ordered) when the
@@ -1496,26 +1509,18 @@ enum Decision {
     FenceOpen,
 }
 
-/// The line so far consists only of thematic-break characters (spaces
-/// allowed between them): it may still be an HR.
-/// A thematic break in the making: two or more *matching* markers and
+/// The live stream's early decision: two or more *matching* markers and
 /// nothing else. Two is enough here because the run may still grow (`**`
 /// becomes `***`); the decision aborts as soon as a real char arrives.
-/// Two or more marks of one kind, with only whitespace around them: the line
-/// is a thematic break unless a non-marker char turns up, so live holds it.
 fn is_hr_candidate(t: &str) -> bool {
-    is_hr_prefix(t) && t.chars().filter(|c| !c.is_whitespace()).count() >= 2
+    hr_markers(t).is_some_and(|n| n >= 2)
 }
 
 /// The prefix may still *become* a rule (replay decides on the whole line):
-/// an open run of one mark, which more marks of that kind can extend, or an
-/// [`is_hr_prefix`] that padding may be followed by marks.
+/// an open run of a single mark, which more marks of that kind can extend, or
+/// a run whose padding may still be followed by marks.
 fn may_be_hr(t: &str) -> bool {
-    let mut chars = t.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (matches!(first, '-' | '_' | '*') && chars.all(|c| c == first)) || is_hr_prefix(t)
+    hr_markers(t).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,6 +2112,25 @@ mod tests {
             live("```\n   \n```\n尾\n"),
             format!("{G}```{R}\n\n{G}```{R}\n尾\n")
         );
+    }
+
+    #[test]
+    fn hr_markers_thresholds_split_replay_from_live() {
+        // one walk answers all four questions: the count is the threshold
+        assert_eq!(hr_markers("---"), Some(3));
+        assert_eq!(hr_markers("- - -"), Some(3));
+        assert_eq!(hr_markers("--"), Some(2));
+        assert_eq!(hr_markers("-"), Some(1));
+        // any other char (or a mixed run) ends it
+        assert_eq!(hr_markers("-*-"), None);
+        assert_eq!(hr_markers("-x"), None);
+        assert_eq!(hr_markers(""), None);
+        assert_eq!(hr_markers("   "), None);
+        assert!(is_hr("---") && !is_hr("--"));
+        assert!(is_hr_candidate("--") && !is_hr_candidate("-"));
+        // the live hold is the loosest of the four
+        assert!(may_be_hr("-") && may_be_hr("- -"));
+        assert!(!may_be_hr("-x"));
     }
 
     #[test]
