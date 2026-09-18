@@ -221,6 +221,13 @@ pub fn build_body(
     if let Some(effort) = input.reasoning {
         body["reasoning_effort"] = json!(effort);
     }
+    // automatic prefix caching is per-replica on most gateways, so a
+    // round-robin hop serves the next round cold and re-bills the whole
+    // prompt. The key pins the conversation to one replica; it is opaque to
+    // the model, so it costs no tokens and does not enter the cached prefix.
+    if let Some(key) = input.cache_key {
+        body["prompt_cache_key"] = json!(key);
+    }
     // apply -o options; json values pass through, others are sent as strings
     // (OpenAI accepts numbers-as-numbers; we try numeric parsing first)
     super::apply_options(&mut body, &m.options);
@@ -668,6 +675,27 @@ mod tests {
         // unset → the parameter is absent, byte-compatible with before
         let body = build_body(&model("openai-compat"), &input(&[], &[]), true).unwrap();
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    /// The cache key pins a conversation to one gateway replica; it is
+    /// opaque, so it must ride outside the cached prefix and stay absent
+    /// when there is no stable conversation (a one-shot call).
+    #[test]
+    fn cache_key_sent_when_the_conversation_is_stable() {
+        let mut i = input(&[], &[]);
+        i.cache_key = Some("01HZ-conversation");
+        let body = build_body(&model("openai-compat"), &i, true).unwrap();
+        assert_eq!(body["prompt_cache_key"], json!("01HZ-conversation"));
+        assert!(
+            body["prompt_cache_key"]
+                .as_str()
+                .is_some_and(|k| !k.is_empty()),
+            "an empty key would be sent as an empty string"
+        );
+
+        // unset → the parameter is absent, byte-compatible with before
+        let body = build_body(&model("openai-compat"), &input(&[], &[]), true).unwrap();
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]

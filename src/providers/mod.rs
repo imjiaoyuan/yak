@@ -396,6 +396,9 @@ pub struct PromptInput<'a> {
     /// explicit markers, OpenAI-compatible automatic caching) reads the
     /// stable part back instead of rewriting the whole prompt every round.
     pub cache_anchor: Option<usize>,
+    /// opaque conversation id for providers that route by it (OpenAI-style
+    /// `prompt_cache_key`): keeps one conversation on one cache replica
+    pub cache_key: Option<&'a str>,
 }
 
 /// The reasoning-effort levels accepted by --thinking / /thinking.
@@ -626,6 +629,7 @@ pub(crate) mod testutil {
             reasoning: None,
             note: None,
             cache_anchor: None,
+            cache_key: None,
         }
     }
 

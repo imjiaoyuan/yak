@@ -338,6 +338,9 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         no_session: args.flag(&["no-session"]),
         store,
         approval: approval_cfg,
+        cache_key: conversation_id
+            .clone()
+            .unwrap_or_else(crate::core::db::ulid),
         conversation_id,
         seed,
         thinking,

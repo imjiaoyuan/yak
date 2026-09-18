@@ -99,6 +99,11 @@ pub struct AgentOptions<'a> {
     /// the extension host, when extensions exist; event hooks fire at turn
     /// and tool boundaries (None when nothing was discovered)
     pub hooks: Option<&'a crate::agent::ext::Extensions>,
+    /// opaque id sent with every request so a multi-replica gateway routes
+    /// one conversation to the same backend; automatic prefix caching is
+    /// per-replica, so without it a round-robin hop re-bills the whole
+    /// prompt. None for a one-shot call with no stable conversation.
+    pub cache_key: Option<&'a str>,
 }
 
 /// Fire an event on the host, swallowing failures into the extension's
@@ -423,6 +428,7 @@ pub fn run_agent(
             reasoning: opts.reasoning.as_deref(),
             note: note.as_deref(),
             cache_anchor: cache_stable,
+            cache_key: opts.cache_key,
         };
 
         let mut text = String::new();
@@ -1369,6 +1375,7 @@ mod tests {
             compact: None,
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
@@ -1459,6 +1466,7 @@ mod tests {
             compact: None,
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
@@ -1575,6 +1583,7 @@ mod tests {
             compact: None,
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
@@ -1704,6 +1713,7 @@ mod tests {
             compact: None,
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let caller = std::thread::current().id();
         let mut approval = approval::ApprovalConfig::default();
@@ -1762,6 +1772,7 @@ mod tests {
             }),
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let history = vec![Msg::user("hi")];
         let note = context_note(&history, &opts, 0, None).unwrap();
@@ -1805,6 +1816,7 @@ mod tests {
             }),
             reasoning: None,
             hooks: None,
+            cache_key: None,
         };
         let history = vec![Msg::user("hi"), Msg::user("there")];
         let marker = Some((

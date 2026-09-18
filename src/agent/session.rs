@@ -25,6 +25,10 @@ pub struct Session {
     pub store: Option<threads::Store>,
     pub approval: ApprovalConfig,
     pub conversation_id: Option<String>,
+    /// opaque id sent as `prompt_cache_key` so a gateway keeps this
+    /// conversation on one cache replica; distinct from `conversation_id`,
+    /// which is a thread filename and only exists once a turn is persisted
+    pub cache_key: String,
     pub seed: Vec<Msg>,
     /// reasoning effort level; None sends no parameter
     pub thinking: Option<String>,
@@ -120,6 +124,7 @@ impl Session {
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
             hooks: Some(&self.extensions),
+            cache_key: Some(self.cache_key.as_str()),
         };
         let model_id = self.model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
@@ -393,6 +398,7 @@ impl Session {
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
             hooks: Some(&self.extensions),
+            cache_key: Some(self.cache_key.as_str()),
         };
         let task_start = std::time::Instant::now();
         // the terminal path renders the reasoning trace through TaskView;
@@ -711,6 +717,7 @@ mod tests {
             store: None,
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
+            cache_key: "cache-test".to_string(),
             seed,
             thinking: None,
             steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -818,6 +825,7 @@ mod tests {
             store: Some(store),
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
+            cache_key: "cache-test".to_string(),
             seed: Vec::new(),
             thinking: None,
             steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -892,6 +900,7 @@ mod tests {
             store: Some(store),
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
+            cache_key: "cache-test".to_string(),
             seed: Vec::new(),
             thinking: None,
             steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
