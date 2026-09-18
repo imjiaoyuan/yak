@@ -1668,19 +1668,38 @@ pub fn render_once(text: &str, indent: usize) -> String {
     out
 }
 
-/// Truncate to at most `max` terminal cells (CJK-aware), "…" on cut.
+/// Truncate to at most `max` terminal cells (CJK-aware), "…" on cut — the
+/// ellipsis is charged to the budget, so the result never overshoots the
+/// column it was handed. Escape sequences ride along untouched and cost no
+/// cells (see [`cell_width`]), and text that already fits comes back
+/// verbatim. Rows cut this way occupy exactly one terminal line, ASCII and
+/// wide CJK alike.
 pub(crate) fn truncate_cells(text: &str, max: usize) -> String {
+    if cell_width(text) <= max {
+        return text.to_string();
+    }
+    let budget = max.saturating_sub(1);
+    let bytes = text.as_bytes();
     let mut out = String::new();
     let mut cells = 0usize;
-    for c in text.chars() {
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            let end = escape_end(bytes, i);
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap();
         let w = char_width(c);
-        if cells + w > max.saturating_sub(1) {
-            out.push('…');
-            return out;
+        if cells + w > budget {
+            break;
         }
         out.push(c);
         cells += w;
+        i += c.len_utf8();
     }
+    out.push('…');
     out
 }
 
@@ -2699,5 +2718,28 @@ mod tests {
         assert_eq!(cell_width("a\x1b[2Kb"), 2);
         assert_eq!(cell_width("\x1b[31m中\x1b[0m"), 2);
         assert_eq!(cell_width("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"), 4);
+    }
+
+    #[test]
+    fn truncate_cells_charges_the_ellipsis_and_counts_wide_glyphs_as_two() {
+        // text that fits is handed back untouched, no ellipsis invented
+        assert_eq!(truncate_cells("abc", 3), "abc");
+        assert_eq!(truncate_cells("abc", 9), "abc");
+        // the ellipsis is part of the budget, so the row never overshoots
+        assert_eq!(truncate_cells("abcdef", 4), "abc…");
+        assert_eq!(cell_width(&truncate_cells("abcdef", 4)), 4);
+        // a wide glyph is two cells and is never split across the cut
+        assert_eq!(truncate_cells("中中中", 6), "中中中");
+        assert_eq!(truncate_cells("中中中", 5), "中中…");
+        assert_eq!(cell_width(&truncate_cells("中文测试", 7)), 7);
+        // zero-width input still leaves a marker rather than nothing
+        assert_eq!(truncate_cells("", 4), "");
+    }
+
+    #[test]
+    fn truncate_cells_charges_no_cells_for_escape_sequences() {
+        // the SGR bytes must not be mistaken for printable columns
+        assert_eq!(truncate_cells("\x1b[32mab\x1b[0m", 2), "\x1b[32mab\x1b[0m");
+        assert_eq!(truncate_cells("\x1b[32mabcd\x1b[0m", 3), "\x1b[32mab…");
     }
 }

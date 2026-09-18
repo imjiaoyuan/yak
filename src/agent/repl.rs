@@ -505,46 +505,78 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
 /// Replay the loaded conversation on resume, so the user actually sees what
 /// was there before the prompt (bounded to the most recent stretch).
 fn render_history(seed: &[crate::providers::Msg]) {
+    let width = crate::term::columns().saturating_sub(1).max(20);
+    let p = crate::theme::err();
+    for row in history_rows(seed, width) {
+        match row.style {
+            RowStyle::User => eprintln!("{}{}{}", p.bold, row.text, p.reset),
+            RowStyle::Plain => eprintln!("{}", row.text),
+            RowStyle::Dim => eprintln!("{}{}{}", p.dim, row.text, p.reset),
+        }
+    }
+}
+
+/// How a replayed row is painted; the text itself is style-free so the
+/// clipping can be tested without a terminal or a palette.
+enum RowStyle {
+    User,
+    Plain,
+    Dim,
+}
+
+struct Row {
+    style: RowStyle,
+    text: String,
+}
+
+/// The replay's rows, each clipped to `width` cells. History is a scan, not
+/// an answer: a row that wraps would bury the next one under a long tool
+/// payload, so every entry gets exactly one line and the payload is cut with
+/// an ellipsis instead. `width` is a parameter (and callers pass one column
+/// less than the terminal) because a row landing on the last cell can trip
+/// the terminal's autowrap and double-space the whole replay.
+fn history_rows(seed: &[crate::providers::Msg], width: usize) -> Vec<Row> {
+    use crate::core::render_md::{cell_width, truncate_cells};
     use crate::providers::Msg;
     const CAP: usize = 40; // messages shown on resume; older history is noted
+    let mut rows = Vec::new();
     if seed.is_empty() {
-        return;
+        return rows;
     }
+    let clip = |payload: &str, used: usize| truncate_cells(payload, width.saturating_sub(used));
     let skip = seed.len().saturating_sub(CAP);
     if skip > 0 {
-        eprintln!(
-            "{}── {skip} earlier message(s) omitted ──{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
+        rows.push(Row {
+            style: RowStyle::Dim,
+            text: format!("── {skip} earlier message(s) omitted ──"),
+        });
     }
     for m in &seed[skip..] {
         match m {
             Msg::User { text, .. } => {
                 for line in text.split('\n') {
-                    eprintln!(
-                        "{}>{} {line}",
-                        crate::theme::err().bold,
-                        crate::theme::err().reset
-                    );
+                    rows.push(Row {
+                        style: RowStyle::User,
+                        text: format!("> {}", clip(line, 2)),
+                    });
                 }
             }
             Msg::Assistant {
                 text, tool_calls, ..
             } => {
-                if !text.is_empty() {
-                    for line in text.lines() {
-                        eprintln!("  {line}");
-                    }
+                for line in text.lines() {
+                    rows.push(Row {
+                        style: RowStyle::Plain,
+                        text: format!("  {}", clip(line, 2)),
+                    });
                 }
                 for c in tool_calls {
-                    eprintln!(
-                        "{}  [tool: {}]{} {}",
-                        crate::theme::err().dim,
-                        c.name,
-                        crate::theme::err().reset,
-                        crate::core::text::truncate_chars(&c.arguments.to_string(), 80)
-                    );
+                    let head = format!("  [tool: {}] ", c.name);
+                    let used = cell_width(&head);
+                    rows.push(Row {
+                        style: RowStyle::Dim,
+                        text: format!("{head}{}", clip(&c.arguments.to_string(), used)),
+                    });
                 }
             }
             Msg::ToolResult {
@@ -555,23 +587,22 @@ fn render_history(seed: &[crate::providers::Msg]) {
             } => {
                 let first = content.lines().next().unwrap_or("");
                 let flag = if *is_error { " ✗" } else { "" };
-                eprintln!(
-                    "{}  [result{flag} · {name}]{} {}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset,
-                    crate::core::text::truncate_chars(first, 100)
-                );
+                let head = format!("  [result{flag} · {name}] ");
+                let used = cell_width(&head);
+                rows.push(Row {
+                    style: RowStyle::Dim,
+                    text: format!("{head}{}", clip(first, used)),
+                });
             }
             Msg::Summary { text } => {
-                eprintln!(
-                    "{}  <summary>{} {}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset,
-                    crate::core::text::truncate_chars(text, 120)
-                );
+                rows.push(Row {
+                    style: RowStyle::Dim,
+                    text: format!("  <summary> {}", clip(text, 12)),
+                });
             }
         }
     }
+    rows
 }
 
 fn completions(buf: &str, skill_names: &[String], cwd: &str) -> Vec<String> {
@@ -1125,6 +1156,59 @@ mod tests {
         assert!(
             skill_prompt("x", std::path::Path::new("SKILL.md"), "b").contains("dir=\"SKILL.md\"")
         );
+    }
+
+    #[test]
+    fn history_replay_clips_every_row_to_the_terminal_width() {
+        use crate::providers::{Msg, ToolCall};
+        let long = "x".repeat(400);
+        let seed = vec![
+            Msg::user("a user line that is quite long indeed\nsecond line"),
+            Msg::Assistant {
+                text: long.clone(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({ "command": long.clone() }),
+                }],
+                reasoning: None,
+            },
+            Msg::ToolResult {
+                call_id: "c1".into(),
+                name: "bash".into(),
+                content: format!("{long}\nmore"),
+                is_error: true,
+                attachments: Vec::new(),
+            },
+            Msg::Summary { text: long.clone() },
+        ];
+        let width = 40;
+        let rows = history_rows(&seed, width);
+        // every row fits, wide glyphs charged their real cells
+        for r in &rows {
+            assert!(
+                crate::core::render_md::cell_width(&r.text) <= width,
+                "row overflows {width} cells: {}",
+                r.text
+            );
+        }
+        assert_eq!(rows.len(), 6); // two user lines, assistant text, tool, result, summary
+        assert!(rows[0].text.starts_with("> a user line"));
+        assert!(rows[3].text.contains("[tool: bash]"));
+        assert!(rows[4].text.contains("[result ✗ · bash]"));
+        assert!(rows[5].text.starts_with("  <summary>"));
+        // a short history is replayed whole, with no omission note
+        assert!(history_rows(&[Msg::user("hi")], width)[0].text == "> hi");
+        assert!(history_rows(&[], width).is_empty());
+    }
+
+    #[test]
+    fn history_replay_notes_the_dropped_prefix() {
+        use crate::providers::Msg;
+        let seed: Vec<Msg> = (0..45).map(|i| Msg::user(format!("m{i}"))).collect();
+        let rows = history_rows(&seed, 80);
+        assert!(rows[0].text.contains("5 earlier message(s) omitted"));
+        assert_eq!(rows.len(), 41);
     }
 
     #[test]
