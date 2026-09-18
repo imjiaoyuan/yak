@@ -396,19 +396,39 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
-        // multimodal blocks are the most expensive, worst-cached context:
-        // attachments older than the last few messages become notes now,
-        // before the request is built (the idempotent pass is cheap)
-        compact::trim_old_attachments(&mut history);
-        // the same reasoning one step further: a huge tool result from
-        // earlier in the task is re-sent every single round, so an outright
-        // dump in the stale prefix is projected down now rather than waited
-        // for until compaction pressure. Recent results stay verbatim, and
-        // the pass is idempotent, so the notice fires at most once per
-        // result (a resume replays the same archived id)
-        let stale = compact::prune_stale_tool_results(&mut history, &compact::observation_dir());
-        if stale.count > 0 {
-            on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
+        // Context pressure, priced once per round to serve the rewrite gate,
+        // the note and the compaction check below. Rewriting history in the
+        // middle invalidates the provider's cached prefix from that point on,
+        // so the two passes that rewrite it run only under real pressure:
+        // below the gate the tokens they would save cost less than the cache
+        // they would break (they stay unconditional when compaction is off,
+        // since then nothing else guards the window).
+        let cfg = opts.compact.as_ref();
+        let mut used_tokens = cfg.map(|_| compact::estimate_tokens(&history, usage_marker));
+        let rewrite = match (cfg, used_tokens) {
+            (Some(c), Some(used)) => compact::rewrite_prefix(used, c),
+            // no compaction configured: nothing else guards the window, so
+            // the passes stay unconditional
+            (None, _) | (Some(_), None) => true,
+        };
+        if rewrite {
+            // multimodal blocks are the most expensive, worst-cached context:
+            // attachments older than the last few messages become notes
+            compact::trim_old_attachments(&mut history);
+            // the same reasoning one step further: a huge tool result from
+            // earlier in the task is re-sent every single round, so an
+            // outright dump in the stale prefix is projected down here rather
+            // than waited for until compaction pressure. Recent results stay
+            // verbatim, and the pass is idempotent, so the notice fires at
+            // most once per result (a resume replays the same archived id)
+            let stale =
+                compact::prune_stale_tool_results(&mut history, &compact::observation_dir());
+            if stale.count > 0 {
+                on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
+            }
+            // the passes edited the prefix: re-price rather than hand the
+            // pre-trim number to the note and the compaction gate
+            used_tokens = cfg.map(|_| compact::estimate_tokens(&history, usage_marker));
         }
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
@@ -418,7 +438,7 @@ pub fn run_agent(
         // left rides the end of every request, so the model can decide to
         // wrap up instead of exploring indefinitely. Request-only: it never
         // enters the history or the prompt-cache prefix.
-        let note = context_note(&history, opts, spent_input, usage_marker);
+        let note = context_note(used_tokens, opts, spent_input);
         let input = PromptInput {
             system: opts.system,
             history: &history,
@@ -767,18 +787,12 @@ pub fn run_agent(
 /// task has left, in context-window tokens and (when a task budget is set)
 /// input tokens. `None` when neither is known. Kept short and factual — it
 /// exists so the model can choose to wrap up, not to make it narrate.
-fn context_note(
-    history: &[Msg],
-    opts: &AgentOptions,
-    spent_input: u64,
-    usage_marker: Option<(usize, Usage)>,
-) -> Option<String> {
+fn context_note(used_tokens: Option<u64>, opts: &AgentOptions, spent_input: u64) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(cfg) = opts.compact.as_ref() {
-        // the marker prices the covered prefix at the provider's reported
-        // count and estimates only the tail — a full-history rescan here
-        // was the loop's last O(n²) (the note rides every round)
-        let used = compact::estimate_tokens(history, usage_marker);
+    if let (Some(cfg), Some(used)) = (opts.compact.as_ref(), used_tokens) {
+        // priced once by the caller: the same number gates the prefix
+        // rewrites and (via the loop) the compaction check, so nothing
+        // rescans the history here
         let left = cfg.context_window.saturating_sub(used);
         parts.push(format!("{left} tokens left in this context window"));
     }
@@ -1774,8 +1788,7 @@ mod tests {
             hooks: None,
             cache_key: None,
         };
-        let history = vec![Msg::user("hi")];
-        let note = context_note(&history, &opts, 0, None).unwrap();
+        let note = context_note(Some(0), &opts, 0).unwrap();
         assert!(
             note.starts_with("<context>") && note.ends_with("</context>"),
             "{note}"
@@ -1786,7 +1799,7 @@ mod tests {
         );
         // a task budget adds its own clause
         opts.token_budget = 10_000;
-        let note = context_note(&history, &opts, 3_000, None).unwrap();
+        let note = context_note(Some(0), &opts, 3_000).unwrap();
         assert!(
             note.contains("7000 of this task's input-token budget left"),
             "{note}"
@@ -1794,7 +1807,7 @@ mod tests {
         // neither a window nor a budget: no note at all
         opts.compact = None;
         opts.token_budget = 0;
-        assert!(context_note(&history, &opts, 0, None).is_none());
+        assert!(context_note(Some(0), &opts, 0).is_none());
     }
 
     /// The marker prices the covered prefix at the provider's reported count
@@ -1827,7 +1840,10 @@ mod tests {
                 cached: 0,
             },
         ));
-        let note = context_note(&history, &opts, 0, marker).unwrap();
+        // the loop prices the context once per round and hands the number
+        // down, so the marker's reported total must survive that step
+        let used = compact::estimate_tokens(&history, marker);
+        let note = context_note(Some(used), &opts, 0).unwrap();
         assert!(
             note.contains("93000 tokens left"),
             "the marker total must flow through: {note}"

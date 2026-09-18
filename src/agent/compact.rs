@@ -80,6 +80,17 @@ pub fn should_compact(estimate: u64, cfg: &CompactConfig) -> bool {
     estimate + cfg.reserve_tokens >= cfg.context_window
 }
 
+/// Should this round rewrite the conversation prefix (trim old attachments,
+/// project stale tool results)? Those passes save input tokens on every
+/// later request, but a mid-history edit invalidates the provider's cached
+/// prefix from the change point on: below real pressure the cache they break
+/// is worth more than the tokens they would save, so they wait. The gate is
+/// half the window — comfortably before compaction (`should_compact`), so
+/// there is room to relieve pressure without ever calling the summarizer.
+pub fn rewrite_prefix(estimate: u64, cfg: &CompactConfig) -> bool {
+    estimate + cfg.reserve_tokens >= cfg.context_window / 2
+}
+
 /// Find the cut point: the latest turn boundary whose kept tail still holds
 /// at least `keep_recent_tokens` (the minimal cut preserving the window).
 /// Boundaries are User, Summary and Assistant messages — an assistant stays
@@ -438,6 +449,36 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("llm-obs-test-{}", crate::core::db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The prefix-rewrite gate must sit strictly below the compaction gate:
+    /// otherwise history gets rewritten every round for nothing (breaking
+    /// the cache), or pressure only appears once summarization is already
+    /// the only option left.
+    #[test]
+    fn rewrite_gate_fires_before_compaction() {
+        let cfg = CompactConfig {
+            context_window: 100_000,
+            reserve_tokens: 0,
+            keep_recent_tokens: 0,
+        };
+        assert!(!rewrite_prefix(49_999, &cfg), "just under half: no rewrite");
+        assert!(rewrite_prefix(50_000, &cfg), "at half: rewrite");
+        assert!(rewrite_prefix(60_000, &cfg));
+        // and it must have fired well before the summarizer is due
+        assert!(
+            !should_compact(50_000, &cfg),
+            "at the rewrite gate compaction must still have room"
+        );
+        assert!(should_compact(100_000, &cfg), "at the window: compact");
+        // the reserve counts on both sides (a small window still orders them)
+        let tight = CompactConfig {
+            context_window: 8_000,
+            reserve_tokens: 4_000,
+            keep_recent_tokens: 0,
+        };
+        assert!(rewrite_prefix(0, &tight), "reserve alone reaches half");
+        assert!(should_compact(4_000, &tight));
     }
 
     #[test]
