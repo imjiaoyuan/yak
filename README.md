@@ -430,7 +430,8 @@ A slow or broken extension prints a dim warning and mounts nothing; it never blo
 Tool calls time out after 120s (`extensions.tool_timeout` in config) unless the extension asks for
 its own deadline at `initialize` — an extension that runs a build or another agent needs that —
 and events after 5s. ctrl+c abandons a call and tells a busy extension `interrupt` so it can stop
-its own child processes. `extensions.disabled` skips one by file stem or declared tool name, and `/reload` restarts them all.
+its own child processes. `extensions.disabled` skips one by file stem — or by a script tool's declared
+manifest name — and `/reload` restarts them all.
 
 Two self-contained templates ship in `examples/extensions/`: `template.js` (a JavaScript runtime
 whose user section uses a familiar extension API — `registerTool` / `registerCommand` /
