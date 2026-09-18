@@ -175,6 +175,19 @@ pub(crate) fn print_action_line(verb: &str, preview: &str, diff: Option<&str>) {
     }
 }
 
+/// Print one tool-output block to stderr: each line wrapped to the terminal
+/// at a 2-cell margin, painted in the chrome gray. The plain-`ToolEnd`
+/// summary and the live `ToolLog` head both print here, so a result looks the
+/// same whether it streamed as it ran or arrived in one piece.
+pub(crate) fn print_output_block(text: &str) {
+    let width = crate::term::columns().max(20);
+    let p = crate::theme::err();
+    for line in text.lines() {
+        let wrapped = crate::core::render_md::wrap_block(line, width, 2);
+        eprintln!("{}{wrapped}{}", p.gray, p.reset);
+    }
+}
+
 pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = lines[lines.len().saturating_sub(max_lines)..].join("\n");

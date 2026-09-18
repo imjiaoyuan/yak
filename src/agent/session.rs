@@ -196,11 +196,8 @@ impl Session {
                             if n == 1 {
                                 view.borrow_mut().spin_pause();
                             }
-                            let p = crate::theme::err();
                             eprint!("\r\x1b[2K");
-                            let width = crate::term::columns().max(20);
-                            let wrapped = crate::core::render_md::wrap_block(&line, width, 2);
-                            eprintln!("{}{wrapped}{}", p.gray, p.reset);
+                            crate::agent::tools::print_output_block(&line);
                         } else {
                             // beyond the head: one line, rewritten in place
                             let p = crate::theme::err();
@@ -228,12 +225,7 @@ impl Session {
                                 }
                             }
                         } else {
-                            let p = crate::theme::err();
-                            let width = crate::term::columns().max(20);
-                            for line in summary.lines() {
-                                let wrapped = crate::core::render_md::wrap_block(line, width, 2);
-                                eprintln!("{}{wrapped}{}", p.gray, p.reset);
-                            }
+                            crate::agent::tools::print_output_block(&summary);
                         }
                         // the next model round is awaited right after: spin,
                         // or the time-to-first-token reads as a hang
