@@ -64,6 +64,17 @@ impl Usage {
     pub fn cache_percent(self) -> u64 {
         (self.cached * 100).checked_div(self.input).unwrap_or(0)
     }
+
+    /// Fold one round's counts into a running session total. Every consumer
+    /// that tracks a session (the terminal footer, the session store, the
+    /// `--json` feed) accumulates the same three fields, so the operation
+    /// lives here rather than as three copies of the same three additions —
+    /// a new field on `Usage` must not be able to be missed at one of them.
+    pub fn add(&mut self, other: Usage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cached += other.cached;
+    }
 }
 
 /// Why a model response ended. `ToolUse` is the signal an agent loop acts on;
@@ -772,6 +783,32 @@ fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<Fetched
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one place a new `Usage` field has to be taught to the session
+    /// totals: three call sites used to add the same three fields by hand.
+    #[test]
+    fn usage_adds_every_field_into_a_running_total() {
+        let mut total = Usage::default();
+        total.add(Usage {
+            input: 100,
+            output: 20,
+            cached: 60,
+        });
+        total.add(Usage {
+            input: 50,
+            output: 5,
+            cached: 0,
+        });
+        assert_eq!(total.input, 150);
+        assert_eq!(total.output, 25);
+        assert_eq!(total.cached, 60, "a zero stays a zero, not a reset");
+        // and the cached share reads off the totals as before
+        assert_eq!(total.cache_percent(), 40);
+        // adding nothing is a no-op
+        let before = total;
+        total.add(Usage::default());
+        assert_eq!(total, before);
+    }
 
     #[test]
     fn capped_reads_refuse_an_oversized_body() {

@@ -143,9 +143,7 @@ impl Session {
         // live-updating counter line
         let logged = std::cell::Cell::new(0usize);
         const LOG_HEAD: usize = 5;
-        let mut total_in = 0u64;
-        let mut total_out = 0u64;
-        let mut total_cached = 0u64;
+        let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
         let mut on_update = |u: AgentUpdate| {
             match u {
@@ -234,9 +232,7 @@ impl Session {
                 }
                 AgentUpdate::TurnEnd { usage, .. } => {
                     if let Some(u) = usage {
-                        total_in += u.input;
-                        total_out += u.output;
-                        total_cached += u.cached;
+                        total.add(u);
                         last_usage = Some(u);
                     }
                     view.borrow_mut().turn_end(usage);
@@ -319,9 +315,9 @@ impl Session {
         view.borrow_mut().abort();
         // the interrupt flag must not leak into the next prompt or task
         crate::core::http::clear_interrupt();
-        self.tokens.0 += total_in;
-        self.tokens.1 += total_out;
-        self.tokens_cached += total_cached;
+        self.tokens.0 += total.input;
+        self.tokens.1 += total.output;
+        self.tokens_cached += total.cached;
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
@@ -404,9 +400,7 @@ impl Session {
         // the terminal path renders the reasoning trace through TaskView;
         // here it is only carried into the stored turn
         let mut reasoning = String::new();
-        let mut total_in = 0u64;
-        let mut total_out = 0u64;
-        let mut total_cached = 0u64;
+        let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
         let mut on_update = |u: AgentUpdate| {
             match &u {
@@ -414,9 +408,7 @@ impl Session {
                 // same accounting as the terminal path, so the session totals
                 // and /status agree in both modes
                 AgentUpdate::TurnEnd { usage: Some(usage) } => {
-                    total_in += usage.input;
-                    total_out += usage.output;
-                    total_cached += usage.cached;
+                    total.add(*usage);
                     last_usage = Some(*usage);
                 }
                 _ => {}
@@ -446,9 +438,9 @@ impl Session {
             &mut steer,
         );
         crate::core::http::clear_interrupt();
-        self.tokens.0 += total_in;
-        self.tokens.1 += total_out;
-        self.tokens_cached += total_cached;
+        self.tokens.0 += total.input;
+        self.tokens.1 += total.output;
+        self.tokens_cached += total.cached;
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {

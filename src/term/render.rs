@@ -301,9 +301,7 @@ pub struct TaskView {
     streamed_any: bool,
     thinking_announced: bool,
     thinking_trace_shown: bool,
-    total_in: u64,
-    total_out: u64,
-    total_cached: u64,
+    total: Usage,
 }
 
 impl TaskView {
@@ -323,9 +321,7 @@ impl TaskView {
             streamed_any: false,
             thinking_announced: false,
             thinking_trace_shown: false,
-            total_in: 0,
-            total_out: 0,
-            total_cached: 0,
+            total: Usage::default(),
         }
     }
 
@@ -523,9 +519,7 @@ impl TaskView {
     pub fn turn_end(&mut self, usage: Option<Usage>) {
         self.flush_notices();
         if let Some(u) = usage {
-            self.total_in += u.input;
-            self.total_out += u.output;
-            self.total_cached += u.cached;
+            self.total.add(u);
         }
         self.close_thinking();
         self.thinking_announced = false; // next round may announce again
@@ -560,20 +554,18 @@ impl TaskView {
         }
         let p = crate::theme::err();
         let pad = " ".repeat(self.indent);
-        if self.total_in > 0 || self.total_out > 0 {
-            let cache = if self.total_cached > 0 {
-                format!(
-                    " · cache {}%",
-                    self.total_cached * 100 / self.total_in.max(1)
-                )
+        let total = self.total;
+        if total.input > 0 || total.output > 0 {
+            let cache = if total.cached > 0 {
+                format!(" · cache {}%", total.cached * 100 / total.input.max(1))
             } else {
                 String::new()
             };
             eprintln!(
                 "{}{pad}{secs:.1}s · ↑{} ↓{}{cache}{}",
                 p.gray,
-                humanize_tokens(self.total_in),
-                humanize_tokens(self.total_out),
+                humanize_tokens(total.input),
+                humanize_tokens(total.output),
                 p.reset
             );
         } else {
