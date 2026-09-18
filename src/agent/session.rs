@@ -53,11 +53,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// The turn-provenance mode stamp (always "agent").
-    pub fn mode_label(&self) -> &str {
-        "agent"
-    }
-
     /// A resumed thread can already be over the window. Project its
     /// oversized tool results down before the first request — the very cut
     /// the loop's own prune would make at the first turn end, only silent, so
@@ -564,7 +559,7 @@ impl Session {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: crate::core::db::ulid(),
             ts: crate::core::db::now_turn_datetime(),
-            mode: self.mode_label().to_string(),
+            mode: "agent".to_string(),
             model: self.model.qualified_id(),
             cwd: Some(self.cwd.display().to_string()),
             system: self.system.clone(),
