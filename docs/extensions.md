@@ -274,11 +274,9 @@ guardrails regardless of mode, write a `tool_call` gate.
 protocol, so most tool/command/hook extensions written against the shim paste straight in. APIs that need
 the host process (UI, editors, hotkeys) raise with a clear message instead of silently no-oping.
 
-`examples/extensions/todo.js` is gone on purpose: the host's built-in `update_plan` owns the plan
-surface now, so an example mounting a second todo/plan tool would demonstrate a gap that no longer
-exists. The same reasoning trims `examples/extensions/websearch` to `web_search` + `/web` — page
-fetching is the built-in `webfetch`. Extension *logic* is portable; extension *chrome* belongs to
-whichever host renders it, and a capability the host already offers belongs in the host.
+`examples/extensions/websearch` is trimmed to `web_search` + `/web`, since page fetching is the
+built-in `webfetch`. Extension *logic* is portable; extension *chrome* belongs to whichever host
+renders it, and a capability the host already offers belongs in the host.
 
 ## Mounting MCP servers: the `mcp_bridge.py` example
 
