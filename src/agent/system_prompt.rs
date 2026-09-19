@@ -94,6 +94,21 @@ pub fn build_system_prompt(
                        to pick a new one up.\n\
                      - A directory with SKILL.md under {skills_dir} (or the project's .llm/skills) \
                        publishes /skill:<name>.\n\
+                     - MCP servers are not built in: mount them with a resident extension that \
+                       speaks MCP (JSON-RPC 2.0 over stdio or streamable HTTP) and adds one \
+                       `<server>__<tool>` tool per MCP tool, reading a config file beside itself; \
+                       write it yourself, or start from the bridge named under Reference docs.\n\
+                     Reference docs (llm's own; base \
+                     raw.githubusercontent.com/imjiaoyuan/llm/main/)\n\
+                     - Read these only when the user asks about llm itself (extensions, MCP, \
+                       skills, memory, config, internals); in a checkout of the llm repo read the \
+                       local files instead.\n\
+                     - docs/extensions.md — the extension protocol: manifest fields, every message \
+                       and event, the `tool_call` gate, timeouts.\n\
+                     - examples/extensions/mcp_bridge.py — MCP servers mounted as \
+                       `<server>__<tool>` tools.\n\
+                     - docs/architecture.md — request flow, the agent loop, tool and approval \
+                       rules, the rendering contract.\n\
                      \n\
                      Answering\n\
                      - Be concise; mirror the user's language and tone. NEVER restate the request \
@@ -189,6 +204,21 @@ mod tests {
         // resuming the resumed prompt must be a fixed point: no compounding
         let again = build_system_prompt(cwd, None, None, Some(&out), &[]).unwrap();
         assert_eq!(again, out);
+    }
+
+    #[test]
+    fn reference_docs_block_points_at_the_repo_files() {
+        let dir = crate::core::testutil::scratch_dir("refdocs");
+        let out = build_system_prompt(&dir, None, None, None, &[]).unwrap();
+        for needle in [
+            "Reference docs",
+            "raw.githubusercontent.com/imjiaoyuan/llm/main/",
+            "docs/extensions.md",
+            "examples/extensions/mcp_bridge.py",
+            "docs/architecture.md",
+        ] {
+            assert!(out.contains(needle), "missing {needle}: {out}");
+        }
     }
 
     #[test]
