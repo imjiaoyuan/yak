@@ -111,13 +111,27 @@ pub fn build_body(
             Msg::Assistant {
                 text,
                 tool_calls,
-                reasoning: _,
+                reasoning,
+                reasoning_meta,
             } => {
                 flush_results(&mut messages, &mut pending_results);
-                if tool_calls.is_empty() {
+                if tool_calls.is_empty() && reasoning_meta.is_none() {
                     messages.push(json!({"role": "assistant", "content": text}));
                 } else {
                     let mut blocks: Vec<Value> = Vec::new();
+                    // extended thinking must be replayed, signature and all,
+                    // by the assistant turn that carries a tool call; a trace
+                    // whose signature was never captured cannot be replayed
+                    // (the API refuses it), so it is dropped
+                    if let Some(meta) = reasoning_meta
+                        && let Some(signature) = meta.get("signature").and_then(Value::as_str)
+                    {
+                        blocks.push(json!({
+                            "type": "thinking",
+                            "thinking": reasoning.as_deref().unwrap_or(""),
+                            "signature": signature,
+                        }));
+                    }
                     if !text.is_empty() {
                         blocks.push(json!({"type": "text", "text": text}));
                     }
@@ -315,7 +329,20 @@ pub(crate) fn feed_event(
                 on_event(Event::Delta(text.to_string()));
             }
             if let Some(text) = chunk["delta"]["thinking"].as_str() {
-                on_event(Event::ReasoningDelta(text.to_string()));
+                on_event(Event::ReasoningDelta {
+                    text: text.to_string(),
+                    meta: None,
+                });
+            }
+            // the signature that must be replayed with the trace on the
+            // next turn rides its own delta, after the visible text
+            if chunk["delta"]["type"] == "signature_delta"
+                && let Some(sig) = chunk["delta"]["signature"].as_str()
+            {
+                on_event(Event::ReasoningDelta {
+                    text: String::new(),
+                    meta: Some(json!({"signature": sig})),
+                });
             }
             if chunk["delta"]["type"] == "input_json_delta"
                 && let Some(frag) = chunk["delta"]["partial_json"].as_str()
@@ -364,7 +391,10 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
             }
             Some("thinking") => {
                 if let Some(text) = block["thinking"].as_str() {
-                    on_event(Event::ReasoningDelta(text.to_string()));
+                    on_event(Event::ReasoningDelta {
+                        text: text.to_string(),
+                        meta: None,
+                    });
                 }
             }
             Some("tool_use") => {
@@ -483,6 +513,86 @@ mod tests {
         assert!(err.contains("UTF-8"), "{err}");
     }
 
+    /// Extended thinking must ride back with the assistant turn that made
+    /// the tool call — signature included — or the next request is a 400.
+    #[test]
+    fn a_thinking_trace_replays_its_signature_on_the_tool_round() {
+        let history = vec![
+            Msg::user("think then run"),
+            Msg::Assistant {
+                text: "let me look".into(),
+                tool_calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "ls".into(),
+                    arguments: json!({}),
+                }],
+                reasoning: Some("weighing options".into()),
+                reasoning_meta: Some(json!({"signature": "sig-abc"})),
+            },
+            Msg::tool_result("t1", "ls", "a"),
+        ];
+        let mut i = input(&history, &[]);
+        i.prompt = "";
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let blocks = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "weighing options");
+        assert_eq!(blocks[0]["signature"], "sig-abc");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[2]["type"], "tool_use");
+    }
+
+    /// A trace whose signature was never captured cannot be replayed (the API
+    /// rejects a thinking block without one), so the text is dropped rather
+    /// than sent malformed.
+    #[test]
+    fn a_thinking_trace_without_a_signature_is_not_replayed() {
+        let history = vec![
+            Msg::user("hi"),
+            Msg::Assistant {
+                text: "hello".into(),
+                tool_calls: vec![],
+                reasoning: Some("hmm".into()),
+                reasoning_meta: None,
+            },
+        ];
+        let mut i = input(&history, &[]);
+        i.prompt = "";
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let text = body["messages"][1]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "hello", "the trace is dropped, the answer is not");
+    }
+
+    /// The signature arrives on its own SSE delta after the thinking text and
+    /// must be captured, not dropped with the empty chunk.
+    #[test]
+    fn a_signature_delta_is_captured() {
+        let mut usage = None;
+        let mut stop = StopReason::default();
+        let mut events: Vec<(String, Option<Value>)> = Vec::new();
+        let mut on_event = |e: Event| {
+            if let Event::ReasoningDelta { text, meta } = e {
+                events.push((text, meta));
+            }
+        };
+        feed_event(
+            "content_block_delta",
+            &json!({"index": 0, "delta": {"type": "thinking_delta", "thinking": "why"}}),
+            &mut usage,
+            &mut stop,
+            &mut on_event,
+        );
+        feed_event(
+            "content_block_delta",
+            &json!({"index": 0, "delta": {"type": "signature_delta", "signature": "sig-1"}}),
+            &mut usage,
+            &mut stop,
+            &mut on_event,
+        );
+        assert_eq!(events[0], ("why".to_string(), None));
+        assert_eq!(events[1].1, Some(json!({"signature": "sig-1"})));
+    }
+
     #[test]
     fn consecutive_tool_results_merge_into_one_user_turn() {
         let history = vec![
@@ -502,6 +612,7 @@ mod tests {
                     },
                 ],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("t1", "ls", "a"),
             Msg::ToolResult {
@@ -582,6 +693,7 @@ mod tests {
                 text: "hello".into(),
                 tool_calls: vec![],
                 reasoning: None,
+                reasoning_meta: None,
             },
         ];
         i.history = &history;
@@ -740,6 +852,7 @@ mod tests {
                     arguments: json!({"command": "ls"}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("t1", "bash", "out"),
         ];

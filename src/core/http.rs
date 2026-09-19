@@ -29,8 +29,13 @@ pub fn interrupt_flag() -> &'static AtomicBool {
 pub enum Event {
     /// a chunk of visible output text
     Delta(String),
-    /// a chunk of reasoning/thinking output
-    ReasoningDelta(String),
+    /// a chunk of reasoning/thinking output; `meta` rides the last chunk of
+    /// a thinking block (Anthropic's `signature_delta`) and carries the
+    /// opaque state the provider needs replayed with the trace
+    ReasoningDelta {
+        text: String,
+        meta: Option<serde_json::Value>,
+    },
     /// a fragment of a streamed tool call; `index` is the provider's block
     /// index, `id`/`name` ride along on the first fragment (which may be empty)
     ToolCallDelta {

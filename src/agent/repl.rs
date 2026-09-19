@@ -1179,6 +1179,7 @@ mod tests {
                     arguments: serde_json::json!({ "command": long.clone() }),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),

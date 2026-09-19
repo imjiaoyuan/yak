@@ -82,6 +82,12 @@ pub enum Msg {
         /// non-thinking models and legacy histories.
         #[serde(default)]
         reasoning: Option<String>,
+        /// opaque provider state that must ride back with the trace on
+        /// replay — Anthropic's thinking `signature` above all. A trace
+        /// without it is a 400 on the next turn, so it is persisted even
+        /// when the visible text is empty.
+        #[serde(default)]
+        reasoning_meta: Option<Value>,
     },
     ToolResult {
         call_id: String,
@@ -115,6 +121,7 @@ impl Msg {
             text: text.into(),
             tool_calls: Vec::new(),
             reasoning: None,
+            reasoning_meta: None,
         }
     }
 

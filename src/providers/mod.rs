@@ -305,7 +305,7 @@ pub(crate) fn dispatch(
         let mut forward = |e: Event| {
             if matches!(
                 e,
-                Event::Delta(_) | Event::ReasoningDelta(_) | Event::ToolCallDelta { .. }
+                Event::Delta(_) | Event::ReasoningDelta { .. } | Event::ToolCallDelta { .. }
             ) {
                 handed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -606,6 +606,7 @@ mod tests {
                     arguments: json!({}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::Assistant {
                 text: "done".into(),
@@ -615,6 +616,7 @@ mod tests {
                     arguments: json!({}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("b", "read", "content"),
         ];

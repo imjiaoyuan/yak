@@ -89,6 +89,7 @@ pub fn build_body(
                 text,
                 tool_calls,
                 reasoning,
+                reasoning_meta: _,
             } => {
                 if tool_calls.is_empty() {
                     let mut msg = json!({"role": "assistant", "content": text});
@@ -278,7 +279,10 @@ pub(crate) fn feed_chunk(
     if let Some(text) = reasoning
         && !text.is_empty()
     {
-        on_event(Event::ReasoningDelta(text.to_string()));
+        on_event(Event::ReasoningDelta {
+            text: text.to_string(),
+            meta: None,
+        });
     }
     if let Some(calls) = delta["tool_calls"].as_array() {
         for (i, call) in calls.iter().enumerate() {
@@ -313,7 +317,10 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
         on_event(Event::Delta(text.to_string()));
     }
     if let Some(text) = message["message"]["reasoning_content"].as_str() {
-        on_event(Event::ReasoningDelta(text.to_string()));
+        on_event(Event::ReasoningDelta {
+            text: text.to_string(),
+            meta: None,
+        });
     }
     if let Some(calls) = message["message"]["tool_calls"].as_array() {
         for (i, call) in calls.iter().enumerate() {
@@ -492,6 +499,7 @@ mod tests {
                     },
                 ],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -605,6 +613,7 @@ mod tests {
             text: "answer".into(),
             tool_calls: Vec::new(),
             reasoning: Some("chain of thought".into()),
+            reasoning_meta: None,
         }];
         // plain host: reasoning is dropped (DeepSeek's API rejects it back)
         let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
@@ -642,6 +651,7 @@ mod tests {
                     arguments: json!({"path": "."}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("call_1", "ls", "a\nb"),
         ];
@@ -709,6 +719,7 @@ mod tests {
                 arguments: json!({}),
             }],
             reasoning: None,
+            reasoning_meta: None,
         }];
         let body = build_body(&model("openai-compat"), &input(&history, &[]), true).unwrap();
         assert_eq!(body["tools"], json!([]));
@@ -726,6 +737,7 @@ mod tests {
                 arguments: json!({}),
             }],
             reasoning: None,
+            reasoning_meta: None,
         }];
         let body = build_body(
             &model("openai-compat"),
@@ -749,6 +761,7 @@ mod tests {
                     arguments: json!({}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("c1", "ls", "a\nb"),
         ];

@@ -520,6 +520,7 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![call("1")],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("1", "bash", "a\nb\nc"),
             user(&"y".repeat(400)),
@@ -537,12 +538,14 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![call("1")],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("1", "bash", "r".repeat(4000)),
             Msg::Assistant {
                 text: String::new(),
                 tool_calls: vec![call("2")],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::tool_result("2", "bash", "r".repeat(4000)),
         ];

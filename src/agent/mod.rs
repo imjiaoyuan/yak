@@ -437,6 +437,7 @@ pub fn run_agent(
 
         let mut text = String::new();
         let mut reasoning_text = String::new();
+        let mut reasoning_meta: Option<serde_json::Value> = None;
         let mut acc = ToolCallAccumulator::default();
         let mut usage = None;
         let mut stop = StopReason::default();
@@ -445,8 +446,11 @@ pub fn run_agent(
                 text.push_str(&t);
                 on_update(AgentUpdate::Delta(t));
             }
-            crate::core::http::Event::ReasoningDelta(t) => {
+            crate::core::http::Event::ReasoningDelta { text: t, meta } => {
                 reasoning_text.push_str(&t);
+                if let Some(meta) = meta {
+                    reasoning_meta = Some(meta);
+                }
                 on_update(AgentUpdate::ReasoningDelta(t));
             }
             crate::core::http::Event::ToolCallDelta {
@@ -488,6 +492,7 @@ pub fn run_agent(
                     text: text.clone(),
                     tool_calls: vec![],
                     reasoning: None,
+                    reasoning_meta: None,
                 });
                 recoveries += 1;
                 if recoveries <= MAX_STREAM_RECOVERIES {
@@ -515,6 +520,7 @@ pub fn run_agent(
             text: text.clone(),
             tool_calls: tool_calls.clone(),
             reasoning,
+            reasoning_meta,
         });
         final_text = text;
         last_usage = usage;

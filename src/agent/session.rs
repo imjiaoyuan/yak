@@ -836,6 +836,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "a.md", "content": "x"}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -1025,6 +1026,7 @@ mod tests {
                         arguments: serde_json::json!({"path": "a.png"}),
                     }],
                     reasoning: None,
+                    reasoning_meta: None,
                 },
                 Msg::ToolResult {
                     call_id: "c1".into(),

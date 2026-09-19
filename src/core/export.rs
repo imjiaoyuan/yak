@@ -310,6 +310,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "src/main.rs"}),
                 }],
                 reasoning: None,
+                reasoning_meta: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -375,6 +376,7 @@ mod tests {
                 text: "calling".into(),
                 tool_calls: Vec::new(),
                 reasoning: None,
+                reasoning_meta: None,
             },
         ]);
         t.response = "the final answer".into();
@@ -389,6 +391,7 @@ mod tests {
                 text: "the final answer".into(),
                 tool_calls: Vec::new(),
                 reasoning: None,
+                reasoning_meta: None,
             },
         ]);
         t.response = "the final answer".into();
