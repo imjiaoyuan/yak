@@ -61,27 +61,42 @@ const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 static LAST_ULID: std::sync::Mutex<Option<(u64, u128)>> = std::sync::Mutex::new(None);
 
+/// 80 random bits — the width of a ULID's randomness half.
+const RANDOM_BITS: u128 = 1u128 << 80;
+
 pub fn ulid() -> String {
     let now_ms = now_ms();
     let mut last = LAST_ULID.lock().unwrap();
-    let mut rand_bits = {
-        let mut buf = [0u8; 10];
-        getrandom_fill(&mut buf);
-        let mut v: u128 = 0;
-        for b in buf {
-            v = (v << 8) | b as u128;
-        }
-        v
-    };
-    // keep ids strictly monotonic within a process: same ms must beat the last value
-    if let Some((t, prev)) = *last
-        && now_ms == t
-        && rand_bits <= prev
-    {
-        rand_bits = prev.wrapping_add(1) & ((1u128 << 80) - 1);
+    let state = advance(*last, now_ms, random_bits);
+    *last = Some(state);
+    encode_ulid(state.0, state.1)
+}
+
+/// The next (millisecond, randomness) pair, given the previous one. Ids are
+/// strictly monotonic within a process: at or below the last millisecond the
+/// timestamp is reused and the randomness incremented, so a clock that stands
+/// still *or steps backwards* can never hand out a smaller id (the wall clock
+/// is read outside the lock and can regress). `fresh` supplies the random
+/// half for a genuinely new millisecond.
+fn advance(last: Option<(u64, u128)>, now_ms: u64, fresh: impl FnOnce() -> u128) -> (u64, u128) {
+    match last {
+        // the randomness half is exhausted (2**80 ids in one millisecond):
+        // borrow a millisecond instead of wrapping the randomness back to
+        // zero, which would break the ordering
+        Some((t, prev)) if now_ms <= t && prev == RANDOM_BITS - 1 => (t + 1, fresh()),
+        Some((t, prev)) if now_ms <= t => (t, prev + 1),
+        _ => (now_ms, fresh()),
     }
-    *last = Some((now_ms, rand_bits));
-    encode_ulid(now_ms, rand_bits)
+}
+
+fn random_bits() -> u128 {
+    let mut buf = [0u8; 10];
+    getrandom_fill(&mut buf);
+    let mut v: u128 = 0;
+    for b in buf {
+        v = (v << 8) | b as u128;
+    }
+    v
 }
 
 fn now_ms() -> u64 {
@@ -143,6 +158,33 @@ mod ulid_tests {
         );
         assert!(b > a, "same-process ulids must be strictly monotonic");
         assert!(!a.contains('i') && !a.contains('l') && !a.contains('o') && !a.contains('u'));
+    }
+
+    /// A wall clock that stands still or steps backwards must never produce
+    /// an id below the one already handed out (the clock is read outside the
+    /// lock, so both happen in practice).
+    #[test]
+    fn ids_stay_monotonic_when_the_clock_stalls_or_regresses() {
+        let zero = || 0u128;
+        let first = advance(None, 1_000, || 7);
+        assert_eq!(first, (1_000, 7));
+        assert_eq!(advance(Some(first), 1_000, zero), (1_000, 8));
+        assert_eq!(advance(Some((1_000, 8)), 999, zero), (1_000, 9));
+        // a fresh millisecond takes new randomness even if it is lower
+        assert_eq!(advance(Some((1_000, 9)), 1_001, || 2), (1_001, 2));
+        // randomness exhausted: borrow a millisecond, never wrap to zero
+        assert_eq!(
+            advance(Some((1_000, RANDOM_BITS - 1)), 1_000, || 3),
+            (1_001, 3)
+        );
+    }
+
+    #[test]
+    fn an_id_generated_after_a_clock_regression_still_sorts_later() {
+        let ts = now_ms();
+        let last = Some((ts + 60_000, 5));
+        let next = advance(last, ts, || 0);
+        assert!(encode_ulid(next.0, next.1) > encode_ulid(ts + 60_000, 5));
     }
 
     #[test]
