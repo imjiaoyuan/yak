@@ -240,26 +240,51 @@ pub(crate) fn merge_steering(pending: Option<Msg>, queued: Vec<String>) -> Optio
     })
 }
 
+/// One run's inputs: the model, the tool set, the prompt and the seed
+/// history. Grouped so a call site reads as what the run *is*, and the loop
+/// keeps a short signature.
+pub struct RunRequest<'a> {
+    pub model: &'a crate::providers::ResolvedModel,
+    pub tools: &'a [Box<dyn tools::Tool>],
+    pub prompt: &'a str,
+    pub attachments: Vec<crate::providers::Attachment>,
+    pub seed: Vec<Msg>,
+    pub opts: &'a AgentOptions<'a>,
+}
+
+/// The three callbacks the loop reports through: chrome updates, approval
+/// questions, and the steer poll (run at every tool-round boundary, where
+/// lines the user typed mid-run are delivered as a user message before the
+/// next model call).
+pub struct RunCallbacks<'a> {
+    pub on_update: &'a mut dyn FnMut(AgentUpdate),
+    pub on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    pub steer: &'a mut dyn FnMut() -> Vec<String>,
+}
+
 /// Run the agent loop: stream an assistant response, execute its tool calls,
 /// feed results back, repeat until the model stops calling tools or the turn
 /// budget hits. Tool errors become error results (data, not failure); only
 /// provider errors abort with Err, carrying the partial history so the
-/// session survives without a defensive clone. `steer` is polled at every
-/// tool-round boundary; lines the user typed mid-run are delivered as a user
-/// message before the next model call.
-#[allow(clippy::too_many_arguments)]
+/// session survives without a defensive clone.
 pub fn run_agent(
-    model: &crate::providers::ResolvedModel,
-    tools: &[Box<dyn tools::Tool>],
-    prompt: &str,
-    attachments: Vec<crate::providers::Attachment>,
-    seed: Vec<Msg>,
-    opts: &AgentOptions,
+    req: RunRequest<'_>,
     approval: &mut approval::ApprovalConfig,
-    on_update: &mut dyn FnMut(AgentUpdate),
-    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
-    steer: &mut dyn FnMut() -> Vec<String>,
+    cb: RunCallbacks<'_>,
 ) -> Result<AgentOutcome, AgentFailure> {
+    let RunRequest {
+        model,
+        tools,
+        prompt,
+        attachments,
+        seed,
+        opts,
+    } = req;
+    let RunCallbacks {
+        on_update,
+        on_approval,
+        steer,
+    } = cb;
     let tool_defs: Vec<ToolDef> = tools
         .iter()
         .map(|t| ToolDef {
@@ -642,8 +667,7 @@ pub fn run_agent(
         if readonly_batch {
             let mut prepared: Vec<(ToolCall, Result<ClearedCall, CallRefusal>)> = Vec::new();
             for mut call in tool_calls {
-                let cleared = prepare_call(
-                    &mut call,
+                let mut ctx = call_ctx(
                     tools,
                     &opts.cwd,
                     approval,
@@ -651,6 +675,7 @@ pub fn run_agent(
                     on_update,
                     opts.hooks,
                 );
+                let cleared = prepare_call(&mut call, &mut ctx);
                 prepared.push((call, cleared));
             }
             let outs: Vec<(tools::ToolOutput, Vec<String>)> = std::thread::scope(|scope| {
@@ -691,18 +716,15 @@ pub fn run_agent(
                     Err(denied) => (denied.into(), None),
                     Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
                 };
-                finish_call(
-                    &call,
-                    out,
+                let mut ctx = call_ctx(
                     tools,
                     &opts.cwd,
                     approval,
                     on_approval,
                     on_update,
                     opts.hooks,
-                    repeat_note,
-                    &mut history,
                 );
+                finish_call(&call, out, &mut ctx, repeat_note, &mut history);
             }
         } else {
             for mut call in tool_calls {
@@ -717,15 +739,15 @@ pub fn run_agent(
                     });
                     continue;
                 }
-                let (out, repeat_note) = match prepare_call(
-                    &mut call,
+                let mut ctx = call_ctx(
                     tools,
                     &opts.cwd,
                     approval,
                     on_approval,
                     on_update,
                     opts.hooks,
-                ) {
+                );
+                let (out, repeat_note) = match prepare_call(&mut call, &mut ctx) {
                     Err(denied) => (denied.into(), None),
                     Ok(cleared) => {
                         let mut log =
@@ -736,18 +758,15 @@ pub fn run_agent(
                         (out, repeats.observe(&call.name, &call.arguments))
                     }
                 };
-                finish_call(
-                    &call,
-                    out,
+                let mut ctx = call_ctx(
                     tools,
                     &opts.cwd,
                     approval,
                     on_approval,
                     on_update,
                     opts.hooks,
-                    repeat_note,
-                    &mut history,
                 );
+                finish_call(&call, out, &mut ctx, repeat_note, &mut history);
             }
         }
         if interrupted {
@@ -993,21 +1012,53 @@ fn gate_call<'a>(
     })
 }
 
+/// The per-round context both call helpers thread through: the tool set and
+/// cwd they gate against, the live approval state, and the callbacks the loop
+/// reports through. One carrier instead of six parameters each.
+struct CallCtx<'a, 'b> {
+    tools: &'a [Box<dyn tools::Tool>],
+    cwd: &'b std::path::Path,
+    approval: &'b mut approval::ApprovalConfig,
+    on_approval: &'b mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    on_update: &'b mut dyn FnMut(AgentUpdate),
+    hooks: &'b crate::agent::ext::Extensions,
+}
+
+/// Borrow one round's helpers as a carrier. `tools` keeps its own lifetime so
+/// a `ClearedCall` may outlive the borrow of the mutable helpers.
+fn call_ctx<'a, 'b>(
+    tools: &'a [Box<dyn tools::Tool>],
+    cwd: &'b std::path::Path,
+    approval: &'b mut approval::ApprovalConfig,
+    on_approval: &'b mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    on_update: &'b mut dyn FnMut(AgentUpdate),
+    hooks: &'b crate::agent::ext::Extensions,
+) -> CallCtx<'a, 'b> {
+    CallCtx {
+        tools,
+        cwd,
+        approval,
+        on_approval,
+        on_update,
+        hooks,
+    }
+}
+
 /// Gate one call before execution: fire the extension `tool_call` hook (it
 /// may deny or rewrite the arguments), run the approval matrix, and emit the
 /// ToolStart chrome. `Err` carries the denial/validation text that becomes
 /// an error tool result. Shared by the serial path and the read-only parallel
 /// batch so both gate identically.
-#[allow(clippy::too_many_arguments)]
 fn prepare_call<'a>(
     call: &mut ToolCall,
-    tools: &'a [Box<dyn tools::Tool>],
-    cwd: &std::path::Path,
-    approval: &mut approval::ApprovalConfig,
-    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
-    on_update: &mut dyn FnMut(AgentUpdate),
-    hooks: &crate::agent::ext::Extensions,
+    ctx: &mut CallCtx<'a, '_>,
 ) -> Result<ClearedCall<'a>, CallRefusal> {
+    let tools = ctx.tools;
+    let cwd = ctx.cwd;
+    let hooks = ctx.hooks;
+    let approval = &mut *ctx.approval;
+    let on_approval = &mut *ctx.on_approval;
+    let on_update = &mut *ctx.on_update;
     // extension gate: a subscribed tool_call may deny, rewrite the
     // arguments, or allow (skip the built-in approval) before the matrix
     // even sees them; a deny is the Err that becomes an error tool result
@@ -1033,19 +1084,19 @@ fn prepare_call<'a>(
 /// Finish one call after execution: fuse an edit/write's `then_run`, let
 /// extensions rewrite the model-visible result, emit ToolEnd, and push the
 /// result onto the history. Shared by both paths so ordering is identical.
-#[allow(clippy::too_many_arguments)]
 fn finish_call(
     call: &ToolCall,
     out: tools::ToolOutput,
-    tools: &[Box<dyn tools::Tool>],
-    cwd: &std::path::Path,
-    approval: &mut approval::ApprovalConfig,
-    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
-    on_update: &mut dyn FnMut(AgentUpdate),
-    hooks: &crate::agent::ext::Extensions,
+    ctx: &mut CallCtx<'_, '_>,
     repeat_note: Option<String>,
     history: &mut Vec<Msg>,
 ) {
+    let tools = ctx.tools;
+    let cwd = ctx.cwd;
+    let hooks = ctx.hooks;
+    let approval = &mut *ctx.approval;
+    let on_approval = &mut *ctx.on_approval;
+    let on_update = &mut *ctx.on_update;
     // action fusion: an edit/write may fuse its follow-up validation command
     // into the same result, which removes the extra model round-trip (the
     // command still passes the normal bash gate, so approval and the
@@ -1077,7 +1128,7 @@ fn finish_call(
 
 #[cfg(test)]
 mod tests {
-    use super::advance_seed_boundary;
+    use super::{RunCallbacks, RunRequest, advance_seed_boundary};
     use serde_json::json;
 
     /// Compaction drops `cut` messages and inserts one summary, so the run's
@@ -1388,16 +1439,20 @@ mod tests {
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
-            &model,
-            &tools,
-            "go",
-            vec![],
-            vec![],
-            &opts,
+            RunRequest {
+                model: &model,
+                tools: &tools,
+                prompt: "go",
+                attachments: vec![],
+                seed: vec![],
+                opts: &opts,
+            },
             &mut approval,
-            &mut |_| {},
-            &mut |_| ApprovalResponse::Deny,
-            &mut || vec![],
+            RunCallbacks {
+                on_update: &mut |_| {},
+                on_approval: &mut |_| ApprovalResponse::Deny,
+                steer: &mut || vec![],
+            },
         )
         .expect("the run must recover from the dropped stream");
         server.join().unwrap();
@@ -1479,16 +1534,20 @@ mod tests {
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
-            &model,
-            &tools,
-            "go",
-            vec![],
-            vec![],
-            &opts,
+            RunRequest {
+                model: &model,
+                tools: &tools,
+                prompt: "go",
+                attachments: vec![],
+                seed: vec![],
+                opts: &opts,
+            },
             &mut approval,
-            &mut |_| {},
-            &mut |_| ApprovalResponse::Deny,
-            &mut || vec![],
+            RunCallbacks {
+                on_update: &mut |_| {},
+                on_approval: &mut |_| ApprovalResponse::Deny,
+                steer: &mut || vec![],
+            },
         )
         .expect("a budget stop is a normal outcome, not a failure");
         // let a hypothetical erroneous 4th request land before counting
@@ -1596,16 +1655,20 @@ mod tests {
         };
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
-            &model,
-            &tools,
-            "go",
-            vec![],
-            vec![],
-            &opts,
+            RunRequest {
+                model: &model,
+                tools: &tools,
+                prompt: "go",
+                attachments: vec![],
+                seed: vec![],
+                opts: &opts,
+            },
             &mut approval,
-            &mut |_| {},
-            &mut |_| ApprovalResponse::Deny,
-            &mut || vec![],
+            RunCallbacks {
+                on_update: &mut |_| {},
+                on_approval: &mut |_| ApprovalResponse::Deny,
+                steer: &mut || vec![],
+            },
         )
         .expect("identical echoes are not a failure");
         server.join().unwrap();
@@ -1727,16 +1790,20 @@ mod tests {
         let caller = std::thread::current().id();
         let mut approval = approval::ApprovalConfig::default();
         let outcome = run_agent(
-            &model,
-            &tools,
-            "go",
-            vec![],
-            vec![],
-            &opts,
+            RunRequest {
+                model: &model,
+                tools: &tools,
+                prompt: "go",
+                attachments: vec![],
+                seed: vec![],
+                opts: &opts,
+            },
             &mut approval,
-            &mut |_| {},
-            &mut |_| ApprovalResponse::Deny,
-            &mut || vec![],
+            RunCallbacks {
+                on_update: &mut |_| {},
+                on_approval: &mut |_| ApprovalResponse::Deny,
+                steer: &mut || vec![],
+            },
         )
         .expect("a batched read-only turn is not a failure");
         server.join().unwrap();

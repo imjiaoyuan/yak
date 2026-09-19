@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use crate::agent::approval::{self, ApprovalConfig};
 use crate::agent::compact::CompactConfig;
-use crate::agent::{AgentOptions, AgentUpdate, ApprovalRequest, ApprovalResponse, run_agent};
+use crate::agent::{
+    AgentOptions, AgentUpdate, ApprovalRequest, ApprovalResponse, RunCallbacks, RunRequest,
+    run_agent,
+};
 use crate::core::threads::{self, StoredTurn};
 use crate::providers::{Msg, ResolvedModel};
 
@@ -297,16 +300,20 @@ impl Session {
                 .unwrap_or_default()
         };
         let result = run_agent(
-            &self.model,
-            &self.tools,
-            prompt,
-            attachments,
-            std::mem::take(&mut self.seed),
-            &opts,
+            RunRequest {
+                model: &self.model,
+                tools: &self.tools,
+                prompt,
+                attachments,
+                seed: std::mem::take(&mut self.seed),
+                opts: &opts,
+            },
             &mut self.approval,
-            &mut on_update,
-            &mut on_approval,
-            &mut steer,
+            RunCallbacks {
+                on_update: &mut on_update,
+                on_approval: &mut on_approval,
+                steer: &mut steer,
+            },
         );
         watcher.stop();
         // an interrupted task may never see TurnEnd: flush any partial
@@ -425,16 +432,20 @@ impl Session {
                 .unwrap_or_default()
         };
         let result = run_agent(
-            &self.model,
-            &self.tools,
-            prompt,
-            attachments,
-            std::mem::take(&mut self.seed),
-            &opts,
+            RunRequest {
+                model: &self.model,
+                tools: &self.tools,
+                prompt,
+                attachments,
+                seed: std::mem::take(&mut self.seed),
+                opts: &opts,
+            },
             &mut self.approval,
-            &mut on_update,
-            &mut on_approval,
-            &mut steer,
+            RunCallbacks {
+                on_update: &mut on_update,
+                on_approval: &mut on_approval,
+                steer: &mut steer,
+            },
         );
         crate::core::http::clear_interrupt();
         self.tokens.0 += total.input;
