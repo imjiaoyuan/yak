@@ -2,29 +2,43 @@
 """mcp-bridge — Model Context Protocol servers as llm tools (resident extension).
 
 The host speaks its own newline-delimited protocol; MCP servers speak
-JSON-RPC 2.0 over stdio. This extension sits between them and translates,
-so an MCP server needs no host-side support: it is spawned once, its
-tools/list is forwarded as the extension's own tool list (each exposed as
-`<server>__<tool>`, the MCP convention), and every call_tool is forwarded
-to the matching server's tools/call with the text content pieces joined.
+JSON-RPC 2.0 over stdio or streamable HTTP. This extension sits between
+them and translates, so an MCP server needs no host-side support: it is
+started once, its tools/list is forwarded as the extension's own tool
+list (each exposed as `<server>__<tool>`, the MCP convention), and every
+call_tool is forwarded to the matching server's tools/call with the text
+content pieces joined.
 
 Configuration lives next to this file in `mcp.json` (same directory), a
-flat map of server entries in the usual shape:
+flat map of server entries — the usual `{"mcpServers": {...}}` wrapper is
+unwrapped when present:
 
     {
       "fetch":  {"command": "uvx", "args": ["mcp-server-fetch"]},
       "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"],
-                 "env": {"MEMORY_FILE": "/tmp/mem.json"}}
+                 "env": {"MEMORY_FILE": "/tmp/mem.json"}},
+      "cloudflare": {"type": "streamable-http",
+                     "url": "https://mcp.cloudflare.com/mcp",
+                     "headers": {"Authorization": "Bearer ${CLOUDFLARE_MCP_TOKEN}"}}
     }
 
+`command` picks the stdio transport, `url` the streamable-HTTP one.
 Relative `command` values resolve on PATH; `env` rides along with (not
-replacing) the inherited environment. A server that fails to spawn or
-finish its initialize handshake is skipped with a dim warning on stderr —
-the bridge and the remaining servers stay up.
+replacing) the inherited environment, and `headers` adds to the HTTP
+request's own. `${VAR}` in any string value expands from the environment;
+a variable that is not set is an error, not a silently empty value. A
+server that fails to start or to finish its initialize handshake is
+skipped with a dim warning on stderr — the bridge and the remaining
+servers stay up.
 
 Honest limits, by design:
-  - stdio transport only. SSE/HTTP MCP servers are not bridged (the host
-    gives extensions no HTTP lane, deliberately).
+  - HTTP means the streamable-HTTP transport: one POST per JSON-RPC
+    message, the reply either a JSON body or an SSE stream carrying it,
+    and the server's `Mcp-Session-Id` echoed on every later request. A
+    server that answers a request with 202 and expects the client to
+    listen on a separate GET stream is not bridged, nor is the older
+    two-endpoint SSE transport. Auth is a static header, so an OAuth-only
+    server needs a token obtained out of band (no browser flow here).
   - MCP resources, prompts and sampling are not translated — tools are the
     one MCP surface with a clean host-side counterpart.
   - Tool schemas pass through as-is (inputSchema → parameters); a server
@@ -34,22 +48,25 @@ Honest limits, by design:
     config `extensions.tool_timeout` (120s default) bounds every call.
 
 Deadlines: initialize a server waits 10s; a tools/call waits 30s and then
-errors the call (the server is left running — MCP has no cancellation that
-travels this bridge, so a slow call may still write its reply; the id has
-left the pending map and the late reply is dropped as unknown).
+errors the call, sending `notifications/cancelled` for the id (a stdio
+server may ignore it — the id has left the pending map either way, so a
+late reply is dropped as unknown).
 """
 
 import json
 import os
-import shlex
+import re
 import subprocess
 import sys
 import threading
-import time
+import urllib.error
+import urllib.request
 
 INIT_TIMEOUT = 10.0     # seconds: a server's initialize handshake
 CALL_TIMEOUT = 30.0     # seconds: one tools/call round
 CONFIG_NAME = "mcp.json"
+PROTOCOL_VERSION = "2025-06-18"
+DEFAULT_TIMEOUT_HEADER = "MCP-Protocol-Version"
 
 
 def log(msg):
@@ -58,7 +75,18 @@ def log(msg):
     sys.stderr.flush()
 
 
-class Server:
+def expand_env(value):
+    """`${VAR}` in a config string resolves from the environment. An unset
+    variable raises: a missing token must not become an empty header."""
+    def sub(m):
+        name = m.group(1)
+        if name not in os.environ:
+            raise RuntimeError(f"${{{name}}} is not set in the environment")
+        return os.environ[name]
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", sub, value)
+
+
+class StdioTransport:
     """One MCP server child: a locked request pipe and a reader thread
     that routes replies by JSON-RPC id to the waiting caller."""
 
@@ -73,16 +101,12 @@ class Server:
 
     # -- lifecycle ----------------------------------------------------------
 
-    def start(self):
-        """Spawn, initialize, tools/list. Returns the tool list (may be
-        empty) or raises with a reason the caller dims."""
-        cmd = self.spec.get("command")
-        if not isinstance(cmd, str) or not cmd:
-            raise RuntimeError(f"entry has no command")
-        argv = [cmd] + [str(a) for a in (self.spec.get("args") or [])]
+    def open(self):
+        cmd = expand_env(str(self.spec["command"]))
+        argv = [cmd] + [expand_env(str(a)) for a in (self.spec.get("args") or [])]
         env = dict(os.environ)
         for k, v in (self.spec.get("env") or {}).items():
-            env[str(k)] = str(v)
+            env[str(k)] = expand_env(str(v))
         try:
             self.proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -92,19 +116,8 @@ class Server:
         except OSError as e:
             raise RuntimeError(f"spawn failed: {e}")
         threading.Thread(target=self._read_loop, daemon=True).start()
-        # MCP initialize, then the initialized notification, then tools/list
-        params = {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "llm-mcp-bridge", "version": "1"},
-        }
-        result = self.request("initialize", params, INIT_TIMEOUT)
-        if result is None:
-            raise RuntimeError("initialize handshake timed out")
-        self.notify("notifications/initialized", {})
-        return self.request("tools/list", {}, INIT_TIMEOUT) or {}
 
-    def stop(self):
+    def close(self):
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.close()
@@ -170,6 +183,8 @@ class Server:
         if not ready.wait(timeout):
             with self.plock:
                 self.pending.pop(rid, None)
+            self.notify("notifications/cancelled",
+                        {"requestId": rid, "reason": "timeout"})
             return None
         result = slot[0] if slot else None
         if isinstance(result, dict) and "__error__" in result:
@@ -185,6 +200,175 @@ class Server:
                 self.proc.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
+
+
+class HttpTransport:
+    """MCP over streamable HTTP: one POST per JSON-RPC message, the reply
+    either a JSON body or an SSE stream carrying it. The `Mcp-Session-Id`
+    a server hands out at initialize rides every later request."""
+
+    def __init__(self, name, spec):
+        self.name = name
+        self.spec = spec
+        self.url = ""
+        self.headers = {}
+        self.session_id = None
+        self.next_id = 0
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def open(self):
+        self.url = expand_env(str(self.spec["url"]))
+        if not self.url.startswith(("http://", "https://")):
+            raise RuntimeError(f"'{self.url}' is not an http(s) url")
+        for k, v in (self.spec.get("headers") or {}).items():
+            self.headers[str(k)] = expand_env(str(v))
+
+    def close(self):
+        """DELETE ends the session, as the spec asks; a server that does
+        not implement it is not an error worth surfacing."""
+        if not self.session_id:
+            return
+        req = urllib.request.Request(
+            self.url, method="DELETE",
+            headers={**self.headers, "Mcp-Session-Id": self.session_id})
+        try:
+            urllib.request.urlopen(req, timeout=5).close()
+        except (urllib.error.URLError, OSError):
+            pass
+
+    # -- jsonrpc plumbing ---------------------------------------------------
+
+    def _post(self, frame, timeout, expect_reply):
+        headers = dict(self.headers)
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json, text/event-stream"
+        headers[DEFAULT_TIMEOUT_HEADER] = PROTOCOL_VERSION
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        req = urllib.request.Request(
+            self.url, data=json.dumps(frame).encode(), headers=headers,
+            method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            sid = r.headers.get("Mcp-Session-Id")
+            if sid:
+                self.session_id = sid
+            if not expect_reply:
+                return None
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype == "text/event-stream":
+                return self._sse_reply(r, frame.get("id"))
+            body = r.read(8 * 1024 * 1024)
+        return json.loads(body) if body.strip() else None
+
+    def _sse_reply(self, stream, rid):
+        """Read the response stream until the frame carrying our id shows
+        up. Server-initiated messages on the way are ignored."""
+        data = []
+        for line in stream:
+            line = line.decode("utf-8", "replace").rstrip("\r\n")
+            if not line:
+                if data:
+                    msg = self._parse("\n".join(data))
+                    data = []
+                    if isinstance(msg, dict) and msg.get("id") == rid:
+                        return msg
+                continue
+            if line.startswith("data:"):
+                data.append(line[5:].lstrip())
+        return None
+
+    @staticmethod
+    def _parse(text):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    def request(self, method, params, timeout):
+        """One JSON-RPC round over HTTP. Same contract as the stdio
+        transport: the result object, or None (logged) on any failure."""
+        self.next_id += 1
+        rid = self.next_id
+        frame = {"jsonrpc": "2.0", "id": rid, "method": method,
+                 "params": params}
+        try:
+            reply = self._post(frame, timeout, True)
+        except urllib.error.HTTPError as e:
+            log(f"{self.name}: {method} failed: HTTP {e.code} {e.reason}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError,
+                json.JSONDecodeError, UnicodeDecodeError) as e:
+            log(f"{self.name}: {method} failed: {e}")
+            return None
+        if not isinstance(reply, dict):
+            log(f"{self.name}: {method} returned no reply")
+            return None
+        if "error" in reply:
+            log(f"{self.name}: {method} error: {reply['error']}")
+            return None
+        return reply.get("result")
+
+    def notify(self, method, params):
+        frame = {"jsonrpc": "2.0", "method": method, "params": params}
+        try:
+            self._post(frame, 10.0, False)
+        except (urllib.error.URLError, TimeoutError, OSError,
+                json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+
+class Server:
+    """One MCP server of either transport: open it, run the MCP handshake,
+    then forward requests to it. The transport is picked from the entry —
+    `command` spawns a child, `url` speaks HTTP."""
+
+    def __init__(self, name, spec):
+        self.name = name
+        self.spec = spec
+        self.transport = None
+
+    def start(self):
+        """Connect, initialize, tools/list. Returns the tool list (may be
+        empty) or raises with a reason the caller dims."""
+        kind = str(self.spec.get("type") or "").lower()
+        has_url = self.spec.get("url") is not None
+        has_cmd = self.spec.get("command") is not None
+        if has_url or kind in ("http", "streamable-http", "streamable_http"):
+            if not has_url:
+                raise RuntimeError(f"transport '{kind}' needs a url")
+            self.transport = HttpTransport(self.name, self.spec)
+        elif has_cmd:
+            cmd = self.spec.get("command")
+            if not isinstance(cmd, str) or not cmd:
+                raise RuntimeError("entry has no command")
+            self.transport = StdioTransport(self.name, self.spec)
+        else:
+            raise RuntimeError("entry needs 'command' (stdio) or 'url' (http)")
+        self.transport.open()
+        params = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "llm-mcp-bridge", "version": "1"},
+        }
+        result = self.transport.request("initialize", params, INIT_TIMEOUT)
+        if result is None:
+            raise RuntimeError("initialize handshake timed out")
+        self.transport.notify("notifications/initialized", {})
+        return self.transport.request("tools/list", {}, INIT_TIMEOUT) or {}
+
+    def request(self, method, params, timeout):
+        if self.transport is None:
+            return None
+        return self.transport.request(method, params, timeout)
+
+    def notify(self, method, params):
+        if self.transport is not None:
+            self.transport.notify(method, params)
+
+    def stop(self):
+        if self.transport is not None:
+            self.transport.close()
 
 
 def text_of(result):
@@ -207,7 +391,8 @@ def text_of(result):
 
 def load_config():
     """mcp.json beside this script. Missing file: no servers, no tools —
-    the bridge mounts nothing and stays quiet."""
+    the bridge mounts nothing and stays quiet. An `{"mcpServers": {...}}`
+    wrapper (the agent-plugins.org shape MCP repos ship) is unwrapped."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_NAME)
     try:
         with open(path, encoding="utf-8") as f:
@@ -218,7 +403,8 @@ def load_config():
     if not isinstance(cfg, dict):
         log(f"{CONFIG_NAME} must be an object of server entries")
         return {}
-    return cfg
+    inner = cfg.get("mcpServers")
+    return inner if isinstance(inner, dict) else cfg
 
 
 def main():
@@ -316,9 +502,9 @@ def main():
             else:
                 reply({"id": mid, "result": text})
         elif kind == "interrupt":
-            # the host abandoned a call; MCP stdio has no cancellation
-            # lane, so the late reply (if any) is dropped by id — nothing
-            # to forward. Answering keeps the protocol tidy.
+            # the host abandoned a call: the transport has already sent
+            # notifications/cancelled on its own timeout, so all that is
+            # left here is answering the frame and keeping the protocol tidy
             if mid is not None:
                 reply({"id": mid, "result": None})
         elif mid is not None:
