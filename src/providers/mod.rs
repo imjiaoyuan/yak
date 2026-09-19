@@ -6,7 +6,8 @@ pub mod message;
 pub mod openai_compat;
 
 pub use message::{
-    Msg, ORPHAN_RESULT, ToolCall, ToolCallAccumulator, ToolDef, call_answered, last_result_index,
+    Msg, ORPHAN_RESULT, ToolCall, ToolCallAccumulator, ToolDef, ToolError, call_answered,
+    last_result_index,
 };
 
 // the attachment type lives with its loader in core; re-exported here so

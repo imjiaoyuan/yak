@@ -260,15 +260,15 @@ fn webfetch_refuses_non_http_schemes() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(out.is_error);
+    assert!(out.is_error());
     let out = tool.execute(
         &json!({"url": "ftp://example.com/x"}),
         Path::new("."),
         &mut |_| {},
     );
-    assert!(out.is_error);
+    assert!(out.is_error());
     let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
-    assert!(out.is_error);
+    assert!(out.is_error());
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     // the matched lines' trailing junk stays outside the replaced span
     // (minimal diff: only the matched content is replaced)
     assert_eq!(
@@ -319,7 +319,7 @@ fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "fn a() {}\nfn b() { todo!() }\n"
@@ -340,7 +340,7 @@ fn edit_fuzzy_matching_folds_smart_punctuation() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "msg = 'hi'\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -358,7 +358,7 @@ fn edit_fuzzy_duplicate_matches_still_error() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(out.content.contains("2 times"), "{}", out.content);
     assert!(
         out.content.contains("whitespace-flexible"),
@@ -379,14 +379,14 @@ fn edit_requires_unique_matches_and_no_overlap() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(dup.is_error, "'o' appears twice and must be rejected");
+    assert!(dup.is_error(), "'o' appears twice and must be rejected");
 
     let missing = EditTool.execute(
         &json!({"path": file.display().to_string(), "edits": [{"oldText": "nope", "newText": "x"}]}),
         Path::new("."),
         &mut |_| {},
     );
-    assert!(missing.is_error);
+    assert!(missing.is_error());
 
     let overlap = EditTool.execute(
         &json!({"path": file.display().to_string(), "edits": [
@@ -396,7 +396,7 @@ fn edit_requires_unique_matches_and_no_overlap() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(overlap.is_error, "overlapping spans must be rejected");
+    assert!(overlap.is_error(), "overlapping spans must be rejected");
 
     let ok = EditTool.execute(
         &json!({"path": file.display().to_string(), "edits": [
@@ -406,7 +406,7 @@ fn edit_requires_unique_matches_and_no_overlap() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!ok.is_error, "{}", ok.content);
+    assert!(!ok.is_error(), "{}", ok.content);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "1\ntwo\n3\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -422,7 +422,7 @@ fn grep_literal_and_ignore_case() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     assert!(
         out.content.contains("one.txt:1: Hello world"),
         "{}",
@@ -458,7 +458,7 @@ fn grep_regex_delegates_to_ripgrep() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     // rg prints `path:line:text` (the literal path adds a space after the
     // line number); both are the same shape for the model to read
     assert!(
@@ -474,7 +474,7 @@ fn grep_regex_delegates_to_ripgrep() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(bad.is_error, "{}", bad.content);
+    assert!(bad.is_error(), "{}", bad.content);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -486,7 +486,7 @@ fn bash_output_beyond_pipe_buffer_does_not_deadlock() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     // truncated to the last MAX_LINES lines (plus the truncation marker)
     assert!(out.content.lines().count() < 20000);
     assert!(out.content.contains("20000"));
@@ -503,7 +503,7 @@ fn a_timed_out_command_keeps_its_partial_output() {
         Path::new("."),
         &mut |_| {},
     );
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(
         out.content.contains("partial-before-deadline"),
         "partial output must survive the kill: {}",
@@ -592,7 +592,7 @@ fn read_tool_windows_with_meta_header_and_note() {
     std::fs::write(&file, body.join("\n")).unwrap();
 
     let out = read_execute(&dir, json!({"path": "notes.txt", "offset": 3, "limit": 4}));
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     assert!(
         out.content.starts_with("[notes.txt · text · ≥7 lines · "),
         "{}",
@@ -622,7 +622,7 @@ fn read_paths_batches_several_files_in_one_call() {
     std::fs::write(dir.join("a.rs"), "fn a() {}").unwrap();
     std::fs::write(dir.join("b.md"), "# b\nbody").unwrap();
     let out = read_execute(&dir, json!({"paths": ["a.rs", "b.md", "nope.txt"]}));
-    assert!(!out.is_error, "two of three files read fine");
+    assert!(!out.is_error(), "two of three files read fine");
     assert!(out.content.contains("a.rs ·"), "{}", out.content);
     assert!(out.content.contains("1: fn a() {}"), "{}", out.content);
     assert!(out.content.contains("b.md ·"), "{}", out.content);
@@ -630,12 +630,12 @@ fn read_paths_batches_several_files_in_one_call() {
     assert!(out.content.contains("nope.txt"), "{}", out.content);
     // neither field → a clear usage error
     let none = read_execute(&dir, json!({}));
-    assert!(none.is_error);
+    assert!(none.is_error());
     assert!(none.content.contains("`paths`"));
     // over the batch cap → refused up front
     let six: Vec<String> = (0..6).map(|i| format!("f{i}.txt")).collect();
     let over = read_execute(&dir, json!({"paths": six}));
-    assert!(over.is_error);
+    assert!(over.is_error());
     assert!(over.content.contains("at most 5"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -662,7 +662,7 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
     let body: Vec<String> = (0..600).map(|_| "x".repeat(300)).collect();
     std::fs::write(dir.join("wide.txt"), body.join("\n")).unwrap();
     let out = read_execute(&dir, json!({"path": "wide.txt"}));
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     assert!(out.content.contains("150: "), "{}", out.content);
     assert!(!out.content.contains("250: "), "{}", out.content);
     assert!(!out.content.contains("Use offset=501"), "{}", out.content);
@@ -687,18 +687,18 @@ fn read_tool_refuses_binary_with_hint() {
     std::fs::write(dir.join("blob.dat"), b"xx\0yy").unwrap();
 
     let out = read_execute(&dir, json!({"path": "aln.bam"}));
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(out.content.contains("binary format"), "{}", out.content);
     assert!(out.content.contains("samtools"), "{}", out.content);
     assert!(out.content.contains("use bash"), "{}", out.content);
 
     let out = read_execute(&dir, json!({"path": "paper.pdf"}));
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(out.content.contains("pdftotext"), "{}", out.content);
 
     // unknown binary extension gets the generic wording without a hint
     let out = read_execute(&dir, json!({"path": "blob.dat"}));
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(out.content.contains("binary format"), "{}", out.content);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -710,7 +710,7 @@ fn read_tool_attaches_image_for_vision_models() {
     // exact body is irrelevant to the test
     std::fs::write(dir.join("pic.png"), b"\x89PNG\r\n\x1a\n").unwrap();
     let out = read_execute(&dir, json!({"path": "pic.png"}));
-    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.is_error(), "{}", out.content);
     assert!(out.content.contains("vision attachment"), "{}", out.content);
     assert_eq!(out.attachments.len(), 1);
     assert_eq!(out.attachments[0].mime_type, "image/png");
@@ -725,18 +725,18 @@ fn read_tool_offset_past_end_and_empty_file() {
     std::fs::write(dir.join("empty.txt"), b"").unwrap();
 
     let out = read_execute(&dir, json!({"path": "small.txt", "offset": 9}));
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert_eq!(
         out.content,
         "offset 9 is past the end of the file (2 lines)"
     );
 
     let out = read_execute(&dir, json!({"path": "empty.txt"}));
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     assert_eq!(out.content, "(empty file)");
 
     let out = read_execute(&dir, json!({"path": "missing.txt"}));
-    assert!(out.is_error);
+    assert!(out.is_error());
     assert!(out.content.starts_with("cannot read"), "{}", out.content);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -766,7 +766,7 @@ fn update_plan_renders_the_checklist_and_bounces_bad_plans() {
         {"step": "fix the offset bug", "status": "in_progress"},
         {"step": "add a test", "status": "pending"}
     ]}));
-    assert!(!ok.is_error, "{}", ok.content);
+    assert!(!ok.is_error(), "{}", ok.content);
     assert_eq!(
         ok.content,
         "[x] read the parser\n[>] fix the offset bug\n[ ] add a test"
@@ -781,11 +781,11 @@ fn update_plan_renders_the_checklist_and_bounces_bad_plans() {
         {"step": "a", "status": "in_progress"},
         {"step": "b", "status": "in_progress"}
     ]}));
-    assert!(err.is_error);
+    assert!(err.is_error());
     assert!(err.content.contains("at most one"), "{}", err.content);
     // an empty plan and an unknown status are refused too
-    assert!(run(json!({"plan": []})).is_error);
-    assert!(run(json!({"plan": [{"step": "a", "status": "done"}]})).is_error);
+    assert!(run(json!({"plan": []})).is_error());
+    assert!(run(json!({"plan": [{"step": "a", "status": "done"}]})).is_error());
 }
 
 /// The tool definitions ride the head of every request, so they are the

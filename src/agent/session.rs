@@ -841,7 +841,7 @@ mod tests {
                 call_id: "c1".into(),
                 name: "write".into(),
                 content: "wrote 1 bytes to a.md".into(),
-                is_error: false,
+                error: None,
                 attachments: Vec::new(),
             },
         ];
@@ -952,13 +952,37 @@ mod tests {
             call_id: "c1".into(),
             name: "read".into(),
             content: "bytes".into(),
-            is_error: false,
+            error: None,
             attachments: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&msg).unwrap(),
-            r#"{"role":"tool_result","call_id":"c1","name":"read","content":"bytes","is_error":false,"attachments":[]}"#
+            r#"{"role":"tool_result","call_id":"c1","name":"read","content":"bytes","error":null,"attachments":[]}"#
         );
+    }
+
+    #[test]
+    fn a_failure_kind_round_trips_and_the_old_bool_still_reads() {
+        let msg = Msg::ToolResult {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            content: "boom".into(),
+            error: Some(crate::providers::ToolError::Denied),
+            attachments: Vec::new(),
+        };
+        let line = serde_json::to_string(&msg).unwrap();
+        assert!(line.contains(r#""error":"denied""#), "{line}");
+        assert_eq!(serde_json::from_str::<Msg>(&line).unwrap(), msg);
+
+        // threads written before the kinds carried a plain bool
+        let legacy = r#"{"role":"tool_result","call_id":"c9","name":"bash",
+            "content":"boom","is_error":true,"attachments":[]}"#;
+        match serde_json::from_str::<Msg>(legacy).unwrap() {
+            Msg::ToolResult { error, .. } => {
+                assert_eq!(error, Some(crate::providers::ToolError::Failed))
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1006,7 +1030,7 @@ mod tests {
                     call_id: "c1".into(),
                     name: "read".into(),
                     content: "bytes".into(),
-                    is_error: false,
+                    error: None,
                     attachments: vec![crate::providers::Attachment {
                         mime_type: "image/png".into(),
                         base64_data: "aGk=".into(),

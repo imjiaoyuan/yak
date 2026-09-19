@@ -189,7 +189,7 @@ call; `subagent.py` reads stdin on a second thread for exactly this reason.
 | `turn_start` | each agent loop turn | `{turn}` |
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs — see gate semantics | `{tool, args}` |
-| `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, content}` — reply `{"content": ..}` to replace it, see below |
+| `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}` — reply `{"content": ..}` to replace it, see below |
 | `agent_end` | task finished or interrupted | `{final_text, interrupted}` |
 
 ### The `tool_call` gate
@@ -215,9 +215,13 @@ payload is the whole result:
 ```json
 → {"id": 5, "type": "event", "v": 1, "name": "tool_result",
     "params": {"tool": "bash", "args": {"command": "cargo test"}, "tool_call_id": "c1",
-               "summary": "…", "is_error": false, "content": "<the full result text>"}}
+               "summary": "…", "is_error": false, "error": null, "content": "<the full result text>"}}
 ← {"id": 5, "result": {"content": "<what the model should read instead>"}}
 ```
+
+`error` is the refusal class when the call did not run as an ordinary failing tool:
+`"failed"` (ran and failed), `"denied"` (approval, a gate, or bad arguments), `"unknown_tool"`,
+`"interrupted"` — `null` on success, and always consistent with `is_error`.
 
 Reply without a `content` field (or `null`) to observe only. The replacement is re-capped like any
 tool output (2000 lines / 50 KB), the last rewrite wins when several extensions reply, and the

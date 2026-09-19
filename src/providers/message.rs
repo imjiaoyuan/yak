@@ -23,6 +23,43 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+/// Why a tool result is an error; `None` is a success. The wire shapes only
+/// carry a boolean, but the kind survives into the transcript so a consumer
+/// — an extension, an editor, the model itself — can tell a call that never
+/// ran from a tool that ran and failed, without matching prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolError {
+    /// the tool ran and reported failure (non-zero exit, no match, ...)
+    Failed,
+    /// the call was refused before running: approval, an extension gate, or
+    /// arguments the tool's own schema rejects
+    Denied,
+    /// no tool of that name is mounted
+    UnknownTool,
+    /// the user (or a dropped stream) cancelled the run
+    Interrupted,
+}
+
+/// A stored `is_error` bool predates the kinds: `true` reads as `Failed`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireError {
+    Kind(ToolError),
+    Flag(bool),
+}
+
+fn error_from_wire<'de, D>(de: D) -> Result<Option<ToolError>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<WireError>::deserialize(de)? {
+        None | Some(WireError::Flag(false)) => None,
+        Some(WireError::Flag(true)) => Some(ToolError::Failed),
+        Some(WireError::Kind(kind)) => Some(kind),
+    })
+}
+
 /// Unified conversation message; each provider adapter serializes these to its
 /// own wire format, and the thread store persists the same struct (one
 /// vocabulary, no second translation layer). `text` may be empty on an
@@ -50,8 +87,9 @@ pub enum Msg {
         call_id: String,
         name: String,
         content: String,
-        #[serde(default)]
-        is_error: bool,
+        /// the failure class; the old stored spelling `is_error` still reads
+        #[serde(default, alias = "is_error", deserialize_with = "error_from_wire")]
+        error: Option<ToolError>,
         /// images/PDFs a vision-capable read produced, riding this result
         #[serde(default)]
         attachments: Vec<Attachment>,
@@ -90,7 +128,7 @@ impl Msg {
             call_id: call_id.into(),
             name: name.into(),
             content: content.into(),
-            is_error: false,
+            error: None,
             attachments: Vec::new(),
         }
     }

@@ -80,8 +80,9 @@ impl Tool for ReadTool {
             let out = self.read_one(&one, cwd);
             combined.push_str(&out.content);
             combined.push('\n');
+            let failed = out.is_error();
             attachments.extend(out.attachments);
-            if !out.is_error {
+            if !failed {
                 ok += 1;
             }
         }

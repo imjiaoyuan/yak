@@ -606,7 +606,7 @@ pub fn run_agent(
                     content: "The response was truncated before this tool call could run. \
                               Re-issue it with a shorter response."
                         .to_string(),
-                    is_error: true,
+                    error: Some(crate::providers::ToolError::Failed),
                     attachments: Vec::new(),
                 });
             }
@@ -634,7 +634,7 @@ pub fn run_agent(
                     .is_some_and(|t| t.tier() == approval::Tier::Read)
             });
         if readonly_batch {
-            let mut prepared: Vec<(ToolCall, Result<ClearedCall, String>)> = Vec::new();
+            let mut prepared: Vec<(ToolCall, Result<ClearedCall, CallRefusal>)> = Vec::new();
             for mut call in tool_calls {
                 let cleared = prepare_call(
                     &mut call,
@@ -682,7 +682,7 @@ pub fn run_agent(
                     on_update(AgentUpdate::ToolLog(line.clone()));
                 }
                 let (out, repeat_note) = match cleared {
-                    Err(denied) => (tools::ToolOutput::err(denied), None),
+                    Err(denied) => (denied.into(), None),
                     Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
                 };
                 finish_call(
@@ -706,7 +706,7 @@ pub fn run_agent(
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         content: "interrupted by user".to_string(),
-                        is_error: true,
+                        error: Some(crate::providers::ToolError::Interrupted),
                         attachments: Vec::new(),
                     });
                     continue;
@@ -720,7 +720,7 @@ pub fn run_agent(
                     on_update,
                     opts.hooks,
                 ) {
-                    Err(denied) => (tools::ToolOutput::err(denied), None),
+                    Err(denied) => (denied.into(), None),
                     Ok(cleared) => {
                         let mut log =
                             |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
@@ -827,7 +827,9 @@ fn rewrite_tool_result(
         "args": call.arguments.clone(),
         "tool_call_id": call.id,
         "summary": summary,
-        "is_error": out.is_error,
+        "is_error": out.is_error(),
+        // the refusal class, for an extension that wants more than the bool
+        "error": out.error.map(|e| json!(e)),
         "content": out.content.clone(),
     });
     if let Some(replacement) = hooks.rewrite_tool_result(&params) {
@@ -850,7 +852,7 @@ fn fuse_then_run(
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
 ) -> tools::ToolOutput {
-    if out.is_error || !matches!(call.name.as_str(), "edit" | "write") {
+    if out.is_error() || !matches!(call.name.as_str(), "edit" | "write") {
         return out;
     }
     let Some(command) = call
@@ -869,7 +871,7 @@ fn fuse_then_run(
         arguments: json!({"command": command}),
     };
     let body = match gate_call(&bash, tools, cwd, approval, on_approval, false) {
-        Err(denied) => format!("not run: {denied}"),
+        Err(denied) => format!("not run: {}", denied.message),
         Ok(cleared) => {
             cleared
                 .tool
@@ -891,9 +893,22 @@ struct ClearedCall<'a> {
     diff: Option<String>,
 }
 
+/// A call refused before it ran; `kind` is the `UnknownTool`/`Denied`
+/// distinction the transcript keeps and `message` is what the model reads.
+struct CallRefusal {
+    kind: crate::providers::ToolError,
+    message: String,
+}
+
+impl From<CallRefusal> for tools::ToolOutput {
+    fn from(r: CallRefusal) -> tools::ToolOutput {
+        tools::ToolOutput::err_kind(r.kind, r.message)
+    }
+}
+
 /// Validate arguments and clear the approval gate. Ok(ClearedCall) means
-/// cleared for execution; Err carries the denial/validation message that is
-/// fed back to the model as an error result.
+/// cleared for execution; Err carries the refusal that is fed back to the
+/// model as an error result.
 fn gate_call<'a>(
     call: &ToolCall,
     tools: &'a [Box<dyn tools::Tool>],
@@ -901,12 +916,19 @@ fn gate_call<'a>(
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     extension_allowed: bool,
-) -> Result<ClearedCall<'a>, String> {
+) -> Result<ClearedCall<'a>, CallRefusal> {
+    let denial = |message: String| CallRefusal {
+        kind: crate::providers::ToolError::Denied,
+        message,
+    };
     let Some(tool) = tools.iter().find(|t| t.name() == call.name) else {
-        return Err(format!("tool '{}' not found", call.name));
+        return Err(CallRefusal {
+            kind: crate::providers::ToolError::UnknownTool,
+            message: format!("tool '{}' not found", call.name),
+        });
     };
     if let Err(e) = tools::validate(&tool.parameters(), &call.arguments) {
-        return Err(format!("invalid arguments: {e}"));
+        return Err(denial(format!("invalid arguments: {e}")));
     }
 
     let escapes = call
@@ -921,7 +943,7 @@ fn gate_call<'a>(
     };
     let (ask, reason) =
         match approval::resolve(tool.name(), tool.tier(), escapes, approval, bash_command) {
-            approval::Decision::Deny(r) => return Err(format!("denied: {r}")),
+            approval::Decision::Deny(r) => return Err(denial(format!("denied: {r}"))),
             approval::Decision::Ask(r) => (true, r),
             approval::Decision::Auto => (false, String::new()),
         };
@@ -954,7 +976,7 @@ fn gate_call<'a>(
                 }
             }
             ApprovalResponse::Deny => {
-                return Err(format!("denied by user: {preview}"));
+                return Err(denial(format!("denied by user: {preview}")));
             }
         }
     }
@@ -979,12 +1001,17 @@ fn prepare_call<'a>(
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     on_update: &mut dyn FnMut(AgentUpdate),
     hooks: &crate::agent::ext::Extensions,
-) -> Result<ClearedCall<'a>, String> {
+) -> Result<ClearedCall<'a>, CallRefusal> {
     // extension gate: a subscribed tool_call may deny, rewrite the
     // arguments, or allow (skip the built-in approval) before the matrix
     // even sees them; a deny is the Err that becomes an error tool result
-    let (extension_allowed, rewritten) =
-        hooks.gate_tool_call(&json!({"tool": call.name, "args": call.arguments}))?;
+    let denied = |reason: String| CallRefusal {
+        kind: crate::providers::ToolError::Denied,
+        message: reason,
+    };
+    let (extension_allowed, rewritten) = hooks
+        .gate_tool_call(&json!({"tool": call.name, "args": call.arguments}))
+        .map_err(denied)?;
     if let Some(rewritten) = rewritten {
         call.arguments = rewritten;
     }
@@ -1025,7 +1052,7 @@ fn finish_call(
     let out = rewrite_tool_result(out, hooks, call);
     on_update(AgentUpdate::ToolEnd {
         summary: summarize(&out.content),
-        is_error: out.is_error,
+        is_error: out.is_error(),
     });
     // the repeat reminder rides the result the model is about to read; the
     // terminal summary above stays the tool's own output
@@ -1037,7 +1064,7 @@ fn finish_call(
         call_id: call.id.clone(),
         name: call.name.clone(),
         content,
-        is_error: out.is_error,
+        error: out.error,
         attachments: out.attachments,
     });
 }
@@ -1089,7 +1116,7 @@ mod tests {
             &mut approval,
             &mut |_| panic!("yolo mode must not prompt for the fused command"),
         );
-        assert!(!out.is_error, "the applied edit keeps its status");
+        assert!(!out.is_error(), "the applied edit keeps its status");
         assert!(out.content.contains("applied 1 edit"));
         assert!(
             out.content.contains("[then_run] $ cat x.txt"),
@@ -1117,7 +1144,7 @@ mod tests {
             &mut approval,
             &mut |_| panic!("a failed mutation must not run its follow-up"),
         );
-        assert!(out.is_error);
+        assert!(out.is_error());
         assert!(!out.content.contains("[then_run]"), "{}", out.content);
         assert!(!dir.join("ran.txt").exists(), "nothing ran");
         // a bash call carrying then_run is not recursively fused
@@ -1153,7 +1180,7 @@ mod tests {
             &mut approval,
             &mut |_| ApprovalResponse::Deny,
         );
-        assert!(!out.is_error, "the edit still landed");
+        assert!(!out.is_error(), "the edit still landed");
         assert!(out.content.contains("not run: denied"), "{}", out.content);
         assert!(
             !dir.join("ran.txt").exists(),

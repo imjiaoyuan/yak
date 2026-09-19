@@ -162,10 +162,10 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
             Msg::ToolResult {
                 name,
                 content,
-                is_error,
+                error,
                 ..
             } => {
-                let flag = if *is_error { " (error)" } else { "" };
+                let flag = if error.is_some() { " (error)" } else { "" };
                 format!("tool result {name}{flag}: {content}")
             }
         };
@@ -703,7 +703,7 @@ mod tests {
                 call_id: "9".into(),
                 name: "bash".into(),
                 content: "e".repeat(3000),
-                is_error: true,
+                error: Some(crate::providers::ToolError::Failed),
                 attachments: Vec::new(),
             },
         ];
@@ -722,7 +722,7 @@ mod tests {
                 call_id: "1".into(),
                 name: "bash".into(),
                 content: original.clone(),
-                is_error: false,
+                error: None,
                 attachments: Vec::new(),
             },
             Msg::tool_result("2", "bash", "small"),

@@ -140,7 +140,7 @@ pub fn build_body(
             Msg::ToolResult {
                 call_id,
                 content,
-                is_error,
+                error,
                 attachments,
                 ..
             } => {
@@ -164,7 +164,7 @@ pub fn build_body(
                     "type": "tool_result",
                     "tool_use_id": call_id,
                     "content": blocks,
-                    "is_error": is_error,
+                    "is_error": error.is_some(),
                 }));
             }
             Msg::Summary { text } => {
@@ -508,7 +508,7 @@ mod tests {
                 call_id: "t2".into(),
                 name: "read".into(),
                 content: "boom".into(),
-                is_error: true,
+                error: Some(crate::providers::ToolError::Failed),
                 attachments: Vec::new(),
             },
         ];

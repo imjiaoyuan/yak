@@ -449,7 +449,7 @@ mod tests {
                 call_id: "c1".into(),
                 name: "read".into(),
                 content: "Read image file [image/png]".into(),
-                is_error: false,
+                error: None,
                 attachments: vec![att("image/png", Some("shot.png"))],
             },
         ];
@@ -497,14 +497,14 @@ mod tests {
                 call_id: "c1".into(),
                 name: "read".into(),
                 content: "Read image file [image/png]".into(),
-                is_error: false,
+                error: None,
                 attachments: vec![att("image/png", Some("plot.png"))],
             },
             Msg::ToolResult {
                 call_id: "c2".into(),
                 name: "bash".into(),
                 content: "a.txt b.txt".into(),
-                is_error: false,
+                error: None,
                 attachments: Vec::new(),
             },
         ];
@@ -546,7 +546,7 @@ mod tests {
             call_id: "c1".into(),
             name: "read".into(),
             content: "Read image file".into(),
-            is_error: false,
+            error: None,
             attachments: vec![att("image/png", Some("shot.png"))],
         }];
         let body = build_body(&m, &input(&history, &[]), false).unwrap();

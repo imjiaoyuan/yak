@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use super::approval::Tier;
 use crate::gitignore::{collect_files, parse_pattern, pattern_matches_path, scopes_for};
+use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
 use fetch::FetchTool;
@@ -34,7 +35,8 @@ pub(crate) const MAX_TOKENS: u64 = 12_000;
 
 pub struct ToolOutput {
     pub content: String,
-    pub is_error: bool,
+    /// the failure class, `None` on success
+    pub error: Option<ToolError>,
     /// attachments (e.g. an image the read tool decoded) fed back to the
     /// model as vision input on the next round
     pub attachments: Vec<crate::providers::Attachment>,
@@ -44,17 +46,27 @@ impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> ToolOutput {
         ToolOutput {
             content: content.into(),
-            is_error: false,
+            error: None,
             attachments: Vec::new(),
         }
     }
 
+    /// The tool ran and reported failure.
     pub fn err(content: impl Into<String>) -> ToolOutput {
+        ToolOutput::err_kind(ToolError::Failed, content)
+    }
+
+    /// A failure of a specific class: a refused call is not a broken tool.
+    pub fn err_kind(kind: ToolError, content: impl Into<String>) -> ToolOutput {
         ToolOutput {
             content: content.into(),
-            is_error: true,
+            error: Some(kind),
             attachments: Vec::new(),
         }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
     }
 }
 

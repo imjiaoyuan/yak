@@ -582,11 +582,11 @@ fn history_rows(seed: &[crate::providers::Msg], width: usize) -> Vec<Row> {
             Msg::ToolResult {
                 name,
                 content,
-                is_error,
+                error,
                 ..
             } => {
                 let first = content.lines().next().unwrap_or("");
-                let flag = if *is_error { " ✗" } else { "" };
+                let flag = if error.is_some() { " ✗" } else { "" };
                 let head = format!("  [result{flag} · {name}] ");
                 let used = cell_width(&head);
                 rows.push(Row {
@@ -1184,7 +1184,7 @@ mod tests {
                 call_id: "c1".into(),
                 name: "bash".into(),
                 content: format!("{long}\nmore"),
-                is_error: true,
+                error: Some(crate::providers::ToolError::Failed),
                 attachments: Vec::new(),
             },
             Msg::Summary { text: long.clone() },

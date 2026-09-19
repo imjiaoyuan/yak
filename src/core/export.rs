@@ -175,11 +175,11 @@ fn render_message(out: &mut String, m: &Msg) {
         Msg::ToolResult {
             name,
             content,
-            is_error,
+            error,
             attachments,
             ..
         } => {
-            let label = if *is_error {
+            let label = if error.is_some() {
                 "Tool error"
             } else {
                 "Tool result"
@@ -315,7 +315,7 @@ mod tests {
                 call_id: "c1".into(),
                 name: "read".into(),
                 content: "fn main() {}".into(),
-                is_error: false,
+                error: None,
                 attachments: Vec::new(),
             },
         ]);
