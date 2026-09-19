@@ -4,52 +4,44 @@
 use serde_json::{Value, json};
 
 use super::{Attachment, Msg, PromptInput, ResolvedModel};
+use crate::core::attachments::{Kind, kind_of};
 use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 
 /// One content-part block for an attachment, by mime: images ride
 /// `image_url` data URIs, PDFs `file` blocks, wav/mp3 `input_audio`.
 fn attachment_block(a: &Attachment) -> Result<Value, String> {
     let mime = a.mime_type.as_str();
-    if mime.starts_with("image/") {
-        Ok(json!({
+    match kind_of(mime) {
+        Some(Kind::Image) => Ok(json!({
             "type": "image_url",
             "image_url": {"url": format!("data:{mime};base64,{}", a.base64_data)}
-        }))
-    } else if mime == "application/pdf" {
-        let mut file = json!({
-            "file_data": format!("data:application/pdf;base64,{}", a.base64_data)
-        });
-        if let Some(name) = &a.filename {
-            file["filename"] = json!(name);
+        })),
+        Some(Kind::Pdf) => {
+            let mut file = json!({
+                "file_data": format!("data:application/pdf;base64,{}", a.base64_data)
+            });
+            if let Some(name) = &a.filename {
+                file["filename"] = json!(name);
+            }
+            Ok(json!({"type": "file", "file": file}))
         }
-        Ok(json!({"type": "file", "file": file}))
-    } else if mime.starts_with("text/") {
         // no file block for plain text on this wire form: the decoded body
         // rides as an extra text part, headed by its file name
-        let text = super::decoded_text(a)?;
-        let header = match &a.filename {
-            Some(name) => format!("{name}\n"),
-            None => String::new(),
-        };
-        Ok(json!({"type": "text", "text": format!("{header}{text}")}))
-    } else if let Some(format) = audio_format(mime) {
-        Ok(json!({
+        Some(Kind::Text) => {
+            let text = super::decoded_text(a)?;
+            let header = match &a.filename {
+                Some(name) => format!("{name}\n"),
+                None => String::new(),
+            };
+            Ok(json!({"type": "text", "text": format!("{header}{text}")}))
+        }
+        Some(Kind::Audio(format)) => Ok(json!({
             "type": "input_audio",
             "input_audio": {"data": a.base64_data, "format": format}
-        }))
-    } else {
-        Err(format!(
+        })),
+        None => Err(format!(
             "openai-compat models take image, PDF, text and wav/mp3 attachments, not '{mime}'"
-        ))
-    }
-}
-
-/// The `format` field of an `input_audio` block; only wav and mp3 exist.
-fn audio_format(mime: &str) -> Option<&'static str> {
-    match mime {
-        "audio/wav" | "audio/wave" | "audio/x-wav" => Some("wav"),
-        "audio/mpeg" | "audio/mp3" => Some("mp3"),
-        _ => None,
+        )),
     }
 }
 

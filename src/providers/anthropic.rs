@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 
 use super::{Attachment, Msg, PromptInput, ResolvedModel};
+use crate::core::attachments::{Kind, kind_of};
 use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 
 /// Push the buffered run of tool results as one user turn (Anthropic groups
@@ -17,26 +18,27 @@ fn flush_results(messages: &mut Vec<Value>, pending: &mut Vec<Value>) {
 /// documents are native; audio has no Anthropic wire form.
 fn attachment_block(a: &Attachment) -> Result<Value, String> {
     let mime = a.mime_type.as_str();
-    if mime.starts_with("image/") {
-        Ok(json!({
+    match kind_of(mime) {
+        Some(Kind::Image) => Ok(json!({
             "type": "image",
             "source": {"type": "base64", "media_type": mime, "data": a.base64_data}
-        }))
-    } else if mime == "application/pdf" {
-        Ok(json!({
+        })),
+        Some(Kind::Pdf) => Ok(json!({
             "type": "document",
             "source": {"type": "base64", "media_type": "application/pdf", "data": a.base64_data}
-        }))
-    } else if mime == "text/plain" || mime == "text/csv" {
-        let text = super::decoded_text(a)?;
-        Ok(json!({
-            "type": "document",
-            "source": {"type": "text", "media_type": mime, "data": text}
-        }))
-    } else {
-        Err(format!(
+        })),
+        // a text document is native here only for these two mimes; anything
+        // else textual (and every audio clip) has no Messages wire form
+        Some(Kind::Text) if mime == "text/plain" || mime == "text/csv" => {
+            let text = super::decoded_text(a)?;
+            Ok(json!({
+                "type": "document",
+                "source": {"type": "text", "media_type": mime, "data": text}
+            }))
+        }
+        _ => Err(format!(
             "anthropic models take image, PDF and text attachments, not '{mime}'"
-        ))
+        )),
     }
 }
 

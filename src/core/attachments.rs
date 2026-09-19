@@ -5,6 +5,42 @@
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Read};
 
+/// The wire-agnostic class of an attachment: both provider adapters branch on
+/// this instead of each keeping a private copy of the accepted mime set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Image,
+    Pdf,
+    Text,
+    /// An OpenAI `input_audio` block, carrying that wire's `format` field.
+    Audio(&'static str),
+}
+
+/// Classify an attachment mime for the wire adapters; `None` is unsupported,
+/// and the caller's error names the set it accepts. Which classes reach the
+/// wire stays per adapter — Anthropic has no audio form and takes plain text
+/// only — so the branch lives there and just the table lives here.
+pub fn kind_of(mime: &str) -> Option<Kind> {
+    if mime.starts_with("image/") {
+        Some(Kind::Image)
+    } else if mime == "application/pdf" {
+        Some(Kind::Pdf)
+    } else if mime.starts_with("text/") {
+        Some(Kind::Text)
+    } else {
+        audio_format(mime).map(Kind::Audio)
+    }
+}
+
+/// The `format` field of an `input_audio` block; only wav and mp3 exist.
+fn audio_format(mime: &str) -> Option<&'static str> {
+    match mime {
+        "audio/wav" | "audio/wave" | "audio/x-wav" => Some("wav"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        _ => None,
+    }
+}
+
 /// The wire form of an attachment, carried on user messages and tool
 /// results: mime, base64 bytes and a display name. `path`/`url` ride along
 /// as storage provenance (where the bytes came from) — the provider
