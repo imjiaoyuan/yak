@@ -137,11 +137,6 @@ pub fn extension_tool_timeout() -> Duration {
     Duration::from_secs(secs.unwrap_or(120).max(1))
 }
 
-// project trust — vestigial: `~/.llm/trust.json` was written by older
-// builds to mark directories that started in yolo mode. Once yolo became
-// the default the flip had nothing left to do (it would only override an
-// explicit ask), so the file is ignored entirely.
-
 /// The one loud reader: a missing or empty file is an empty object, anything
 /// unparsable or non-object aborts the process exactly like `load()` — no
 /// reader of this file may silently degrade past a corrupt config.
