@@ -140,10 +140,14 @@ exposed as `<extension-stem>__<name>` (the wire protocol keeps the original name
 at `initialize`, else `extensions.tool_timeout`, 120s default):
 
 ```json
-→ {"id": 2, "type": "call_tool", "v": 1, "name": "deploy", "args": {}}
+→ {"id": 2, "type": "call_tool", "v": 1, "name": "deploy", "args": {}, "tool_call_id": "call_7f3"}
 ← {"id": 2, "result": "deployed 3 services"}
 ← {"id": 2, "error": "deploy script not found"}        // error tool result
 ```
+
+`tool_call_id` is the model's own id for this call: key per-call state on it when several calls of your
+tool can be in flight (the read-only batch runs them concurrently). A script tool (`# --- llm-tool:`)
+does not see it — the host feeds those the arguments only.
 
 The reply's `result` should be a string; any other JSON value is serialized as its pretty form.
 

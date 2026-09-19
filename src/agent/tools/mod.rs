@@ -108,6 +108,19 @@ pub trait Tool: Send + Sync {
     /// `log` receives live progress lines while the tool runs (bash streams
     /// its stdout); tools without progress simply ignore it
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
+
+    /// Execute with the full call in hand. The default drops the call (a
+    /// tool's arguments are all it needs); extension tools override it so
+    /// their script sees the model's `tool_call_id` and can key state on it
+    /// across the concurrent read-only batch.
+    fn execute_call(
+        &self,
+        call: &crate::providers::ToolCall,
+        cwd: &Path,
+        log: &mut dyn FnMut(&str),
+    ) -> ToolOutput {
+        self.execute(&call.arguments, cwd, log)
+    }
 }
 
 /// The `then_run` field shared by `write` and `edit`: the fused follow-up

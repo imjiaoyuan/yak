@@ -333,17 +333,21 @@ impl Ext {
         &self,
         name: &str,
         args: &Value,
+        call_id: Option<&str>,
         log: &mut dyn FnMut(&str),
     ) -> Result<String, String> {
         let timeout = match &*lock(&self.state) {
             Ok(state) => state.tool_timeout,
             Err(_) => TOOL_TIMEOUT,
         };
-        let result = self.request(
-            &json!({"id": next_id(), "type": "call_tool", "v": 1, "name": name, "args": args}),
-            timeout,
-            Some(log),
-        )?;
+        let mut frame =
+            json!({"id": next_id(), "type": "call_tool", "v": 1, "name": name, "args": args});
+        if let Some(call_id) = call_id {
+            // the model's own tool_call_id, so a stateful extension can key
+            // per-call state (calls in the read-only batch run concurrently)
+            frame["tool_call_id"] = json!(call_id);
+        }
+        let result = self.request(&frame, timeout, Some(log))?;
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
             Some(other) => crate::jsonfmt::dumps_indent(other, 2),
@@ -963,8 +967,31 @@ impl Tool for ExtTool {
     fn preview(&self, args: &Value) -> String {
         super::tools::args_preview(&self.tool_name, args)
     }
-    fn execute(&self, args: &Value, _cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
-        match self.ext.call_tool(&self.tool_name, args, log) {
+    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+        // direct calls (tests) carry no call id: the frame then omits
+        // `tool_call_id` rather than inventing one. The agent loop routes
+        // through execute_call, which has the real id.
+        self.run(args, None, cwd, log)
+    }
+    fn execute_call(
+        &self,
+        call: &crate::providers::ToolCall,
+        cwd: &Path,
+        log: &mut dyn FnMut(&str),
+    ) -> ToolOutput {
+        self.run(&call.arguments, Some(call.id.as_str()), cwd, log)
+    }
+}
+
+impl ExtTool {
+    fn run(
+        &self,
+        args: &Value,
+        call_id: Option<&str>,
+        _cwd: &Path,
+        log: &mut dyn FnMut(&str),
+    ) -> ToolOutput {
+        match self.ext.call_tool(&self.tool_name, args, call_id, log) {
             Ok(text) => {
                 if text.len() > MAX_BYTES {
                     let (capped, _) = truncate_tail(&text, MAX_LINES, MAX_BYTES);

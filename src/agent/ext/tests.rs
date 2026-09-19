@@ -204,11 +204,12 @@ done
         lock(&ext.state).as_ref().err()
     );
     assert_eq!(
-        ext.call_tool("ping", &json!({}), &mut |_| {}).unwrap(),
+        ext.call_tool("ping", &json!({}), None, &mut |_| {})
+            .unwrap(),
         "alive"
     );
     // the child exited after answering: the next call must respawn it
-    let out = ext.call_tool("ping", &json!({}), &mut |_| {});
+    let out = ext.call_tool("ping", &json!({}), None, &mut |_| {});
     assert_eq!(out.unwrap(), "alive", "respawned, not an error");
     let n: u32 = std::fs::read_to_string(&counter)
         .unwrap()
@@ -254,7 +255,9 @@ done
     );
     let mut log: Vec<String> = Vec::new();
     let out = ext
-        .call_tool("ping", &json!({}), &mut |line| log.push(line.to_string()))
+        .call_tool("ping", &json!({}), None, &mut |line| {
+            log.push(line.to_string())
+        })
         .unwrap();
     assert_eq!(out, "done", "stderr is progress, never part of the result");
     assert!(
@@ -301,7 +304,9 @@ done
 
     let ext = connect_stub(&script);
     let mut log: Vec<String> = Vec::new();
-    let out = ext.call_tool("ping", &json!({}), &mut |line| log.push(line.to_string()));
+    let out = ext.call_tool("ping", &json!({}), None, &mut |line| {
+        log.push(line.to_string())
+    });
     assert_eq!(
         out.unwrap(),
         "done",
@@ -413,6 +418,49 @@ fn a_dead_extension_cannot_swallow_a_tool_result() {
     );
 }
 
+/// The model's tool_call_id rides the `call_tool` frame: a stateful
+/// extension keys per-call state on it, which the concurrent read-only
+/// batch makes necessary. The id is echoed back as the result here.
+#[cfg(unix)]
+#[test]
+fn a_tool_call_carries_the_models_call_id() {
+    let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      cid=$(printf '%s' "$line" | sed -n 's/.*"tool_call_id":"\([^"]*\)".*/\1/p')
+      printf '{"id":%s,"result":"cid=%s"}\n' "$id" "$cid"
+      ;;
+  esac
+done
+"#;
+    let ext = connect_stub(&write_stub_extension("callid", body));
+    assert!(lock(&ext.state).is_ok(), "handshake must succeed");
+    let tool = ExtTool {
+        ext,
+        tool_name: "ping".into(),
+        exposed: "ping".into(),
+        description: String::new(),
+        schema: json!({"type": "object", "properties": {}}),
+        tier: Tier::Exec,
+    };
+    let out = tool.execute_call(
+        &crate::providers::ToolCall {
+            id: "call_7f3".into(),
+            name: "ping".into(),
+            arguments: json!({}),
+        },
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(out.content, "cid=call_7f3");
+}
+
 /// A reply carrying neither `result` nor `error` broke the protocol — the
 /// strict reply contract says so instead of handing back an empty success
 /// the caller cannot distinguish from a real empty result.
@@ -424,7 +472,7 @@ fn a_reply_without_a_result_is_an_error() {
     let ext = connect_stub(&write_stub_extension("mute", mute));
     assert!(lock(&ext.state).is_ok());
     let err = ext
-        .call_tool("ping", &json!({}), &mut |_| {})
+        .call_tool("ping", &json!({}), None, &mut |_| {})
         .expect_err("a reply without result must fail");
     assert!(err.contains("replied without a result"), "{err}");
     let err = ext

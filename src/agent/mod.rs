@@ -653,14 +653,14 @@ pub fn run_agent(
                     .map(|(call, cleared)| match cleared {
                         Ok(cleared) => {
                             let tool = cleared.tool;
-                            let args = &call.arguments;
                             let cwd = opts.cwd.as_path();
                             Some(scope.spawn(move || {
                                 // read-only tools do not stream: buffer any
                                 // lines and replay them in order below
                                 let mut logs: Vec<String> = Vec::new();
-                                let out = tool
-                                    .execute(args, cwd, &mut |l: &str| logs.push(l.to_string()));
+                                let out = tool.execute_call(call, cwd, &mut |l: &str| {
+                                    logs.push(l.to_string())
+                                });
                                 (out, logs)
                             }))
                         }
@@ -724,7 +724,7 @@ pub fn run_agent(
                     Ok(cleared) => {
                         let mut log =
                             |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
-                        let out = cleared.tool.execute(&call.arguments, &opts.cwd, &mut log);
+                        let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);
                         // tool_result fires once, in finish_call, so denied
                         // and executed calls notify hooks identically
                         (out, repeats.observe(&call.name, &call.arguments))
@@ -875,7 +875,7 @@ fn fuse_then_run(
         Ok(cleared) => {
             cleared
                 .tool
-                .execute(&bash.arguments, cwd, &mut |_: &str| {})
+                .execute_call(&bash, cwd, &mut |_: &str| {})
                 .content
         }
     };
