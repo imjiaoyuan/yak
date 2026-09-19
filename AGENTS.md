@@ -225,6 +225,12 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   exist) + an environment line (OS · shell · git repo · project type with its verify command) +
   skills + a self-extension block naming the extensions/skills dirs and the manifest-header form.
   Project instructions are embedded whole at any length.
+- **`--json`** replaces the terminal UI of a *one-shot* task with line-delimited events
+  (`text`/`reasoning`/`tool_start`/`tool_log`/`tool_end`/`turn_end`/`result`) so an
+  out-of-process consumer (CI, an editor, `examples/extensions/subagent.py`) can watch a run —
+  the same usage accounting and persistence as the terminal path, approvals and diagnostics on
+  stderr, stdout nothing but events. A missing task is a usage error, and the interactive
+  session refuses it.
 
 ### Extensions
 
