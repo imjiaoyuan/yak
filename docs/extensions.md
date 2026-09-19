@@ -3,7 +3,7 @@
 Extensions are the plugin system: anything the core skips, you build yourself as an executable
 dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or
 `/reload`. This page is the full reference; runnable examples live in
-[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `todo`, `subagent.py` — a
+[`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `subagent.py` — a
 tool that runs another `llm` in its own context window, `repeat_guard.py` — a `tool_call` deny gate
 for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds repeated log lines, plus the
 `template.js`/`template.py` starter templates).
@@ -274,17 +274,36 @@ guardrails regardless of mode, write a `tool_call` gate.
 protocol, so most tool/command/hook extensions written against the shim paste straight in. APIs that need
 the host process (UI, editors, hotkeys) raise with a clear message instead of silently no-oping.
 
-`examples/extensions/todo.js` is a port of the reference's official `todo.ts` example: the tool and command
-logic transliterates unchanged in shape — same `todo` tool with `list`/`add`/`toggle`/`clear`, same
-`/todos` command. Three things could not cross the process boundary and have substitutes:
+`examples/extensions/todo.js` is gone on purpose: the host's built-in `update_plan` owns the plan
+surface now, so an example mounting a second todo/plan tool would demonstrate a gap that no longer
+exists. The same reasoning trims `examples/extensions/websearch` to `web_search` + `/web` — page
+fetching is the built-in `webfetch`. Extension *logic* is portable; extension *chrome* belongs to
+whichever host renders it, and a capability the host already offers belongs in the host.
 
-| in-process | out-of-process |
-|---|---|
-| `renderCall`/`renderResult` TUI components | the host's own `$ todo` action line + result summary |
-| `ctx.ui.custom` full-screen component for `/todos` | the command prints the list as text |
-| `ctx.sessionManager` state in session entries (branching rewinds it) | `~/.llm/todo.json` (survives restarts, shared across branches) |
+## Mounting MCP servers: the `mcp_bridge.py` example
 
-Extension *logic* is portable; extension *chrome* belongs to whichever host renders it.
+The MCP support lives here rather than in the binary: `examples/extensions/mcp_bridge.py` is a
+resident extension that starts every server in an `mcp.json` beside itself and mounts each of their
+tools as `<server>__<tool>`, exec-tier, so the approval matrix applies as usual. Entries pick their
+transport — `command` (stdio, `args`/`env`) or `url` (streamable HTTP, `headers`) — and `${VAR}` in
+any string value expands from the environment, so a token never has to sit in the file:
+
+```json
+{
+  "cloudflare": {
+    "type": "streamable-http",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "headers": { "Authorization": "Bearer ${CLOUDFLARE_MCP_TOKEN}" }
+  },
+  "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] }
+}
+```
+
+The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream
+back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session).
+Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of
+scope — a server that fails its handshake is skipped with a dim warning on stderr and the rest stay
+up.
 
 ## Running another llm: the `subagent.py` example
 

@@ -1,10 +1,9 @@
 # Architecture
 
-Deep implementation detail behind `AGENTS.md`'s Architecture section: read
-this when changing the request path, the agent loop, the tool registry, the
-extension host or the terminal presentation. The maps in `AGENTS.md` stay
-authoritative for *what exists*; this file is where the *how* lives, so the
-project instructions injected into every agent session stay small.
+Deep implementation detail: read this when changing the request path, the agent loop, the tool
+registry, the extension host or the terminal presentation. `docs/extensions.md` covers the plugin
+surface; this file is where the *how* lives — request flow, loop discipline, tool and approval
+rules, the extension host, the rendering contract.
 
 Model resolution is one shared chain, `providers::resolve_run_model` (`-m` > `LLM_MODEL` > the session's model > the stored default; a bare model name served by more than one provider errors listing the `provider/model` candidates instead of silently taking the first in config order), and every provider `/models` fetch plus the messages API build headers through `providers::auth_headers(kind, key)` (Anthropic: `x-api-key` + `anthropic-version`; openai-compat: Bearer).
 

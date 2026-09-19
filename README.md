@@ -442,12 +442,11 @@ same shape in Python). Copy one into the extensions directory and edit its user 
 The full reference is [`docs/extensions.md`](docs/extensions.md) — manifest fields, every message and
 event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has runnable examples
 
-to copy: `wordcount` (a script tool), `websearch` (a resident extension offering `web_search` +
-`web_fetch` and a `/web` command — uses `BRAVE_API_KEY` when set, otherwise keyless
-DuckDuckGo/Wikipedia), `todo`, `repeat_guard.py` (denies a `tool_call` loop), `fold_repeats.py` (folds
-repeated lines in a tool result), `mcp_bridge.py` (mounts MCP servers as `server__tool` tools from
-an `mcp.json` beside the script — stdio transport; this is the MCP support) and `subagent.py`
-(below).
+to copy: `wordcount` (a script tool), `websearch` (a resident extension offering `web_search` plus a
+`/web` command — uses `BRAVE_API_KEY` when set, otherwise keyless DuckDuckGo/Wikipedia),
+`repeat_guard.py` (denies a `tool_call` loop), `fold_repeats.py` (folds
+repeated lines in a tool result), `mcp_bridge.py` (mounts MCP servers as `server__tool` tools from an `mcp.json` beside the script —
+stdio or streamable HTTP; this is the MCP support) and `subagent.py` (below).
 
 Here is a whole resident extension — a tool that shells out to `deploy.sh`:
 
