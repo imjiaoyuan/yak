@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""websearch — a resident llm extension: two tools + one slash command.
+"""websearch — a resident llm extension: one tool + one slash command.
 
 Copy to ~/.llm/extensions/websearch, chmod +x, /reload. It mounts:
 
   web_search {query, limit?}   web search → top titles + URLs
-  web_fetch  {url}             fetch a page → readable text (capped)
   /web <query>                 run a search straight from the prompt
 
 Search backend: Brave's Search API when BRAVE_API_KEY is set in the
@@ -14,10 +13,11 @@ DuckDuckGo's HTML page, then its Instant Answer JSON, then the Wikipedia
 API (encyclopedia scope, always works). The result's first line says
 which backend answered.
 
-Note the built-in `webfetch` tool still exists; `web_fetch` here is the
-plugin-form demonstration. All extension tools are exec-tier: the
-approval matrix applies as usual. Protocol: newline-delimited JSON on
-stdio, one reply per request id (docs/extensions.md has the reference).
+Page fetching is deliberately not mounted: the built-in `webfetch`
+already covers it, so this example mounts only the capability the host
+lacks. All extension tools are exec-tier: the approval matrix applies as
+usual. Protocol: newline-delimited JSON on stdio, one reply per request
+id (docs/extensions.md has the reference).
 """
 
 import json
@@ -28,13 +28,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from html import unescape
-from html.parser import HTMLParser
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; llm-websearch/1.0)",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
-FETCH_CAP = 6000  # chars of page text returned to the model
 
 
 def reply(obj):
@@ -63,48 +61,6 @@ def http_get(url, timeout=15):
 
 def http_get_json(url, timeout=15):
     return json.loads(http_get(url, timeout))
-
-
-# ------------------------------------------------------------------ fetch --
-class _Text(HTMLParser):
-    """Collect visible text; skip script/style; newline at block tags."""
-
-    BLOCKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "pre", "table"}
-    SKIP = {"script", "style", "noscript", "template"}
-
-    def __init__(self):
-        super().__init__()
-        self.parts = []
-        self._skip = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip += 1
-        elif tag in self.BLOCKS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self._skip:
-            self._skip -= 1
-        elif tag in self.BLOCKS:
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if not self._skip:
-            self.parts.append(data)
-
-
-def web_fetch(url):
-    if not url.startswith(("http://", "https://")):
-        return "error: only http(s) URLs are supported"
-    page = http_get(url)
-    p = _Text()
-    p.feed(page)
-    text = re.sub(r"[ \t]+", " ", "".join(p.parts))
-    text = re.sub(r"\n\s*\n+", "\n", text).strip()
-    if len(text) > FETCH_CAP:
-        text = text[:FETCH_CAP] + f"\n… truncated at {FETCH_CAP} chars"
-    return f"{url}\n\n{text}" if text else f"{url}\n\n(no text content)"
 
 
 # ----------------------------------------------------------------- search --
@@ -244,16 +200,6 @@ TOOLS = [
             "required": ["query"],
         },
     },
-    {
-        "name": "web_fetch",
-        "description": "Fetch a web page and return its readable text "
-        "(capped, scripts and styles stripped)",
-        "parameters": {
-            "type": "object",
-            "properties": {"url": {"type": "string", "description": "http(s) URL"}},
-            "required": ["url"],
-        },
-    },
 ]
 
 
@@ -271,8 +217,6 @@ def main():
             try:
                 if msg.get("name") == "web_search":
                     out = web_search(str(args.get("query", "")), int(args.get("limit") or 5))
-                elif msg.get("name") == "web_fetch":
-                    out = web_fetch(str(args.get("url", "")))
                 else:
                     out = f"unknown tool {msg.get('name')}"
                 reply({"id": mid, "result": out})

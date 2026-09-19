@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// websearch.ts — the TypeScript twin of the `websearch` example: same two
-// tools (web_search, web_fetch), same /web command, same backend chain —
-// in node with no dependencies beyond the standard library.
+// websearch.ts — the TypeScript twin of the `websearch` example: same
+// web_search tool, same /web command, same backend chain — in node with
+// no dependencies beyond the standard library.
 //
 // Node executes this file directly through native type stripping on
 // node >= 23.6. On 22.6–23.5 change the shebang to
@@ -16,9 +16,10 @@
 // Search backends (first that answers wins): Brave Search API when
 // BRAVE_API_KEY is set (free tier at https://brave.com/search/api);
 // keyless fallback chain DuckDuckGo HTML → DDG Instant Answers → Wikipedia.
-// Note the built-in `webfetch` tool still exists; `web_fetch` here is the
-// plugin-form demonstration. Protocol: newline-delimited JSON on stdio,
-// one reply per request id (docs/extensions.md has the reference).
+// Page fetching is deliberately not mounted: the built-in `webfetch` already
+// covers it, so this example mounts only the capability the host lacks.
+// Protocol: newline-delimited JSON on stdio, one reply per request id
+// (docs/extensions.md has the reference).
 
 import * as readline from "node:readline";
 
@@ -26,7 +27,6 @@ const HEADERS: Record<string, string> = {
   "User-Agent": "Mozilla/5.0 (compatible; llm-websearch/1.0)",
   Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
 };
-const FETCH_CAP = 6000; // chars of page text returned to the model
 
 interface ToolSpec {
   name: string;
@@ -64,44 +64,6 @@ async function httpGet(url: string, timeoutMs = 15000): Promise<{ ctype: string;
   // unlike the python twin (capped at 256 KiB) this reads the whole body;
   // the 15s abort bounds a runaway either way
   return { ctype, body: await r.text() };
-}
-
-// ------------------------------------------------------------------ fetch --
-const BLOCKS = new Set(["p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "pre", "table"]);
-const SKIP = new Set(["script", "style", "noscript", "template"]);
-
-// A tag tokenizer over the same block/skip vocabulary the python twin's
-// HTMLParser subclass implements: visible text only, newlines at block
-// boundaries. A regex tokenizer, like the built-in Rust webfetch's
-// html_to_text — no full HTML parser in the dependency set.
-function htmlToText(html: string): string {
-  const parts: string[] = [];
-  let skip = 0;
-  let last = 0;
-  const tag = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
-  for (let m = tag.exec(html); m; m = tag.exec(html)) {
-    if (skip === 0) parts.push(html.slice(last, m.index));
-    const name = m[1].toLowerCase();
-    if (SKIP.has(name)) skip = Math.max(0, skip + (m[0][1] === "/" ? -1 : 1));
-    else if (BLOCKS.has(name)) parts.push("\n");
-    last = m.index + m[0].length;
-  }
-  if (skip === 0) parts.push(html.slice(last));
-  return parts.join("").replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
-}
-
-async function webFetch(url: string): Promise<string> {
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    return "error: only http(s) URLs are supported";
-  }
-  const { ctype, body } = await httpGet(url);
-  const isHtml = ctype === "text/html" || ctype === "application/xhtml+xml";
-  let text = isHtml ? htmlToText(body) : body.trim(); // JSON/XML/plain pass through
-  if (!text) return `${url}\n\n(no text content)`;
-  if (text.length > FETCH_CAP) {
-    text = text.slice(0, FETCH_CAP) + `\n… truncated at ${FETCH_CAP} chars`;
-  }
-  return `${url}\n\n${text}`;
 }
 
 // ----------------------------------------------------------------- search --
@@ -242,16 +204,6 @@ const TOOLS: ToolSpec[] = [
       required: ["query"],
     },
   },
-  {
-    name: "web_fetch",
-    description:
-      "Fetch a web page and return its readable text (capped, scripts and styles stripped)",
-    parameters: {
-      type: "object",
-      properties: { url: { type: "string", description: "http(s) URL" } },
-      required: ["url"],
-    },
-  },
 ];
 
 async function main(): Promise<void> {
@@ -274,9 +226,7 @@ async function main(): Promise<void> {
         const out =
           name === "web_search"
             ? await webSearch(String(args.query ?? ""), Number(args.limit) || 5)
-            : name === "web_fetch"
-              ? await webFetch(String(args.url ?? ""))
-              : `unknown tool ${name}`;
+            : `unknown tool ${name}`;
         reply({ id, result: out });
       } catch (e) {
         reply({ id, error: `${e instanceof Error ? e.name : "Error"}: ${msg(e)}` });
