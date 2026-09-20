@@ -405,40 +405,10 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
-        // Context pressure, priced once per round to serve the rewrite gate,
-        // the note and the compaction check below. Rewriting history in the
-        // middle invalidates the provider's cached prefix from that point on,
-        // so the two passes that rewrite it run only under real pressure:
-        // below the gate the tokens they would save cost less than the cache
-        // they would break (they stay unconditional when compaction is off,
-        // since then nothing else guards the window).
-        let cfg = opts.compact.as_ref();
-        let mut used_tokens = cfg.map(|_| compact::estimate_tokens(&history, usage_marker));
-        let rewrite = match (cfg, used_tokens) {
-            (Some(c), Some(used)) => compact::rewrite_prefix(used, c),
-            // no compaction configured: nothing else guards the window, so
-            // the passes stay unconditional
-            (None, _) | (Some(_), None) => true,
-        };
-        if rewrite {
-            // multimodal blocks are the most expensive, worst-cached context:
-            // attachments older than the last few messages become notes
-            compact::trim_old_attachments(&mut history);
-            // the same reasoning one step further: a huge tool result from
-            // earlier in the task is re-sent every single round, so an
-            // outright dump in the stale prefix is projected down here rather
-            // than waited for until compaction pressure. Recent results stay
-            // verbatim, and the pass is idempotent, so the notice fires at
-            // most once per result (a resume replays the same archived id)
-            let stale =
-                compact::prune_stale_tool_results(&mut history, &compact::observation_dir());
-            if stale.count > 0 {
-                on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
-            }
-            // the passes edited the prefix: re-price rather than hand the
-            // pre-trim number to the note and the compaction gate
-            used_tokens = cfg.map(|_| compact::estimate_tokens(&history, usage_marker));
-        }
+        // Context pressure, priced once per round to serve the note and the
+        // compaction check below; under real pressure the stale prefix is
+        // rewritten here too (see `price_and_rewrite`).
+        let used_tokens = price_and_rewrite(&mut history, usage_marker, opts, on_update);
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
@@ -460,43 +430,8 @@ pub fn run_agent(
             cache_key: opts.cache_key,
         };
 
-        let mut text = String::new();
-        let mut reasoning_text = String::new();
-        let mut reasoning_meta: Option<serde_json::Value> = None;
-        let mut acc = ToolCallAccumulator::default();
-        let mut usage = None;
-        let mut stop = StopReason::default();
-        let stream_result = model.stream(&input, opts.stream, &mut |event| match event {
-            crate::core::http::Event::Delta(t) => {
-                text.push_str(&t);
-                on_update(AgentUpdate::Delta(t));
-            }
-            crate::core::http::Event::ReasoningDelta { text: t, meta } => {
-                reasoning_text.push_str(&t);
-                if let Some(meta) = meta {
-                    reasoning_meta = Some(meta);
-                }
-                on_update(AgentUpdate::ReasoningDelta(t));
-            }
-            crate::core::http::Event::ToolCallDelta {
-                index,
-                name,
-                id,
-                fragment,
-            } => {
-                acc.push(index, id.as_deref(), name.as_deref(), &fragment);
-                // live size of the argument streaming in: a big write looks
-                // dead otherwise, then dumps its whole diff at once
-                if acc.name(index).is_some() {
-                    on_update(AgentUpdate::ToolReceiving);
-                }
-            }
-            crate::core::http::Event::Done { usage: u, stop: s } => {
-                usage = u;
-                stop = s;
-            }
-        });
-        if let Err(e) = stream_result {
+        let mut round = stream_round(model, &input, opts.stream, on_update);
+        if let Some(e) = round.error.take() {
             if crate::core::http::interrupted() {
                 interrupted = true;
                 break;
@@ -509,12 +444,12 @@ pub fn run_agent(
             // would otherwise recover forever, each attempt with a fresh
             // retry budget. The pending user message lands first so the
             // order stays what happened: prompt, partial answer.
-            if !text.is_empty() {
+            if !round.text.is_empty() {
                 if has_pending {
                     history.push(pending.take().expect("checked above"));
                 }
                 history.push(Msg::Assistant {
-                    text: text.clone(),
+                    text: round.text.clone(),
                     tool_calls: vec![],
                     reasoning: None,
                     reasoning_meta: None,
@@ -522,7 +457,7 @@ pub fn run_agent(
                 recoveries += 1;
                 if recoveries <= MAX_STREAM_RECOVERIES {
                     on_update(AgentUpdate::StreamRecovered {
-                        chars: text.chars().count(),
+                        chars: round.text.chars().count(),
                         error: e,
                     });
                     continue;
@@ -539,13 +474,15 @@ pub fn run_agent(
         if has_pending {
             history.push(pending.take().expect("checked above"));
         }
-        let tool_calls = acc.finish();
-        let reasoning = (!reasoning_text.is_empty()).then(|| reasoning_text.clone());
+        let text = round.text;
+        let tool_calls = round.tool_calls;
+        let usage = round.usage;
+        let stop = round.stop;
         history.push(Msg::Assistant {
             text: text.clone(),
             tool_calls: tool_calls.clone(),
-            reasoning,
-            reasoning_meta,
+            reasoning: round.reasoning,
+            reasoning_meta: round.reasoning_meta,
         });
         final_text = text;
         last_usage = usage;
@@ -569,63 +506,19 @@ pub fn run_agent(
             }),
         );
 
-        // compaction check after each completed turn; the usage report
-        // covered everything except the assistant we just pushed
-        if let (Some(marker), Some(cfg)) = (usage_marker, opts.compact.as_ref()) {
-            let mut estimate = compact::estimate_tokens(&history, Some(marker));
-            if compact::should_compact(estimate, cfg) {
-                // pressure confirmed: prune oversized tool results first —
-                // it costs no model call and may relieve enough to skip
-                // summarization entirely. The usage marker covers the
-                // un-pruned prefix, so re-estimating over it would report the
-                // identical number; subtract what the projection frees.
-                let pruned = compact::prune_tool_results(&mut history, &compact::observation_dir());
-                if pruned.count > 0 {
-                    estimate = estimate.saturating_sub(pruned.freed_tokens);
-                    on_update(AgentUpdate::ToolResultsPruned {
-                        count: pruned.count,
-                    });
-                }
-            }
-            if compact::should_compact(estimate, cfg)
-                && let Some(cut) = compact::find_cut(&history, cfg.effective_keep_recent())
-                && let Ok(s) = compact::summarize(model, &history[..cut])
-                && !s.is_empty()
-            {
-                // the original task rides verbatim on top of the summary:
-                // long-running work must not drift from what was asked. On
-                // re-compaction it is recovered from the previous summary
-                // (the first user message is long gone by then).
-                let dropped = &history[..cut];
-                let task = match dropped.first() {
-                    Some(Msg::Summary { text }) => compact::extract_original_task(text),
-                    _ => dropped.iter().find_map(|m| match m {
-                        Msg::User { text, .. } => Some(text.clone()),
-                        _ => None,
-                    }),
-                };
-                let task = task.map(|mut t| {
-                    crate::core::text::truncate_ellipsis(&mut t, 4000);
-                    t
-                });
-                let tail = history.split_off(cut);
-                history.clear();
-                history.push(Msg::Summary {
-                    text: compact::compose_summary(task.as_deref(), &s),
-                });
-                history.extend(tail);
-                seed_boundary = advance_seed_boundary(seed_boundary, cut);
-                on_update(AgentUpdate::Compacted { removed: cut });
-                // the rebuild moved every index: the marker's covered length
-                // no longer names anything real, so drop it until the next
-                // usage report re-establishes one
-                usage_marker = None;
-                // the rebuild rewrote everything below the summary too
-                cache_stable = None;
-            }
-            // a failed summarization leaves the history untouched:
-            // the run continues, possibly hitting the window later
-        }
+        // compaction check after each completed turn (see `compact_after_turn`)
+        let after = compact_after_turn(
+            model,
+            &mut history,
+            usage_marker,
+            opts.compact.as_ref(),
+            seed_boundary,
+            cache_stable,
+            on_update,
+        );
+        seed_boundary = after.seed_boundary;
+        usage_marker = after.usage_marker;
+        cache_stable = after.cache_stable;
 
         if stop == StopReason::Length {
             // truncated output: don't act on possibly-mangled calls, let the
@@ -786,6 +679,200 @@ pub fn run_agent(
         budget_exhausted,
         seed_boundary,
     })
+}
+
+/// One model round: everything that streamed back, plus the transport error if
+/// the request broke mid-flight (`text` then holds the partial answer already
+/// handed to the screen).
+struct Round {
+    text: String,
+    reasoning: Option<String>,
+    reasoning_meta: Option<serde_json::Value>,
+    tool_calls: Vec<ToolCall>,
+    usage: Option<Usage>,
+    stop: StopReason,
+    error: Option<String>,
+}
+
+/// Run one model round, reporting the stream as chrome updates.
+fn stream_round(
+    model: &crate::providers::ResolvedModel,
+    input: &PromptInput<'_>,
+    stream: bool,
+    on_update: &mut dyn FnMut(AgentUpdate),
+) -> Round {
+    let mut text = String::new();
+    let mut reasoning_text = String::new();
+    let mut reasoning_meta: Option<serde_json::Value> = None;
+    let mut acc = ToolCallAccumulator::default();
+    let mut usage = None;
+    let mut stop = StopReason::default();
+    let error = model
+        .stream(input, stream, &mut |event| match event {
+            crate::core::http::Event::Delta(t) => {
+                text.push_str(&t);
+                on_update(AgentUpdate::Delta(t));
+            }
+            crate::core::http::Event::ReasoningDelta { text: t, meta } => {
+                reasoning_text.push_str(&t);
+                if let Some(meta) = meta {
+                    reasoning_meta = Some(meta);
+                }
+                on_update(AgentUpdate::ReasoningDelta(t));
+            }
+            crate::core::http::Event::ToolCallDelta {
+                index,
+                name,
+                id,
+                fragment,
+            } => {
+                acc.push(index, id.as_deref(), name.as_deref(), &fragment);
+                // live size of the argument streaming in: a big write looks
+                // dead otherwise, then dumps its whole diff at once
+                if acc.name(index).is_some() {
+                    on_update(AgentUpdate::ToolReceiving);
+                }
+            }
+            crate::core::http::Event::Done { usage: u, stop: s } => {
+                usage = u;
+                stop = s;
+            }
+        })
+        .err();
+    Round {
+        text,
+        reasoning: (!reasoning_text.is_empty()).then_some(reasoning_text),
+        reasoning_meta,
+        tool_calls: acc.finish(),
+        usage,
+        stop,
+        error,
+    }
+}
+
+/// Price the conversation once per round and, under real pressure, rewrite its
+/// stale prefix: attachment blocks older than the last few messages become
+/// notes, and an oversized tool result far from the tail is projected down
+/// rather than waited for until compaction. Rewriting history in the middle
+/// invalidates the provider's cached prefix from that point on, so both passes
+/// run only past the rewrite gate — below it the tokens they would save cost
+/// less than the cache they would break — and stay unconditional when
+/// compaction is off, since then nothing else guards the window. Returns the
+/// estimate the budget note and the compaction gate price, or None when no
+/// compaction is configured.
+fn price_and_rewrite(
+    history: &mut [Msg],
+    usage_marker: Option<(usize, Usage)>,
+    opts: &AgentOptions<'_>,
+    on_update: &mut dyn FnMut(AgentUpdate),
+) -> Option<u64> {
+    let cfg = opts.compact.as_ref();
+    let mut used_tokens = cfg.map(|_| compact::estimate_tokens(history, usage_marker));
+    let rewrite = match (cfg, used_tokens) {
+        (Some(c), Some(used)) => compact::rewrite_prefix(used, c),
+        (None, _) | (Some(_), None) => true,
+    };
+    if rewrite {
+        compact::trim_old_attachments(history);
+        // the pass is idempotent, so its notice fires at most once per result
+        // (a resume replays the same archived id)
+        let stale = compact::prune_stale_tool_results(history, &compact::observation_dir());
+        if stale.count > 0 {
+            on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
+        }
+        // the passes edited the prefix: re-price rather than hand the pre-trim
+        // number to the note and the compaction gate
+        used_tokens = cfg.map(|_| compact::estimate_tokens(history, usage_marker));
+    }
+    used_tokens
+}
+
+/// What a compaction check reports back: a rebuild moves every index, so the
+/// two bookkeeping markers either follow it or are dropped.
+struct AfterTurn {
+    seed_boundary: usize,
+    /// covered prefix of the history, or None after a rebuild
+    usage_marker: Option<(usize, Usage)>,
+    /// stable cache prefix, or None once the rebuild rewrote below the summary
+    cache_stable: Option<usize>,
+}
+
+/// Compact after a completed turn when the estimate says the window is under
+/// pressure: prune oversized tool results first (no model call, and it may
+/// relieve enough to skip summarizing at all), then summarize at a turn
+/// boundary.
+fn compact_after_turn(
+    model: &crate::providers::ResolvedModel,
+    history: &mut Vec<Msg>,
+    usage_marker: Option<(usize, Usage)>,
+    cfg: Option<&compact::CompactConfig>,
+    seed_boundary: usize,
+    cache_stable: Option<usize>,
+    on_update: &mut dyn FnMut(AgentUpdate),
+) -> AfterTurn {
+    let mut after = AfterTurn {
+        seed_boundary,
+        usage_marker,
+        cache_stable,
+    };
+    // the usage report covered everything except the assistant we just pushed
+    let (Some(marker), Some(cfg)) = (usage_marker, cfg) else {
+        return after;
+    };
+    let mut estimate = compact::estimate_tokens(history, Some(marker));
+    if compact::should_compact(estimate, cfg) {
+        // pressure confirmed: prune oversized tool results first — it costs no
+        // model call and may relieve enough to skip summarization entirely.
+        // The usage marker covers the un-pruned prefix, so re-estimating over
+        // it would report the identical number; subtract what the projection
+        // frees.
+        let pruned = compact::prune_tool_results(history, &compact::observation_dir());
+        if pruned.count > 0 {
+            estimate = estimate.saturating_sub(pruned.freed_tokens);
+            on_update(AgentUpdate::ToolResultsPruned {
+                count: pruned.count,
+            });
+        }
+    }
+    if compact::should_compact(estimate, cfg)
+        && let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent())
+        && let Ok(s) = compact::summarize(model, &history[..cut])
+        && !s.is_empty()
+    {
+        // the original task rides verbatim on top of the summary: long-running
+        // work must not drift from what was asked. On re-compaction it is
+        // recovered from the previous summary (the first user message is long
+        // gone by then).
+        let dropped = &history[..cut];
+        let task = match dropped.first() {
+            Some(Msg::Summary { text }) => compact::extract_original_task(text),
+            _ => dropped.iter().find_map(|m| match m {
+                Msg::User { text, .. } => Some(text.clone()),
+                _ => None,
+            }),
+        };
+        let task = task.map(|mut t| {
+            crate::core::text::truncate_ellipsis(&mut t, 4000);
+            t
+        });
+        let tail = history.split_off(cut);
+        history.clear();
+        history.push(Msg::Summary {
+            text: compact::compose_summary(task.as_deref(), &s),
+        });
+        history.extend(tail);
+        after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
+        on_update(AgentUpdate::Compacted { removed: cut });
+        // the rebuild moved every index: the marker's covered length no longer
+        // names anything real, so drop it until the next usage report
+        // re-establishes one, and treat the prefix below the summary as
+        // rewritten
+        after.usage_marker = None;
+        after.cache_stable = None;
+    }
+    // a failed summarization leaves the history untouched: the run continues,
+    // possibly hitting the window later
+    after
 }
 
 /// Terminal preview of a tool result: the first ten non-empty lines, each
