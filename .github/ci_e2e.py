@@ -155,6 +155,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 {"choices": [{"index": 0, "delta": {"content": "half an ans"}}]}
             ).encode() + b"\n\n")
             return
+        if body.get("model") == "m-413":
+            # a gateway's opaque refusal: nothing in it names the size, so the
+            # CLI has to explain it itself — and re-sending the same body
+            # cannot help, so it must not retry
+            self.send_response(413)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {
+                "type": "server_error",
+                "code": "server_error",
+                "message": "Upstream request failed: response was not valid JSON",
+            }}).encode())
+            return
+        if body.get("model") == "m-429":
+            n = seen.get("m429", 0)
+            seen["m429"] = n + 1
+            if n == 0:
+                self.send_response(429)
+                self.send_header("Retry-After", "1")
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": {"message": "slow down"}}')
+                return
+            # the second attempt falls through to the normal reply
         if body.get("model") == "m-write":
             self.handle_write_tool(body)
             return
@@ -475,6 +499,21 @@ def main():
     tout = tr.stdout + tr.stderr
     assert tr.returncode == 1 and "completion marker" in tout, \
         f"truncated stream: rc={tr.returncode} out={tout[-300:]!r}"
+
+    # a 413 body names nothing (a gateway wrapper), so the CLI states the body
+    # it sent plus the remedy, and never replays it
+    o413 = run([binary, "-m", "mock/m-413", "x"], env, stdin=subprocess.DEVNULL)
+    t413 = o413.stdout + o413.stderr
+    assert o413.returncode == 1 and "HTTP 413" in t413 \
+        and "request body was" in t413 and "shrink or drop attachments" in t413, \
+        f"413 explanation: rc={o413.returncode} out={t413[-300:]!r}"
+
+    # a 429 with Retry-After is waited out and the turn still completes
+    o429 = run([binary, "-m", "mock/m-429", "hello"], env, stdin=subprocess.DEVNULL)
+    t429 = o429.stdout + o429.stderr
+    assert o429.returncode == 0 and seen.get("m429", 0) >= 2 \
+        and "final answer after tool" in t429, \
+        f"429 retry: rc={o429.returncode} seen={seen.get('m429')} out={t429[-300:]!r}"
 
     # the stored default is config: the REPL /model writes the same shape
     cfgpath = os.path.join(user, "config.json")
