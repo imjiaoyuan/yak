@@ -291,6 +291,12 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         .or(settings.max_request_bytes)
         .unwrap_or(crate::core::http::MAX_REQUEST_BYTES);
 
+    // heavy attachments are the one thing that reaches that ceiling: say so
+    // now, while the fix is still in the user's hands
+    if let Some(warning) = crate::providers::attachment_weight(&attachments, max_request_bytes) {
+        eprintln!("Warning: {warning}");
+    }
+
     // cumulative input-token budget per task (each round resends the full
     // context, so the sum is what a runaway loop costs); 0 = unlimited
     let token_budget: u64 = args

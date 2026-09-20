@@ -329,13 +329,39 @@ pub(crate) fn dispatch(
 /// `agent.max_request_bytes` in config.json overrides it; the ceiling is a
 /// property of the gateway, not of any one provider.
 ///
+/// How full the request ceiling already is, when the attachments the user just
+/// asked for are heavy enough to be worth saying out loud: the pre-flight will
+/// refuse an oversized body, so the one moment the fix is cheap is here. Fires
+/// past a fifth of the limit (the conversation adds more on top) and names the
+/// numbers either way.
+pub fn attachment_weight(attachments: &[Attachment], limit: usize) -> Option<String> {
+    let bytes: usize = attachments.iter().map(|a| a.base64_data.len()).sum();
+    if bytes * 5 < limit {
+        return None;
+    }
+    let count = attachments.len();
+    let total = crate::core::text::human_bytes(bytes as u64);
+    let cap = crate::core::text::human_bytes(limit as u64);
+    Some(if bytes > limit {
+        format!(
+            "{count} attachment(s) carry {total}, over the {cap} request limit: this request \
+             would be refused before it is sent — drop an attachment or lower its size"
+        )
+    } else {
+        format!(
+            "{count} attachment(s) carry {total}, most of the {cap} request limit; a few more \
+             images in this conversation will push a request past it"
+        )
+    })
+}
+
 /// Pre-flight budget on the serialized request body. Providers answer an
 /// oversized body with a 413 whose text names nothing useful — a gateway in
 /// front of the model wraps it beyond recognition — and by then the bytes are
 /// already on the wire. Refusing the same body locally costs nothing and can
 /// still say which attachments filled it. Attachment bytes are never
 /// reclaimed: compaction prunes tool results, not attachment payloads, and a
-/// resumed thread replays every attachment it stored, so the remedy is a
+/// resumed thread reloads every attachment it stored, so the remedy is a
 /// smaller file or a fresh conversation.
 pub(crate) fn check_request_body(body: &str, input: &PromptInput<'_>) -> Result<(), String> {
     if body.len() <= input.max_request_bytes {
@@ -371,7 +397,7 @@ pub(crate) fn check_request_body(body: &str, input: &PromptInput<'_>) -> Result<
         "request body is {total} (over the {limit} limit): {} attachment(s) carry {}\n  \
          largest first: {named}{rest}\n  \
          shrink them (resize or re-encode images) or start a new conversation — a resumed \
-         thread replays every attachment it stored",
+         thread reloads every attachment it stored",
         carried.len(),
         human_bytes(bytes as u64),
     ))

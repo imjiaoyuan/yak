@@ -155,6 +155,20 @@ fn a_configured_ceiling_replaces_the_default() {
 }
 
 #[test]
+fn heavy_attachments_are_flagged_before_the_request_is_built() {
+    let limit = 1000;
+    // comfortably inside the ceiling: nothing worth saying
+    assert!(attachment_weight(&[attachment("a.png", 100)], limit).is_none());
+    let near = attachment_weight(&[attachment("a.png", 800)], limit).unwrap();
+    assert!(near.contains("800 B"), "{near}");
+    assert!(near.contains("most of the 1000 B"), "{near}");
+    // over it: the pre-flight will refuse the body, so this says so plainly
+    let over = attachment_weight(&[attachment("a.png", 1200)], limit).unwrap();
+    assert!(over.contains("over the 1000 B request limit"), "{over}");
+    assert!(over.contains("would be refused"), "{over}");
+}
+
+#[test]
 fn a_body_over_budget_without_attachments_says_so() {
     let history = vec![Msg::user("go")];
     let input = testutil::input(&history, &[]);
