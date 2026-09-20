@@ -326,6 +326,9 @@ pub(crate) fn dispatch(
     }
 }
 
+/// `agent.max_request_bytes` in config.json overrides it; the ceiling is a
+/// property of the gateway, not of any one provider.
+///
 /// Pre-flight budget on the serialized request body. Providers answer an
 /// oversized body with a 413 whose text names nothing useful — a gateway in
 /// front of the model wraps it beyond recognition — and by then the bytes are
@@ -335,7 +338,7 @@ pub(crate) fn dispatch(
 /// resumed thread replays every attachment it stored, so the remedy is a
 /// smaller file or a fresh conversation.
 pub(crate) fn check_request_body(body: &str, input: &PromptInput<'_>) -> Result<(), String> {
-    if body.len() <= http::MAX_REQUEST_BYTES {
+    if body.len() <= input.max_request_bytes {
         return Ok(());
     }
     let carried: Vec<&Attachment> = input
@@ -345,7 +348,7 @@ pub(crate) fn check_request_body(body: &str, input: &PromptInput<'_>) -> Result<
         .filter(|a| !a.base64_data.is_empty())
         .collect();
     let total = human_bytes(body.len() as u64);
-    let limit = human_bytes(http::MAX_REQUEST_BYTES as u64);
+    let limit = human_bytes(input.max_request_bytes as u64);
     if carried.is_empty() {
         return Err(format!(
             "request body is {total} (over the {limit} limit) and no attachment explains it: \
@@ -499,6 +502,10 @@ pub struct PromptInput<'a> {
     /// opaque conversation id for providers that route by it (OpenAI-style
     /// `prompt_cache_key`): keeps one conversation on one cache replica
     pub cache_key: Option<&'a str>,
+    /// the largest body this request may serialize to; refusing an oversized
+    /// body locally beats paying for the upload only to read a gateway's
+    /// opaque 413 back (`agent.max_request_bytes`)
+    pub max_request_bytes: usize,
 }
 
 /// The reasoning-effort levels accepted by --thinking / /thinking.
@@ -650,6 +657,7 @@ pub(crate) mod testutil {
 
     pub(crate) fn input<'a>(history: &'a [Msg], tools: &'a [ToolDef]) -> PromptInput<'a> {
         PromptInput {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             system: None,
             history,
             prompt: "go",

@@ -91,6 +91,10 @@ pub struct AgentOptions<'a> {
     /// wrap-up note is injected, at the cap the run stops with a visible
     /// line. 0 disables (the reference style rollout budget over turns alone)
     pub token_budget: u64,
+    /// ceiling on one serialized request body, in bytes
+    /// (`agent.max_request_bytes`); a gateway in front of the model may
+    /// refuse far less than the provider itself documents
+    pub max_request_bytes: usize,
     pub stream: bool,
     /// enable compaction with this configuration; None disables it
     pub compact: Option<compact::CompactConfig>,
@@ -419,6 +423,7 @@ pub fn run_agent(
         // enters the history or the prompt-cache prefix.
         let note = context_note(used_tokens, opts, spent_input);
         let input = PromptInput {
+            max_request_bytes: opts.max_request_bytes,
             system: opts.system,
             history: &history,
             prompt: pending_prompt,

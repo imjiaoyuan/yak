@@ -58,6 +58,12 @@ const SPECS: &[OptSpec] = &[
         "Cumulative input-token budget per task (0 = unlimited, the default)",
         "N"
     ),
+    value_spec!(
+        "max-request-bytes",
+        None,
+        "Largest request body to send, in bytes (32MB by default)",
+        "N"
+    ),
     flag_spec!(
         "no-session",
         None,
@@ -274,6 +280,17 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         .map_err(|e| format!("invalid --max-turns: {e}"))?
         .unwrap_or(0);
 
+    // one request body's ceiling: a gateway in front of the model may refuse
+    // far less than the provider documents, so the local pre-flight can be
+    // tightened per run (the flag beats the config key)
+    let max_request_bytes: usize = args
+        .opt(&["max-request-bytes"])
+        .map(|s| s.parse::<usize>())
+        .transpose()
+        .map_err(|e| format!("invalid --max-request-bytes: {e}"))?
+        .or(settings.max_request_bytes)
+        .unwrap_or(crate::core::http::MAX_REQUEST_BYTES);
+
     // cumulative input-token budget per task (each round resends the full
     // context, so the sum is what a runaway loop costs); 0 = unlimited
     let token_budget: u64 = args
@@ -327,6 +344,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let extensions = extensions_connecting.join();
 
     let mut session = crate::agent::session::Session {
+        max_request_bytes,
         compact: settings.compact_config(&model.qualified_id(), &model.model_id),
         model,
         tools: Vec::new(),

@@ -297,6 +297,7 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     };
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
     let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 4,
@@ -392,6 +393,7 @@ fn token_budget_warns_then_stops_the_run() {
     };
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
     let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,
@@ -513,6 +515,7 @@ fn a_third_identical_tool_call_reminds_the_model_to_change_approach() {
     };
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
     let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,
@@ -647,6 +650,7 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
     let threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(ProbeTool(threads.clone()))];
     let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,
@@ -706,6 +710,7 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
 #[test]
 fn context_note_reports_the_room_left() {
     let mut opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,
@@ -749,6 +754,7 @@ fn context_note_reports_the_room_left() {
 #[test]
 fn context_note_uses_the_usage_marker_for_the_covered_prefix() {
     let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,

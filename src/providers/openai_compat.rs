@@ -526,6 +526,7 @@ mod tests {
         let i = input(&[], &[]);
         let atts = [att("image/png", Some("plot.png"))];
         let inp = crate::providers::PromptInput {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             attachments: &atts,
             ..i
         };

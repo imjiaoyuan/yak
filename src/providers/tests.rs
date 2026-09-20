@@ -140,6 +140,21 @@ fn an_oversized_body_is_refused_locally_with_the_offenders_named() {
 }
 
 #[test]
+fn a_configured_ceiling_replaces_the_default() {
+    // the ceiling is configuration, not a constant: a gateway in front of the
+    // provider may refuse far less than the provider itself documents
+    let history = vec![Msg::user("go")];
+    let mut input = testutil::input(&history, &[]);
+    input.max_request_bytes = 1024;
+    let body = "x".repeat(1025);
+    let err = check_request_body(&body, &input).unwrap_err();
+    assert!(err.contains("over the 1.0 KB limit"), "{err}");
+    // the default ceiling would have let the same body through
+    input.max_request_bytes = http::MAX_REQUEST_BYTES;
+    assert!(check_request_body(&body, &input).is_ok());
+}
+
+#[test]
 fn a_body_over_budget_without_attachments_says_so() {
     let history = vec![Msg::user("go")];
     let input = testutil::input(&history, &[]);

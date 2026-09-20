@@ -13,6 +13,10 @@ pub struct AgentSettings {
     pub context_window: Option<u64>,
     pub reserve_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
+    /// ceiling on one serialized request body, in bytes; a gateway in front of
+    /// the model may refuse far less than the provider documents, and the
+    /// refusal that comes back names nothing usable
+    pub max_request_bytes: Option<usize>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
     pub model_windows: std::collections::BTreeMap<String, u64>,
     pub disabled_skills: Vec<String>,
@@ -74,6 +78,10 @@ pub fn parse(raw: &str) -> AgentSettings {
     s.context_window = agent.get("context_window").and_then(|v| v.as_u64());
     s.reserve_tokens = agent.get("reserve_tokens").and_then(|v| v.as_u64());
     s.keep_recent_tokens = agent.get("keep_recent_tokens").and_then(|v| v.as_u64());
+    s.max_request_bytes = agent
+        .get("max_request_bytes")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     if let Some(tools) = agent.get("tools").and_then(|v| v.as_object()) {
         for (name, policy) in tools {
             if let Some(p) = policy.as_str() {
@@ -101,6 +109,14 @@ pub fn parse(raw: &str) -> AgentSettings {
 #[cfg(test)]
 mod agent_settings_tests {
     use super::*;
+
+    /// The ceiling is a gateway property: absent unless configured.
+    #[test]
+    fn a_request_ceiling_comes_from_the_agent_section() {
+        assert_eq!(parse("{}").max_request_bytes, None);
+        let s = parse(r#"{"agent": {"max_request_bytes": 8000000}}"#);
+        assert_eq!(s.max_request_bytes, Some(8_000_000));
+    }
 
     #[test]
     fn parses_agent_object() {

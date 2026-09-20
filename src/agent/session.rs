@@ -22,6 +22,9 @@ pub struct Session {
     pub max_turns: usize,
     /// cumulative input-token budget per task; 0 = unlimited
     pub token_budget: u64,
+    /// ceiling on one serialized request body; a gateway in front of the
+    /// model may refuse far less than the provider documents
+    pub max_request_bytes: usize,
     pub stream: bool,
     pub compact: CompactConfig,
     pub no_session: bool,
@@ -119,6 +122,7 @@ impl Session {
             return self.run_task_json(prompt, attachments);
         }
         let opts = AgentOptions {
+            max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
             max_turns: self.max_turns,
@@ -392,6 +396,7 @@ impl Session {
         attachments: Vec<crate::providers::Attachment>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
         let opts = AgentOptions {
+            max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
             max_turns: self.max_turns,
@@ -696,6 +701,7 @@ mod tests {
     /// A session with a tiny window, so a single stored result is over.
     fn tight_session(seed: Vec<Msg>) -> Session {
         Session {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig {
                 context_window: 4_000,
                 reserve_tokens: 100,
@@ -807,6 +813,7 @@ mod tests {
         let cwd = dir.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
         let mut session = Session {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig::default(),
             model: crate::providers::ResolvedModel {
                 provider_name: "mock".into(),
@@ -882,6 +889,7 @@ mod tests {
         let cwd = dir.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
         let mut session = Session {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig::default(),
             model: crate::providers::ResolvedModel {
                 provider_name: "mock".into(),

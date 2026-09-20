@@ -155,6 +155,8 @@ usage accounting and persistence are identical to a normal run; the interactive 
 Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the
 context, so the total is what a runaway task actually costs. It warns at 80% and stops cleanly at
 100%. (`--max-turns` still exists as an explicit cap; `0` or unset means unlimited.)
+`--max-request-bytes` caps one request body in bytes (32MB by default): lower it when a gateway in
+front of the model refuses less than the provider documents.
 
 ### Attachments
 
@@ -221,13 +223,17 @@ Under the `"agent"` key of `config.json`:
   "agent": {
     "approval_mode": "always-ask",
     "context_window": 128000,
+    "max_request_bytes": 8000000,
     "tools": {"bash": "prompt"}
   }
 }
 ```
 
 `approval_mode` is `yolo` (default) or `always-ask`. `context_window` is the point where long
-conversations get compacted. `tools` maps a tool to `allow`, `deny` or `prompt`.
+conversations get compacted. `tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes`
+caps one request body in bytes (32MB by default) — lower it when a gateway in front of the model
+refuses less than the provider documents, and the run refuses the oversized body locally, naming
+the attachments that filled it, instead of coming back as an opaque 413.
 
 The command blacklist is a plain file, not a config key: `~/.llm/blacklist` for everything you run,
 and `.llm/blacklist` for one project (its lines win; the two are concatenated). It only adds refusals

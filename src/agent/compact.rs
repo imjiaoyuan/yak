@@ -186,6 +186,7 @@ pub fn summarize(
         serialize_prefix(prefix)
     );
     let input = PromptInput {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: Some(SUMMARIZER_SYSTEM),
         history: &[],
         prompt: &prompt,

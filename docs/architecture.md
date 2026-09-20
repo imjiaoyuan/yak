@@ -21,7 +21,9 @@ is too long", Google "exceed context limit" — PayloadTooLarge for a 413 (whose
 gateway wrapper naming nothing, so the size we sent and the shrink-the-attachments remedy are
 appended to it), Stream for post-start drops, Interrupted for esc); each adapter's `run` builds its
 body and hands it to `providers::check_request_body` first, which refuses a body past
-`http::MAX_REQUEST_BYTES` (32MB — the documented provider ceiling) while it can still name the
+`input.max_request_bytes` — `http::MAX_REQUEST_BYTES` (32MB, the documented provider ceiling)
+unless `agent.max_request_bytes` in config.json lowers it, since a gateway in front may refuse far
+less — while it can still name the
 attachments that filled it: compaction prunes tool results, never attachment payloads, and a resumed
 thread replays every attachment it stored, so the remedy has to reach the user;
 retries resend with ±10%-jittered backoff (1s→30s for responses, a separate 5s→60s×6 budget for
