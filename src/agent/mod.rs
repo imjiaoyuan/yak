@@ -471,6 +471,19 @@ pub fn run_agent(
                     });
                     continue;
                 }
+            } else if round.text.is_empty()
+                && round.reasoning.is_none()
+                && round.tool_calls.is_empty()
+                && recoveries < MAX_STREAM_RECOVERIES
+            {
+                // nothing was handed out — not one delta of text, reasoning
+                // or a tool call — so replaying the request cannot duplicate
+                // anything on screen. This is the shape of a gateway cutting
+                // a long-lived SSE connection before the first byte of its
+                // answer.
+                recoveries += 1;
+                on_update(AgentUpdate::StreamRecovered { chars: 0, error: e });
+                continue;
             }
             return Err(AgentFailure {
                 message: e,

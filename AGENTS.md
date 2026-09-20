@@ -162,7 +162,9 @@ a server `Retry-After`, sleeping in 50ms interruptible slices with a dim `retryi
 extracting `x-request-id`/`cf-ray` into the error text, and never replaying after output was
 already handed out. A mid-stream drop instead keeps the partial answer as a real assistant
 message and continues from it (assistant-last is a prefill for both wire shapes), bounded at 5
-recoveries per run; a stream that ends without a completion marker (`[DONE]`/`message_stop`) is
+recoveries per run; a drop before any output arrived is resent as-is (nothing was handed out, so
+nothing can duplicate), sharing the same budget; a stream that ends without a completion marker
+(`[DONE]`/`message_stop`) is
 surfaced as truncation rather than a clean turn. An Anthropic `message_start` seeds the
 input/cached token counts the edge merges with the `message_delta` output counts; a stream silent
 past 300s is an idle error. The body read runs on its own thread with 100ms `recv_timeout` slices

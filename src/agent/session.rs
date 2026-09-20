@@ -254,10 +254,12 @@ impl Session {
                     // continues; the model picks up from the partial text
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
-                    eprintln!(
-                        "{}stream dropped ({error}) — keeping the partial answer ({chars} chars), continuing{}",
-                        p.dim, p.reset
-                    );
+                    let what = if chars == 0 {
+                        "nothing received yet, resending".to_string()
+                    } else {
+                        format!("keeping the partial answer ({chars} chars), continuing")
+                    };
+                    eprintln!("{}stream dropped ({error}) — {what}{}", p.dim, p.reset);
                     view.borrow_mut().resume_wait();
                 }
                 AgentUpdate::ToolResultsPruned { count } => {

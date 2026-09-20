@@ -33,6 +33,8 @@ with a dim `retrying in Ns` notice, extracting `x-request-id`/`cf-ray` into the 
 never replaying after output was already handed out — a mid-stream drop instead keeps the partial
 answer as a real assistant message and continues from it (assistant-last is a prefill for both wire
 shapes), bounded at 5 recoveries per run before the error surfaces with the partial in history; a
+drop that arrives before any output — no text, no reasoning, no tool call — is resent unchanged
+(nothing was handed out, so nothing can duplicate), sharing the same 5-recovery budget; a
 stream that ends without a completion marker (`[DONE]`/`message_stop`) is surfaced as truncation
 rather than a clean turn (a clean FIN on a half-delivered answer must not be stored as a finished
 round), and an Anthropic `message_start` seeds the input/cached token counts that the edge merges

@@ -342,6 +342,93 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     );
 }
 
+/// A mock SSE server that cuts the first connection before any content
+/// arrives at all (no [DONE], no delta): the round produced nothing, so a
+/// resend cannot duplicate anything on screen and the run must retry instead
+/// of dying with the truncation error.
+#[test]
+fn a_stream_cut_before_any_output_is_resent() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            // read past the request head + body (content-length)
+            read_request(&mut c);
+            use std::io::Write as _;
+            if n == 0 {
+                // headers, then the connection dies before one data event
+                let _ = c.write_all(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".as_bytes(),
+                );
+                drop(c);
+            } else {
+                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fresh answer\"}}]}\n\n\
+                            data: [DONE]\n\n";
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                break;
+            }
+        }
+    });
+
+    let model = crate::providers::ResolvedModel {
+        provider_name: "mock".into(),
+        kind: "openai-compat".into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        api_key: Some("sk-x".into()),
+        model_id: "m".into(),
+        options: vec![],
+    };
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let opts = AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
+        system: None,
+        cwd: std::env::temp_dir(),
+        max_turns: 4,
+        token_budget: 0,
+        stream: true,
+        compact: None,
+        reasoning: None,
+        hooks: &crate::agent::ext::Extensions::empty(),
+        cache_key: None,
+    };
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        RunCallbacks {
+            on_update: &mut |_| {},
+            on_approval: &mut |_| ApprovalResponse::Deny,
+            steer: &mut || vec![],
+        },
+    )
+    .expect("an empty drop must be resent, not fatal");
+    server.join().unwrap();
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "exactly one resend"
+    );
+    assert_eq!(outcome.final_text, "fresh answer");
+    assert_eq!(outcome.history.len(), 2, "prompt, answer — no ghost turns");
+}
+
 /// The token budget stops a task like a turn cap would, but on the
 /// metric that actually prices a runaway loop: cumulative input tokens.
 /// Past 80% a wrap-up note rides the pending prompt; at 100% the loop
