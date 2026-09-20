@@ -136,6 +136,9 @@ impl HttpError {
             429 => Class::RateLimited,
             401 | 403 => Class::Auth,
             413 => Class::PayloadTooLarge,
+            // 408 is the server giving up on a request it already accepted,
+            // which has the same retry shape as a 5xx
+            408 => Class::Server,
             400 if context_too_large(&self.message) => Class::ContextTooLarge,
             s if s >= 500 => Class::Server,
             _ => Class::InvalidRequest,
@@ -862,6 +865,11 @@ mod tests {
         assert_eq!(HttpError::new(0, "interrupted").class(), Class::Interrupted);
         assert_eq!(HttpError::new(429, "slow down").class(), Class::RateLimited);
         assert_eq!(HttpError::new(503, "unavailable").class(), Class::Server);
+        // a 408 is the server timing out, not a malformed request
+        assert_eq!(
+            HttpError::new(408, "request timeout").class(),
+            Class::Server
+        );
         assert_eq!(HttpError::new(401, "bad key").class(), Class::Auth);
         assert_eq!(
             HttpError::new(413, "payload too large").class(),
