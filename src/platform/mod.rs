@@ -216,8 +216,15 @@ pub(crate) fn build_shell_command(spec: &ShellSpec, cmd: &str, cwd: &Path) -> Co
         // PowerShell only propagates a native command's exit code when it is
         // the last statement. Appending the explicit exit makes nonzero codes
         // visible to the agent error branch; `$LASTEXITCODE` is initially 0.
-        let mut full = cmd.to_string();
-        if full.is_empty() {
+        //
+        // The encoding line comes first: Windows PowerShell encodes its own
+        // output for the console it inherited (an OEM code page), and through
+        // our UTF-8 pipe a non-ASCII listing arrives as replacement
+        // characters. Setting it is the documented fix, and `-NoProfile`
+        // keeps a profile from putting it back.
+        let mut full = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n".to_string();
+        full.push_str(cmd);
+        if cmd.is_empty() {
             full.push_str("exit $LASTEXITCODE");
         } else {
             // a newline, not a semicolon: a trailing `# comment` would
@@ -514,5 +521,34 @@ mod tests {
                 powershell: false,
             }
         );
+    }
+
+    #[test]
+    fn a_powershell_payload_forces_utf8_output_and_keeps_the_exit_last() {
+        let cmd = build_shell_command(&ShellSpec::from_name("pwsh"), "echo hi", Path::new("."));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-NoProfile");
+        let payload = args.last().unwrap();
+        assert!(
+            payload.starts_with("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"),
+            "{payload}"
+        );
+        assert!(
+            payload.ends_with("echo hi\nexit $LASTEXITCODE"),
+            "{payload}"
+        );
+    }
+
+    #[test]
+    fn a_posix_payload_is_passed_through_untouched() {
+        let cmd = build_shell_command(&ShellSpec::from_name("sh"), "echo hi", Path::new("."));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.last().unwrap(), "echo hi");
     }
 }
