@@ -248,9 +248,15 @@ impl LineEditor {
                                 let path =
                                     dir.join(format!("paste-{}.{}", crate::core::db::ulid(), ext));
                                 if std::fs::write(&path, &bytes).is_ok() {
-                                    let text = path.display().to_string();
-                                    buf.insert_str(cursor, &text);
-                                    cursor += text.len();
+                                    // the path still lands in the submitted
+                                    // text (auto-attach scans for it), but the
+                                    // buffer shows a short atomic token — the
+                                    // same placeholder big text pastes use
+                                    paste_seq += 1;
+                                    let token = format!("[paste #{paste_seq} image]");
+                                    pastes.push((token.clone(), path.display().to_string()));
+                                    buf.insert_str(cursor, &token);
+                                    cursor += token.len();
                                     nav.reset(self.history.len());
                                     line.draw(&mut out, prompt, &buf, cursor, is_command);
                                 }
@@ -950,6 +956,10 @@ fn append_history_to(path: &Path, text: &str) {
 struct InputLine {
     /// row offset of the cursor within the region (how far up to return)
     rows: usize,
+    /// terminal width the region was painted at; a resize reflows every row,
+    /// so a mismatch means `rows` no longer maps the screen — repaint from a
+    /// fresh region instead of walking a stale count upward
+    width: usize,
 }
 
 /// Hanging indent for wrapped input rows, matching the chrome column.
@@ -1003,7 +1013,7 @@ impl Drop for KittyKeys {
 
 impl InputLine {
     fn new() -> InputLine {
-        InputLine { rows: 0 }
+        InputLine { rows: 0, width: 0 }
     }
 
     fn draw(
@@ -1014,6 +1024,12 @@ impl InputLine {
         cursor: usize,
         is_command: &dyn Fn(&str) -> bool,
     ) {
+        let cols = crate::term::columns();
+        if self.rows > 0 && self.width != 0 && self.width != cols {
+            let _ = writeln!(out);
+            self.rows = 0;
+        }
+        self.width = cols;
         if self.rows > 0 {
             let _ = write!(out, "\x1b[{}A", self.rows);
         }
