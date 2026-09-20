@@ -178,7 +178,7 @@ def install_picker_lane(binary, work, env):
     assert os.path.isdir(clone), f"install did not land in the project (screen {screen[-400:]!r})"
     config = subprocess.run(
         ["git", "-C", clone, "config", "--get-regexp", "^llm"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).stdout
     assert "llm.skills demo" in config, f"unchecked skill not recorded: {config!r}"
     assert "llm.extensions *" in config, f"fully checked extensions must stay open: {config!r}"

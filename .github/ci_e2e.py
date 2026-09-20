@@ -320,9 +320,13 @@ def pin_thread_mtimes(user_dir, offsets):
 
 
 def run(cmd, env, cwd=None, stdin=None):
+    # the CLI writes UTF-8 whatever the platform default is, so the decode is
+    # pinned: Windows would otherwise read it through the console code page
+    # (cp1252) and kill the reader thread on a multi-byte glyph's byte, which
+    # surfaces as a None stdout rather than the actual failure
     return subprocess.run(
-        cmd, capture_output=True, text=True, env=env, cwd=cwd,
-        stdin=stdin, timeout=120,
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=cwd, stdin=stdin, timeout=120,
     )
 
 
