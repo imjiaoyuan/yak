@@ -399,6 +399,8 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
 - `LLM.md` — hand-edited user memory, injected into the system prompt.
 - `extensions/`, `skills/`, `commands/` — user-side plugin, skill and prompt directories.
 - `pkg/` — packages installed with `llm install`.
+- `tmp/` — the editor's scratch dir (pasted clipboard images, ctrl+g buffers), swept of
+  anything older than a week at every agent start (`core/tmp.rs`).
 - `observations/` — archived full tool results, keyed by content id, paged back by `recall`.
 
 ## Workflow

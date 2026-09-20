@@ -22,3 +22,4 @@ pub mod templates;
 pub mod testutil;
 pub mod text;
 pub mod threads;
+pub mod tmp;

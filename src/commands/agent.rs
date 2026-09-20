@@ -146,6 +146,9 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
     let cwd_str = cwd.display().to_string();
+    // housekeeping: the editor's scratch dir (pasted images, ctrl+g buffers)
+    // has no other reaper, so every agent start sweeps it
+    crate::core::tmp::prune_user_tmp();
     // extensions start connecting now, on a background thread: discovery is
     // a few readdirs (synchronous), but the spawn+handshake is slow — the
     // attachments, thread store and system prompt below load while the
