@@ -105,7 +105,7 @@ Everything else is handwritten in-tree:
 | `term/render.rs` | ANSI rendering + the shared TaskView |
 | `core/render_md.rs` | terminal markdown incl. CJK cell widths (`MdStream` for replay + `StyleStream` for live streaming) |
 | `theme.rs` | the color theme (one cached `Palette` per stream) |
-| `platform/` | terminal/shell/editor/pager/clipboard + `platform::interrupt` (the cooperative interrupt flag, re-exported by core) |
+| `platform/` | terminal/shell/editor/pager/clipboard + `platform::interrupt` (the cooperative interrupt flag, re-exported by core); a PowerShell payload forces UTF-8 output and appends the explicit exit that makes a native command's code visible |
 | `term/lineedit.rs` | the raw-mode line editor and picker |
 
 Extend these instead of adding crates. When a new crate is genuinely justified (correctness or
