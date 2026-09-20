@@ -135,6 +135,7 @@ impl HttpError {
             }
             429 => Class::RateLimited,
             401 | 403 => Class::Auth,
+            413 => Class::PayloadTooLarge,
             400 if context_too_large(&self.message) => Class::ContextTooLarge,
             s if s >= 500 => Class::Server,
             _ => Class::InvalidRequest,
@@ -154,6 +155,8 @@ enum Class {
     Auth,
     /// other 4xx
     InvalidRequest,
+    /// HTTP 413: the body the provider refuses on size, not on content
+    PayloadTooLarge,
     /// 400 whose body says the prompt does not fit the model's window
     ContextTooLarge,
     /// failure after the stream started (idle timeout, dropped connection)
@@ -170,6 +173,7 @@ impl Class {
             Class::Server => "server error",
             Class::Auth => "authentication",
             Class::InvalidRequest => "bad request",
+            Class::PayloadTooLarge => "request too large",
             Class::ContextTooLarge => "context window exceeded",
             Class::Stream => "stream failed",
             Class::Interrupted => "interrupted",
@@ -199,6 +203,16 @@ impl std::fmt::Display for HttpError {
         }
         if let Some(id) = &self.request_id {
             write!(f, " [req {id}]")?;
+        }
+        // a 413 body is rarely more than a gateway's own wording (a proxy in
+        // front of the provider often returns prose-free JSON), so the
+        // remedy rides on the error itself
+        if self.status == 413 {
+            write!(
+                f,
+                " — the request body is over the provider's limit: shrink or drop \
+                 attachments, then retry (a new conversation starts over without them)"
+            )?;
         }
         Ok(())
     }
@@ -234,7 +248,9 @@ impl Retry {
             class,
             Class::Connection | Class::RateLimited | Class::Server | Class::Stream
         ) {
-            return None; // auth, bad requests, window overflows and interrupts never retry
+            // auth, bad requests, oversized bodies, window overflows and
+            // interrupts never retry: none of them change on a re-send
+            return None;
         }
         let connection = class == Class::Connection;
         let max = if connection {
@@ -596,9 +612,19 @@ fn send_raw(
             .into_body()
             .read_to_string()
             .unwrap_or_else(|e| format!("<unreadable error body: {e}>"));
+        // a 413 body is a gateway's wrapper and rarely names the number that
+        // matters; the size we sent is ours to state
+        let message = if status == 413 {
+            format!(
+                "{body} (request body was {})",
+                crate::core::text::human_bytes(req.body.len() as u64)
+            )
+        } else {
+            body
+        };
         return Err(HttpError {
             status,
-            message: body,
+            message,
             retry_after,
             request_id,
         });
@@ -620,6 +646,13 @@ fn map_error(e: ureq::Error) -> HttpError {
 /// document limits sit around 32MB, so anything past 50MB cannot ride a
 /// request anyway — refuse it instead of buffering it first.
 pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
+/// Cap on one request body. The same reasoning as the per-attachment cap, one
+/// level up: Anthropic documents a 32MB request ceiling, and a gateway in
+/// front of any provider refuses far less politely (an opaque 413 whose body
+/// names nothing). A body past this cannot be sent, so `providers` refuses it
+/// locally, while it can still name the attachments that filled it.
+pub const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
 /// GET and read the whole body: (bytes, content-type) after a status check.
 /// The body is capped: a size-limited read refuses an oversized download
@@ -831,6 +864,10 @@ mod tests {
         assert_eq!(HttpError::new(503, "unavailable").class(), Class::Server);
         assert_eq!(HttpError::new(401, "bad key").class(), Class::Auth);
         assert_eq!(
+            HttpError::new(413, "payload too large").class(),
+            Class::PayloadTooLarge
+        );
+        assert_eq!(
             HttpError::new(400, "unknown parameter").class(),
             Class::InvalidRequest
         );
@@ -927,6 +964,26 @@ mod tests {
         assert_eq!(parse_retry_after("7"), Some(7));
         assert_eq!(parse_retry_after(" 12 "), Some(12));
         assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn an_oversized_body_is_fatal_and_carries_the_remedy() {
+        let e = HttpError {
+            status: 413,
+            // the shape a proxy in front of a provider returns: a wrapped
+            // server_error whose text says nothing about the size
+            message: "{\"error\":{\"code\":\"server_error\"}}".into(),
+            retry_after: None,
+            request_id: Some("req_1".into()),
+        };
+        // retrying replays the same oversized body, so it never happens
+        assert_eq!(Retry::new().next(&e), None);
+        let text = e.to_string();
+        assert!(text.starts_with("HTTP 413: "), "{text}");
+        assert!(text.contains("over the provider's limit"), "{text}");
+        assert!(text.contains("[req req_1]"), "{text}");
+        // and the hint stays off every other status
+        assert!(!HttpError::new(500, "boom").to_string().contains("limit"));
     }
 
     #[test]

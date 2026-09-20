@@ -430,12 +430,10 @@ pub fn run(
         headers.extend(super::auth_headers(&m.kind, key));
     }
     headers.extend(super::gateway_headers(&url));
+    let body = build_body(m, input, stream)?.to_string();
+    super::check_request_body(&body, input)?;
     super::dispatch(
-        HttpRequest {
-            url,
-            headers,
-            body: build_body(m, input, stream)?.to_string(),
-        },
+        HttpRequest { url, headers, body },
         stream,
         |event_type, chunk, usage, stop, on_event| {
             feed_event(event_type, chunk, usage, stop, on_event)

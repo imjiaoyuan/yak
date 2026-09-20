@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::core::config::Provider;
 use crate::core::http::{self, Event, HttpRequest, StopReason, Usage};
+use crate::core::text::human_bytes;
 
 // the conversation model: unified messages both provider adapters serialize
 
@@ -323,6 +324,73 @@ pub(crate) fn dispatch(
         complete(&value, on_event);
         Ok(())
     }
+}
+
+/// Pre-flight budget on the serialized request body. Providers answer an
+/// oversized body with a 413 whose text names nothing useful — a gateway in
+/// front of the model wraps it beyond recognition — and by then the bytes are
+/// already on the wire. Refusing the same body locally costs nothing and can
+/// still say which attachments filled it. Attachment bytes are never
+/// reclaimed: compaction prunes tool results, not attachment payloads, and a
+/// resumed thread replays every attachment it stored, so the remedy is a
+/// smaller file or a fresh conversation.
+pub(crate) fn check_request_body(body: &str, input: &PromptInput<'_>) -> Result<(), String> {
+    if body.len() <= http::MAX_REQUEST_BYTES {
+        return Ok(());
+    }
+    let carried: Vec<&Attachment> = input
+        .attachments
+        .iter()
+        .chain(input.history.iter().flat_map(message_attachments))
+        .filter(|a| !a.base64_data.is_empty())
+        .collect();
+    let total = human_bytes(body.len() as u64);
+    let limit = human_bytes(http::MAX_REQUEST_BYTES as u64);
+    if carried.is_empty() {
+        return Err(format!(
+            "request body is {total} (over the {limit} limit) and no attachment explains it: \
+             the conversation itself is that large — start a new one"
+        ));
+    }
+    let mut biggest: Vec<(&Attachment, usize)> =
+        carried.iter().map(|a| (*a, a.base64_data.len())).collect();
+    biggest.sort_by_key(|x| std::cmp::Reverse(x.1));
+    // three names are enough to recognize the set; the count carries the rest
+    let named = biggest
+        .iter()
+        .take(3)
+        .map(|(a, n)| format!("{} ({})", reference(a), human_bytes(*n as u64)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rest = if biggest.len() > 3 { ", …" } else { "" };
+    let bytes: usize = carried.iter().map(|a| a.base64_data.len()).sum();
+    Err(format!(
+        "request body is {total} (over the {limit} limit): {} attachment(s) carry {}\n  \
+         largest first: {named}{rest}\n  \
+         shrink them (resize or re-encode images) or start a new conversation — a resumed \
+         thread replays every attachment it stored",
+        carried.len(),
+        human_bytes(bytes as u64),
+    ))
+}
+
+/// The attachments riding one message: user input and whatever images a tool
+/// result carried. Assistant turns and summaries have none.
+fn message_attachments(m: &Msg) -> &[Attachment] {
+    match m {
+        Msg::User { attachments, .. } | Msg::ToolResult { attachments, .. } => attachments,
+        Msg::Assistant { .. } | Msg::Summary { .. } => &[],
+    }
+}
+
+/// How an attachment is named in a report: its display name, else where it
+/// came from, else its mime type.
+fn reference(a: &Attachment) -> &str {
+    a.filename
+        .as_deref()
+        .or(a.path.as_deref())
+        .or(a.url.as_deref())
+        .unwrap_or(&a.mime_type)
 }
 
 /// A text attachment's decoded body. Attachments carry base64; text blocks
@@ -662,6 +730,56 @@ mod tests {
         assert!(rm("zai", "glm-4.6v").supports_images());
         assert!(rm("zai", "glm-5.3-flash").supports_images());
         assert!(rm("opencode-go", "glm-5.3-flash").supports_images());
+    }
+
+    fn attachment(name: &str, base64_len: usize) -> Attachment {
+        Attachment {
+            mime_type: "image/png".into(),
+            base64_data: "A".repeat(base64_len),
+            filename: Some(name.into()),
+            path: Some(format!("/tmp/mg/{name}")),
+            url: None,
+        }
+    }
+
+    #[test]
+    fn a_body_within_budget_is_left_to_the_provider() {
+        let history = vec![Msg::user_with("look", vec![attachment("m05.png", 4096)])];
+        let input = testutil::input(&history, &[]);
+        assert!(check_request_body("{}", &input).is_ok());
+        // exactly at the cap is still sendable, like the per-attachment one
+        let at = "x".repeat(http::MAX_REQUEST_BYTES);
+        assert!(check_request_body(&at, &input).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_body_is_refused_locally_with_the_offenders_named() {
+        // eleven screenshots of ~3MB base64: each is far under the
+        // per-attachment cap, the body is not — which is how a gateway's
+        // opaque 413 happens with nothing in it to act on
+        let shots: Vec<Attachment> = (0..11)
+            .map(|i| attachment(&format!("m{i:02}.png"), 3 * 1024 * 1024))
+            .collect();
+        let history = vec![Msg::user_with("look", shots)];
+        let input = testutil::input(&history, &[]);
+        let body = "x".repeat(http::MAX_REQUEST_BYTES + 1);
+        let err = check_request_body(&body, &input).unwrap_err();
+        assert!(err.contains("over the 32.0 MB limit"), "{err}");
+        assert!(err.contains("11 attachment(s) carry 33.0 MB"), "{err}");
+        // the three largest are named by file name, with their own size
+        assert!(err.contains("m00.png (3.0 MB)"), "{err}");
+        assert!(err.contains(", …"), "{err}");
+        // and the remedy: compaction cannot reclaim attachment bytes
+        assert!(err.contains("start a new conversation"), "{err}");
+    }
+
+    #[test]
+    fn a_body_over_budget_without_attachments_says_so() {
+        let history = vec![Msg::user("go")];
+        let input = testutil::input(&history, &[]);
+        let body = "x".repeat(http::MAX_REQUEST_BYTES + 1);
+        let err = check_request_body(&body, &input).unwrap_err();
+        assert!(err.contains("no attachment explains it"), "{err}");
     }
 }
 

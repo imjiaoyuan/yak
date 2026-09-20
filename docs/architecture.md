@@ -17,7 +17,13 @@ from config → `providers::ResolvedModel::stream()` dispatches on the config `k
 or `anthropic`) → `http.rs` does sync POST + SSE parsing under a the reference shape, deliberately lean
 error taxonomy (`HttpError::class()`: Connection/RateLimited/Server retry, Auth/InvalidRequest
 fatal, ContextTooLarge sniffed from 400 bodies — OpenAI "maximum context length", Anthropic "prompt
-is too long", Google "exceed context limit" — Stream for post-start drops, Interrupted for esc);
+is too long", Google "exceed context limit" — PayloadTooLarge for a 413 (whose body is usually a
+gateway wrapper naming nothing, so the size we sent and the shrink-the-attachments remedy are
+appended to it), Stream for post-start drops, Interrupted for esc); each adapter's `run` builds its
+body and hands it to `providers::check_request_body` first, which refuses a body past
+`http::MAX_REQUEST_BYTES` (32MB — the documented provider ceiling) while it can still name the
+attachments that filled it: compaction prunes tool results, never attachment payloads, and a resumed
+thread replays every attachment it stored, so the remedy has to reach the user;
 retries resend with ±10%-jittered backoff (1s→30s for responses, a separate 5s→60s×6 budget for
 connection failures — bounded for an attended terminal: ≈ three minutes of automatic fighting, then
 the error surfaces), honoring a server Retry-After when sent, sleeping in 50ms interruptible slices
