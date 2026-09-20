@@ -57,8 +57,10 @@ bursts read as fast typing that decelerates into the base rate, a keeping-up str
 everything stays write-once (no erase, no redraw — pacing only decides when bytes are written); any
 non-interrupt keystroke sets `screen().flush_now` and the next tick prints the whole backlog at once
 (the user is watching), a single dim `thinking ... end` trace line (reasoning is never streamed
-anywhere), and the dim `secs · ↑in ↓out` footer (plus `cache N%` when the provider reports
-prompt-cache hits); answers stream character-immediately and styled the reference-like in a left-indent-2 block
+anywhere), and the dim `secs · this task: input N · output N · cache N%` footer (the cache
+share only when the provider reports prompt-cache hits; all three are the task's own
+rounds summed — a re-sent prompt per round, so never a context size — while the session's
+cumulative counters and the window's occupancy live in `/status`); answers stream character-immediately and styled the reference-like in a left-indent-2 block
 on a TTY through `StyleStream` (`core/render_md.rs`), write-once — no erase, no redraw: each line
 classifies from its first chars (heading, quote, list, fence, table, rule) and the settled prefix
 streams, while an unclosed inline marker (`**`, `` ` ``, `~~`, `[`) holds only its own span until it
@@ -235,7 +237,11 @@ across processes with `LLM_SESSION_ID`.
   `compact.rs` (cut at a turn boundary keeping a 32k-token recent window; the stored Summary
   composes the original task verbatim above the compressed sections — re-compaction recovers it from
   the previous summary — and `trim_old_attachments` swaps attachments older than the last two
-  attachment-bearing messages for a name+mime note every round, before the request is built), Every
+  attachment-bearing messages for a name+mime note every round, before the request is built; a
+  compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
+  `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
+  the one failure compaction exists to prevent; a round the provider reported no usage for is priced
+  from the text instead, so a gateway that omits the counts cannot switch the gate off), Every
   request closes with a request-only `<context>N tokens left in this context window</context>` user
   turn (`context_note` in `mod.rs`: the context-window room, plus the task's input-token room when
   `--token-budget` is set) — the reference style budget awareness so the model can choose to wrap up; it is

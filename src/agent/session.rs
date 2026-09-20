@@ -249,6 +249,18 @@ impl Session {
                     // silent on the terminal
                     view.borrow_mut().pause();
                 }
+                AgentUpdate::CompactStalled { reason } => {
+                    // compaction is due and cannot run: the session keeps
+                    // growing over the window, so the reason is the one thing
+                    // the user needs (and the only place it is said)
+                    view.borrow_mut().pause();
+                    let p = crate::theme::err();
+                    eprintln!(
+                        "{}compaction stalled: {reason} — the context stays over the window{}",
+                        p.dim, p.reset
+                    );
+                    view.borrow_mut().resume_wait();
+                }
                 AgentUpdate::StreamRecovered { chars, error } => {
                     // settle the partial answer, then say why the wait
                     // continues; the model picks up from the partial text
@@ -635,6 +647,9 @@ fn event_json(u: &AgentUpdate) -> serde_json::Value {
         }
         AgentUpdate::Compacted { removed } => {
             serde_json::json!({"type": "compacted", "removed": removed})
+        }
+        AgentUpdate::CompactStalled { reason } => {
+            serde_json::json!({"type": "compact_stalled", "reason": reason})
         }
         AgentUpdate::StreamRecovered { chars, error } => {
             serde_json::json!({"type": "stream_recovered", "chars": chars, "error": error})
@@ -1494,6 +1509,12 @@ mod tests {
             (
                 AgentUpdate::Compacted { removed: 12 },
                 json!({"type": "compacted", "removed": 12}),
+            ),
+            (
+                AgentUpdate::CompactStalled {
+                    reason: "the summarizer returned nothing".into(),
+                },
+                json!({"type": "compact_stalled", "reason": "the summarizer returned nothing"}),
             ),
             (
                 AgentUpdate::StreamRecovered {

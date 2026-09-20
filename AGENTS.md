@@ -220,7 +220,11 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   archive write failure (keep the whole text rather than leave a marker pointing at nothing), and
   char-indexed cuts keep CJK on codepoint boundaries. A resumed thread that no longer fits is
   projected down the same way before its first request, silently (`Session::prune_seed_to_fit`),
-  so the notice cannot repeat turn after turn.
+  so the notice cannot repeat turn after turn. A compaction that cannot run — summarizer error,
+  empty summary, no cut point — is not silent: it reports a `compact_stalled` notice naming why,
+  once per run, because a session left quietly over its window is the one failure compaction
+  exists to prevent; a round the provider reported no usage for is priced from the text instead,
+  so a gateway that omits the counts cannot switch the gate off.
 - **Memory** (`memory.rs`): `~/.llm/LLM.md`, one manual region, 16KB cap. `section()` injects
   into the system prompt and names the path even when the file is absent or empty — the block is
   what tells the agent where durable preferences go, so it must never be conditional. There is no

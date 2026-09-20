@@ -46,6 +46,11 @@ pub enum AgentUpdate {
     Compacted {
         removed: usize,
     },
+    /// compaction was due and could not be applied: the session keeps growing
+    /// over the window, and that must not happen silently
+    CompactStalled {
+        reason: String,
+    },
     /// a dropped stream was recovered: the partial answer is kept as a real
     /// assistant message and the model continues from it (bounded per run)
     StreamRecovered {
@@ -337,6 +342,8 @@ pub fn run_agent(
     // set after each completed round, cleared wherever the loop edits history
     // in place, so a provider reading its own cache back never sees a prefix
     // that was rewritten under it.
+    // one compaction-stalled notice per run (see `compact_after_turn`)
+    let mut compact_stalled = false;
     let mut cache_stable: Option<usize> = None;
     let mut final_text = String::new();
     let mut interrupted = false;
@@ -529,6 +536,7 @@ pub fn run_agent(
         );
 
         // compaction check after each completed turn (see `compact_after_turn`)
+        let mut sink = StallSink::new(&mut compact_stalled, on_update);
         let after = compact_after_turn(
             model,
             &mut history,
@@ -536,7 +544,7 @@ pub fn run_agent(
             opts.compact.as_ref(),
             seed_boundary,
             cache_stable,
-            on_update,
+            &mut sink,
         );
         seed_boundary = after.seed_boundary;
         usage_marker = after.usage_marker;
@@ -714,7 +722,8 @@ struct AfterTurn {
 /// Compact after a completed turn when the estimate says the window is under
 /// pressure: prune oversized tool results first (no model call, and it may
 /// relieve enough to skip summarizing at all), then summarize at a turn
-/// boundary.
+/// boundary. A compaction that cannot run reports why through the sink instead
+/// of leaving the session quietly over its window.
 fn compact_after_turn(
     model: &crate::providers::ResolvedModel,
     history: &mut Vec<Msg>,
@@ -722,18 +731,21 @@ fn compact_after_turn(
     cfg: Option<&compact::CompactConfig>,
     seed_boundary: usize,
     cache_stable: Option<usize>,
-    on_update: &mut dyn FnMut(AgentUpdate),
+    sink: &mut StallSink<'_>,
 ) -> AfterTurn {
     let mut after = AfterTurn {
         seed_boundary,
         usage_marker,
         cache_stable,
     };
-    // the usage report covered everything except the assistant we just pushed
-    let (Some(marker), Some(cfg)) = (usage_marker, cfg) else {
+    let Some(cfg) = cfg else {
         return after;
     };
-    let mut estimate = compact::estimate_tokens(history, Some(marker));
+    // The usage report covered everything except the assistant we just pushed.
+    // A round whose counts never arrived is priced from the text instead (the
+    // same chars/4 math `prune_seed_to_fit` runs), because a gateway that omits
+    // usage must not silently switch the window gate off.
+    let mut estimate = compact::estimate_tokens(history, usage_marker);
     if compact::should_compact(estimate, cfg) {
         // pressure confirmed: prune oversized tool results first — it costs no
         // model call and may relieve enough to skip summarization entirely.
@@ -743,50 +755,93 @@ fn compact_after_turn(
         let pruned = compact::prune_tool_results(history, &compact::observation_dir());
         if pruned.count > 0 {
             estimate = estimate.saturating_sub(pruned.freed_tokens);
-            on_update(AgentUpdate::ToolResultsPruned {
+            (sink.on_update)(AgentUpdate::ToolResultsPruned {
                 count: pruned.count,
             });
         }
     }
     if compact::should_compact(estimate, cfg)
-        && let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent())
-        && let Ok(s) = compact::summarize(model, &history[..cut])
-        && !s.is_empty()
+        && let Err(reason) = compact_now(model, history, cfg, &mut after, &mut *sink.on_update)
     {
-        // the original task rides verbatim on top of the summary: long-running
-        // work must not drift from what was asked. On re-compaction it is
-        // recovered from the previous summary (the first user message is long
-        // gone by then).
-        let dropped = &history[..cut];
-        let task = match dropped.first() {
-            Some(Msg::Summary { text }) => compact::extract_original_task(text),
-            _ => dropped.iter().find_map(|m| match m {
-                Msg::User { text, .. } => Some(text.clone()),
-                _ => None,
-            }),
-        };
-        let task = task.map(|mut t| {
-            crate::core::text::truncate_ellipsis(&mut t, 4000);
-            t
-        });
-        let tail = history.split_off(cut);
-        history.clear();
-        history.push(Msg::Summary {
-            text: compact::compose_summary(task.as_deref(), &s),
-        });
-        history.extend(tail);
-        after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
-        on_update(AgentUpdate::Compacted { removed: cut });
-        // the rebuild moved every index: the marker's covered length no longer
-        // names anything real, so drop it until the next usage report
-        // re-establishes one, and treat the prefix below the summary as
-        // rewritten
-        after.usage_marker = None;
-        after.cache_stable = None;
+        // The history is untouched either way: the run continues, but a session
+        // that keeps growing past the window has to say why
+        sink.stalled(reason);
     }
-    // a failed summarization leaves the history untouched: the run continues,
-    // possibly hitting the window later
     after
+}
+
+/// Where a stalled compaction reports through. The notice is said once per run
+/// — a summarizer that keeps failing would otherwise repeat itself every round
+/// — while the attempt itself keeps happening every round.
+pub struct StallSink<'a> {
+    warned: &'a mut bool,
+    on_update: &'a mut dyn FnMut(AgentUpdate),
+}
+
+impl StallSink<'_> {
+    pub fn new<'a>(
+        warned: &'a mut bool,
+        on_update: &'a mut dyn FnMut(AgentUpdate),
+    ) -> StallSink<'a> {
+        StallSink { warned, on_update }
+    }
+
+    fn stalled(&mut self, reason: String) {
+        if !*self.warned {
+            *self.warned = true;
+            (self.on_update)(AgentUpdate::CompactStalled { reason });
+        }
+    }
+}
+
+/// Replace the prefix below the cut with a summary of it. `Err` names why the
+/// rebuild did not happen — the caller reports it, because a window that
+/// silently stays over its limit is the one failure compaction exists to
+/// prevent.
+fn compact_now(
+    model: &crate::providers::ResolvedModel,
+    history: &mut Vec<Msg>,
+    cfg: &compact::CompactConfig,
+    after: &mut AfterTurn,
+    on_update: &mut dyn FnMut(AgentUpdate),
+) -> Result<(), String> {
+    let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent()) else {
+        return Err("no turn boundary can be dropped without orphaning a tool result".to_string());
+    };
+    let summary = compact::summarize(model, &history[..cut])?;
+    if summary.trim().is_empty() {
+        return Err("the summarizer returned nothing".to_string());
+    }
+    // the original task rides verbatim on top of the summary: long-running
+    // work must not drift from what was asked. On re-compaction it is
+    // recovered from the previous summary (the first user message is long
+    // gone by then).
+    let dropped = &history[..cut];
+    let task = match dropped.first() {
+        Some(Msg::Summary { text }) => compact::extract_original_task(text),
+        _ => dropped.iter().find_map(|m| match m {
+            Msg::User { text, .. } => Some(text.clone()),
+            _ => None,
+        }),
+    };
+    let task = task.map(|mut t| {
+        crate::core::text::truncate_ellipsis(&mut t, 4000);
+        t
+    });
+    let tail = history.split_off(cut);
+    history.clear();
+    history.push(Msg::Summary {
+        text: compact::compose_summary(task.as_deref(), &summary),
+    });
+    history.extend(tail);
+    after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
+    on_update(AgentUpdate::Compacted { removed: cut });
+    // the rebuild moved every index: the marker's covered length no longer
+    // names anything real, so drop it until the next usage report
+    // re-establishes one, and treat the prefix below the summary as rewritten
+    after.usage_marker = None;
+    after.cache_stable = None;
+    Ok(())
 }
 
 /// The mutable sinks a tool round reports through. Bundled so the call runner

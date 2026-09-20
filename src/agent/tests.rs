@@ -233,6 +233,67 @@ fn mock_model(port: u16) -> crate::providers::ResolvedModel {
     }
 }
 
+/// A compaction that cannot run must be reported, not silently skipped: the
+/// session would otherwise keep growing past the window with nobody told, and
+/// the notice fires once per run (a summarizer that keeps failing would
+/// otherwise repeat itself every round).
+#[test]
+fn a_stalled_compaction_is_reported_once() {
+    use std::io::Write as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            read_request(&mut c);
+            // refused outright: a 400 is fatal, so the summarizer call fails at
+            // once instead of burning the connection-retry budget
+            let _ = c.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 2\r\n\r\n{}");
+        }
+    });
+    let model = mock_model(port);
+    let cfg = compact::CompactConfig {
+        context_window: 1_000,
+        reserve_tokens: 0,
+        keep_recent_tokens: 0,
+    };
+    let marker = Some((
+        0,
+        Usage {
+            input: 10_000,
+            output: 0,
+            cached: 0,
+        },
+    ));
+    let mut history = vec![Msg::user("the task"), Msg::user("more")];
+    let mut warned = false;
+    let mut updates: Vec<AgentUpdate> = Vec::new();
+    {
+        let mut push = |u: AgentUpdate| updates.push(u);
+        let mut sink = StallSink::new(&mut warned, &mut push);
+        let _ = compact_after_turn(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+    }
+    assert_eq!(
+        history.len(),
+        2,
+        "a stalled compaction leaves the seed alone"
+    );
+    let stalled = |updates: &Vec<AgentUpdate>| {
+        updates
+            .iter()
+            .filter(|u| matches!(u, AgentUpdate::CompactStalled { .. }))
+            .count()
+    };
+    assert_eq!(stalled(&updates), 1);
+    // a second over-window round still tries, and stays quiet about it
+    {
+        let mut push = |u: AgentUpdate| updates.push(u);
+        let mut sink = StallSink::new(&mut warned, &mut push);
+        let _ = compact_after_turn(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+    }
+    assert_eq!(stalled(&updates), 1);
+}
+
 /// The empty extension host every inline-server test runs under; shared as
 /// one leaked instance since `AgentOptions` borrows it.
 fn empty_extensions() -> &'static crate::agent::ext::Extensions {
