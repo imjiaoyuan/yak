@@ -196,6 +196,13 @@ fn run_task_logged(
             if attachments.len() == 1 { "" } else { "s" },
             crate::theme::err().reset
         );
+        // the queue can already crowd the request ceiling: the same heads-up
+        // the CLI prints for -a, before the pre-flight refuses anything
+        if let Some(warning) =
+            crate::providers::attachment_weight(attachments, session.max_request_bytes)
+        {
+            eprintln!("Warning: {warning}");
+        }
     }
     // cloned in, cleared on success: a failed task keeps them queued
     match session.run_task(text, attachments.clone()) {
