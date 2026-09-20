@@ -167,8 +167,15 @@ fn attach_local_files(
         let Ok(n) = file.read(&mut probe) else {
             continue;
         };
+        // the one classification point: anything the adapters would not
+        // carry as a pixel or a page is not auto-attached
         let mime = match crate::core::attachments::sniff_mime(&probe[..n]) {
-            Some(m) if m.starts_with("image/") => m,
+            Some(m)
+                if crate::core::attachments::kind_of(m)
+                    == Some(crate::core::attachments::Kind::Image) =>
+            {
+                m
+            }
             Some("application/pdf") if supports_pdf => "application/pdf",
             _ => continue,
         };

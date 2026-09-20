@@ -790,7 +790,7 @@ fn image_window_start(msgs: &[Msg]) -> Option<usize> {
     let mut seen = 0;
     for (i, m) in msgs.iter().enumerate().rev() {
         if let Msg::User { attachments, .. } = m
-            && attachments.iter().any(is_image)
+            && attachments.iter().any(|a| a.is_image())
         {
             seen += 1;
             if seen == IMAGE_TURNS_KEPT {
@@ -808,13 +808,9 @@ fn drop_images(m: &mut Msg) {
         Msg::ToolResult { attachments, .. } => attachments,
         _ => return,
     };
-    for a in attachments.iter_mut().filter(|a| is_image(a)) {
+    for a in attachments.iter_mut().filter(|a| a.is_image()) {
         a.base64_data.clear();
     }
-}
-
-fn is_image(a: &crate::providers::Attachment) -> bool {
-    a.mime_type.starts_with("image/")
 }
 
 #[cfg(test)]

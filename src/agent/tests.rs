@@ -220,6 +220,55 @@ fn later_id_and_name_do_not_clobber_earlier() {
     assert_eq!(calls[0].arguments, json!({"a": 1}));
 }
 
+/// A mock openai-compat model served on `port`: every test server below
+/// speaks its dialect.
+fn mock_model(port: u16) -> crate::providers::ResolvedModel {
+    crate::providers::ResolvedModel {
+        provider_name: "mock".into(),
+        kind: "openai-compat".into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        api_key: Some("sk-x".into()),
+        model_id: "m".into(),
+        options: vec![],
+    }
+}
+
+/// The empty extension host every inline-server test runs under; shared as
+/// one leaked instance since `AgentOptions` borrows it.
+fn empty_extensions() -> &'static crate::agent::ext::Extensions {
+    static E: std::sync::OnceLock<crate::agent::ext::Extensions> = std::sync::OnceLock::new();
+    E.get_or_init(crate::agent::ext::Extensions::empty)
+}
+
+/// The options every inline-server test runs with; `max_turns` and
+/// `token_budget` are the two dials a test actually turns, so the rest
+/// starts here and is overridden in place.
+fn test_opts() -> AgentOptions<'static> {
+    AgentOptions {
+        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
+        system: None,
+        cwd: std::env::temp_dir(),
+        max_turns: 0,
+        token_budget: 0,
+        stream: true,
+        compact: None,
+        reasoning: None,
+        hooks: empty_extensions(),
+        cache_key: None,
+    }
+}
+
+/// Callbacks that stay silent and deny every approval. Each call hands back
+/// fresh closures (leaked — the test binary is short-lived), so every test
+/// borrows its own.
+fn deny_callbacks() -> RunCallbacks<'static> {
+    RunCallbacks {
+        on_update: Box::leak(Box::new(|_| {})),
+        on_approval: Box::leak(Box::new(|_| ApprovalResponse::Deny)),
+        steer: Box::leak(Box::new(std::vec::Vec::new)),
+    }
+}
+
 /// Read one mock-server request: past the request head plus its
 /// content-length body. Shared by the inline SSE servers below.
 fn read_request(c: &mut std::net::TcpStream) {
@@ -287,27 +336,10 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     });
     use std::io::Write as _;
 
-    let model = crate::providers::ResolvedModel {
-        provider_name: "mock".into(),
-        kind: "openai-compat".into(),
-        base_url: format!("http://127.0.0.1:{port}/v1"),
-        api_key: Some("sk-x".into()),
-        model_id: "m".into(),
-        options: vec![],
-    };
+    let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 4,
-        token_budget: 0,
-        stream: true,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+    let mut opts = test_opts();
+    opts.max_turns = 4;
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -319,11 +351,7 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
             opts: &opts,
         },
         &mut approval,
-        RunCallbacks {
-            on_update: &mut |_| {},
-            on_approval: &mut |_| ApprovalResponse::Deny,
-            steer: &mut || vec![],
-        },
+        deny_callbacks(),
     )
     .expect("the run must recover from the dropped stream");
     server.join().unwrap();
@@ -380,27 +408,10 @@ fn a_stream_cut_before_any_output_is_resent() {
         }
     });
 
-    let model = crate::providers::ResolvedModel {
-        provider_name: "mock".into(),
-        kind: "openai-compat".into(),
-        base_url: format!("http://127.0.0.1:{port}/v1"),
-        api_key: Some("sk-x".into()),
-        model_id: "m".into(),
-        options: vec![],
-    };
+    let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 4,
-        token_budget: 0,
-        stream: true,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+    let mut opts = test_opts();
+    opts.max_turns = 4;
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -412,11 +423,7 @@ fn a_stream_cut_before_any_output_is_resent() {
             opts: &opts,
         },
         &mut approval,
-        RunCallbacks {
-            on_update: &mut |_| {},
-            on_approval: &mut |_| ApprovalResponse::Deny,
-            steer: &mut || vec![],
-        },
+        deny_callbacks(),
     )
     .expect("an empty drop must be resent, not fatal");
     server.join().unwrap();
@@ -470,27 +477,10 @@ fn token_budget_warns_then_stops_the_run() {
     });
     use std::io::Write as _;
 
-    let model = crate::providers::ResolvedModel {
-        provider_name: "mock".into(),
-        kind: "openai-compat".into(),
-        base_url: format!("http://127.0.0.1:{port}/v1"),
-        api_key: Some("sk-x".into()),
-        model_id: "m".into(),
-        options: vec![],
-    };
+    let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 2500,
-        stream: true,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+    let mut opts = test_opts();
+    opts.token_budget = 2500;
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -502,11 +492,7 @@ fn token_budget_warns_then_stops_the_run() {
             opts: &opts,
         },
         &mut approval,
-        RunCallbacks {
-            on_update: &mut |_| {},
-            on_approval: &mut |_| ApprovalResponse::Deny,
-            steer: &mut || vec![],
-        },
+        deny_callbacks(),
     )
     .expect("a budget stop is a normal outcome, not a failure");
     // let a hypothetical erroneous 4th request land before counting
@@ -592,27 +578,9 @@ fn a_third_identical_tool_call_reminds_the_model_to_change_approach() {
     });
     use std::io::Write as _;
 
-    let model = crate::providers::ResolvedModel {
-        provider_name: "mock".into(),
-        kind: "openai-compat".into(),
-        base_url: format!("http://127.0.0.1:{port}/v1"),
-        api_key: Some("sk-x".into()),
-        model_id: "m".into(),
-        options: vec![],
-    };
+    let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 0,
-        stream: true,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+    let opts = test_opts();
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -624,11 +592,7 @@ fn a_third_identical_tool_call_reminds_the_model_to_change_approach() {
             opts: &opts,
         },
         &mut approval,
-        RunCallbacks {
-            on_update: &mut |_| {},
-            on_approval: &mut |_| ApprovalResponse::Deny,
-            steer: &mut || vec![],
-        },
+        deny_callbacks(),
     )
     .expect("identical echoes are not a failure");
     server.join().unwrap();
@@ -726,28 +690,10 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
     });
     use std::io::Write as _;
 
-    let model = crate::providers::ResolvedModel {
-        provider_name: "mock".into(),
-        kind: "openai-compat".into(),
-        base_url: format!("http://127.0.0.1:{port}/v1"),
-        api_key: Some("sk-x".into()),
-        model_id: "m".into(),
-        options: vec![],
-    };
+    let model = mock_model(port);
     let threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(ProbeTool(threads.clone()))];
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 0,
-        stream: true,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+    let opts = test_opts();
     let caller = std::thread::current().id();
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
@@ -760,11 +706,7 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
             opts: &opts,
         },
         &mut approval,
-        RunCallbacks {
-            on_update: &mut |_| {},
-            on_approval: &mut |_| ApprovalResponse::Deny,
-            steer: &mut || vec![],
-        },
+        deny_callbacks(),
     )
     .expect("a batched read-only turn is not a failure");
     server.join().unwrap();

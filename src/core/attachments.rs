@@ -32,6 +32,14 @@ pub fn kind_of(mime: &str) -> Option<Kind> {
     }
 }
 
+impl Attachment {
+    /// The one image predicate, so budgeting and sniffing agree with the
+    /// wire adapters on what counts as an image.
+    pub fn is_image(&self) -> bool {
+        kind_of(&self.mime_type) == Some(Kind::Image)
+    }
+}
+
 /// The `format` field of an `input_audio` block; only wav and mp3 exist.
 fn audio_format(mime: &str) -> Option<&'static str> {
     match mime {

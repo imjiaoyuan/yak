@@ -17,6 +17,13 @@
 /// request ever pays for pixels the provider throws away.
 pub const MAX_EDGE: u32 = 1568;
 
+/// Ceiling on total pixels any one image may decode to, as a guard on the
+/// resize path alone: the attachment byte cap does not bound pixels (a few KB
+/// of flat color can claim a gigabyte of decoder buffer), and an image over
+/// the edge is exactly the one that would be decoded. 8192² holds any real
+/// camera or screenshot with room to spare.
+const MAX_PIXELS: u64 = 8192 * 8192;
+
 /// A normalized image and what changed.
 pub struct Prepared {
     /// Encoded bytes: PNG, or the untouched original when nothing was needed.
@@ -61,6 +68,14 @@ pub fn prepare(bytes: &[u8], mime: &str) -> Result<Option<Prepared>, String> {
         && w.max(h) <= MAX_EDGE
     {
         return Ok(Some(unchanged(bytes, mime, (w, h))));
+    }
+    // guard the resize path (an oversized image is exactly the one that
+    // decodes): the file cap does not bound pixels, and a few KB of flat
+    // color can claim a gigabyte of decoder buffer
+    if let Some((w, h)) = probe
+        && u64::from(w) * u64::from(h) > MAX_PIXELS
+    {
+        return Err(format!("image too large to resize: {w}x{h} pixels"));
     }
     let img = if png {
         decode_png(bytes)?
@@ -414,6 +429,25 @@ mod tests {
     fn anything_but_an_image_mime_is_not_ours_to_touch() {
         assert!(prepare(b"%PDF-1.7", "application/pdf").unwrap().is_none());
         assert!(prepare(b"hello", "").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_absurd_pixel_count_is_refused_before_decoding() {
+        // a PNG that is nothing but its signature and IHDR claiming
+        // 20000x20000: the refusal is decided off those 24 bytes, so the
+        // test needs no pixels and the decode none either
+        let mut bomb = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        bomb.extend_from_slice(&13u32.to_be_bytes());
+        bomb.extend_from_slice(b"IHDR");
+        bomb.extend_from_slice(&20000u32.to_be_bytes());
+        bomb.extend_from_slice(&20000u32.to_be_bytes());
+        bomb.extend_from_slice(&[8, 2, 0, 0, 0]); // depth, rgb, compression, filter, interlace
+        bomb.extend_from_slice(&[0, 0, 0, 0]); // crc: never read
+        let err = match prepare(&bomb, "image/png") {
+            Err(e) => e,
+            Ok(_) => panic!("an absurd canvas must not be decoded"),
+        };
+        assert!(err.contains("20000x20000"), "{err}");
     }
 
     #[test]
