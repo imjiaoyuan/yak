@@ -77,7 +77,8 @@ x86_64-gnu plus x86_64/aarch64-musl Linux; sha256 checksums). Repo-root `install
 are the portable installer/updaters over those assets: re-running resolves the latest release and
 compares versions (`updating old -> new`; equal versions stay unless `LLM_FORCE=1`), with
 `LLM_VERSION`/`LLM_REPO`/`LLM_INSTALL_DIR` overrides and a user-level `~/.local/bin` everywhere.
-Keep them in sync with the release asset names (`llm-<target>.tar.gz` + `.sha256`). The Pages
+Keep them in sync with the release asset names (`llm-<target>.tar.gz` on Unix, `llm-<target>.zip` on
+Windows, each with a `.sha256`). The Pages
 site (`https://jiaoyuan.org/llm/`, source = main root) serves only the two installer scripts,
 never binaries.
 
