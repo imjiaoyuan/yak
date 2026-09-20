@@ -540,128 +540,20 @@ pub fn run_agent(
             break;
         }
         // Read-only calls from one assistant message have no ordering
-        // dependency on each other, so they run concurrently (other agents
-        // do the same); mutating and exec calls stay strictly serial. The
-        // batch is gated first (approvals prompt, extension hooks rewrite
-        // args, ToolStart prints), executed in parallel, then finished in
-        // the original order so history and tool results stay deterministic.
-        // A batched turn therefore emits its `$` action lines before the
-        // results; the renderer's per-tool log state is unaffected because
-        // no built-in read tool streams, and the results themselves still
-        // arrive in call order.
-        let readonly_batch = tool_calls.len() > 1
-            && !crate::core::http::interrupted()
-            && tool_calls.iter().all(|c| {
-                tools
-                    .iter()
-                    .find(|t| t.name() == c.name)
-                    .is_some_and(|t| t.tier() == approval::Tier::Read)
-            });
-        if readonly_batch {
-            let mut prepared: Vec<(ToolCall, Result<ClearedCall, CallRefusal>)> = Vec::new();
-            for mut call in tool_calls {
-                let mut ctx = call_ctx(
-                    tools,
-                    &opts.cwd,
-                    approval,
-                    on_approval,
-                    on_update,
-                    opts.hooks,
-                );
-                let cleared = prepare_call(&mut call, &mut ctx);
-                prepared.push((call, cleared));
-            }
-            let outs: Vec<(tools::ToolOutput, Vec<String>)> = std::thread::scope(|scope| {
-                let handles: Vec<_> = prepared
-                    .iter()
-                    .map(|(call, cleared)| match cleared {
-                        Ok(cleared) => {
-                            let tool = cleared.tool;
-                            let cwd = opts.cwd.as_path();
-                            Some(scope.spawn(move || {
-                                // read-only tools do not stream: buffer any
-                                // lines and replay them in order below
-                                let mut logs: Vec<String> = Vec::new();
-                                let out = tool.execute_call(call, cwd, &mut |l: &str| {
-                                    logs.push(l.to_string())
-                                });
-                                (out, logs)
-                            }))
-                        }
-                        Err(_) => None,
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| match h {
-                        Some(h) => h.join().unwrap_or_else(|_| {
-                            (tools::ToolOutput::err("tool panicked"), Vec::new())
-                        }),
-                        None => (tools::ToolOutput::err(String::new()), Vec::new()),
-                    })
-                    .collect()
-            });
-            for ((call, cleared), (out, logs)) in prepared.into_iter().zip(outs) {
-                for line in &logs {
-                    on_update(AgentUpdate::ToolLog(line.clone()));
-                }
-                let (out, repeat_note) = match cleared {
-                    Err(denied) => (denied.into(), None),
-                    Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
-                };
-                let mut ctx = call_ctx(
-                    tools,
-                    &opts.cwd,
-                    approval,
-                    on_approval,
-                    on_update,
-                    opts.hooks,
-                );
-                finish_call(&call, out, &mut ctx, repeat_note, &mut history);
-            }
-        } else {
-            for mut call in tool_calls {
-                if crate::core::http::interrupted() {
-                    interrupted = true;
-                    history.push(Msg::ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: "interrupted by user".to_string(),
-                        error: Some(crate::providers::ToolError::Interrupted),
-                        attachments: Vec::new(),
-                    });
-                    continue;
-                }
-                let mut ctx = call_ctx(
-                    tools,
-                    &opts.cwd,
-                    approval,
-                    on_approval,
-                    on_update,
-                    opts.hooks,
-                );
-                let (out, repeat_note) = match prepare_call(&mut call, &mut ctx) {
-                    Err(denied) => (denied.into(), None),
-                    Ok(cleared) => {
-                        let mut log =
-                            |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
-                        let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);
-                        // tool_result fires once, in finish_call, so denied
-                        // and executed calls notify hooks identically
-                        (out, repeats.observe(&call.name, &call.arguments))
-                    }
-                };
-                let mut ctx = call_ctx(
-                    tools,
-                    &opts.cwd,
-                    approval,
-                    on_approval,
-                    on_update,
-                    opts.hooks,
-                );
-                finish_call(&call, out, &mut ctx, repeat_note, &mut history);
-            }
-        }
+        // dependency on each other, so they run concurrently; mutating and exec
+        // calls stay strictly serial (see `run_tool_calls`).
+        interrupted = run_tool_calls(
+            tool_calls,
+            tools,
+            opts,
+            CallSinks {
+                approval: &mut *approval,
+                on_approval: &mut *on_approval,
+                on_update: &mut *on_update,
+                repeats: &mut repeats,
+            },
+            &mut history,
+        );
         if interrupted {
             break;
         }
@@ -873,6 +765,152 @@ fn compact_after_turn(
     // a failed summarization leaves the history untouched: the run continues,
     // possibly hitting the window later
     after
+}
+
+/// The mutable sinks a tool round reports through. Bundled so the call runner
+/// takes one context instead of a handful of mutably borrowed arguments.
+struct CallSinks<'a> {
+    approval: &'a mut approval::ApprovalConfig,
+    on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    on_update: &'a mut dyn FnMut(AgentUpdate),
+    repeats: &'a mut RepeatGuard,
+}
+
+/// Execute one assistant message's tool calls: gate them first (extension
+/// `tool_call` hooks, the approval matrix, ToolStart chrome), run them — a batch
+/// of read-only calls concurrently, anything else strictly serially — then
+/// finish them in call order so history and tool results stay deterministic. A
+/// batched turn therefore emits its `$` action lines before the results; the
+/// renderer's per-tool log state is unaffected because no built-in read tool
+/// streams. Returns whether the user interrupted mid-batch.
+fn run_tool_calls(
+    tool_calls: Vec<ToolCall>,
+    tools: &[Box<dyn tools::Tool>],
+    opts: &AgentOptions<'_>,
+    sinks: CallSinks<'_>,
+    history: &mut Vec<Msg>,
+) -> bool {
+    let CallSinks {
+        approval,
+        on_approval,
+        on_update,
+        repeats,
+    } = sinks;
+    let mut interrupted = false;
+    // other agents run a batch of read-only calls together; anything that
+    // mutates or executes stays serial
+    let readonly_batch = tool_calls.len() > 1
+        && !crate::core::http::interrupted()
+        && tool_calls.iter().all(|c| {
+            tools
+                .iter()
+                .find(|t| t.name() == c.name)
+                .is_some_and(|t| t.tier() == approval::Tier::Read)
+        });
+    if readonly_batch {
+        let mut prepared: Vec<(ToolCall, Result<ClearedCall, CallRefusal>)> = Vec::new();
+        for mut call in tool_calls {
+            let mut ctx = call_ctx(
+                tools,
+                &opts.cwd,
+                approval,
+                on_approval,
+                on_update,
+                opts.hooks,
+            );
+            let cleared = prepare_call(&mut call, &mut ctx);
+            prepared.push((call, cleared));
+        }
+        let outs: Vec<(tools::ToolOutput, Vec<String>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = prepared
+                .iter()
+                .map(|(call, cleared)| match cleared {
+                    Ok(cleared) => {
+                        let tool = cleared.tool;
+                        let cwd = opts.cwd.as_path();
+                        Some(scope.spawn(move || {
+                            // read-only tools do not stream: buffer any lines and
+                            // replay them in order below
+                            let mut logs: Vec<String> = Vec::new();
+                            let out = tool
+                                .execute_call(call, cwd, &mut |l: &str| logs.push(l.to_string()));
+                            (out, logs)
+                        }))
+                    }
+                    Err(_) => None,
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| match h {
+                    Some(h) => h
+                        .join()
+                        .unwrap_or_else(|_| (tools::ToolOutput::err("tool panicked"), Vec::new())),
+                    None => (tools::ToolOutput::err(String::new()), Vec::new()),
+                })
+                .collect()
+        });
+        for ((call, cleared), (out, logs)) in prepared.into_iter().zip(outs) {
+            for line in &logs {
+                on_update(AgentUpdate::ToolLog(line.clone()));
+            }
+            let (out, repeat_note) = match cleared {
+                Err(denied) => (denied.into(), None),
+                Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
+            };
+            let mut ctx = call_ctx(
+                tools,
+                &opts.cwd,
+                approval,
+                on_approval,
+                on_update,
+                opts.hooks,
+            );
+            finish_call(&call, out, &mut ctx, repeat_note, history);
+        }
+    } else {
+        for mut call in tool_calls {
+            if crate::core::http::interrupted() {
+                interrupted = true;
+                history.push(Msg::ToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content: "interrupted by user".to_string(),
+                    error: Some(crate::providers::ToolError::Interrupted),
+                    attachments: Vec::new(),
+                });
+                continue;
+            }
+            let mut ctx = call_ctx(
+                tools,
+                &opts.cwd,
+                approval,
+                on_approval,
+                on_update,
+                opts.hooks,
+            );
+            let (out, repeat_note) = match prepare_call(&mut call, &mut ctx) {
+                Err(denied) => (denied.into(), None),
+                Ok(cleared) => {
+                    let mut log = |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
+                    let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);
+                    // tool_result fires once, in finish_call, so denied and
+                    // executed calls notify hooks identically
+                    (out, repeats.observe(&call.name, &call.arguments))
+                }
+            };
+            let mut ctx = call_ctx(
+                tools,
+                &opts.cwd,
+                approval,
+                on_approval,
+                on_update,
+                opts.hooks,
+            );
+            finish_call(&call, out, &mut ctx, repeat_note, history);
+        }
+    }
+    interrupted
 }
 
 /// Terminal preview of a tool result: the first ten non-empty lines, each
