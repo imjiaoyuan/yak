@@ -987,7 +987,7 @@ fn repl_command(
                 r = p.reset
             );
             eprintln!(
-                "  {d}tokens  {r}↑{} ↓{}{} · approval {} · tools {} · thinking {}",
+                "  {d}tokens  {r}cumulative input {} · output {}{} · approval {} · tools {} · thinking {}",
                 humanize_tokens(session.tokens.0),
                 humanize_tokens(session.tokens.1),
                 if session.tokens_cached > 0 {
@@ -997,15 +997,15 @@ fn repl_command(
                         cached: session.tokens_cached,
                     }
                     .cache_percent();
-                    // the per-turn figure is what a compaction or prefix
-                    // change actually costs; the average lags behind it
+                    // the per-round figure is what a compaction or prefix
+                    // change actually costs; the session average lags behind it
                     match session
                         .last_usage
                         .filter(|u| u.input > 0 && u.cached > 0)
                         .map(|u| u.cache_percent())
                     {
                         Some(last) if last != cumulative => {
-                            format!(" · cache {cumulative}% (last {last}%)")
+                            format!(" · cache {cumulative}% (last round {last}%)")
                         }
                         _ => format!(" · cache {cumulative}%"),
                     }

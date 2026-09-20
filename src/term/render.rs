@@ -284,9 +284,10 @@ pub fn humanize_tokens(n: u64) -> String {
 // TaskView: the agent-style task presentation shared by every mode
 
 /// Spinner with phase relabel, a single dim `thinking ... end` trace line,
-/// the answer stream through the [Renderer], and a cyan `secs · ↑in ↓out`
-/// footer. `indent` is the chrome margin (agent 2, prompt/chat 0); `live`
-/// false disables the spinner (quiet/JSON modes).
+/// the answer stream through the [Renderer], and a dim `secs · this task:
+/// input N · output N · cache N%` footer. `indent` is the chrome margin
+/// (agent 2, prompt/chat 0); `live` false disables the spinner (quiet/JSON
+/// modes).
 pub struct TaskView {
     /// shared with the [`crate::term::ticker::DrainTicker`] heartbeat, which
     /// drains paced text from a timer thread while no delta arrives
@@ -543,9 +544,13 @@ impl TaskView {
         self.renderer.lock().unwrap().finish_stream();
     }
 
-    /// The `secs · ↑in ↓out` line, right before the prompt returns. When the
-    /// provider reports cache hits, the cached share of the input rides along
-    /// so prefix-cache health is visible at a glance.
+    /// The `secs · this task: input N · output N · cache N%` line, right
+    /// before the prompt returns. Every field is this task's own: every round
+    /// re-sends the whole prompt, so the input is what the run summed across
+    /// its rounds, never a context size. Session-lifetime counters and the
+    /// window's occupancy live in `/status`, so the two are never read as the
+    /// same number. When the provider reports cache hits, the cached share of
+    /// the input rides along so prefix-cache health is visible at a glance.
     pub fn footer(&mut self, secs: f64) {
         self.stop_ticker();
         self.stop_pacer();
@@ -562,7 +567,7 @@ impl TaskView {
                 String::new()
             };
             eprintln!(
-                "{}{pad}{secs:.1}s · ↑{} ↓{}{cache}{}",
+                "{}{pad}{secs:.1}s · this task: input {} · output {}{cache}{}",
                 p.gray,
                 humanize_tokens(total.input),
                 humanize_tokens(total.output),
