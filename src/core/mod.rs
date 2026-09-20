@@ -15,6 +15,7 @@ pub mod export;
 pub mod fsx;
 pub mod http;
 pub mod paths;
+pub mod prompt_image;
 pub mod render_md;
 pub mod templates;
 #[cfg(test)]

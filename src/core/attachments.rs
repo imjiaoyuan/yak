@@ -91,6 +91,21 @@ pub fn reload(a: &Attachment) -> Option<Attachment> {
     }
     let path = a.path.as_deref()?;
     let bytes = std::fs::read(path).ok()?;
+    // the store keeps the original file's path, never a rewritten copy, so
+    // the same normalization the load path applied runs again here — a
+    // resumed turn sends the shape the turn that made it sent
+    let mime = if a.mime_type.is_empty() {
+        sniff_mime(&bytes).unwrap_or_default().to_string()
+    } else {
+        a.mime_type.clone()
+    };
+    let bytes = match crate::core::prompt_image::prepare(&bytes, &mime) {
+        Ok(Some(prepared)) => prepared.bytes,
+        // a payload our decoder rejects rides through as it was: the file is
+        // there and the provider may well accept what we could not read, so a
+        // resume must not turn it into "bytes not available"
+        Ok(None) | Err(_) => bytes,
+    };
     Some(Attachment {
         base64_data: crate::b64::encode(&bytes),
         ..a.clone()
@@ -114,6 +129,9 @@ pub struct Loaded {
     pub url: Option<String>,
     pub mime_type: Option<String>,
     pub content: Vec<u8>,
+    /// Set when normalization changed the picture (a downscale): the caller
+    /// folds it into the prompt so the model never measures a scaled image.
+    pub notice: Option<String>,
 }
 
 impl Loaded {
@@ -193,7 +211,35 @@ pub fn load_args(args: &crate::core::args::ParsedArgs) -> Result<Vec<Loaded>, St
 
 /// Resolve one `-a`/`--at` reference: `-` reads stdin, http(s) URLs are
 /// fetched (content-type wins the mime), anything else is a local file.
+/// Whatever the source, the payload is normalized on the way out (see
+/// `normalize`), so no caller can put an oversized image on the wire.
 pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
+    normalize(load_raw(reference, mime)?)
+}
+
+/// Fold each attachment's notice into the text the model reads, one per line.
+pub fn fold_notices<'a>(text: &mut String, notices: impl IntoIterator<Item = &'a str>) {
+    for notice in notices {
+        text.push('\n');
+        text.push_str(notice);
+    }
+}
+
+/// Normalize one loaded payload: an image past the long-edge ceiling is
+/// decoded, downscaled and re-encoded here, before any request can carry it.
+fn normalize(mut loaded: Loaded) -> Result<Loaded, String> {
+    let Some(mime) = loaded.mime_type.clone() else {
+        return Ok(loaded);
+    };
+    if let Some(prepared) = crate::core::prompt_image::prepare(&loaded.content, &mime)? {
+        loaded.notice = prepared.resized().then(|| prepared.notice());
+        loaded.content = prepared.bytes;
+        loaded.mime_type = Some(prepared.mime);
+    }
+    Ok(loaded)
+}
+
+fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
     if reference == "-" {
         let mut buf = Vec::new();
         std::io::stdin()
@@ -206,6 +252,7 @@ pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
                 .map(String::from)
                 .or_else(|| sniff_mime(&buf).map(String::from)),
             content: buf,
+            notice: None,
         });
     }
     if reference.starts_with("http://") || reference.starts_with("https://") {
@@ -220,6 +267,7 @@ pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
             url: Some(reference.to_string()),
             mime_type: Some(mime_type),
             content: buf,
+            notice: None,
         })
     } else {
         let path = std::path::Path::new(reference);
@@ -247,6 +295,7 @@ pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
             url: None,
             mime_type: Some(mime_type),
             content: data,
+            notice: None,
         })
     }
 }
@@ -396,6 +445,52 @@ mod tests {
     }
 
     #[test]
+    fn load_scales_an_oversized_image_and_reports_it() {
+        let dir = crate::core::testutil::scratch_dir("att-scale");
+        let png = |w: u32, h: u32| {
+            let mut bytes = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut bytes, w, h);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.set_color(png::ColorType::Rgb);
+                let mut writer = encoder.write_header().unwrap();
+                writer
+                    .write_image_data(&vec![90u8; (w * h * 3) as usize])
+                    .unwrap();
+            }
+            bytes
+        };
+
+        let big = dir.join("shot.png");
+        let original = png(3000, 1000);
+        std::fs::write(&big, &original).unwrap();
+        let loaded = load(big.to_str().unwrap(), Some("image/png")).unwrap();
+        assert_eq!(loaded.path.as_deref(), big.to_str(), "provenance is kept");
+        let notice = loaded.notice.unwrap();
+        assert!(notice.contains("3000x1000"), "{notice}");
+        assert!(notice.contains("1568x522"), "{notice}");
+        assert!(
+            loaded.content.len() < original.len(),
+            "the payload shrank: {} vs {}",
+            loaded.content.len(),
+            original.len()
+        );
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&loaded.content));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let info = decoder.read_info().unwrap().info().clone();
+        assert_eq!((info.width, info.height), (1568, 522));
+
+        // one already inside the ceiling rides byte for byte, and silently
+        let small = dir.join("small.png");
+        let original = png(20, 20);
+        std::fs::write(&small, &original).unwrap();
+        let loaded = load(small.to_str().unwrap(), Some("image/png")).unwrap();
+        assert!(loaded.notice.is_none());
+        assert_eq!(loaded.content, original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sniff_matches_common_magics() {
         assert_eq!(
             sniff_mime(&[0x89, b'P', b'N', b'G', 0, 0]),
@@ -467,6 +562,7 @@ mod tests {
             url: Some("https://example.com/a/shot.png?token=1".into()),
             mime_type: None,
             content: Vec::new(),
+            notice: None,
         };
         assert_eq!(l.file_name().as_deref(), Some("shot.png"));
     }

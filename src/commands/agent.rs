@@ -155,10 +155,14 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let settings = crate::agent::settings::load();
 
     // attachments: -a path|URL|- and --at path mimetype ride the first task
-    let attachments: Vec<crate::providers::Attachment> = crate::core::attachments::load_args(args)?
-        .into_iter()
-        .map(|l| l.request())
-        .collect();
+    let loaded = crate::core::attachments::load_args(args)?;
+    // a downscaled image says so, so the model never measures scaled pixels
+    crate::core::attachments::fold_notices(
+        &mut prompt,
+        loaded.iter().filter_map(|l| l.notice.as_deref()),
+    );
+    let attachments: Vec<crate::providers::Attachment> =
+        loaded.into_iter().map(|l| l.request()).collect();
 
     // session continuation: -c = most recent (this directory's, else the
     // newest anywhere), --session/--cid = given id

@@ -412,6 +412,10 @@ pub fn run_agent(
         // Context pressure, priced once per round to serve the note and the
         // compaction check below; under real pressure the stale prefix is
         // rewritten here too (see `price_and_rewrite`).
+        // Every image in the request is billed every round, so only the newest
+        // image turns keep their pixels — including anything a tool result or
+        // a steering message added mid-run.
+        crate::agent::session::budget_images(&mut history);
         let used_tokens = price_and_rewrite(&mut history, usage_marker, opts, on_update);
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek

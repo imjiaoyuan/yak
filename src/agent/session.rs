@@ -745,7 +745,7 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
             {
                 continue;
             }
-            msgs.push(rehydrated(m));
+            msgs.push(m.clone());
         }
         // the final plain assistant was popped out of `messages` (it doubles
         // as the turn response); ride it back in so a resume sees the answer
@@ -753,7 +753,66 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
             msgs.push(Msg::assistant(turn.response.clone()));
         }
     }
+    // Only the kept window is worth reading off disk: an older image rides as
+    // provenance and the adapters render the missing payload as a note.
+    let start = image_window_start(&msgs).unwrap_or(0);
+    for m in &mut msgs[start..] {
+        let restored = rehydrated(m);
+        *m = restored;
+    }
     (msgs, system)
+}
+
+/// How many of the newest image-carrying user turns keep their pixels on a
+/// replay. Every image in the request is billed on every request, so a thread
+/// that once carried screenshots would keep paying for them; older turns keep
+/// their provenance and the adapters render the dropped payload as a note.
+const IMAGE_TURNS_KEPT: usize = 2;
+
+/// Drop the pixels from images older than the newest `IMAGE_TURNS_KEPT` user
+/// turns that carry any — from tool results too, since they belong to the turn
+/// they ran in.
+pub(crate) fn budget_images(msgs: &mut [Msg]) {
+    let Some(start) = image_window_start(msgs) else {
+        return;
+    };
+    for m in &mut msgs[..start] {
+        drop_images(m);
+    }
+}
+
+/// Where the kept image window starts: the index of the `IMAGE_TURNS_KEPT`-th
+/// newest image-carrying user turn. `None` when the history holds fewer image
+/// turns than the cap, so nothing is taken away.
+fn image_window_start(msgs: &[Msg]) -> Option<usize> {
+    let mut seen = 0;
+    for (i, m) in msgs.iter().enumerate().rev() {
+        if let Msg::User { attachments, .. } = m
+            && attachments.iter().any(is_image)
+        {
+            seen += 1;
+            if seen == IMAGE_TURNS_KEPT {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Leave an attachment's provenance and take only its pixels.
+fn drop_images(m: &mut Msg) {
+    let attachments = match m {
+        Msg::User { attachments, .. } => attachments,
+        Msg::ToolResult { attachments, .. } => attachments,
+        _ => return,
+    };
+    for a in attachments.iter_mut().filter(|a| is_image(a)) {
+        a.base64_data.clear();
+    }
+}
+
+fn is_image(a: &crate::providers::Attachment) -> bool {
+    a.mime_type.starts_with("image/")
 }
 
 #[cfg(test)]
@@ -1089,6 +1148,119 @@ mod tests {
 
     /// Resume puts the payloads back from their local files; a source that is
     /// gone stays a record, which the adapters report to the model as a note.
+    #[test]
+    fn only_the_newest_image_turns_keep_their_pixels() {
+        let image_turn = |text: &str| Msg::User {
+            text: text.to_string(),
+            attachments: vec![crate::core::attachments::from_bytes(
+                Some("image/png"),
+                vec![1, 2, 3],
+            )],
+        };
+        let mut msgs = vec![
+            image_turn("one"),
+            Msg::assistant("ok".to_string()),
+            image_turn("two"),
+            image_turn("three"),
+        ];
+        budget_images(&mut msgs);
+        let dropped = |m: &Msg| match m {
+            Msg::User { attachments, .. } => attachments[0].base64_data.is_empty(),
+            _ => panic!("not a user turn"),
+        };
+        assert!(dropped(&msgs[0]), "the oldest image rides as a note");
+        assert!(!dropped(&msgs[2]), "the newest two keep their pixels");
+        assert!(!dropped(&msgs[3]));
+    }
+
+    #[test]
+    fn an_old_tool_results_images_are_budgeted_too() {
+        let shot = || {
+            vec![crate::core::attachments::from_bytes(
+                Some("image/png"),
+                vec![1, 2, 3],
+            )]
+        };
+        let mut msgs = vec![
+            Msg::User {
+                text: "old".into(),
+                attachments: shot(),
+            },
+            Msg::ToolResult {
+                call_id: "1".into(),
+                name: "read".into(),
+                content: "shot".into(),
+                error: None,
+                attachments: shot(),
+            },
+            Msg::User {
+                text: "middle".into(),
+                attachments: shot(),
+            },
+            Msg::User {
+                text: "new".into(),
+                attachments: shot(),
+            },
+        ];
+        budget_images(&mut msgs);
+        let dropped = |m: &Msg| match m {
+            Msg::User { attachments, .. } | Msg::ToolResult { attachments, .. } => {
+                attachments[0].base64_data.is_empty()
+            }
+            _ => panic!("not an image carrier"),
+        };
+        assert!(dropped(&msgs[0]), "the old turn's screenshot goes");
+        assert!(dropped(&msgs[1]), "and the tool result that ran in it");
+        assert!(!dropped(&msgs[2]), "the newest two keep their pixels");
+        assert!(!dropped(&msgs[3]));
+    }
+
+    #[test]
+    fn a_resume_only_reads_the_images_it_keeps() {
+        let dir = crate::core::testutil::scratch_dir("rehydrate-window");
+        let turn = |n: usize| {
+            let file = dir.join(format!("shot{n}.png"));
+            std::fs::write(&file, format!("bytes{n}")).unwrap();
+            StoredTurn {
+                v: crate::core::threads::THREAD_FORMAT_VERSION,
+                id: format!("t{n}"),
+                ts: "2026-08-23T01:00:00+00:00".into(),
+                mode: "agent".into(),
+                model: "prov/m".into(),
+                cwd: None,
+                system: None,
+                prompt: format!("look {n}"),
+                response: String::new(),
+                reasoning: None,
+                usage: None,
+                duration_ms: None,
+                options: Vec::new(),
+                messages: vec![Msg::user_with(
+                    format!("look {n}").as_str(),
+                    vec![crate::providers::Attachment {
+                        mime_type: "image/png".into(),
+                        base64_data: String::new(),
+                        filename: None,
+                        path: Some(file.display().to_string()),
+                        url: None,
+                    }],
+                )],
+            }
+        };
+        let (msgs, _) = rebuild_turns(&[turn(0), turn(1), turn(2)]);
+        let payload = |i: usize| match &msgs[i] {
+            Msg::User { attachments, .. } => attachments[0].base64_data.clone(),
+            _ => panic!("expected the stored user message"),
+        };
+        assert!(
+            payload(0).is_empty(),
+            "the oldest image is not even read off disk"
+        );
+        assert_eq!(payload(1), crate::b64::encode(b"bytes1"));
+        assert_eq!(payload(2), crate::b64::encode(b"bytes2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn resume_reloads_payloads_from_their_local_file() {
         let dir = crate::core::testutil::scratch_dir("rehydrate");

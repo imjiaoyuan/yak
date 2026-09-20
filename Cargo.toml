@@ -5,10 +5,12 @@ edition = "2024"
 description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."
 
 [dependencies]
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 unicode-width = "0.2"
 ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
+zune-jpeg = "0.5.15"
 
 [profile.release]
 lto = "thin"
