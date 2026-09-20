@@ -148,6 +148,19 @@ pub fn resolve(
             "command matches blacklist pattern '{pattern}' — approval required"
         ));
     }
+    // the `outside-cwd` directive gives a path leaving the working directory
+    // the same standing a matched pattern has — it asks in either mode
+    // unless `a` spared it this session
+    if escapes_cwd
+        && cfg.blacklist.asks_outside_cwd()
+        && !cfg
+            .blacklist_session_allows
+            .iter()
+            .any(|a| a == crate::agent::blacklist::OUTSIDE_CWD)
+    {
+        blacklist_ask =
+            Some("path outside the working directory (blacklist outside-cwd)".to_string());
+    }
     if let (Tier::Exec, Some(cmd)) = (tier, bash_command)
         && let Some(reason) = forbidden_command(cmd)
     {
@@ -655,6 +668,40 @@ mod tests {
         assert!(matches!(exec, Decision::Ask(_)));
         assert_eq!(
             resolve("bash", Tier::Exec, true, &cfg(Mode::Yolo, &[]), None),
+            Decision::Auto
+        );
+    }
+
+    #[test]
+    fn the_outside_cwd_directive_asks_in_either_mode() {
+        let mut config = cfg(Mode::Yolo, &[]);
+        config.blacklist = crate::agent::blacklist::Blacklist::parse("outside-cwd");
+        // yolo runs everything by default; the directive asks for a path
+        // that leaves the working directory, any tier
+        assert!(matches!(
+            resolve("read", Tier::Read, true, &config, None),
+            Decision::Ask(_)
+        ));
+        assert!(matches!(
+            resolve("write", Tier::Write, true, &config, None),
+            Decision::Ask(_)
+        ));
+        assert_eq!(
+            resolve("read", Tier::Read, false, &config, None),
+            Decision::Auto,
+            "a path inside stays free"
+        );
+        // an `a` answer spared the directive for the session
+        config
+            .blacklist_session_allows
+            .push(crate::agent::blacklist::OUTSIDE_CWD.to_string());
+        assert_eq!(
+            resolve("read", Tier::Read, true, &config, None),
+            Decision::Auto
+        );
+        // and without the directive, yolo never asks
+        assert_eq!(
+            resolve("read", Tier::Read, true, &cfg(Mode::Yolo, &[]), None),
             Decision::Auto
         );
     }

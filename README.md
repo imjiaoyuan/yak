@@ -78,7 +78,9 @@ in yolo *and* ask mode, and no config or file edit can re-enable them.
 `.llm/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the
 hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line
 is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment
-(`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded
+(`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. One line is a
+directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
+for approval in either mode (`!outside-cwd` switches it off). The file is seeded
 with the syntax as comments; deleting it just resets those comments.
 
 Want to approve things yourself? Use `--approval-mode ask` for one run, or put
@@ -171,9 +173,10 @@ Images, PDFs, wav/mp3 clips and plain text (.txt, .md, .csv, source files) are s
 content blocks. Text becomes a document block on Anthropic models and an extra text part elsewhere.
 Anything the chosen model cannot accept is refused before the request leaves your machine.
 
-In a session, ctrl+v pastes the clipboard image as a temp-file path you can see and edit, and any
-local image path you type attaches itself. Long conversations keep only the newest image
-attachments; older ones collapse into short text notes.
+In a session, ctrl+v pastes the clipboard image as a short `[paste #N image]` token (the
+temp-file path rides underneath and attaches on submit), and any local image path you type attaches
+itself. Long conversations keep only the newest image attachments; older ones collapse into short
+text notes.
 
 ### Sessions
 

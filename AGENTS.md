@@ -205,7 +205,10 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   or config `approval_mode = "always-ask"` restores prompting. Per-tool policies live in
   `[agent] tools` (`allow`/`deny`/`prompt`) and `--tools` narrows the set.
 - **Blacklist** (`blacklist.rs`): gitignore-style files (`~/.llm/blacklist`, project
-  `.llm/blacklist`, project lines win) that only *add* refusals on top of the hardcoded ones.
+  `.llm/blacklist`, project lines win) that only *add* refusals on top of the hardcoded ones. One
+  line is a directive rather than a pattern: `outside-cwd` promotes any path leaving the working
+  directory to a prompt in either mode (a `!outside-cwd` line switches it off; answering `a`
+  spares it for the session).
 - **Compaction** (`compact.rs`): estimate tokens (last usage + chars/4 tail), cut at a
   boundary, summarize, plus a tool-result pruner at compaction pressure
   (`prune_tool_results`: results over 8192 chars become head 4096 + a middle marker + tail 1024

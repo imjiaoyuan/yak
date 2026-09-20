@@ -1123,8 +1123,19 @@ fn gate_call<'a>(
     let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
     // a bash command that hit the ask-list carries its pattern down to the
     // prompt (highlighted there) and to the `a` answer, which spares the
-    // pattern — not the whole bash tool — for the session
-    let matched_pattern = bash_command.and_then(|cmd| approval::blacklist_hit(approval, cmd));
+    // pattern — not the whole bash tool — for the session. The outside-cwd
+    // directive rides the same channel as a pseudo-pattern.
+    let matched_pattern = bash_command
+        .and_then(|cmd| approval::blacklist_hit(approval, cmd))
+        .or_else(|| {
+            (escapes
+                && approval.blacklist.asks_outside_cwd()
+                && !approval
+                    .blacklist_session_allows
+                    .iter()
+                    .any(|a| a == crate::agent::blacklist::OUTSIDE_CWD))
+            .then(|| crate::agent::blacklist::OUTSIDE_CWD.to_string())
+        });
     // a blacklist ask prompts even when an extension said allow:
     // gating every run of the pattern is the file's whole point
     if ask && (!extension_allowed || matched_pattern.is_some()) {

@@ -20,11 +20,19 @@
 //! - a pattern with whitespace matches the **whole segment** from its first
 //!   word: `rm -rf /` denies `rm -rf /` but not `rm notes.txt`
 //! - globs `*`, `?`, `[...]` work within a word: `mkfs*`, `git push --force*`
+//! - one directive, not a pattern: `outside-cwd` makes any tool call whose
+//!   path leaves the working directory ask for approval in either mode;
+//!   `!outside-cwd` switches it back off (last line wins)
 //!
 //! A hit asks for approval — even in yolo; the command runs only after
 //! the user allows it (`a` spares the pattern for the session).
 
 use std::path::Path;
+
+/// The directive line, and the pseudo-pattern reported at the approval
+/// prompt when it fires: answering `a` spares the directive, not the whole
+/// tool, for the session.
+pub const OUTSIDE_CWD: &str = "outside-cwd";
 
 /// One blacklist entry, already lowered for case-insensitive matching.
 #[derive(Debug, Clone)]
@@ -51,12 +59,15 @@ pub enum Match {
 #[derive(Debug, Default, Clone)]
 pub struct Blacklist {
     entries: Vec<Entry>,
+    /// the `outside-cwd` directive is on (last line wins)
+    ask_outside_cwd: bool,
 }
 
 impl Blacklist {
     /// Parse the text of one blacklist file.
     pub fn parse(text: &str) -> Blacklist {
         let mut entries = Vec::new();
+        let mut ask_outside_cwd = false;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -69,33 +80,57 @@ impl Blacklist {
             if body.is_empty() {
                 continue;
             }
+            if body.eq_ignore_ascii_case(OUTSIDE_CWD) {
+                ask_outside_cwd = !allow;
+                continue;
+            }
             entries.push(Entry {
                 pattern: body.to_lowercase(),
                 allow,
             });
         }
-        Blacklist { entries }
+        Blacklist {
+            entries,
+            ask_outside_cwd,
+        }
+    }
+
+    /// Whether the `outside-cwd` directive is on.
+    pub fn asks_outside_cwd(&self) -> bool {
+        self.ask_outside_cwd
     }
 
     /// Load both homes (user, then project). Missing files contribute
     /// nothing; unreadable files degrade silently — a guard file must never
     /// take the agent down.
     pub fn load(cwd: &Path) -> Blacklist {
-        let mut entries = Vec::new();
         // project last: its lines win by last-match semantics
         let user = crate::core::config::user_dir().join("blacklist");
-        if let Ok(text) = std::fs::read_to_string(&user) {
-            entries.extend(Blacklist::parse(&text).entries);
-        }
+        let mut files = vec![user.clone()];
         if let Some(dir) = crate::core::paths::nearest_dir_up(cwd, ".llm", true) {
             let project = dir.join("blacklist");
-            if project != user
-                && let Ok(text) = std::fs::read_to_string(&project)
-            {
-                entries.extend(Blacklist::parse(&text).entries);
+            if project != user {
+                files.push(project);
             }
         }
-        Blacklist { entries }
+        let mut merged = Blacklist::default();
+        for path in files {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let one = Blacklist::parse(&text);
+                merged.entries.extend(one.entries);
+                // a directive is a whole-file switch: the last file that
+                // mentions it wins, so the project copy overrides the user's
+                if one.ask_outside_cwd
+                    || text.lines().any(|l| {
+                        l.trim()
+                            .eq_ignore_ascii_case(format!("!{OUTSIDE_CWD}").as_str())
+                    })
+                {
+                    merged.ask_outside_cwd = one.ask_outside_cwd;
+                }
+            }
+        }
+        merged
     }
 
     /// The default file content written on first start: the two rules every
@@ -116,6 +151,8 @@ impl Blacklist {
              # word pattern  : matches that command word anywhere in the line\n\
              # words pattern : matches the whole command segment\n\
              # globs: * ? [...] · ! re-allows (last match wins) · # comment\n\
+             # outside-cwd : also confirm file access outside the working\n\
+             #               directory (!outside-cwd switches it off)\n\
              # answer a at the prompt to spare a pattern for this session\n\
              # deleting this file resets it to these two rules\n\
              #\n\
@@ -238,6 +275,17 @@ mod tests {
         );
         assert_eq!(b.evaluate(&["ls".into()], &["ls".into()]), Match::None);
         assert_eq!(b.entries.len(), 2);
+    }
+
+    #[test]
+    fn the_outside_cwd_directive_parses_and_the_last_line_wins() {
+        assert!(bl("rm\noutside-cwd").asks_outside_cwd());
+        assert!(bl("OUTSIDE-CWD").asks_outside_cwd());
+        assert!(!bl("outside-cwd\n!outside-cwd").asks_outside_cwd());
+        assert!(!Blacklist::default().asks_outside_cwd());
+        assert!(Blacklist::default_file().contains("outside-cwd"));
+        // the directive is not an entry: pattern matching is untouched
+        assert_eq!(bl("outside-cwd").entries.len(), 0);
     }
 
     #[test]
