@@ -978,10 +978,15 @@ fn repl_command(
                 );
             }
             eprintln!(
-                "  {d}context {r}{} / {} ({}%) · {} messages",
+                "  {d}context {r}{}{} · {} messages",
                 humanize_tokens(used),
-                humanize_tokens(window),
-                pct,
+                if window == 0 {
+                    // no denominator: the provider has not refused anything yet,
+                    // and inventing a window here is what this avoids
+                    " · window unknown (it is learned from the first refusal)".to_string()
+                } else {
+                    format!(" / {} ({}%)", humanize_tokens(window), pct)
+                },
                 session.seed.len(),
                 d = p.dim,
                 r = p.reset

@@ -225,18 +225,24 @@ Under the `"agent"` key of `config.json`:
 {
   "agent": {
     "approval_mode": "always-ask",
-    "context_window": 128000,
     "max_request_bytes": 8000000,
     "tools": {"bash": "prompt"}
   }
 }
 ```
 
-`approval_mode` is `yolo` (default) or `always-ask`. `context_window` is the point where long
-conversations get compacted. `tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes`
+`approval_mode` is `yolo` (default) or `always-ask`. `tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes`
 caps one request body in bytes (32MB by default) — lower it when a gateway in front of the model
 refuses less than the provider documents, and the run refuses the oversized body locally, naming
 the attachments that filled it, instead of coming back as an opaque 413.
+
+Nothing here guesses a context window: gateways rarely publish one, and a made-up number either
+pays for a summary nobody needed or dies on a request the provider refuses anyway. So the agent
+learns it from the provider itself — when a request comes back saying the prompt does not fit, it
+compacts the conversation below that size, retries, and remembers the size for the rest of the
+session (the request note and the proactive compaction then work as usual). Set
+`context_window` (or a `model_windows` entry) when you already know the number and want the
+proactive gate from the first turn.
 
 The command blacklist is a plain file, not a config key: `~/.llm/blacklist` for everything you run,
 and `.llm/blacklist` for one project (its lines win; the two are concatenated). It only adds refusals

@@ -24,8 +24,11 @@ pub struct AgentSettings {
 
 impl AgentSettings {
     /// Compaction limits for a resolved model: the qualified-id window, then
-    /// the bare model-id window, then the global context_window, then the
-    /// 128k default; reserve and keep_recent fall back to their defaults.
+    /// the bare model-id window, then the global context_window. An unset
+    /// window stays 0 (unknown) rather than a guess: the provider's own
+    /// refusal is what establishes it, and a made-up number would only buy a
+    /// summary nobody needed or a request it refuses. Reserve and keep_recent
+    /// fall back to their defaults.
     pub fn compact_config(&self, qualified: &str, model_id: &str) -> CompactConfig {
         CompactConfig {
             context_window: self
@@ -34,7 +37,7 @@ impl AgentSettings {
                 .or_else(|| self.model_windows.get(model_id))
                 .copied()
                 .or(self.context_window)
-                .unwrap_or(128_000),
+                .unwrap_or(0),
             reserve_tokens: self.reserve_tokens.unwrap_or(16_384),
             keep_recent_tokens: self.keep_recent_tokens.unwrap_or(32_000),
         }

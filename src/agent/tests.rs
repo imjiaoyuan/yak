@@ -431,6 +431,85 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     );
 }
 
+/// The window is learned, not guessed: a provider refusing a prompt for not
+/// fitting its window is the only authority on the size, so the refusal must
+/// become the session's window, the history must be compacted below it, and the
+/// round retried — the run survives the one number this side could not know.
+#[test]
+fn a_refused_prompt_teaches_the_window_and_the_round_is_retried() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            read_request(&mut c);
+            if n == 0 {
+                let body =
+                    r#"{"error":{"message":"This model's maximum context length is 4096 tokens"}}"#;
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            } else {
+                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                            data: [DONE]\n\n";
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                // the mock keeps accepting: the run may come back (the window
+                // the refusal taught is what the next gate measures against)
+            }
+        }
+    });
+    let model = mock_model(port);
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let mut opts = test_opts();
+    opts.max_turns = 4;
+    // the window is exactly what is not known here: nothing is configured
+    opts.compact = Some(compact::CompactConfig {
+        context_window: 0,
+        reserve_tokens: 0,
+        keep_recent_tokens: 0,
+    });
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![Msg::user("the long task"), Msg::user("more")],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the refusal must be answered with a compaction, not an error");
+    // the mock keeps accepting, so the thread is left to the process exit
+    drop(server);
+    let hits = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        hits >= 3,
+        "the refusal, a summary of what it refused, then the retry: {hits} requests"
+    );
+    assert!(
+        matches!(outcome.history.first(), Some(Msg::Summary { .. })),
+        "the prefix below the cut became a summary"
+    );
+    assert_eq!(outcome.final_text, "ok");
+}
+
 /// A mock SSE server that cuts the first connection before any content
 /// arrives at all (no [DONE], no delta): the round produced nothing, so a
 /// resend cannot duplicate anything on screen and the run must retry instead
@@ -815,7 +894,7 @@ fn context_note_reports_the_room_left() {
         hooks: &crate::agent::ext::Extensions::empty(),
         cache_key: None,
     };
-    let note = context_note(Some(0), &opts, 0).unwrap();
+    let note = context_note(Some(0), &opts, opts.compact.as_ref(), 0).unwrap();
     assert!(
         note.starts_with("<context>") && note.ends_with("</context>"),
         "{note}"
@@ -826,7 +905,7 @@ fn context_note_reports_the_room_left() {
     );
     // a task budget adds its own clause
     opts.token_budget = 10_000;
-    let note = context_note(Some(0), &opts, 3_000).unwrap();
+    let note = context_note(Some(0), &opts, opts.compact.as_ref(), 3_000).unwrap();
     assert!(
         note.contains("7000 of this task's input-token budget left"),
         "{note}"
@@ -834,7 +913,7 @@ fn context_note_reports_the_room_left() {
     // neither a window nor a budget: no note at all
     opts.compact = None;
     opts.token_budget = 0;
-    assert!(context_note(Some(0), &opts, 0).is_none());
+    assert!(context_note(Some(0), &opts, opts.compact.as_ref(), 0).is_none());
 }
 
 /// The marker prices the covered prefix at the provider's reported count
@@ -871,7 +950,7 @@ fn context_note_uses_the_usage_marker_for_the_covered_prefix() {
     // the loop prices the context once per round and hands the number
     // down, so the marker's reported total must survive that step
     let used = compact::estimate_tokens(&history, marker);
-    let note = context_note(Some(used), &opts, 0).unwrap();
+    let note = context_note(Some(used), &opts, opts.compact.as_ref(), 0).unwrap();
     assert!(
         note.contains("93000 tokens left"),
         "the marker total must flow through: {note}"

@@ -240,10 +240,14 @@ across processes with `LLM_SESSION_ID`.
   attachment-bearing messages for a name+mime note every round, before the request is built; a
   compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
   `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
-  the one failure compaction exists to prevent; a round the provider reported no usage for is priced
-  from the text instead, so a gateway that omits the counts cannot switch the gate off), Every
+  the one failure compaction exists to prevent; the window itself is never guessed either: config
+  may name it, and an unset one is learned from the provider's own refusal (the refused size
+  becomes the session's window, the history is compacted below it, and the round is retried,
+  bounded); a round the provider reported no usage for is priced from the text instead, so a gateway
+  that omits the counts cannot switch the gate off), Every
   request closes with a request-only `<context>N tokens left in this context window</context>` user
-  turn (`context_note` in `mod.rs`: the context-window room, plus the task's input-token room when
+  turn (`context_note` in `mod.rs`: the context-window room — only once the window is known, since
+  an unknown one has no room to report — plus the task's input-token room when
   `--token-budget` is set) — the reference style budget awareness so the model can choose to wrap up; it is
   never persisted and rides after the Anthropic cache tip, so the prompt-cache prefix is untouched.
   Read-only calls from one assistant message (every tool at `Tier::Read`) run concurrently on scope

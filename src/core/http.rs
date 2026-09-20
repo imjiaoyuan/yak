@@ -195,6 +195,14 @@ fn context_too_large(message: &str) -> bool {
         || m.contains("exceed context limit")
 }
 
+/// Does this text name a prompt that does not fit the model's window? A
+/// rendered error repeats the provider's own words, so the agent loop can
+/// recognize the refusal from the message it already has — and that refusal is
+/// what teaches it the window it could not have known before.
+pub fn context_overflow(text: &str) -> bool {
+    context_too_large(text)
+}
+
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.status == 0 {

@@ -220,7 +220,10 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   archive write failure (keep the whole text rather than leave a marker pointing at nothing), and
   char-indexed cuts keep CJK on codepoint boundaries. A resumed thread that no longer fits is
   projected down the same way before its first request, silently (`Session::prune_seed_to_fit`),
-  so the notice cannot repeat turn after turn. A compaction that cannot run — summarizer error,
+  so the notice cannot repeat turn after turn. No window is ever guessed: config may name one, and
+  an unset one is learned from the provider's own refusal — the refused size becomes the session's
+  window, the history is compacted below it, and the round is retried (bounded), so the run
+  survives a number this side had no way to know. A compaction that cannot run — summarizer error,
   empty summary, no cut point — is not silent: it reports a `compact_stalled` notice naming why,
   once per run, because a session left quietly over its window is the one failure compaction
   exists to prevent; a round the provider reported no usage for is priced from the text instead,
@@ -395,7 +398,8 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion
   everywhere, the top-level `models` family (`default` + optional `thinking` — one shared model
   every mode starts on; the per-model `options` table), the `agent` behavior section
-  (approval/tools/skills, `context_window`, `reserve_tokens`, `keep_recent_tokens`,
+  (approval/tools/skills, `context_window` — unset means learned from the provider's own refusal,
+  `reserve_tokens`, `keep_recent_tokens`,
   `tools` policies, `model_windows`, `disabled_skills`), the `aliases` object (hand-edited; no
   CLI command edits it), and the two plugin tables (`extensions.disabled`/`tool_timeout`).
   This file deliberately deviates from the reference's config.toml + keys.json +

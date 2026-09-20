@@ -344,6 +344,13 @@ pub fn run_agent(
     // that was rewritten under it.
     // one compaction-stalled notice per run (see `compact_after_turn`)
     let mut compact_stalled = false;
+    // how many times a refused request was answered with a fresh compaction:
+    // bounded, so a provider that refuses everything ends the run
+    const MAX_OVERFLOW_COMPACTIONS: usize = 2;
+    let mut overflow_compactions = 0usize;
+    // The model's context window: the configured one when there is one, else 0
+    // (unknown) until the provider itself refuses a prompt and says so.
+    let mut window = opts.compact.as_ref().map_or(0, |c| c.context_window);
     let mut cache_stable: Option<usize> = None;
     let mut final_text = String::new();
     let mut interrupted = false;
@@ -423,7 +430,14 @@ pub fn run_agent(
         // image turns keep their pixels — including anything a tool result or
         // a steering message added mid-run.
         crate::agent::session::budget_images(&mut history);
-        let used_tokens = price_and_rewrite(&mut history, usage_marker, opts, on_update);
+        // the compaction this round runs under: the window learned from an
+        // earlier refusal during this run replaces the configured one
+        let cfg_now = opts.compact.as_ref().map(|c| compact::CompactConfig {
+            context_window: window,
+            ..c.clone()
+        });
+        let used_tokens =
+            price_and_rewrite(&mut history, usage_marker, cfg_now.as_ref(), on_update);
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
@@ -432,7 +446,7 @@ pub fn run_agent(
         // left rides the end of every request, so the model can decide to
         // wrap up instead of exploring indefinitely. Request-only: it never
         // enters the history or the prompt-cache prefix.
-        let note = context_note(used_tokens, opts, spent_input);
+        let note = context_note(used_tokens, opts, cfg_now.as_ref(), spent_input);
         let input = PromptInput {
             max_request_bytes: opts.max_request_bytes,
             system: opts.system,
@@ -451,6 +465,45 @@ pub fn run_agent(
             if crate::core::http::interrupted() {
                 interrupted = true;
                 break;
+            }
+            // The provider refusing a prompt that does not fit its window is
+            // the only authoritative statement about that window there is: a
+            // gateway rarely publishes one, and a guess either pays for a
+            // summary nobody needed or dies right here. Learn it — the refused
+            // size becomes this session's window — compact the history below
+            // it, and retry the round. Bounded: a provider that refuses
+            // everything ends the run instead of looping.
+            if round.text.is_empty()
+                && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
+                && crate::core::http::context_overflow(&e)
+                && let Some(cfg) = cfg_now.as_ref()
+            {
+                window = compact::estimate_tokens(&history, usage_marker);
+                let learned = compact::CompactConfig {
+                    context_window: window,
+                    ..cfg.clone()
+                };
+                let mut after = AfterTurn {
+                    seed_boundary,
+                    usage_marker,
+                    cache_stable,
+                };
+                let sink = StallSink::new(&mut compact_stalled, on_update);
+                if compact_now(
+                    model,
+                    &mut history,
+                    &learned,
+                    &mut after,
+                    &mut *sink.on_update,
+                )
+                .is_ok()
+                {
+                    seed_boundary = after.seed_boundary;
+                    usage_marker = after.usage_marker;
+                    cache_stable = after.cache_stable;
+                    overflow_compactions += 1;
+                    continue;
+                }
             }
             // a drop after output was handed out is never replayed — the
             // answer on screen would duplicate — but the run need not die
@@ -541,7 +594,7 @@ pub fn run_agent(
             model,
             &mut history,
             usage_marker,
-            opts.compact.as_ref(),
+            cfg_now.as_ref(),
             seed_boundary,
             cache_stable,
             &mut sink,
@@ -685,10 +738,9 @@ fn stream_round(
 fn price_and_rewrite(
     history: &mut [Msg],
     usage_marker: Option<(usize, Usage)>,
-    opts: &AgentOptions<'_>,
+    cfg: Option<&compact::CompactConfig>,
     on_update: &mut dyn FnMut(AgentUpdate),
 ) -> Option<u64> {
-    let cfg = opts.compact.as_ref();
     let mut used_tokens = cfg.map(|_| compact::estimate_tokens(history, usage_marker));
     let rewrite = match (cfg, used_tokens) {
         (Some(c), Some(used)) => compact::rewrite_prefix(used, c),
@@ -994,11 +1046,19 @@ fn run_tool_calls(
 /// truncated, with a count of the lines that did not fit.
 /// Budget awareness: a terse note reporting how much room the
 /// task has left, in context-window tokens and (when a task budget is set)
-/// input tokens. `None` when neither is known. Kept short and factual — it
+/// input tokens. `None` when neither is known — an unknown window says nothing
+/// about room rather than inventing a number. Kept short and factual — it
 /// exists so the model can choose to wrap up, not to make it narrate.
-fn context_note(used_tokens: Option<u64>, opts: &AgentOptions, spent_input: u64) -> Option<String> {
+fn context_note(
+    used_tokens: Option<u64>,
+    opts: &AgentOptions,
+    cfg: Option<&compact::CompactConfig>,
+    spent_input: u64,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let (Some(cfg), Some(used)) = (opts.compact.as_ref(), used_tokens) {
+    if let (Some(cfg), Some(used)) = (cfg, used_tokens)
+        && cfg.context_window > 0
+    {
         // priced once by the caller: the same number gates the prefix
         // rewrites and (via the loop) the compaction check, so nothing
         // rescans the history here

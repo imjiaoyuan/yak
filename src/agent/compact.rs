@@ -10,6 +10,11 @@ use crate::providers::PromptInput;
 
 #[derive(Clone)]
 pub struct CompactConfig {
+    /// The model's context window, when it is actually known (config:
+    /// `agent.context_window` or a `model_windows` entry). `0` means unknown:
+    /// gateways rarely publish one, so the window is learned from the provider
+    /// itself — the size it refuses is the only authoritative statement there
+    /// is — and until that happens nothing here can honestly predict it.
     pub context_window: u64,
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
@@ -18,7 +23,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> CompactConfig {
         CompactConfig {
-            context_window: 128_000,
+            context_window: 0,
             reserve_tokens: 16_384,
             keep_recent_tokens: 32_000,
         }
@@ -36,6 +41,10 @@ impl CompactConfig {
     /// found once pressure is real, small enough that the kept tail does not
     /// crowd out the summary that replaces everything before it.
     pub fn effective_keep_recent(&self) -> u64 {
+        if self.context_window == 0 {
+            // nothing to scale against: keep what the config asks for
+            return self.keep_recent_tokens;
+        }
         let usable = self.context_window.saturating_sub(self.reserve_tokens);
         self.keep_recent_tokens.min(usable / 2)
     }
@@ -93,7 +102,9 @@ pub fn estimate_tokens(history: &[Msg], usage_marker: Option<(usize, Usage)>) ->
 }
 
 pub fn should_compact(estimate: u64, cfg: &CompactConfig) -> bool {
-    estimate + cfg.reserve_tokens >= cfg.context_window
+    // an unknown window (0) has no threshold to cross: the provider's refusal
+    // is what starts compaction then, not a number this side invented
+    cfg.context_window > 0 && estimate + cfg.reserve_tokens >= cfg.context_window
 }
 
 /// Should this round rewrite the conversation prefix (trim old attachments,
