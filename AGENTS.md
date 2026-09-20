@@ -364,8 +364,10 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   the one bounded repair: dropped with a warning. A turn stamped with a future format is refused
   with the upgrade path named. `latest_thread`/`resolve_thread`/`fork_thread`/`recent_threads`
   serve the resume and list surfaces (the list falls back to the last parseable line, so a torn
-  tail never hides a thread). Attachments persist as metadata only (path/url/mime); resume
-  replays text only. Every agent session persists unless `--no-session`; there is no global
+  tail never hides a thread). Attachments persist as provenance, not pixels (path/url/mime —
+  `stored_messages` strips the payload so a thread file stays small, however many screenshots ride
+  it); `rebuild_turns` reloads local files on resume, and a record whose bytes are gone rides as a
+  text note in place of its block. Every agent session persists unless `--no-session`; there is no global
   logging switch.
 - `config.json` — the single settings file (0600, `jsonfmt::dumps_indent(2)`, merge-preserving
   hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion

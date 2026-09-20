@@ -586,7 +586,7 @@ impl Session {
             usage: usage.map(|u| (u.input, u.output)),
             duration_ms: Some(start.elapsed().as_millis() as i64),
             options: turn_options,
-            messages: new_messages,
+            messages: stored_messages(&new_messages),
         };
         let thread_id = match store.append_turn(self.conversation_id.as_deref(), &turn) {
             Ok(id) => id,
@@ -661,6 +661,68 @@ fn emit_event(event: &serde_json::Value) {
     let _ = out.flush();
 }
 
+/// Stored turns keep provenance, not pixels: `threads/<id>.jsonl` would
+/// otherwise hold every attachment of every round again — a handful of
+/// screenshots grows a thread file into tens of MB — and `rehydrated` puts the
+/// bytes back from their sources on resume.
+fn stored_messages(msgs: &[Msg]) -> Vec<Msg> {
+    msgs.iter()
+        .map(|m| match m {
+            Msg::User { text, attachments } => Msg::User {
+                text: text.clone(),
+                attachments: attachments.iter().map(|a| a.without_payload()).collect(),
+            },
+            Msg::ToolResult {
+                call_id,
+                name,
+                content,
+                error,
+                attachments,
+            } => Msg::ToolResult {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                content: content.clone(),
+                error: *error,
+                attachments: attachments.iter().map(|a| a.without_payload()).collect(),
+            },
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// The reverse for a resumed turn: reload payloads from their local sources,
+/// keeping the record as stored when the bytes are gone — the adapters then
+/// report the missing attachment to the model instead of sending an empty
+/// block.
+fn rehydrated(m: &Msg) -> Msg {
+    let restore = |attachments: &[crate::providers::Attachment]| {
+        attachments
+            .iter()
+            .map(|a| crate::core::attachments::reload(a).unwrap_or_else(|| a.clone()))
+            .collect::<Vec<_>>()
+    };
+    match m {
+        Msg::User { text, attachments } => Msg::User {
+            text: text.clone(),
+            attachments: restore(attachments),
+        },
+        Msg::ToolResult {
+            call_id,
+            name,
+            content,
+            error,
+            attachments,
+        } => Msg::ToolResult {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            content: content.clone(),
+            error: *error,
+            attachments: restore(attachments),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Rebuild a wire-level history (plus the original system prompt) from a
 /// thread's stored turns. The messages *are* `Msg` — the thread stores the
 /// same struct the request carries — so the walk only filters empty user
@@ -683,7 +745,7 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
             {
                 continue;
             }
-            msgs.push(m.clone());
+            msgs.push(rehydrated(m));
         }
         // the final plain assistant was popped out of `messages` (it doubles
         // as the turn response); ride it back in so a resume sees the answer
@@ -1003,6 +1065,72 @@ mod tests {
             }
             other => panic!("expected a tool result, got {other:?}"),
         }
+    }
+
+    /// A stored turn keeps provenance, not pixels: a thread file would
+    /// otherwise hold every attachment of every round again.
+    #[test]
+    fn a_stored_turn_drops_payloads_and_keeps_their_source() {
+        let msg = Msg::user_with(
+            "look",
+            vec![crate::providers::Attachment {
+                mime_type: "image/png".into(),
+                base64_data: "aGk=".into(),
+                filename: Some("m05.png".into()),
+                path: Some("/tmp/mg/m05.png".into()),
+                url: None,
+            }],
+        );
+        let line = serde_json::to_string(&stored_messages(&[msg])).unwrap();
+        assert!(!line.contains("aGk="), "{line}");
+        assert!(line.contains("m05.png"), "{line}");
+        assert!(line.contains("/tmp/mg/m05.png"), "{line}");
+    }
+
+    /// Resume puts the payloads back from their local files; a source that is
+    /// gone stays a record, which the adapters report to the model as a note.
+    #[test]
+    fn resume_reloads_payloads_from_their_local_file() {
+        let dir = crate::core::testutil::scratch_dir("rehydrate");
+        let file = dir.join("m05.png");
+        std::fs::write(&file, b"pngbytes").unwrap();
+        let record = |path: Option<String>| crate::providers::Attachment {
+            mime_type: "image/png".into(),
+            base64_data: String::new(),
+            filename: Some("m05.png".into()),
+            path,
+            url: None,
+        };
+        let turn = StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: "t1".into(),
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: None,
+            prompt: "look".into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::user_with(
+                "look",
+                vec![
+                    record(Some(file.display().to_string())),
+                    record(Some(dir.join("gone.png").display().to_string())),
+                    record(None),
+                ],
+            )],
+        };
+        let (msgs, _) = rebuild_turns(&[turn]);
+        let Msg::User { attachments, .. } = &msgs[0] else {
+            panic!("expected the stored user message")
+        };
+        assert_eq!(attachments[0].base64_data, crate::b64::encode(b"pngbytes"));
+        assert!(attachments[1].base64_data.is_empty());
+        assert!(attachments[2].base64_data.is_empty());
     }
 
     #[test]

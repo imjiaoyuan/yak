@@ -69,6 +69,34 @@ pub struct Attachment {
     pub url: Option<String>,
 }
 
+impl Attachment {
+    /// The same attachment without its payload: what a stored turn keeps. The
+    /// provenance (`path`/`url`, name, mime) survives, so a resume can put the
+    /// pixels back.
+    pub fn without_payload(&self) -> Attachment {
+        Attachment {
+            base64_data: String::new(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Put a stored attachment's payload back from its local source. Only files are
+/// read — refetching a URL would make a resume depend on the network — and a
+/// source that is gone is not an error here: the adapters send a note naming
+/// what went missing, so the model and the transcript both see it.
+pub fn reload(a: &Attachment) -> Option<Attachment> {
+    if !a.base64_data.is_empty() {
+        return Some(a.clone());
+    }
+    let path = a.path.as_deref()?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(Attachment {
+        base64_data: crate::b64::encode(&bytes),
+        ..a.clone()
+    })
+}
+
 /// A missing or `null` mime reads as the empty string: the old stored shape
 /// had no mime on a bytes-only record, and every consumer treats empty as
 /// "unknown" rather than failing the whole resume.

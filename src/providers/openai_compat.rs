@@ -10,6 +10,17 @@ use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 /// One content-part block for an attachment, by mime: images ride
 /// `image_url` data URIs, PDFs `file` blocks, wav/mp3 `input_audio`.
 fn attachment_block(a: &Attachment) -> Result<Value, String> {
+    if a.base64_data.is_empty() {
+        // a resumed thread stores provenance, not pixels: bytes that could not
+        // be reloaded are reported as a note, never sent as an empty block
+        return Ok(json!({
+            "type": "text",
+            "text": format!(
+                "[{}: attached earlier in this conversation, bytes not available]",
+                super::reference(a)
+            )
+        }));
+    }
     let mime = a.mime_type.as_str();
     match kind_of(mime) {
         Some(Kind::Image) => Ok(json!({
@@ -563,6 +574,25 @@ mod tests {
         let err = build_body(&model("openai-compat"), &i, false).unwrap_err();
         assert!(err.contains("application/zip"), "{err}");
         assert!(err.contains("image, PDF, text and wav/mp3"), "{err}");
+    }
+
+    #[test]
+    fn a_stored_attachment_without_bytes_rides_as_a_note() {
+        // a resumed thread stores provenance, not pixels: an empty payload must
+        // never reach the wire as an empty data URI
+        let mut i = input(&[], &[]);
+        let atts = [Attachment {
+            mime_type: "image/png".into(),
+            base64_data: String::new(),
+            filename: Some("m05.png".into()),
+            path: Some("/tmp/mg/m05.png".into()),
+            url: None,
+        }];
+        i.attachments = &atts;
+        let body = build_body(&model("openai-compat"), &i, false).unwrap();
+        let content = body["messages"][0]["content"].to_string();
+        assert!(content.contains("m05.png"), "{content}");
+        assert!(!content.contains("base64"), "{content}");
     }
 
     #[test]

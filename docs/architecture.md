@@ -25,7 +25,7 @@ body and hands it to `providers::check_request_body` first, which refuses a body
 unless `agent.max_request_bytes` in config.json lowers it, since a gateway in front may refuse far
 less — while it can still name the
 attachments that filled it: compaction prunes tool results, never attachment payloads, and a resumed
-thread replays every attachment it stored, so the remedy has to reach the user;
+thread reloads every attachment it stored, so the remedy has to reach the user;
 retries resend with ±10%-jittered backoff (1s→30s for responses, a separate 5s→60s×6 budget for
 connection failures — bounded for an attended terminal: ≈ three minutes of automatic fighting, then
 the error surfaces), honoring a server Retry-After when sent, sleeping in 50ms interruptible slices
@@ -122,7 +122,9 @@ across processes with `LLM_SESSION_ID`.
   empty. Both provider adapters serialize attachments per mime (`attachment_block`): image blocks,
   OpenAI `file`/`input_audio` plus a text part for `text/*`, Anthropic `document` (base64 PDF or
   plaintext `text/plain`/`text/csv`); unsupported mimes error client-side before any request leaves,
-  naming the accepted set (`build_body` returns `Result` for exactly that).
+  naming the accepted set (`build_body` returns `Result` for exactly that); a record stored without
+  its bytes — a resumed attachment whose source is gone — rides as a text note naming it, never an
+  empty data URI.
 - `core/attachments.rs` is the shared loader: `load_args()` runs the `-a`/`--at` entry-flag loop for
   prompt and agent; `Loaded` keeps path/url/mime/bytes provenance so one load feeds both the wire
   (`request()`) and the log store (`stored()`); magic-byte `sniff_mime` covers stdin and clipboard

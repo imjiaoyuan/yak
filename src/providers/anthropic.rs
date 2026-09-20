@@ -17,6 +17,17 @@ fn flush_results(messages: &mut Vec<Value>, pending: &mut Vec<Value>) {
 /// One content block for an attachment: images, PDFs and plain-text
 /// documents are native; audio has no Anthropic wire form.
 fn attachment_block(a: &Attachment) -> Result<Value, String> {
+    if a.base64_data.is_empty() {
+        // a resumed thread stores provenance, not pixels: bytes that could not
+        // be reloaded are reported as a note, never sent as an empty block
+        return Ok(json!({
+            "type": "text",
+            "text": format!(
+                "[{}: attached earlier in this conversation, bytes not available]",
+                super::reference(a)
+            )
+        }));
+    }
     let mime = a.mime_type.as_str();
     match kind_of(mime) {
         Some(Kind::Image) => Ok(json!({
@@ -476,6 +487,25 @@ mod tests {
         let err = build_body(&model("anthropic"), &i, false).unwrap_err();
         assert!(err.contains("audio/mpeg"), "{err}");
         assert!(err.contains("image, PDF and text"), "{err}");
+    }
+
+    #[test]
+    fn a_stored_attachment_without_bytes_rides_as_a_note() {
+        // a resumed thread stores provenance, not pixels: an empty payload must
+        // never reach the wire as an empty base64 source
+        let mut i = input(&[], &[]);
+        let atts = [Attachment {
+            mime_type: "image/png".into(),
+            base64_data: String::new(),
+            filename: Some("m05.png".into()),
+            path: Some("/tmp/mg/m05.png".into()),
+            url: None,
+        }];
+        i.attachments = &atts;
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "text");
+        assert!(content[1]["text"].as_str().unwrap().contains("m05.png"));
     }
 
     #[test]
