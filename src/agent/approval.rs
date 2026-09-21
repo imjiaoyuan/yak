@@ -286,15 +286,39 @@ fn expand_env(tok: &str) -> String {
     out
 }
 
-/// True when a path argument leaves the working directory. Canonicalizes
-/// both sides when possible so symlinks cannot smuggle a path out; falls
-/// back to a lexical check for paths that do not exist yet.
+/// True when a path argument leaves the working directory. Both sides are
+/// canonicalized so a symlink cannot smuggle a path out — for a target that
+/// does not exist yet (`write`, `edit`), the deepest existing ancestor is
+/// the part that gets followed.
 pub fn escapes_cwd(cwd: &std::path::Path, arg: &str) -> bool {
-    let target = normalize(&crate::agent::tools::resolve_path(cwd, arg));
-    if let (Ok(base), Ok(t)) = (cwd.canonicalize(), target.canonicalize()) {
-        return !t.starts_with(&base);
+    let target = canonical_with_missing(&normalize(&crate::agent::tools::resolve_path(cwd, arg)));
+    let base = cwd.canonicalize().unwrap_or_else(|_| normalize(cwd));
+    !target.starts_with(&base)
+}
+
+/// [`Path::canonicalize`] for a path that may not exist yet: the existing
+/// prefix is resolved through symlinks and the missing tail is rejoined
+/// verbatim, so `link-to-elsewhere/new-file.txt` lands where the write would.
+fn canonical_with_missing(target: &std::path::Path) -> std::path::PathBuf {
+    let mut probe = target.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut out = real;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) if parent != probe => {
+                tail.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            // nothing of the path is left to resolve: keep it lexical
+            _ => return target.to_path_buf(),
+        }
     }
-    !target.starts_with(normalize(cwd))
 }
 
 /// Lexically drop `.` and resolve `..` without touching the filesystem.
@@ -1094,6 +1118,24 @@ mod tests {
         assert!(escapes_cwd(cwd, "../outside.txt"));
         assert!(escapes_cwd(cwd, "/etc/passwd"));
         assert!(escapes_cwd(cwd, "~/notes.txt"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_directory_does_not_smuggle_a_new_file_out_of_the_cwd() {
+        let outside = crate::core::testutil::scratch_dir("escapes-outside");
+        let cwd = crate::core::testutil::scratch_dir("escapes-cwd");
+        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        // the file does not exist yet — exactly what a write targets
+        assert!(!outside.exists() || outside.is_dir());
+        assert!(escapes_cwd(&cwd, "link/new.txt"));
+        assert!(escapes_cwd(&cwd, "link/deep/new.txt"));
+        // and the cwd's own symlinked prefix is not a false positive: a
+        // path inside the directory stays inside however it is reached
+        std::fs::create_dir_all(cwd.join("real")).unwrap();
+        assert!(!escapes_cwd(&cwd, "real/new.txt"));
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]
