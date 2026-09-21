@@ -82,7 +82,9 @@ is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole se
 directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
 for approval in either mode — a file tool's `path`/`paths` argument, or a shell command line naming
 one (`!outside-cwd` switches it off). The file is seeded with the syntax as comments and
-`outside-cwd` active; deleting it just resets it to those rules.
+`outside-cwd` active; deleting it just resets it to those rules. It is a prompt, not a fence: the
+check is lexical, so a path a shell builds at runtime (`p=/etc/passwd; cat $p`) is not seen, and
+neither is an argument an extension tool names for itself.
 
 Want to approve things yourself? Use `--approval-mode ask` for one run, or put
 `"approval_mode": "always-ask"` in `config.json` to make it the default. In ask mode:
@@ -90,7 +92,8 @@ Want to approve things yourself? Use `--approval-mode ask` for one run, or put
 - **Free:** reading files in your project, and read-only commands like `ls`, `git status`, `rg`,
   `cargo test`.
 - **Asks first:** file writes and edits, branch changes like `git push`, reading a path that leaves
-your project (the seeded `outside-cwd` rule), and anything it cannot recognise as safe.
+your project (the seeded `outside-cwd` rule), a `webfetch` (the one way off the machine), an
+`outside-cwd` match your project cannot be sure of, and anything it cannot recognise as safe.
 
 File edits show a unified diff right above the question. Type `a` to allow that tool for the rest of
 the session. `/yolo` flips the mode on and off mid-session.

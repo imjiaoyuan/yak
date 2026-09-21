@@ -204,7 +204,9 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
 - **Approval** (`approval.rs`): read/write/exec tiers, a readonly-command whitelist, and the
   hardcoded refusal list that applies in either mode. Yolo is the default; `--approval-mode ask`
   or config `approval_mode = "always-ask"` restores prompting. Per-tool policies live in
-  `[agent] tools` (`allow`/`deny`/`prompt`) and `--tools` narrows the set.
+  `[agent] tools` (`allow`/`deny`/`prompt`) and `--tools` narrows the set. `webfetch` is exec-tier
+  (the one way off the machine), and an extension tool keeps the default `path`/`paths` reading of
+  its arguments — one that names its paths differently is not seen by the `outside-cwd` gate.
 - **Blacklist** (`blacklist.rs`): gitignore-style files (`~/.llm/blacklist`, project
   `.llm/blacklist`, project lines win) that only *add* refusals on top of the hardcoded ones. One
   line is a directive rather than a pattern: `outside-cwd` promotes any path leaving the working

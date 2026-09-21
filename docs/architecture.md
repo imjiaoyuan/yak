@@ -146,7 +146,8 @@ across processes with `LLM_SESSION_ID`.
   output it already printed — the deadline and the output are independent facts — and reports
   `Command timed out after Ns (process killed)`), grep (literal by default; `regex: true` passes the
   pattern to ripgrep, so a regex lookup stays inside the tool instead of becoming a bash pipeline),
-  glob, ls, webfetch, recall (`observation_path` accepts only a plain alphanumeric id — a
+  glob, ls, webfetch (exec-tier — ask mode confirms a fetch, the one way off the machine),
+  recall (`observation_path` accepts only a plain alphanumeric id — a
   model-supplied `/` or `..` is refused, not cleaned, so it can never leave `~/.llm/observations/`;
   char-offset paging, `next_offset` continues); write and edit declare an optional `then_run`
   command whose execution lives in the loop, not the tool — `fuse_then_run` in `mod.rs` runs it as
