@@ -305,8 +305,9 @@ fn next_delay(retry: &mut Retry, e: &HttpError) -> Option<Duration> {
         // clear the row first: the spinner redraws this row without a
         // newline, and an append would glue the notice onto its frame
         eprintln!(
-            "{}\r\x1b[2Kretrying in {}s ({}){}",
+            "{}\r\x1b[2K{}retrying in {}s ({}){}",
             crate::theme::err().dim,
+            crate::theme::NOTICE,
             delay.as_secs_f32().ceil() as u64,
             e.class().label(),
             crate::theme::err().reset

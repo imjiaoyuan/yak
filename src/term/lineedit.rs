@@ -1100,7 +1100,10 @@ impl InputLine {
         // wrap at exactly the margin
         let limit = cols - 1;
         // every continuation row (hard newline or soft wrap) renders under
-        // a dim `>` prompt, matching the main `>` at column 0
+        // the prompt's own marker: same glyph, same styling, so a draft that
+        // wrapped reads exactly like the first row instead of going gray
+        let (mark, _) = prompt.split_once('>').unwrap_or(("", ""));
+        let reset = &crate::theme::err().reset;
         let mut rows: Vec<String> = vec![String::new()];
         let mut col = crate::core::render_md::cell_width(prompt);
         let (mut crow, mut ccol) = (0, col);
@@ -1136,8 +1139,7 @@ impl InputLine {
         }
         for (i, r) in rows.iter().enumerate() {
             if i > 0 {
-                let p = crate::theme::err();
-                let _ = write!(out, "\n{}>{} ", p.dim, p.reset);
+                let _ = write!(out, "\n{mark}>{reset} ");
             }
             let _ = write!(out, "{}", style(r));
         }

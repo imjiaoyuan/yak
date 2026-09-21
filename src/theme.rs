@@ -55,6 +55,11 @@ pub struct Palette {
     pub reset: String,
 }
 
+/// The marker a run notice carries (`· retrying in 6s …`), so a line the tool
+/// says about itself never reads like model output or like your own input.
+/// Routine maintenance wears this; a warning that needs attention wears `!`.
+pub const NOTICE: &str = "· ";
+
 /// The answer-text palette: the reference's the theme file markdown tokens. `tc` picks
 /// truecolor (`38;2;R;G;B`, the reference's exact hex) over the nearest 256-color
 /// index (`38;5;N`). Only `render_md` reads the md tokens; the chrome

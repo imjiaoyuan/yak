@@ -256,7 +256,7 @@ impl Session {
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
                     eprintln!(
-                        "{}compaction stalled: {reason} — the context stays over the window{}",
+                        "{}! compaction stalled: {reason} — the context stays over the window{}",
                         p.dim, p.reset
                     );
                     view.borrow_mut().resume_wait();
@@ -271,7 +271,12 @@ impl Session {
                     } else {
                         format!("keeping the partial answer ({chars} chars), continuing")
                     };
-                    eprintln!("{}stream dropped ({error}) — {what}{}", p.dim, p.reset);
+                    eprintln!(
+                        "{}{}stream dropped ({error}) — {what}{}",
+                        p.dim,
+                        crate::theme::NOTICE,
+                        p.reset
+                    );
                     view.borrow_mut().resume_wait();
                 }
                 AgentUpdate::ToolResultsPruned { count } => {
@@ -282,8 +287,9 @@ impl Session {
                     let s = if count == 1 { "" } else { "s" };
                     let dir = crate::agent::compact::observation_dir();
                     eprintln!(
-                        "{}pruned {count} oversized tool result{s} from context (full text archived under {}){}",
+                        "{}{}pruned {count} oversized tool result{s} from context (full text archived under {}){}",
                         p.dim,
+                        crate::theme::NOTICE,
                         dir.display(),
                         p.reset
                     );
