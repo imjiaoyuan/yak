@@ -23,9 +23,9 @@ pub(super) fn configure_shell_command(command: &mut Command) {
     }
 }
 
-/// The image types to ask for, best first: the two `prompt_image` re-encodes
-/// plus the two it passes through, so a source that offers only one of them
-/// still lands.
+/// The image types to ask for, best first: the two a screenshot tool
+/// re-encodes to, plus the two others some sources offer, so a clipboard
+/// that carries only one of them still lands.
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 /// Why one clipboard tool could not deliver.

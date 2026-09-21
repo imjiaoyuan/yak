@@ -393,17 +393,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/reload",
 ];
 
-/// A near miss of a known slash command ("/clea"), mirroring main.rs's
-/// command_hint thresholds so a typo hints instead of burning a model call.
-fn slash_hint(word: &str) -> Option<String> {
-    let word = word.strip_prefix('/')?;
-    let names: Vec<&str> = SLASH_COMMANDS
-        .iter()
-        .map(|c| c.strip_prefix('/').unwrap_or(c))
-        .collect();
-    crate::core::text::closest_name(word, &names).map(|n| format!("/{n}"))
-}
-
 /// Is this buffer a command line for the echo highlight? Only when its
 /// first word is a registered command — exact (arguments allowed) or, still
 /// being typed, a prefix of one. A `/`-prefixed path matches no name and
@@ -1145,15 +1134,6 @@ fn repl_command(
             }
             // not a builtin and not a commands-dir command: plain task text
             // (covers path-looking words like "/home/me/shot.jpg 看看?").
-            // A near miss of a known command only hints — no model call.
-            if let Some(name) = slash_hint(other) {
-                eprintln!(
-                    "{}did you mean {name}? (nothing was sent){}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                );
-                return false;
-            }
             run_task_logged(session, text, &mut Vec::new());
             return false;
         }
@@ -1309,17 +1289,6 @@ mod tests {
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }
-    }
-
-    #[test]
-    fn slash_hint_catches_prefixes_and_near_misses() {
-        assert_eq!(slash_hint("/cle"), Some("/clear".to_string()));
-        assert_eq!(slash_hint("/statu"), Some("/status".to_string()));
-        assert_eq!(slash_hint("/hlep"), Some("/help".to_string()));
-        // an ordinary word or path-looking text is no typo of a command
-        assert_eq!(slash_hint("/etc/passwd"), None);
-        assert_eq!(slash_hint("/summarize this file"), None);
-        assert_eq!(slash_hint("/x"), None);
     }
 
     #[test]
