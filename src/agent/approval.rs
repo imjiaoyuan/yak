@@ -298,11 +298,14 @@ fn expand_env(tok: &str) -> String {
 /// True when a path argument leaves the working directory. Both sides are
 /// canonicalized so a symlink cannot smuggle a path out — for a target that
 /// does not exist yet (`write`, `edit`), the deepest existing ancestor is
-/// the part that gets followed.
+/// the part that gets followed. The cwd rides the same helper on purpose: a
+/// working directory can itself be reached through a symlink (`/tmp` is
+/// `/private/tmp` on macOS) or not exist yet, and resolving only one side
+/// compares a symlink-free path against a lexical one — every path inside
+/// then looks like it left.
 pub fn escapes_cwd(cwd: &std::path::Path, arg: &str) -> bool {
     let target = canonical_with_missing(&normalize(&crate::agent::tools::resolve_path(cwd, arg)));
-    let base = cwd.canonicalize().unwrap_or_else(|_| normalize(cwd));
-    !target.starts_with(&base)
+    !target.starts_with(canonical_with_missing(cwd))
 }
 
 /// [`Path::canonicalize`] for a path that may not exist yet: the existing
@@ -1150,6 +1153,23 @@ mod tests {
         assert!(escapes_cwd(cwd, "../outside.txt"));
         assert!(escapes_cwd(cwd, "/etc/passwd"));
         assert!(escapes_cwd(cwd, "~/notes.txt"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cwd_that_does_not_exist_is_resolved_like_the_paths_under_it() {
+        // the bug this pins: resolving only the target left a lexical cwd on
+        // one side and a symlink-free path on the other, so a path *inside*
+        // the working directory looked like it had left it — which is how a
+        // `/var/folders/...` cwd on macOS failed every relative path
+        let real = crate::core::testutil::scratch_dir("escapes-real");
+        let root = crate::core::testutil::scratch_dir("escapes-root");
+        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
+        let cwd = root.join("link").join("absent");
+        assert!(!escapes_cwd(&cwd, "src/main.rs"));
+        assert!(escapes_cwd(&cwd, "../outside.txt"));
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
