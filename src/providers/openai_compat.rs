@@ -261,6 +261,7 @@ pub(crate) fn feed_chunk(
             input: p,
             output: c,
             cached: super::cache_hit_tokens(&chunk["usage"]),
+            cached_write: 0,
         });
     }
     let Some(choice) = chunk["choices"].get(0) else {
@@ -312,6 +313,7 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
             input: p,
             output: c,
             cached: super::cache_hit_tokens(&value["usage"]),
+            cached_write: 0,
         }),
         _ => None,
     };
@@ -833,7 +835,8 @@ mod tests {
             Some(Usage {
                 input: 10,
                 output: 5,
-                cached: 0
+                cached: 0,
+                cached_write: 0,
             })
         );
         let calls = acc.finish();
@@ -871,7 +874,8 @@ mod tests {
             Some(Usage {
                 input: 3,
                 output: 4,
-                cached: 0
+                cached: 0,
+                cached_write: 0,
             })
         );
         assert_eq!(stop_seen, Some(StopReason::ToolUse));
@@ -921,7 +925,8 @@ mod tests {
             Usage {
                 input: 200,
                 output: 0,
-                cached: 150
+                cached: 150,
+                cached_write: 50,
             }
             .cache_percent(),
             75

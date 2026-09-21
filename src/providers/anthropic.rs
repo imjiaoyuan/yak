@@ -300,16 +300,17 @@ fn apply_usage(u: &Value, usage: &mut Option<Usage>) {
     if input.is_none() && output.is_none() && read.is_none() && write.is_none() {
         return;
     }
-    let mut cur = usage.take().unwrap_or(Usage {
-        input: 0,
-        output: 0,
-        cached: 0,
-    });
+    let mut cur = usage.take().unwrap_or_default();
     if let Some(p) = input {
-        cur.input = p + read.unwrap_or(0) + write.unwrap_or(0);
-    }
-    if let Some(r) = read {
+        // A half the event does not repeat falls back to the count already
+        // known: `input_tokens` is the same request's cumulative count, so an
+        // event echoing it without the split (proxies do) must not drop the
+        // cache counts `message_start` established.
+        let r = read.unwrap_or(cur.cached);
+        let w = write.unwrap_or(cur.cached_write);
+        cur.input = p + r + w;
         cur.cached = r;
+        cur.cached_write = w;
     }
     if let Some(c) = output {
         cur.output = c;
@@ -971,8 +972,46 @@ mod tests {
         let usage = feed_complete(&value, &mut |_| {}).unwrap();
         assert_eq!(usage.input, 640);
         assert_eq!(usage.cached, 500);
+        assert_eq!(usage.cached_write, 40);
         assert_eq!(usage.output, 20);
         // the whole-prompt denominator keeps the share at or below 100%
+        assert_eq!(usage.cache_percent(), 78);
+    }
+
+    /// `message_start` carries the split; `message_delta` carries the request's
+    /// cumulative counts. A delta that repeats `input_tokens` without the cache
+    /// halves must not drop what the start established — the whole-prompt total
+    /// would fall under its own cached part and the context estimate with it.
+    #[test]
+    fn a_delta_without_the_cache_split_keeps_the_counts_it_was_given() {
+        let mut usage = None;
+        let mut stop = StopReason::default();
+        let mut feed = |event_type: &str, chunk: &Value| {
+            feed_event(event_type, chunk, &mut usage, &mut stop, &mut |_| {});
+        };
+        feed(
+            "message_start",
+            &json!({
+                "message": {"usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 500,
+                    "cache_creation_input_tokens": 40
+                }}
+            }),
+        );
+        feed(
+            "message_delta",
+            &json!({
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 100, "output_tokens": 20}
+            }),
+        );
+        let usage = usage.unwrap();
+        assert_eq!(usage.input, 640, "the prompt total keeps its cached halves");
+        assert_eq!(usage.cached, 500);
+        assert_eq!(usage.cached_write, 40);
+        assert_eq!(usage.output, 20);
         assert_eq!(usage.cache_percent(), 78);
     }
 
@@ -1029,7 +1068,8 @@ mod tests {
             Some(Usage {
                 input: 7,
                 output: 8,
-                cached: 0
+                cached: 0,
+                cached_write: 0,
             })
         );
         let calls = acc.finish();
@@ -1066,7 +1106,8 @@ mod tests {
             Some(Usage {
                 input: 1,
                 output: 2,
-                cached: 0
+                cached: 0,
+                cached_write: 0,
             })
         );
         assert_eq!(stop_seen, Some(StopReason::ToolUse));

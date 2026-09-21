@@ -60,8 +60,14 @@ pub struct Usage {
     /// input tokens served from the provider's prompt cache, when reported:
     /// DeepSeek `prompt_cache_hit_tokens`, OpenAI `prompt_tokens_details.
     /// cached_tokens`, OpenRouter `cached_tokens`, Anthropic
-    /// `cache_read_input_tokens` (whose read+write also fold into `input`)
+    /// `cache_read_input_tokens`. Always a subset of `input`.
     pub cached: u64,
+    /// input tokens written into the provider's prompt cache, when the two
+    /// halves are reported separately (Anthropic
+    /// `cache_creation_input_tokens`). Also a subset of `input`; kept apart
+    /// from `cached` because it is what a later event carrying only
+    /// `input_tokens` has to fold back in, and because a write is not a read.
+    pub cached_write: u64,
 }
 
 impl Usage {
@@ -78,6 +84,7 @@ impl Usage {
     pub fn add(&mut self, other: Usage) {
         self.input += other.input;
         self.output += other.output;
+        self.cached_write += other.cached_write;
         self.cached += other.cached;
     }
 }
@@ -824,15 +831,18 @@ mod tests {
             input: 100,
             output: 20,
             cached: 60,
+            cached_write: 30,
         });
         total.add(Usage {
             input: 50,
             output: 5,
             cached: 0,
+            cached_write: 0,
         });
         assert_eq!(total.input, 150);
         assert_eq!(total.output, 25);
         assert_eq!(total.cached, 60, "a zero stays a zero, not a reset");
+        assert_eq!(total.cached_write, 30);
         // and the cached share reads off the totals as before
         assert_eq!(total.cache_percent(), 40);
         // adding nothing is a no-op
