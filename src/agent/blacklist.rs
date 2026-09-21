@@ -20,9 +20,11 @@
 //! - a pattern with whitespace matches the **whole segment** from its first
 //!   word: `rm -rf /` denies `rm -rf /` but not `rm notes.txt`
 //! - globs `*`, `?`, `[...]` work within a word: `mkfs*`, `git push --force*`
-//! - one directive, not a pattern: `outside-cwd` makes any tool call whose
-//!   path leaves the working directory ask for approval in either mode;
-//!   `!outside-cwd` switches it back off (last line wins)
+//! - one directive, not a pattern: `outside-cwd` makes any tool call that
+//!   reaches outside the working directory ask for approval in either mode
+//!   (a file tool's `path`/`paths` argument, or a shell command line naming
+//!   a path outside — see `approval::command_escapes_cwd`); `!outside-cwd`
+//!   switches it back off (last line wins). The seeded file turns it on.
 //!
 //! A hit asks for approval — even in yolo; the command runs only after
 //! the user allows it (`a` spares the pattern for the session).
@@ -135,9 +137,10 @@ impl Blacklist {
 
     /// The default file content written on first start: the two rules every
     /// install should confirm interactively (`rm`, force-pushes) plus the
-    /// syntax, written out so the mechanism is discoverable. The commands
-    /// that must never run live in `approval.rs` and cannot be turned off
-    /// from here, which is why they are not seeded here.
+    /// `outside-cwd` directive, fully active, and the syntax, written out so
+    /// the mechanism is discoverable. The commands that must never run live
+    /// in `approval.rs` and cannot be turned off from here, which is why they
+    /// are not seeded here.
     pub fn default_file() -> String {
         String::from(
             "# llm command ask-list — one pattern per line\n\
@@ -151,13 +154,16 @@ impl Blacklist {
              # word pattern  : matches that command word anywhere in the line\n\
              # words pattern : matches the whole command segment\n\
              # globs: * ? [...] · ! re-allows (last match wins) · # comment\n\
-             # outside-cwd : also confirm file access outside the working\n\
-             #               directory (!outside-cwd switches it off)\n\
              # answer a at the prompt to spare a pattern for this session\n\
-             # deleting this file resets it to these two rules\n\
+             # deleting this file resets it to these rules\n\
              #\n\
+             # a path that leaves the working directory also confirms: a file\n\
+             # tool's path/paths argument, or a shell command line naming one\n\
+             # outside the directory (commands run from the directory itself\n\
+             # are unaffected)\n\
              rm\n\
-             git push --force*\n",
+             git push --force*\n\
+             outside-cwd\n",
         )
     }
 
@@ -283,7 +289,8 @@ mod tests {
         assert!(bl("OUTSIDE-CWD").asks_outside_cwd());
         assert!(!bl("outside-cwd\n!outside-cwd").asks_outside_cwd());
         assert!(!Blacklist::default().asks_outside_cwd());
-        assert!(Blacklist::default_file().contains("outside-cwd"));
+        // the seeded file ships the directive on, with a way out
+        assert!(Blacklist::parse(&Blacklist::default_file()).asks_outside_cwd());
         // the directive is not an entry: pattern matching is untouched
         assert_eq!(bl("outside-cwd").entries.len(), 0);
     }
@@ -307,7 +314,7 @@ mod tests {
         assert!(!b.entries[0].allow);
         assert_eq!(b.entries[1].pattern, "git push --force*");
         assert!(
-            Blacklist::default_file().contains("# deleting this file resets it to these two rules")
+            Blacklist::default_file().contains("# deleting this file resets it to these rules")
         );
         // a dangerous word as an *argument* is not a command position:
         // `init` must not catch `npm init` or `git init`

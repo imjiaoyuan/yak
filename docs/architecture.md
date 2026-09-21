@@ -158,7 +158,10 @@ across processes with `LLM_SESSION_ID`.
   read-only subcommand, redirection, command substitution (`$(..)`/backticks) and flag-writes (`sort
   -o`, `date -s`) rejected, git `branch`/`remote`/`config` read-only only in their bare or
   one-argument read forms — so ask mode only prompts for state-changing work: writes, non-read-only
-  commands, out-of-cwd reads; symlink-aware `escapes_cwd`; an extension's `tool_call` reply may
+  commands, out-of-cwd reads; symlink-aware `escapes_cwd`, fed per call by the tool's own
+  `Tool::escapes_cwd` (the shared `path`/`paths` arguments by default, a `$VAR`-expanded scan of
+  the command line for `bash`, so a read-only `cat /etc/passwd` is no way around the gate); an
+  extension's `tool_call` reply may
   deny, rewrite args, or `decision: "allow"` to skip the ask (a blacklist ask still prompts — the
   ask-list is extension-proof); yolo is the default mode (`--approval-mode ask` / `[agent]
   approval_mode = "always-ask"` restores prompting; the legacy `~/.llm/trust.json` is ignored — its
@@ -172,7 +175,8 @@ across processes with `LLM_SESSION_ID`.
   `!` line can switch off; then the user-editable ask-list (`blacklist.rs`: `~/.llm/blacklist` plus
   the nearest `.llm/blacklist`, project lines winning by last match; word patterns hit a command
   position anywhere in the line, segment patterns match the whole segment, globs work, `!`
-  re-allows), seeded with `rm` and `git push --force*`: a hit is an `Ask` in either mode — immune to
+  re-allows), seeded with `rm`, `git push --force*` and the active `outside-cwd` directive: a hit is
+  an `Ask` in either mode — immune to
   allow policies — with the matched pattern highlighted in the prompt, and `a` spares the pattern
   for the session (`blacklist_session_allows`, never persisted), `session.rs` (the Session: one
   model + tools + accumulated history, thinking level, steer queue shared with the KeyWatcher, turn

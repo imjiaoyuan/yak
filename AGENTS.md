@@ -209,7 +209,11 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   `.llm/blacklist`, project lines win) that only *add* refusals on top of the hardcoded ones. One
   line is a directive rather than a pattern: `outside-cwd` promotes any path leaving the working
   directory to a prompt in either mode (a `!outside-cwd` line switches it off; answering `a`
-  spares it for the session).
+  spares it for the session). Which paths count comes from the tool itself
+  (`Tool::escapes_cwd`): the shared `path`/`paths` arguments by default — a `read` batch is checked
+  path by path — and an env-expanded scan of the command line for `bash`, where a token whose
+  expansion cannot be resolved counts as escaping rather than as harmless. The seeded file ships
+  the directive on.
 - **Compaction** (`compact.rs`): estimate tokens (last usage + chars/4 tail), cut at a
   boundary, summarize, plus a tool-result pruner at compaction pressure
   (`prune_tool_results`: results over 8192 chars become head 4096 + a middle marker + tail 1024

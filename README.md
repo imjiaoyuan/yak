@@ -80,16 +80,17 @@ hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is n
 is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment
 (`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. One line is a
 directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
-for approval in either mode (`!outside-cwd` switches it off). The file is seeded
-with the syntax as comments; deleting it just resets those comments.
+for approval in either mode — a file tool's `path`/`paths` argument, or a shell command line naming
+one (`!outside-cwd` switches it off). The file is seeded with the syntax as comments and
+`outside-cwd` active; deleting it just resets it to those rules.
 
 Want to approve things yourself? Use `--approval-mode ask` for one run, or put
 `"approval_mode": "always-ask"` in `config.json` to make it the default. In ask mode:
 
 - **Free:** reading files in your project, and read-only commands like `ls`, `git status`, `rg`,
   `cargo test`.
-- **Asks first:** file writes and edits, branch changes like `git push`, and anything it cannot
-  recognise as safe.
+- **Asks first:** file writes and edits, branch changes like `git push`, reading a path that leaves
+your project (the seeded `outside-cwd` rule), and anything it cannot recognise as safe.
 
 File edits show a unified diff right above the question. Type `a` to allow that tool for the rest of
 the session. `/yolo` flips the mode on and off mid-session.
