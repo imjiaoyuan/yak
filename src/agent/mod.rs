@@ -1218,11 +1218,7 @@ fn gate_call<'a>(
         return Err(denial(format!("invalid arguments: {e}")));
     }
 
-    let escapes = call
-        .arguments
-        .get("path")
-        .and_then(|p| p.as_str())
-        .is_some_and(|p| approval::escapes_cwd(cwd, p));
+    let escapes = tool.escapes_cwd(&call.arguments, cwd);
     let bash_command = if tool.name() == "bash" {
         Some(call.arguments["command"].as_str().unwrap_or(""))
     } else {

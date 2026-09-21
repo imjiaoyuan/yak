@@ -26,6 +26,11 @@ impl Tool for BashTool {
     fn preview(&self, args: &Value) -> String {
         args["command"].as_str().unwrap_or("?").to_string()
     }
+    /// A shell command's paths live in its command line, not in a `path`
+    /// argument: every token that names one is resolved against the cwd.
+    fn escapes_cwd(&self, args: &Value, cwd: &Path) -> bool {
+        crate::agent::approval::command_escapes_cwd(cwd, args["command"].as_str().unwrap_or(""))
+    }
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
         let command = args["command"].as_str().unwrap_or("");
         let timeout = args["timeout"].as_u64().unwrap_or(120);

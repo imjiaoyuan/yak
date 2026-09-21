@@ -195,6 +195,96 @@ pub fn resolve(
     }
 }
 
+/// True when any of a call's `path`/`paths` arguments leaves the working
+/// directory.
+pub fn args_escape_cwd(cwd: &std::path::Path, args: &serde_json::Value) -> bool {
+    let one = args.get("path").and_then(|p| p.as_str());
+    let many = args
+        .get("paths")
+        .and_then(|p| p.as_array())
+        .map(|list| list.iter().filter_map(|p| p.as_str()))
+        .into_iter()
+        .flatten();
+    one.into_iter().chain(many).any(|p| escapes_cwd(cwd, p))
+}
+
+/// True when a shell command line names a path outside the working
+/// directory. Best-effort by nature — a shell can build a path no lexer
+/// sees — so this gates, it does not sandbox. Every token that names a path
+/// is resolved (with `$VAR`/`${VAR}` expanded from the environment); a
+/// path-naming token whose expansion cannot be resolved statically counts
+/// as escaping rather than as harmless.
+pub fn command_escapes_cwd(cwd: &std::path::Path, command: &str) -> bool {
+    split_compound(command).iter().any(|seg| {
+        tokens(seg)
+            .iter()
+            .filter_map(|tok| token_path(tok))
+            .any(|p| p.contains('$') || p.contains('`') || escapes_cwd(cwd, &p))
+    })
+}
+
+/// The path one command token names, if it names one: a literal path (it
+/// carries a separator or starts at `~`), the value half of `--flag=path`
+/// or `VAR=path`. Flags and ordinary words are not paths.
+fn token_path(tok: &str) -> Option<String> {
+    if let Some((_, value)) = tok.split_once('=') {
+        return token_path(value);
+    }
+    if tok.starts_with('-') {
+        return None;
+    }
+    let path = expand_env(tok);
+    (path.contains('/') || path.starts_with('~')).then_some(path)
+}
+
+/// `$VAR`/`${VAR}` replaced from the environment, so `cat $HOME/x` is
+/// checked against the real home. Anything else (`$1`, `$(...)`, an unknown
+/// variable) is left exactly as written, which marks the token unresolvable.
+fn expand_env(tok: &str) -> String {
+    if !tok.contains('$') {
+        return tok.to_string();
+    }
+    let mut out = String::new();
+    let mut chars = tok.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let braced = chars.peek() == Some(&'{');
+        if braced {
+            chars.next();
+        }
+        let mut name = String::new();
+        while let Some(&n) = chars.peek() {
+            if n.is_ascii_alphanumeric() || n == '_' {
+                name.push(n);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let closed = !braced || chars.peek() == Some(&'}');
+        match (closed, name.is_empty(), std::env::var(&name)) {
+            (true, false, Ok(value)) => {
+                if braced {
+                    chars.next();
+                }
+                out.push_str(&value);
+            }
+            // not a plain variable reference: keep the text as it was
+            _ => {
+                out.push('$');
+                if braced {
+                    out.push('{');
+                }
+                out.push_str(&name);
+            }
+        }
+    }
+    out
+}
+
 /// True when a path argument leaves the working directory. Canonicalizes
 /// both sides when possible so symlinks cannot smuggle a path out; falls
 /// back to a lexical check for paths that do not exist yet.
@@ -639,6 +729,7 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn cfg(mode: Mode, policies: &[(&str, Policy)]) -> ApprovalConfig {
         ApprovalConfig {
@@ -1002,6 +1093,45 @@ mod tests {
         assert!(escapes_cwd(cwd, "../outside.txt"));
         assert!(escapes_cwd(cwd, "/etc/passwd"));
         assert!(escapes_cwd(cwd, "~/notes.txt"));
+    }
+
+    #[test]
+    fn a_batch_of_paths_is_checked_like_a_single_one() {
+        let cwd = std::path::Path::new("/home/user/proj");
+        assert!(!args_escape_cwd(
+            cwd,
+            &json!({"paths": ["src/a.rs", "src/b.rs"]})
+        ));
+        assert!(args_escape_cwd(
+            cwd,
+            &json!({"paths": ["src/a.rs", "/etc/passwd"]})
+        ));
+        assert!(args_escape_cwd(cwd, &json!({"path": "../secrets"})));
+        assert!(!args_escape_cwd(cwd, &json!({"pattern": "x"})));
+    }
+
+    #[test]
+    fn a_command_line_is_scanned_for_paths_outside_the_cwd() {
+        let cwd = std::path::Path::new("/home/user/proj");
+        let escapes = |cmd: &str| command_escapes_cwd(cwd, cmd);
+        // the project's own workflow is untouched
+        assert!(!escapes("cargo test --all-targets"));
+        assert!(!escapes("rg foo src/agent && cat src/main.rs"));
+        assert!(!escapes("git commit -m 'fix src/x'"));
+        // a read-only whitelisted word is no longer a way around the gate
+        assert!(escapes("cat /etc/passwd"));
+        assert!(escapes("ls ~/.ssh"));
+        assert!(escapes("cd /tmp && ls"));
+        assert!(escapes("rg --files ../other"));
+        assert!(escapes("cat --file=/etc/hosts"));
+        // `$HOME` is expanded, so the real target is what gets checked
+        assert!(escapes("cat $HOME/.ssh/id_rsa"));
+        // an expansion that cannot be resolved is not assumed harmless
+        assert!(escapes("cat $SECRET_DIR/x"));
+        assert!(escapes("cat `pwd`/x"));
+        // a bare word, a flag, or a value the `=` half of a flag: not paths
+        assert!(!escapes("awk '{print $1}' src/main.rs"));
+        assert!(!escapes("cargo test --features=serde"));
     }
 
     #[test]

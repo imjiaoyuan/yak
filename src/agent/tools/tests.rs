@@ -813,3 +813,28 @@ fn tool_defs_stay_under_the_wire_budget() {
         "tool definitions total {total} bytes (budget 4800) — trim before adding"
     );
 }
+
+#[test]
+fn every_file_tool_reports_the_paths_it_would_reach_outside_the_cwd() {
+    let cwd = std::path::Path::new("/home/user/proj");
+    let tools = builtin_tools();
+    let tool = |name: &str| -> &dyn Tool {
+        tools
+            .iter()
+            .find(|t| t.name() == name)
+            .expect("mounted")
+            .as_ref()
+    };
+    // the batch read is one call carrying up to five paths: the gate has to
+    // see every one of them, not just a single `path` argument
+    let read = tool("read");
+    assert!(!read.escapes_cwd(&json!({"paths": ["src/a.rs", "src/b.rs"]}), cwd));
+    assert!(read.escapes_cwd(&json!({"paths": ["src/a.rs", "/etc/passwd"]}), cwd));
+    assert!(read.escapes_cwd(&json!({"paths": ["~/.ssh/id_rsa"]}), cwd));
+    assert!(!tool("write").escapes_cwd(&json!({"path": "src/a.rs"}), cwd));
+    assert!(tool("edit").escapes_cwd(&json!({"path": "../elsewhere/a.rs"}), cwd));
+    // a shell command's paths are in the command line, not in an argument
+    let bash = tool("bash");
+    assert!(!bash.escapes_cwd(&json!({"command": "cargo test"}), cwd));
+    assert!(bash.escapes_cwd(&json!({"command": "cat /etc/passwd"}), cwd));
+}
