@@ -3,6 +3,8 @@
 
 use std::process::Command;
 
+use super::Clip;
+
 /// Start the shell in a new process group. Darwin's `setsid` symbol has
 /// historical link availability risk, so `setpgid(0, 0)` is the conservative
 /// POSIX choice here. The tree is still group-killable.

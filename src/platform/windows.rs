@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-use super::{RawByte, TermSize};
+use super::{Clip, RawByte, TermSize};
 
 const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
 const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
