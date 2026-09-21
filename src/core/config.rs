@@ -212,6 +212,37 @@ pub fn default_model() -> Option<String> {
     default_model_from(&read_root_or_die())
 }
 
+/// Remember the window a provider's own refusal established, keyed by model
+/// id under `agent.model_windows`, so the next run compacts before that wall
+/// instead of after it. An explicit `context_window` still wins.
+pub fn try_set_model_window(model: &str, window: u64) -> std::io::Result<()> {
+    edit_mode_default(|root| set_model_window_in(root, model, window))
+}
+
+fn set_model_window_in(value: &mut serde_json::Value, model: &str, window: u64) {
+    let root = value
+        .as_object_mut()
+        .expect("read_root only yields objects");
+    let agent = root
+        .entry("agent".to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if !agent.is_object() {
+        *agent = serde_json::Value::Object(Default::default());
+    }
+    let windows = agent
+        .as_object_mut()
+        .expect("made an object above")
+        .entry("model_windows".to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if !windows.is_object() {
+        *windows = serde_json::Value::Object(Default::default());
+    }
+    windows
+        .as_object_mut()
+        .expect("made an object above")
+        .insert(model.to_string(), serde_json::Value::from(window));
+}
+
 fn default_model_from(value: &serde_json::Value) -> Option<String> {
     value
         .get("models")
@@ -424,6 +455,30 @@ mod default_model_tests {
         // the options table is a sibling, not the default: it stays
         assert!(v["models"].get("options").is_some());
         assert_eq!(v["providers"]["p"]["kind"], json!("openai-compat"));
+    }
+
+    #[test]
+    fn set_model_window_writes_the_entry_and_keeps_siblings() {
+        let mut v = json!({"agent": {"context_window": 1000, "tools": {}}});
+        set_model_window_in(&mut v, "openai/gpt-5", 400_000);
+        assert_eq!(
+            v["agent"]["model_windows"]["openai/gpt-5"],
+            json!(400_000u64)
+        );
+        // the global window and the rest of the agent section stay put
+        assert_eq!(v["agent"]["context_window"], json!(1000));
+        assert!(v["agent"].get("tools").is_some());
+        // a second model adds an entry instead of replacing the table
+        set_model_window_in(&mut v, "other/m", 8);
+        assert_eq!(
+            v["agent"]["model_windows"]["openai/gpt-5"],
+            json!(400_000u64)
+        );
+        assert_eq!(v["agent"]["model_windows"]["other/m"], json!(8u64));
+        // a non-object where a section belongs is replaced, not a panic
+        let mut v = json!({"agent": "nonsense"});
+        set_model_window_in(&mut v, "m", 8);
+        assert_eq!(v["agent"]["model_windows"]["m"], json!(8u64));
     }
 
     #[test]

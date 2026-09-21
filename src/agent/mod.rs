@@ -501,6 +501,17 @@ pub fn run_agent(
                     seed_boundary = after.seed_boundary;
                     usage_marker = after.usage_marker;
                     cache_stable = after.cache_stable;
+                    // remember it: the refusal is the one authoritative
+                    // statement about this window, and paying for it on every
+                    // later run is a tax nobody agreed to
+                    if let Err(e) =
+                        crate::core::config::try_set_model_window(&model.model_id, window)
+                    {
+                        eprintln!(
+                            "Warning: could not record the context window for {}: {e}",
+                            model.model_id
+                        );
+                    }
                     overflow_compactions += 1;
                     continue;
                 }
