@@ -244,14 +244,14 @@ caps one request body in bytes (32MB by default) — lower it when a gateway in 
 refuses less than the provider documents, and the run refuses the oversized body locally, naming
 the attachments that filled it, instead of coming back as an opaque 413.
 
-Nothing here guesses a context window: gateways rarely publish one, and a made-up number either
-pays for a summary nobody needed or dies on a request the provider refuses anyway. So the agent
-learns it from the provider itself — when a request comes back saying the prompt does not fit, it
-compacts the conversation below that size, retries, and remembers it — for the rest of the session,
-and in `agent.model_windows` on disk, so the next run compacts before that wall instead of walking
-into it again (the request note and the proactive compaction then work as usual). Set
-`context_window` (or a `model_windows` entry) when you already know the number and want the
-proactive gate from the first turn.
+Compaction is driven by an absolute threshold, `compact_at_tokens` (64k by default): the one number
+a user can pick without knowing anything about the model behind the gateway. Each compaction the
+session runs doubles it, so a long conversation is summarized at 64k, then 128k, then 256k — a few
+summaries for a very long session, not one on every round that sits above a fixed line. Nothing
+here asks for a model's context window or guesses at one. A request that comes back saying the
+prompt does not fit still compacts the conversation at once, retries, and sets the next rung at the
+size that was refused, so the session does not walk into that wall again — in memory only: no file
+records it and nothing reports it.
 
 The command blacklist is a plain file, not a config key: `~/.llm/blacklist` for everything you run,
 and `.llm/blacklist` for one project (its lines win; the two are concatenated). It only adds refusals

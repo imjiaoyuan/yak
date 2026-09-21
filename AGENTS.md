@@ -188,9 +188,11 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion
   everywhere, the top-level `models` family (`default` + optional `thinking` — one shared model
   every mode starts on; the per-model `options` table), the `agent` behavior section
-  (approval/tools/skills, `context_window` — unset means learned from the provider's own refusal,
-  `reserve_tokens`, `keep_recent_tokens`,
-  `tools` policies, `model_windows`, `disabled_skills`), the `aliases` object (hand-edited; no
+  (approval/tools/skills, `compact_at_tokens` — the occupancy that starts auto-compaction, the
+  ladder's first rung, which the loop doubles after each compaction it runs, so nothing here ever
+  asks for a model's context window — `keep_recent_tokens` (the tail each compaction keeps, clamped
+  to half the rung),
+  `tools` policies, `disabled_skills`), the `aliases` object (hand-edited; no
   CLI command edits it), and the two plugin tables (`extensions.disabled`/`tool_timeout`).
   This file deliberately deviates from the reference's config.toml + keys.json +
   default_model.txt + model_options.json split.

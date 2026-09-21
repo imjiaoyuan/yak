@@ -38,7 +38,9 @@ drop that arrives before any output — no text, no reasoning, no tool call — 
 stream that ends without a completion marker (`[DONE]`/`message_stop`) is surfaced as truncation
 rather than a clean turn (a clean FIN on a half-delivered answer must not be stored as a finished
 round), and an Anthropic `message_start` seeds the input/cached token counts that the edge merges
-with the `message_delta` output counts a stream silent past 300s is an idle error, not a hung task.
+with the `message_delta` output counts — every field an event omits keeps the value an earlier one
+established, so a delta repeating only `input_tokens` cannot drop the cached halves it was already
+given. A stream silent past 300s is an idle error, not a hung task.
 The body read runs on its own thread with 100ms `recv_timeout` slices checking the interrupt flag,
 so esc works during silent thinking stretches — and the whole blocking request phase (DNS, TCP, TLS,
 body upload, response headers, plus attachment GETs) runs on a worker polled the same way
@@ -60,7 +62,7 @@ non-interrupt keystroke sets `screen().flush_now` and the next tick prints the w
 anywhere), and the dim `secs · this task: input N · output N · cache N%` footer (the cache
 share only when the provider reports prompt-cache hits; all three are the task's own
 rounds summed — a re-sent prompt per round, so never a context size — while the session's
-cumulative counters and the window's occupancy live in `/status`); answers stream character-immediately and styled the reference-like in a left-indent-2 block
+cumulative counters and the context occupancy live in `/status`); answers stream character-immediately and styled the reference-like in a left-indent-2 block
 on a TTY through `StyleStream` (`core/render_md/`), write-once — no erase, no redraw: each line
 classifies from its first chars (heading, quote, list, fence, table, rule) and the settled prefix
 streams, while an unclosed inline marker (`**`, `` ` ``, `~~`, `[`) holds only its own span until it
@@ -241,14 +243,15 @@ across processes with `LLM_SESSION_ID`.
   attachment-bearing messages for a name+mime note every round, before the request is built; a
   compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
   `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
-  the one failure compaction exists to prevent; the window itself is never guessed either: config
-  may name it, and an unset one is learned from the provider's own refusal (the refused size
-  becomes the session's window, the history is compacted below it, and the round is retried,
-  bounded); a round the provider reported no usage for is priced from the text instead, so a gateway
+  the one failure compaction exists to prevent; compaction is driven by an absolute threshold
+  (`agent.compact_at_tokens`, 64k by default) — the ladder's first rung, doubled by the loop after
+  each compaction the session runs, so a long conversation is summarized at 64k, then 128k, then
+  256k — and no model's context window is asked for or guessed at anywhere in that path (a prompt
+  the provider refuses still forces a compaction, whose retry sets the next rung at the refused
+  size, in memory only); a round the provider reported no usage for is priced from the text instead, so a gateway
   that omits the counts cannot switch the gate off), Every
-  request closes with a request-only `<context>N tokens left in this context window</context>` user
-  turn (`context_note` in `mod.rs`: the context-window room — only once the window is known, since
-  an unknown one has no room to report — plus the task's input-token room when
+  request closes with a request-only `<context>N tokens left before auto-compaction</context>` user
+  turn (`context_note` in `mod.rs`: the room until the trigger, plus the task's input-token room when
   `--token-budget` is set) — the reference style budget awareness so the model can choose to wrap up; it is
   never persisted and rides after the Anthropic cache tip, so the prompt-cache prefix is untouched.
   Read-only calls from one assistant message (every tool at `Tier::Read`) run concurrently on scope
@@ -298,7 +301,7 @@ session's `cache_key`) pinning one conversation to one replica — automatic cac
 so a round-robin hop serves the next round cold — and its hit count parsed from all three usage
 shapes (`providers::cache_hit_tokens`: DeepSeek, OpenAI, OpenRouter). Anything that rewrites history
 mid-conversation invalidates the cached prefix from the change point, so the two pruning passes are
-gated on `compact::rewrite_prefix` (half the window, well below the compaction gate) instead of
+gated on `compact::rewrite_prefix` (half the trigger, well below the compaction gate) instead of
 running every round, and the typewriter's settle wait is bounded by `SETTLE_GRACE` because it runs
 on the agent thread — a long answer tail must not hold the next tool round hostage.
 `commands/agent.rs` is CLI glue only. While a task runs, KeyWatcher buffers typed lines into the

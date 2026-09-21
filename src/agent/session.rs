@@ -78,7 +78,7 @@ impl Session {
             return;
         }
         let estimate = crate::agent::compact::estimate_tokens(&self.seed, None);
-        if crate::agent::compact::should_compact(estimate, &self.compact) {
+        if crate::agent::compact::should_compact(estimate, self.compact.trigger_tokens) {
             crate::agent::compact::prune_tool_results(&mut self.seed, archive_dir);
         }
     }
@@ -852,8 +852,7 @@ mod tests {
         Session {
             max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig {
-                context_window: 4_000,
-                reserve_tokens: 100,
+                trigger_tokens: 4_000,
                 keep_recent_tokens: 100,
             },
             model: crate::providers::ResolvedModel {
@@ -944,8 +943,7 @@ mod tests {
         ];
         let mut session = tight_session(seed.clone());
         session.compact = CompactConfig {
-            context_window: 128_000,
-            reserve_tokens: 16_384,
+            trigger_tokens: 128_000,
             keep_recent_tokens: 32_000,
         };
         session.prune_seed_to_fit_at(&dir);
@@ -1512,6 +1510,7 @@ mod tests {
                         input: 10,
                         output: 2,
                         cached: 8,
+                        cached_write: 0,
                     }),
                 },
                 json!({"type": "turn_end", "usage": {"input": 10, "output": 2, "cached": 8}}),

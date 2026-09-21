@@ -253,8 +253,7 @@ fn a_stalled_compaction_is_reported_once() {
     });
     let model = mock_model(port);
     let cfg = compact::CompactConfig {
-        context_window: 1_000,
-        reserve_tokens: 0,
+        trigger_tokens: 1_000,
         keep_recent_tokens: 0,
     };
     let marker = Some((
@@ -263,6 +262,7 @@ fn a_stalled_compaction_is_reported_once() {
             input: 10_000,
             output: 0,
             cached: 0,
+            cached_write: 0,
         },
     ));
     let mut history = vec![Msg::user("the task"), Msg::user("more")];
@@ -478,8 +478,7 @@ fn a_refused_prompt_teaches_the_window_and_the_round_is_retried() {
     opts.max_turns = 4;
     // the window is exactly what is not known here: nothing is configured
     opts.compact = Some(compact::CompactConfig {
-        context_window: 0,
-        reserve_tokens: 0,
+        trigger_tokens: 0,
         keep_recent_tokens: 0,
     });
     let mut approval = approval::ApprovalConfig::default();
@@ -873,9 +872,8 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
     assert_eq!(results, [("c1", "probed"), ("c2", "probed")]);
 }
 
-/// Budget awareness: the note reports the context-window room
-/// and (when set) the task's input-token room, wrapped so the model reads
-/// it as a system note rather than a user turn.
+/// Budget awareness: the note reports the task's input-token room,
+/// wrapped so the model reads it as a system note rather than a user turn.
 #[test]
 fn context_note_reports_the_room_left() {
     let mut opts = AgentOptions {
@@ -883,61 +881,34 @@ fn context_note_reports_the_room_left() {
         system: None,
         cwd: std::env::temp_dir(),
         max_turns: 0,
-        token_budget: 0,
+        token_budget: 10_000,
         stream: false,
-        compact: Some(compact::CompactConfig {
-            context_window: 100_000,
-            reserve_tokens: 0,
-            keep_recent_tokens: 0,
-        }),
+        compact: None,
         reasoning: None,
         hooks: &crate::agent::ext::Extensions::empty(),
         cache_key: None,
     };
-    let note = context_note(Some(0), &opts, opts.compact.as_ref(), 0).unwrap();
+    let note = context_note(&opts, 3_000).unwrap();
     assert!(
         note.starts_with("<context>") && note.ends_with("</context>"),
         "{note}"
     );
     assert!(
-        note.contains("tokens left in this context window"),
-        "{note}"
-    );
-    // a task budget adds its own clause
-    opts.token_budget = 10_000;
-    let note = context_note(Some(0), &opts, opts.compact.as_ref(), 3_000).unwrap();
-    assert!(
         note.contains("7000 of this task's input-token budget left"),
         "{note}"
     );
-    // neither a window nor a budget: no note at all
-    opts.compact = None;
+    // no task budget: no note at all — how long the conversation may run is
+    // the auto-compaction ladder's business, not a number handed to the model
     opts.token_budget = 0;
-    assert!(context_note(Some(0), &opts, opts.compact.as_ref(), 0).is_none());
+    assert!(context_note(&opts, 0).is_none());
 }
 
-/// The marker prices the covered prefix at the provider's reported count
-/// and only the tail at the chars/4 estimate: with a marker naming the
-/// whole history, the note must carry exactly the reported total, and
-/// the None path keeps its whole-history estimate.
+/// The marker prices the covered prefix at the provider's reported count and
+/// only the tail at the chars/4 estimate: the number the compaction gate acts
+/// on must be the reported total, not a chars/4 rescan of history the provider
+/// already counted.
 #[test]
-fn context_note_uses_the_usage_marker_for_the_covered_prefix() {
-    let opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 0,
-        stream: false,
-        compact: Some(compact::CompactConfig {
-            context_window: 100_000,
-            reserve_tokens: 0,
-            keep_recent_tokens: 0,
-        }),
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-    };
+fn the_usage_marker_total_reaches_the_compaction_gate() {
     let history = vec![Msg::user("hi"), Msg::user("there")];
     let marker = Some((
         history.len(),
@@ -945,14 +916,11 @@ fn context_note_uses_the_usage_marker_for_the_covered_prefix() {
             input: 7_000,
             output: 0,
             cached: 0,
+            cached_write: 0,
         },
     ));
-    // the loop prices the context once per round and hands the number
-    // down, so the marker's reported total must survive that step
     let used = compact::estimate_tokens(&history, marker);
-    let note = context_note(Some(used), &opts, opts.compact.as_ref(), 0).unwrap();
-    assert!(
-        note.contains("93000 tokens left"),
-        "the marker total must flow through: {note}"
-    );
+    assert_eq!(used, 7_000, "the marker's reported total must survive");
+    assert!(compact::should_compact(used, 7_000));
+    assert!(!compact::should_compact(used, 7_001));
 }

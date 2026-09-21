@@ -341,7 +341,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let mut session = crate::agent::session::Session {
         max_request_bytes,
-        compact: settings.compact_config(&model.qualified_id(), &model.model_id),
+        // the auto-compaction ladder's first rung (agent.compact_at_tokens) and
+        // the tail each compaction keeps: no model's context window is asked for
+        // anything here, and a provider that refuses a prompt still forces one
+        compact: settings.compact_config(),
         model,
         tools: Vec::new(),
         system,

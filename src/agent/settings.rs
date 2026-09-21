@@ -10,35 +10,28 @@ use crate::core::config::config_path;
 #[derive(Default)]
 pub struct AgentSettings {
     pub approval_mode: Option<String>,
-    pub context_window: Option<u64>,
-    pub reserve_tokens: Option<u64>,
+    /// the first occupancy that triggers auto-compaction, in tokens; it doubles
+    /// after each compaction the session runs
+    pub compact_at_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     /// ceiling on one serialized request body, in bytes; a gateway in front of
     /// the model may refuse far less than the provider documents, and the
     /// refusal that comes back names nothing usable
     pub max_request_bytes: Option<usize>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
-    pub model_windows: std::collections::BTreeMap<String, u64>,
     pub disabled_skills: Vec<String>,
 }
 
 impl AgentSettings {
-    /// Compaction limits for a resolved model: the qualified-id window, then
-    /// the bare model-id window, then the global context_window. An unset
-    /// window stays 0 (unknown) rather than a guess: the provider's own
-    /// refusal is what establishes it, and a made-up number would only buy a
-    /// summary nobody needed or a request it refuses. Reserve and keep_recent
-    /// fall back to their defaults.
-    pub fn compact_config(&self, qualified: &str, model_id: &str) -> CompactConfig {
+    /// Compaction limits for a run. The trigger is `compact_at_tokens` (64k by
+    /// default): one number, the same whatever model serves the run, picked
+    /// without knowing anything about the model behind the gateway — and the
+    /// loop doubles it after each compaction, so the ladder climbs as the
+    /// session is summarized. `keep_recent_tokens` is the tail each compaction
+    /// keeps, clamped to half the trigger by `effective_keep_recent`.
+    pub fn compact_config(&self) -> CompactConfig {
         CompactConfig {
-            context_window: self
-                .model_windows
-                .get(qualified)
-                .or_else(|| self.model_windows.get(model_id))
-                .copied()
-                .or(self.context_window)
-                .unwrap_or(0),
-            reserve_tokens: self.reserve_tokens.unwrap_or(16_384),
+            trigger_tokens: self.compact_at_tokens.unwrap_or(64_000),
             keep_recent_tokens: self.keep_recent_tokens.unwrap_or(32_000),
         }
     }
@@ -78,8 +71,7 @@ pub fn parse(raw: &str) -> AgentSettings {
         .get("approval_mode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    s.context_window = agent.get("context_window").and_then(|v| v.as_u64());
-    s.reserve_tokens = agent.get("reserve_tokens").and_then(|v| v.as_u64());
+    s.compact_at_tokens = agent.get("compact_at_tokens").and_then(|v| v.as_u64());
     s.keep_recent_tokens = agent.get("keep_recent_tokens").and_then(|v| v.as_u64());
     s.max_request_bytes = agent
         .get("max_request_bytes")
@@ -89,13 +81,6 @@ pub fn parse(raw: &str) -> AgentSettings {
         for (name, policy) in tools {
             if let Some(p) = policy.as_str() {
                 s.tool_policies.insert(name.clone(), p.to_string());
-            }
-        }
-    }
-    if let Some(models) = agent.get("models").and_then(|v| v.as_object()) {
-        for (model, table) in models {
-            if let Some(w) = table.get("context_window").and_then(|v| v.as_u64()) {
-                s.model_windows.insert(model.clone(), w);
             }
         }
     }
@@ -133,24 +118,20 @@ mod agent_settings_tests {
   },
   "agent": {
     "approval_mode": "yolo",
-    "context_window": 5000,
-    "reserve_tokens": 100,
+    "compact_at_tokens": 250000,
     "keep_recent_tokens": 100,
     "disabled_skills": ["old-thing"],
-    "tools": {"bash": "prompt"},
-    "models": {"mock/m1": {"context_window": 9000}}
+    "tools": {"bash": "prompt"}
   }
 }"#;
         let s = parse(raw);
         assert_eq!(s.approval_mode.as_deref(), Some("yolo"));
-        assert_eq!(s.context_window, Some(5000));
-        assert_eq!(s.reserve_tokens, Some(100));
+        assert_eq!(s.compact_at_tokens, Some(250_000));
         assert_eq!(s.keep_recent_tokens, Some(100));
         assert_eq!(
             s.tool_policies.get("bash").map(String::as_str),
             Some("prompt")
         );
-        assert_eq!(s.model_windows.get("mock/m1"), Some(&9000));
         assert_eq!(s.disabled_skills, vec!["old-thing".to_string()]);
     }
 
@@ -158,9 +139,9 @@ mod agent_settings_tests {
     fn missing_or_invalid_returns_defaults() {
         assert!(
             parse(r#"{"providers": {"x": {"kind": "openai-compat"}}}"#)
-                .context_window
+                .compact_at_tokens
                 .is_none()
         );
-        assert!(parse("not json {{{").context_window.is_none());
+        assert!(parse("not json {{{").compact_at_tokens.is_none());
     }
 }

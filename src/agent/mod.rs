@@ -348,9 +348,12 @@ pub fn run_agent(
     // bounded, so a provider that refuses everything ends the run
     const MAX_OVERFLOW_COMPACTIONS: usize = 2;
     let mut overflow_compactions = 0usize;
-    // The model's context window: the configured one when there is one, else 0
-    // (unknown) until the provider itself refuses a prompt and says so.
-    let mut window = opts.compact.as_ref().map_or(0, |c| c.context_window);
+    // The auto-compaction ladder: compaction runs when the priced context
+    // crosses this, and each compaction doubles it (see `next_trigger`), so a
+    // long session is summarized at 64k, then 128k, then 256k ... instead of at
+    // every round that sits above one fixed number. 0 switches it off; a
+    // provider that refuses a prompt still forces one below.
+    let mut compact_trigger = opts.compact.as_ref().map_or(0, |c| c.trigger_tokens);
     let mut cache_stable: Option<usize> = None;
     let mut final_text = String::new();
     let mut interrupted = false;
@@ -430,14 +433,13 @@ pub fn run_agent(
         // image turns keep their pixels — including anything a tool result or
         // a steering message added mid-run.
         crate::agent::session::budget_images(&mut history);
-        // the compaction this round runs under: the window learned from an
-        // earlier refusal during this run replaces the configured one
+        // the compaction this round runs under: the ladder's current rung, which
+        // rises as the session is summarized
         let cfg_now = opts.compact.as_ref().map(|c| compact::CompactConfig {
-            context_window: window,
+            trigger_tokens: compact_trigger,
             ..c.clone()
         });
-        let used_tokens =
-            price_and_rewrite(&mut history, usage_marker, cfg_now.as_ref(), on_update);
+        price_and_rewrite(&mut history, usage_marker, cfg_now.as_ref(), on_update);
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
@@ -446,7 +448,7 @@ pub fn run_agent(
         // left rides the end of every request, so the model can decide to
         // wrap up instead of exploring indefinitely. Request-only: it never
         // enters the history or the prompt-cache prefix.
-        let note = context_note(used_tokens, opts, cfg_now.as_ref(), spent_input);
+        let note = context_note(opts, spent_input);
         let input = PromptInput {
             max_request_bytes: opts.max_request_bytes,
             system: opts.system,
@@ -473,26 +475,36 @@ pub fn run_agent(
             // size becomes this session's window — compact the history below
             // it, and retry the round. Bounded: a provider that refuses
             // everything ends the run instead of looping.
+            // The provider refusing a prompt that does not fit is the moment a
+            // session runs into a wall it could not see: nothing here knows the
+            // model's window, and nothing tries to. Compact now, whatever the
+            // ladder says, and set the next rung at the size that was refused,
+            // so the run can carry on and does not walk into that wall again
+            // this session. In memory only: no file records it, no line
+            // reports it. Bounded, so a provider that refuses everything ends
+            // the run instead of looping.
             if round.text.is_empty()
                 && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
                 && crate::core::http::context_overflow(&e)
                 && let Some(cfg) = cfg_now.as_ref()
             {
-                window = compact::estimate_tokens(&history, usage_marker);
-                let learned = compact::CompactConfig {
-                    context_window: window,
+                compact_trigger =
+                    compact_trigger.max(compact::estimate_tokens(&history, usage_marker));
+                let refused = compact::CompactConfig {
+                    trigger_tokens: compact_trigger,
                     ..cfg.clone()
                 };
                 let mut after = AfterTurn {
                     seed_boundary,
                     usage_marker,
                     cache_stable,
+                    trigger: compact_trigger,
                 };
                 let sink = StallSink::new(&mut compact_stalled, on_update);
                 if compact_now(
                     model,
                     &mut history,
-                    &learned,
+                    &refused,
                     &mut after,
                     &mut *sink.on_update,
                 )
@@ -501,17 +513,6 @@ pub fn run_agent(
                     seed_boundary = after.seed_boundary;
                     usage_marker = after.usage_marker;
                     cache_stable = after.cache_stable;
-                    // remember it: the refusal is the one authoritative
-                    // statement about this window, and paying for it on every
-                    // later run is a tax nobody agreed to
-                    if let Err(e) =
-                        crate::core::config::try_set_model_window(&model.model_id, window)
-                    {
-                        eprintln!(
-                            "Warning: could not record the context window for {}: {e}",
-                            model.model_id
-                        );
-                    }
                     overflow_compactions += 1;
                     continue;
                 }
@@ -613,6 +614,9 @@ pub fn run_agent(
         seed_boundary = after.seed_boundary;
         usage_marker = after.usage_marker;
         cache_stable = after.cache_stable;
+        // a compaction this turn moved the ladder up; one that stalled left it
+        // where it was, so the next round tries again at the same size
+        compact_trigger = after.trigger;
 
         if stop == StopReason::Length {
             // truncated output: don't act on possibly-mangled calls, let the
@@ -754,7 +758,7 @@ fn price_and_rewrite(
 ) -> Option<u64> {
     let mut used_tokens = cfg.map(|_| compact::estimate_tokens(history, usage_marker));
     let rewrite = match (cfg, used_tokens) {
-        (Some(c), Some(used)) => compact::rewrite_prefix(used, c),
+        (Some(c), Some(used)) => compact::rewrite_prefix(used, c.trigger_tokens),
         (None, _) | (Some(_), None) => true,
     };
     if rewrite {
@@ -780,6 +784,9 @@ struct AfterTurn {
     usage_marker: Option<(usize, Usage)>,
     /// stable cache prefix, or None once the rebuild rewrote below the summary
     cache_stable: Option<usize>,
+    /// the ladder rung the next round compacts at; `next_trigger` when a
+    /// compaction ran this turn, unchanged when one stalled
+    trigger: u64,
 }
 
 /// Compact after a completed turn when the estimate says the window is under
@@ -800,6 +807,7 @@ fn compact_after_turn(
         seed_boundary,
         usage_marker,
         cache_stable,
+        trigger: cfg.map_or(0, |c| c.trigger_tokens),
     };
     let Some(cfg) = cfg else {
         return after;
@@ -809,7 +817,7 @@ fn compact_after_turn(
     // same chars/4 math `prune_seed_to_fit` runs), because a gateway that omits
     // usage must not silently switch the window gate off.
     let mut estimate = compact::estimate_tokens(history, usage_marker);
-    if compact::should_compact(estimate, cfg) {
+    if compact::should_compact(estimate, cfg.trigger_tokens) {
         // pressure confirmed: prune oversized tool results first — it costs no
         // model call and may relieve enough to skip summarization entirely.
         // The usage marker covers the un-pruned prefix, so re-estimating over
@@ -823,12 +831,14 @@ fn compact_after_turn(
             });
         }
     }
-    if compact::should_compact(estimate, cfg)
-        && let Err(reason) = compact_now(model, history, cfg, &mut after, &mut *sink.on_update)
-    {
-        // The history is untouched either way: the run continues, but a session
-        // that keeps growing past the window has to say why
-        sink.stalled(reason);
+    if compact::should_compact(estimate, cfg.trigger_tokens) {
+        // a compaction ran this turn: the next one gets twice the room
+        match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
+            Ok(()) => after.trigger = compact::next_trigger(cfg.trigger_tokens),
+            // The history is untouched either way: the run continues, but a
+            // session that keeps growing past the trigger has to say why
+            Err(reason) => sink.stalled(reason),
+        }
     }
     after
 }
@@ -868,7 +878,8 @@ fn compact_now(
     after: &mut AfterTurn,
     on_update: &mut dyn FnMut(AgentUpdate),
 ) -> Result<(), String> {
-    let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent()) else {
+    let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent(cfg.trigger_tokens))
+    else {
         return Err("no turn boundary can be dropped without orphaning a tool result".to_string());
     };
     let summary = compact::summarize(model, &history[..cut])?;
@@ -1064,26 +1075,13 @@ fn run_tool_calls(
 /// Terminal preview of a tool result: the first ten non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
 /// Budget awareness: a terse note reporting how much room the
-/// task has left, in context-window tokens and (when a task budget is set)
-/// input tokens. `None` when neither is known — an unknown window says nothing
-/// about room rather than inventing a number. Kept short and factual — it
+/// task has left, in input tokens. `None` when no task budget is set: how much
+/// longer the conversation can run is the auto-compaction ladder's business,
+/// not something the model is asked to steer by, and this side cannot report a
+/// context size it does not know anyway. Kept short and factual — the note
 /// exists so the model can choose to wrap up, not to make it narrate.
-fn context_note(
-    used_tokens: Option<u64>,
-    opts: &AgentOptions,
-    cfg: Option<&compact::CompactConfig>,
-    spent_input: u64,
-) -> Option<String> {
+fn context_note(opts: &AgentOptions, spent_input: u64) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let (Some(cfg), Some(used)) = (cfg, used_tokens)
-        && cfg.context_window > 0
-    {
-        // priced once by the caller: the same number gates the prefix
-        // rewrites and (via the loop) the compaction check, so nothing
-        // rescans the history here
-        let left = cfg.context_window.saturating_sub(used);
-        parts.push(format!("{left} tokens left in this context window"));
-    }
     if opts.token_budget > 0 {
         let left = opts.token_budget.saturating_sub(spent_input);
         parts.push(format!("{left} of this task's input-token budget left"));

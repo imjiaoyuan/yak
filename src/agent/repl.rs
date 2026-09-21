@@ -923,8 +923,6 @@ fn repl_command(
                 &session.seed,
                 session.last_usage.map(|u| (n, u)),
             );
-            let window = session.compact.context_window;
-            let pct = (used * 100).checked_div(window).unwrap_or(0);
             eprintln!(
                 "  {d}model   {r}{b}{}{r}",
                 session.model.qualified_id(),
@@ -952,15 +950,8 @@ fn repl_command(
                 );
             }
             eprintln!(
-                "  {d}context {r}{}{} · {} messages",
+                "  {d}context {r}{} · {} messages",
                 humanize_tokens(used),
-                if window == 0 {
-                    // no denominator: the provider has not refused anything yet,
-                    // and inventing a window here is what this avoids
-                    " · window unknown (it is learned from the first refusal)".to_string()
-                } else {
-                    format!(" / {} ({}%)", humanize_tokens(window), pct)
-                },
                 session.seed.len(),
                 d = p.dim,
                 r = p.reset
@@ -974,6 +965,7 @@ fn repl_command(
                         input: session.tokens.0,
                         output: 0,
                         cached: session.tokens_cached,
+                        cached_write: 0,
                     }
                     .cache_percent();
                     // the per-round figure is what a compaction or prefix

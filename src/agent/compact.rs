@@ -10,43 +10,42 @@ use crate::providers::PromptInput;
 
 #[derive(Clone)]
 pub struct CompactConfig {
-    /// The model's context window, when it is actually known (config:
-    /// `agent.context_window` or a `model_windows` entry). `0` means unknown:
-    /// gateways rarely publish one, so the window is learned from the provider
-    /// itself — the size it refuses is the only authoritative statement there
-    /// is — and until that happens nothing here can honestly predict it.
-    pub context_window: u64,
-    pub reserve_tokens: u64,
+    /// The first auto-compaction trigger, in tokens (`agent.compact_at_tokens`).
+    /// It doubles after each compaction the session actually runs, so a long
+    /// conversation is summarized a few times — at 64k, then 128k, then 256k —
+    /// instead of at every round that happens to sit above one fixed number.
+    /// `0` switches automatic compaction off; a provider that refuses a prompt
+    /// still forces one, so a session that ran into a wall is not left there.
+    pub trigger_tokens: u64,
+    /// The tail compaction keeps.
     pub keep_recent_tokens: u64,
 }
 
 impl Default for CompactConfig {
     fn default() -> CompactConfig {
         CompactConfig {
-            context_window: 0,
-            reserve_tokens: 16_384,
+            trigger_tokens: 64_000,
             keep_recent_tokens: 32_000,
         }
     }
 }
 
 impl CompactConfig {
-    /// The keep-recent window this context size can actually honor. A fixed
-    /// `keep_recent_tokens` is only meaningful against the window it was
-    /// chosen for: on a smaller model (an 8k local one, say) a 32k window is
-    /// larger than everything the budget leaves, so `find_cut` finds no
-    /// boundary that holds it and returns `None` — compaction then silently
-    /// never runs and the run dies on the provider's context error instead.
-    /// Half the usable window is the ceiling: enough that a cut can always be
-    /// found once pressure is real, small enough that the kept tail does not
-    /// crowd out the summary that replaces everything before it.
-    pub fn effective_keep_recent(&self) -> u64 {
-        if self.context_window == 0 {
+    /// The keep-recent window this trigger can honor. A fixed
+    /// `keep_recent_tokens` is only meaningful against the trigger it was
+    /// chosen for: at a small one a 32k tail is most of the budget, so
+    /// `find_cut` finds no boundary that holds it and returns `None` —
+    /// compaction then silently never runs and the run dies on the provider's
+    /// context error instead. Half the trigger is the ceiling: enough that a
+    /// cut can always be found once pressure is real, small enough that the
+    /// kept tail does not crowd out the summary that replaces everything before
+    /// it.
+    pub fn effective_keep_recent(&self, trigger: u64) -> u64 {
+        if trigger == 0 {
             // nothing to scale against: keep what the config asks for
             return self.keep_recent_tokens;
         }
-        let usable = self.context_window.saturating_sub(self.reserve_tokens);
-        self.keep_recent_tokens.min(usable / 2)
+        self.keep_recent_tokens.min(trigger / 2)
     }
 }
 
@@ -101,10 +100,19 @@ pub fn estimate_tokens(history: &[Msg], usage_marker: Option<(usize, Usage)>) ->
     }
 }
 
-pub fn should_compact(estimate: u64, cfg: &CompactConfig) -> bool {
-    // an unknown window (0) has no threshold to cross: the provider's refusal
-    // is what starts compaction then, not a number this side invented
-    cfg.context_window > 0 && estimate + cfg.reserve_tokens >= cfg.context_window
+/// Does this much context cross the trigger? `0` means automatic compaction is
+/// off — there is no line to cross, and this side does not invent one; a
+/// provider that refuses a prompt is what still stops a run that went too far.
+pub fn should_compact(estimate: u64, trigger: u64) -> bool {
+    trigger > 0 && estimate >= trigger
+}
+
+/// The next rung of the ladder: every compaction this session runs doubles the
+/// room, so a conversation that keeps growing is summarized a few times (64k,
+/// 128k, 256k ...) instead of on every round that sits above one fixed number,
+/// and each summary buys back twice the conversation the last one did.
+pub fn next_trigger(trigger: u64) -> u64 {
+    trigger.saturating_mul(2)
 }
 
 /// Should this round rewrite the conversation prefix (trim old attachments,
@@ -112,10 +120,12 @@ pub fn should_compact(estimate: u64, cfg: &CompactConfig) -> bool {
 /// later request, but a mid-history edit invalidates the provider's cached
 /// prefix from the change point on: below real pressure the cache they break
 /// is worth more than the tokens they would save, so they wait. The gate is
-/// half the window — comfortably before compaction (`should_compact`), so
-/// there is room to relieve pressure without ever calling the summarizer.
-pub fn rewrite_prefix(estimate: u64, cfg: &CompactConfig) -> bool {
-    estimate + cfg.reserve_tokens >= cfg.context_window / 2
+/// half the trigger — comfortably before compaction (`should_compact`), so
+/// there is room to relieve pressure without ever calling the summarizer. With
+/// automatic compaction off nothing else guards the request, so the passes run
+/// every round.
+pub fn rewrite_prefix(estimate: u64, trigger: u64) -> bool {
+    trigger == 0 || estimate >= trigger / 2
 }
 
 /// Find the cut point: the latest turn boundary whose kept tail still holds
@@ -504,27 +514,26 @@ mod tests {
     #[test]
     fn rewrite_gate_fires_before_compaction() {
         let cfg = CompactConfig {
-            context_window: 100_000,
-            reserve_tokens: 0,
+            trigger_tokens: 100_000,
             keep_recent_tokens: 0,
         };
-        assert!(!rewrite_prefix(49_999, &cfg), "just under half: no rewrite");
-        assert!(rewrite_prefix(50_000, &cfg), "at half: rewrite");
-        assert!(rewrite_prefix(60_000, &cfg));
+        let trigger = cfg.trigger_tokens;
+        assert!(
+            !rewrite_prefix(49_999, trigger),
+            "just under half: no rewrite"
+        );
+        assert!(rewrite_prefix(50_000, trigger), "at half: rewrite");
+        assert!(rewrite_prefix(60_000, trigger));
         // and it must have fired well before the summarizer is due
         assert!(
-            !should_compact(50_000, &cfg),
+            !should_compact(50_000, trigger),
             "at the rewrite gate compaction must still have room"
         );
-        assert!(should_compact(100_000, &cfg), "at the window: compact");
-        // the reserve counts on both sides (a small window still orders them)
-        let tight = CompactConfig {
-            context_window: 8_000,
-            reserve_tokens: 4_000,
-            keep_recent_tokens: 0,
-        };
-        assert!(rewrite_prefix(0, &tight), "reserve alone reaches half");
-        assert!(should_compact(4_000, &tight));
+        assert!(should_compact(100_000, trigger), "at the trigger: compact");
+        // with compaction off there is no gate to sit under: nothing else
+        // guards the request, so the cheap passes run every round
+        assert!(rewrite_prefix(0, 0));
+        assert!(!should_compact(u64::MAX, 0));
     }
 
     #[test]
@@ -610,6 +619,7 @@ mod tests {
                     input: 100,
                     output: 50,
                     cached: 0,
+                    cached_write: 0,
                 },
             )),
         );
@@ -619,51 +629,50 @@ mod tests {
     }
 
     #[test]
-    fn keep_recent_never_outgrows_the_window_it_guards() {
-        // the default window honors the full configured value
+    fn keep_recent_never_outgrows_the_trigger_it_guards() {
+        // the default trigger honors the full configured tail
         let big = CompactConfig::default();
-        assert_eq!(big.effective_keep_recent(), 32_000);
-        // a small model clamps it to half the usable window, so a cut always
-        // exists once compaction is due (before the clamp, find_cut returned
-        // None forever and the run died on a provider context error)
+        assert_eq!(big.effective_keep_recent(big.trigger_tokens), 32_000);
+        // a small trigger clamps it to half, so a cut always exists once
+        // compaction is due (before the clamp, find_cut returned None forever
+        // and the run died on a provider context error)
         let small = CompactConfig {
-            context_window: 16_000,
-            reserve_tokens: 4_000,
+            trigger_tokens: 12_000,
             keep_recent_tokens: 32_000,
         };
-        assert_eq!(small.effective_keep_recent(), 6_000);
+        assert_eq!(small.effective_keep_recent(12_000), 6_000);
         // a small configured value is left alone
         let tiny = CompactConfig {
-            context_window: 16_000,
-            reserve_tokens: 4_000,
+            trigger_tokens: 16_000,
             keep_recent_tokens: 1_000,
         };
-        assert_eq!(tiny.effective_keep_recent(), 1_000);
-        // a reserve that eats the whole window degrades to zero, not a panic
-        let degenerate = CompactConfig {
-            context_window: 1_000,
-            reserve_tokens: 8_000,
-            keep_recent_tokens: 32_000,
-        };
-        assert_eq!(degenerate.effective_keep_recent(), 0);
+        assert_eq!(tiny.effective_keep_recent(16_000), 1_000);
+        // OFF keeps what the config asks for: there is no trigger to scale to
+        assert_eq!(small.effective_keep_recent(0), 32_000);
         // the clamped value really does let find_cut succeed: the kept tail
         // must itself hold the window, so the last message is the big one
         let history = vec![Msg::user("x".repeat(4_000)), Msg::user("y".repeat(28_000))];
-        assert!(find_cut(&history, small.effective_keep_recent()).is_some());
+        assert!(find_cut(&history, small.effective_keep_recent(12_000)).is_some());
         // and the unclamped 32k would not have found that cut
         assert_eq!(find_cut(&history, 32_000), None);
     }
 
+    /// The trigger is one number for every model behind the gateway, and it
+    /// doubles after each compaction instead of staying where it started.
     #[test]
-    fn threshold_triggers() {
-        let cfg = CompactConfig {
-            context_window: 1000,
-            reserve_tokens: 100,
-            keep_recent_tokens: 1,
-        };
-        assert!(!should_compact(500, &cfg));
-        assert!(should_compact(901, &cfg));
-        assert!(should_compact(10_000, &cfg));
+    fn the_trigger_compacts_and_then_doubles() {
+        let cfg = CompactConfig::default();
+        assert_eq!(cfg.trigger_tokens, 64_000);
+        assert!(!should_compact(63_999, cfg.trigger_tokens));
+        assert!(should_compact(64_000, cfg.trigger_tokens));
+        let second = next_trigger(cfg.trigger_tokens);
+        assert_eq!(second, 128_000);
+        assert!(
+            !should_compact(64_000, second),
+            "the earlier size is room now"
+        );
+        assert!(should_compact(128_000, second));
+        assert_eq!(next_trigger(u64::MAX), u64::MAX, "saturates, never wraps");
     }
 
     #[test]
