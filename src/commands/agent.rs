@@ -86,7 +86,6 @@ const SPECS: &[OptSpec] = &[
         "Attachment path or URL or -",
         "ATTACHMENT"
     ),
-    crate::two_value_spec!("at", "Attachment with explicit mimetype", "PATH MIMETYPE"),
     flag_spec!("resume", Some('r'), "Browse past sessions and continue one"),
     flag_spec!("no-stream", None, "Do not stream output"),
     flag_spec!(
@@ -151,13 +150,8 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let settings = crate::agent::settings::load();
 
-    // attachments: -a path|URL|- and --at path mimetype ride the first task
+    // attachments: -a path|URL|- ride the first task
     let loaded = crate::core::attachments::load_args(args)?;
-    // a downscaled image says so, so the model never measures scaled pixels
-    crate::core::attachments::fold_notices(
-        &mut prompt,
-        loaded.iter().filter_map(|l| l.notice.as_deref()),
-    );
     let attachments: Vec<crate::providers::Attachment> =
         loaded.into_iter().map(|l| l.request()).collect();
 

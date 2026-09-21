@@ -173,7 +173,6 @@ front of the model refuses less than the provider documents.
 ```bash
 llm -a shot.png "what is wrong here?"      # attach a file
 llm -a https://example.com/page "summarise this"
-llm --at image.png image/png "..."         # force the mimetype
 llm -a - "what is this?" < shot.png        # stdin as the attachment
 ```
 

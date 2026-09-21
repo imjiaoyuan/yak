@@ -1,4 +1,4 @@
-//! Attachment loading: `-a`/`--at` references (paths, URLs, stdin) resolved
+//! Attachment loading: `-a` references (paths, URLs, stdin) resolved
 //! into bytes with a mime type, feeding the wire `Attachment` and the thread
 //! store. Shared by prompt and agent.
 
@@ -122,9 +122,6 @@ pub struct Loaded {
     pub url: Option<String>,
     pub mime_type: Option<String>,
     pub content: Vec<u8>,
-    /// Set when normalization changed the picture (a downscale): the caller
-    /// folds it into the prompt so the model never measures a scaled image.
-    pub notice: Option<String>,
 }
 
 impl Loaded {
@@ -176,44 +173,26 @@ pub fn read_piped_prompt(
     })
 }
 
-/// True when an `-a -` / `--at - MIMETYPE` reference claims stdin, so the
-/// command must not consume it as prompt text first.
+/// True when an `-a -` reference claims stdin, so the command must not
+/// consume it as prompt text first.
 pub fn wants_stdin(args: &crate::core::args::ParsedArgs) -> bool {
     args.multi(&["attachment"]).iter().any(|v| v == "-")
-        || args
-            .multi(&["at"])
-            .chunks(2)
-            .any(|p| p.len() == 2 && p[0] == "-")
 }
 
-/// Load every `-a/--attachment` and `--at PATH MIMETYPE` pair from parsed
-/// args into wire attachments — the shared entry-flag loop for prompt,
-/// chat and agent.
+/// Load every `-a/--attachment` from parsed args into wire attachments —
+/// the shared entry-flag loop for prompt, chat and agent.
 pub fn load_args(args: &crate::core::args::ParsedArgs) -> Result<Vec<Loaded>, String> {
     let mut out = Vec::new();
     for r in &args.multi(&["attachment"]) {
         out.push(load(r.as_str(), None)?);
     }
-    for pair in args.multi(&["at"]).chunks(2) {
-        if pair.len() == 2 {
-            out.push(load(&pair[0], Some(pair[1].as_str()))?);
-        }
-    }
     Ok(out)
 }
 
-/// Resolve one `-a`/`--at` reference: `-` reads stdin, http(s) URLs are
+/// Resolve one `-a` reference: `-` reads stdin, http(s) URLs are
 /// fetched (content-type wins the mime), anything else is a local file.
 pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
     load_raw(reference, mime)
-}
-
-/// Fold each attachment's notice into the text the model reads, one per line.
-pub fn fold_notices<'a>(text: &mut String, notices: impl IntoIterator<Item = &'a str>) {
-    for notice in notices {
-        text.push('\n');
-        text.push_str(notice);
-    }
 }
 
 fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
@@ -229,7 +208,6 @@ fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
                 .map(String::from)
                 .or_else(|| sniff_mime(&buf).map(String::from)),
             content: buf,
-            notice: None,
         });
     }
     if reference.starts_with("http://") || reference.starts_with("https://") {
@@ -244,7 +222,6 @@ fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
             url: Some(reference.to_string()),
             mime_type: Some(mime_type),
             content: buf,
-            notice: None,
         })
     } else {
         let path = std::path::Path::new(reference);
@@ -272,7 +249,6 @@ fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
             url: None,
             mime_type: Some(mime_type),
             content: data,
-            notice: None,
         })
     }
 }
@@ -493,7 +469,6 @@ mod tests {
             url: Some("https://example.com/a/shot.png?token=1".into()),
             mime_type: None,
             content: Vec::new(),
-            notice: None,
         };
         assert_eq!(l.file_name().as_deref(), Some("shot.png"));
     }

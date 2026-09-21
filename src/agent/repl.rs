@@ -111,13 +111,8 @@ pub fn repl(
             continue;
         }
 
-        let notices = attach_local_files(text, &mut attachments, session.model.kind == "anthropic");
-        let mut with_notices = text.to_string();
-        crate::core::attachments::fold_notices(
-            &mut with_notices,
-            notices.iter().map(String::as_str),
-        );
-        run_task_logged(&mut session, &with_notices, &mut attachments);
+        attach_local_files(text, &mut attachments, session.model.kind == "anthropic");
+        run_task_logged(&mut session, text, &mut attachments);
 
         // steering lines typed after the final model call become new tasks
         while !session
@@ -152,9 +147,8 @@ fn attach_local_files(
     text: &str,
     queue: &mut Vec<crate::providers::Attachment>,
     supports_pdf: bool,
-) -> Vec<String> {
+) {
     use std::io::Read;
-    let mut notes: Vec<String> = Vec::new();
     for token in text.split_whitespace() {
         let path = std::path::Path::new(token);
         if !path.is_file() {
@@ -180,26 +174,17 @@ fn attach_local_files(
             _ => continue,
         };
         if let Ok(loaded) = crate::core::attachments::load(token, Some(mime)) {
-            let notice = loaded.notice.clone();
             let req = loaded.request();
             eprintln!(
-                "{}→ attached {} ({}){}{}",
+                "{}→ attached {} ({}){}",
                 crate::theme::err().dim,
                 token,
                 req.mime_type,
-                notice
-                    .as_deref()
-                    .map(|n| format!(" {n}"))
-                    .unwrap_or_default(),
                 crate::theme::err().reset
             );
             queue.push(req);
-            if let Some(note) = notice {
-                notes.push(note);
-            }
         }
     }
-    notes
 }
 
 /// One agent task with interrupt chrome — the shared path for typed input,

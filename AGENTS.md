@@ -21,7 +21,7 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 agent (ten built-in tools, approvals, skills, memory, compaction, an interactive REPL), a
 thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript
 extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment`
-path/URL/stdin + `--at PATH MIMETYPE`; in a session ctrl+v pastes the clipboard image — any
+path/URL/stdin; in a session ctrl+v pastes the clipboard image — any
 image type the selection offers, else the path of a copied image *file* — as a temp-file path,
 and any local image path in a message auto-attaches).
 

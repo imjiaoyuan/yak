@@ -129,7 +129,7 @@ across processes with `LLM_SESSION_ID`.
   naming the accepted set (`build_body` returns `Result` for exactly that); a record stored without
   its bytes — a resumed attachment whose source is gone — rides as a text note naming it, never an
   empty data URI.
-- `core/attachments.rs` is the shared loader: `load_args()` runs the `-a`/`--at` entry-flag loop for
+- `core/attachments.rs` is the shared loader: `load_args()` runs the `-a` entry-flag loop for
   prompt and agent; `Loaded` keeps path/url/mime/bytes provenance so one load feeds both the wire
   (`request()`) and the log store (`stored()`); magic-byte `sniff_mime` covers stdin and clipboard
   bytes; `wants_stdin()` lets `-a -` claim stdin away from the prompt text.

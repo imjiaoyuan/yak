@@ -98,21 +98,6 @@ macro_rules! multi_spec {
     };
 }
 
-/// two-value spec: `--at <PATH> <MIMETYPE>` (original click tuple options)
-#[macro_export]
-macro_rules! two_value_spec {
-    ($long:expr, $help:expr, $value:expr) => {
-        $crate::core::args::OptSpec {
-            long: $long,
-            short: None,
-            takes_value: 2,
-            multiple: true,
-            help: $help,
-            value_name: $value,
-        }
-    };
-}
-
 /// Parse `argv` (without program name) against a spec table.
 ///
 /// Both `--long value` / `--long=value` and `-s value` / `-svalue` forms are
@@ -172,27 +157,6 @@ pub fn parse(argv: &[String], specs: &[OptSpec]) -> Result<ParsedArgs, String> {
             };
             if spec.takes_value == 0 {
                 out.flags.push(spec.long.to_string());
-            } else if spec.takes_value == 2 {
-                // two-value options: --at path mime (no inline form)
-                if inline.is_some() {
-                    return Err(format!(
-                        "Error: Option '--{}' takes two separate values",
-                        spec.long
-                    ));
-                }
-                let mut values = Vec::new();
-                for _ in 0..2 {
-                    i += 1;
-                    values.push(
-                        argv.get(i)
-                            .ok_or_else(|| {
-                                format!("Error: Option '--{}' requires two values", spec.long)
-                            })?
-                            .clone(),
-                    );
-                }
-                let entry = out.multi.entry(spec.long.to_string()).or_default();
-                entry.extend(values);
             } else {
                 let value = match inline {
                     Some(v) => v,
