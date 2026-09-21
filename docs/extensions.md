@@ -6,10 +6,8 @@ dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a fi
 [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `subagent.py` — a
 tool that runs another `llm` in its own context window, `repeat_guard.py` — a `tool_call` deny gate
 for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds repeated log lines, plus the
-`template.js`/`template.py` starter templates).
-`websearch.ts` is a TypeScript twin of the python `websearch` (node >= 23.6 runs it directly
-through native type stripping; bun/deno also work) — install one of the two, not both: the
-host dedups extension entries by file stem.
+`template.js`/`template.py` starter templates). `template.js` runs as-is under node >= 23.6
+(native type stripping); bun and deno work too.
 
 Extensions run with your full user permissions and inherit your environment. Only install or
 write code you would run yourself.
