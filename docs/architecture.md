@@ -103,14 +103,9 @@ across processes with `LLM_SESSION_ID`.
   `.llm/pkg/` (`-g` the explicit default), re-running refreshes unless pinned, `remove`/`list`;
   `pkg::carried` classifies a clone by layout — `skills/`, `extensions/`, `commands/` and a root
   `SKILL.md` (a whole-repo skill, mounted by `skills::load_package`, which the bare `skills/` walk
-  would miss), reported by `install`/`list`; on an attended terminal a bare `install` asks both
-  questions — a `pick` for the scope, then a `pick_multi` checkbox list of everything the repo
-  carries — while a piped/CI install (no tty) takes the defaults, global + everything; `-s NAME`
-  (`'*'` = all) records a skill selection, and every keep list lives in the clone's git config
-  (`llm.skills`, `llm.extensions`, `llm.prompts`; a name list, `*` = all, `-` = nothing), read by
-  `pkg::selected` and applied at discovery — `skills::load_package` for skills,
-  `pkg::extension_kept` in `ext/manifest.rs` for extensions, `pkg::prompt_kept` in `commands_md.rs`
-  for prompts — so a plain refresh keeps it (alongside `llm.pinned`); in the skills walk user pkg
+  would miss), reported by `install`/`list`; everything a clone carries mounts, with no menu to
+  narrow it: the scope flag is the only question, `-l` project-local, the user dir otherwise; in
+  the skills walk user pkg
   loads before project pkg, so project wins) and `export` (`commands/export.rs`: `llm export [PATH]`
   writes the working directory's newest thread — else the newest anywhere, i.e. what `-c` would
   continue — as markdown through `core/export.rs`; the REPL's `/export [PATH]` shares
@@ -189,8 +184,7 @@ across processes with `LLM_SESSION_ID`.
   `/reload`), `ext/` (the extension host — `mod.rs` plus `manifest.rs` for script manifests,
   `proto.rs` for the stdio loops and `roots.rs` for discovery; the reference's extensions done out-of-process:
   user executables in `~/.llm/extensions/` plus the nearest `.llm/extensions/`, project winning by
-  name (a package's extensions dir is filtered by that clone's `llm.extensions` keep list, so
-  `install`'s checkbox can leave one dormant), in two forms — **manifest script tools** (a `# ---
+  name (a package's `extensions/` dir mounts as it stands), in two forms — **manifest script tools** (a `# ---
   llm-tool: name` comment header on any script in any language; the host spawns per call, single
   argument rides as `argv[1]`, `run_with_progress` owns timeout/stdin/stdout/exit-code; no exec bit
   needed so Windows works too) and **resident extensions** (spawned once, speaking newline-delimited
@@ -362,9 +356,7 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   the one picker `pick(title, items, echo)` used by every list in the tool — arrow-move +
   type-to-filter in the fuzzy-filter shape (UTF-8 accumulates across bytes so CJK filters work,
   space-separated terms AND-match case-insensitively, enter returns the original index);
-  `pick_multi(title, items)` is the same menu in checkbox mode (one shared `pick_impl`, space
-  toggles instead of filtering, everything starts checked) and exists only for `llm install`'s item
-  selection. The buffer is multiline (the reference shape): `\r` submits while ctrl+j (`\n`), alt+enter,
+  The buffer is multiline (the reference shape): `\r` submits while ctrl+j (`\n`), alt+enter,
   shift/ctrl+enter, a lone `\` before enter (a doubled `\\` submits literally) and bracketed paste
   insert real newlines — the platform clears ICRNL so `\r`/`\n` stay distinct, and the kitty
   keyboard protocol's disambiguate flag (`ESC[>1u`) is pushed only for the read's duration so

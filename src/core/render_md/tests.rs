@@ -519,7 +519,7 @@ fn live_and_replay_agree_on_a_realistic_corpus() {
         "见 `改哪里` 与 [链接](http://x) 以及 ![图片](img.png) 结束\n",
         // a fence indented inside a list item: it must close (and the
         // text after it keep rendering) on the live stream too
-        "1. **作用域** —— 先弹：\n\n   ```\n   install where:\n   ❯ project-local\n   ```\n\n   给了 `-l` 就跳过。\n\n**验证**\n\n- 见 `pick_multi` 与 `pick`。\n",
+        "1. **作用域** —— 先弹：\n\n   ```\n   install where:\n   ❯ project-local\n   ```\n\n   给了 `-l` 就跳过。\n\n**验证**\n\n- 见 `pick` 与 `-r` 浏览。\n",
         // a fence indented inside a list item, closing with a longer run
         "  - 例子：\n\n    ````\n    x\n    ````\n\n结束\n",
         // a bold-only line, and a fence whose body is all whitespace
@@ -559,7 +559,7 @@ fn fuzz_live_and_replay_agree() {
         "段落 `code` 与 **加粗** 结束",
         "a ~~strike~~ and ~single~ tail",
         "link [a](http://x) and ![img](i.png)",
-        "先用 `pick_multi` 再 `pick`。",
+        "先挑模型再挑会话。",
         "> 引用",
         ">  空格引用",
         "> 第一行\n> 第二行",

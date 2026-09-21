@@ -1325,19 +1325,6 @@ const PICK_MAX_ROWS: usize = 12;
 /// Arrows move within the filtered view, enter returns the ORIGINAL index,
 /// esc/ctrl-c cancel. `echo` prints the choice as one line afterwards.
 pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
-    pick_impl(title, items, echo, false).map(|chosen| chosen[0])
-}
-
-/// The same menu in multi-select mode: every row is a checkbox with a space
-/// to toggle it (so space no longer filters — typing still does), enter
-/// returns the toggled indexes in list order, esc/ctrl-c cancels. Everything
-/// starts checked, so a plain enter keeps the whole package — the same thing
-/// a non-interactive install does.
-pub fn pick_multi(title: &str, items: &[String]) -> Option<Vec<usize>> {
-    pick_impl(title, items, false, true)
-}
-
-fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<Vec<usize>> {
     let mut term = RawTerm::acquire(1, 0)?;
     let mut out = std::io::stderr();
     // cap the menu height so long lists scroll instead of flooding the
@@ -1349,7 +1336,6 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
     let mut matched: Vec<usize> = (0..items.len()).collect();
     let mut sel = 0usize;
     let mut top = 0usize;
-    let mut checked: Vec<bool> = items.iter().map(|_| multi).collect();
 
     let apply_filter = |query: &str, matched: &mut Vec<usize>| {
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
@@ -1371,8 +1357,7 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                 matched: &[usize],
                 sel: usize,
                 top: usize,
-                query: &str,
-                checked: &[bool]|
+                query: &str|
      -> usize {
         let _ = writeln!(out, "{title}");
         let mut printed = 1;
@@ -1396,8 +1381,7 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                 printed += 1;
             }
             for (r, idx) in matched[top..top + visible].iter().enumerate() {
-                let mark = multi.then(|| checked[*idx]);
-                let _ = write!(out, "{}", row(&items[*idx], top + r == sel, mark));
+                let _ = write!(out, "{}", row(&items[*idx], top + r == sel));
                 printed += 1;
             }
             if matched.len() > top + visible {
@@ -1411,14 +1395,9 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                 printed += 1;
             }
         }
-        let filter = if multi {
-            "space toggle"
-        } else {
-            "enter select"
-        };
         let _ = writeln!(
             out,
-            "{}filter: {query}▏  ({filter} · ↑↓ move · esc cancel){}",
+            "{}filter: {query}▏  (enter select · ↑↓ move · esc cancel){}",
             crate::theme::err().gray,
             crate::theme::err().reset
         );
@@ -1438,7 +1417,7 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
     // hide the cursor for the whole menu, before the first paint
     let _ = write!(out, "\x1b[?25l");
     let _ = out.flush();
-    let mut printed = draw(&mut out, &matched, sel, top, "", &checked);
+    let mut printed = draw(&mut out, &matched, sel, top, "");
     loop {
         let b = match term.next_byte() {
             RawByte::Key(b) => b,
@@ -1450,31 +1429,6 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                     continue;
                 }
                 erase(&mut out, printed, true);
-                if multi {
-                    if echo {
-                        let _ = writeln!(
-                            out,
-                            "{}{title}{} {}",
-                            crate::theme::err().dim,
-                            items
-                                .iter()
-                                .zip(checked.iter())
-                                .filter(|(_, c)| **c)
-                                .map(|(i, _)| i.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            crate::theme::err().reset
-                        );
-                    }
-                    return Some(
-                        checked
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, c)| **c)
-                            .map(|(i, _)| i)
-                            .collect(),
-                    );
-                }
                 if echo {
                     let _ = writeln!(
                         out,
@@ -1484,24 +1438,7 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                         items[matched[sel]]
                     );
                 }
-                return Some(vec![matched[sel]]);
-            }
-            b' ' if multi => {
-                if matched.is_empty() {
-                    continue;
-                }
-                let idx = matched[sel];
-                checked[idx] = !checked[idx];
-                erase(&mut out, printed, false);
-                printed = draw(
-                    &mut out,
-                    &matched,
-                    sel,
-                    top,
-                    &String::from_utf8_lossy(&query_bytes),
-                    &checked,
-                );
-                continue;
+                return Some(matched[sel]);
             }
             0x08 | 0x7f => {
                 crate::core::text::pop_utf8_char(&mut query_bytes);
@@ -1541,7 +1478,6 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
                     sel,
                     top,
                     &String::from_utf8_lossy(&query_bytes),
-                    &checked,
                 );
                 continue;
             }
@@ -1554,29 +1490,19 @@ fn pick_impl(title: &str, items: &[String], echo: bool, multi: bool) -> Option<V
         sel = sel.min(matched.len().saturating_sub(1));
         top = top.min(sel);
         erase(&mut out, printed, false);
-        printed = draw(&mut out, &matched, sel, top, &query, &checked);
+        printed = draw(&mut out, &matched, sel, top, &query);
     }
 }
 
-/// One rendered menu row; selected rows get the bold cursor marker. With
-/// `mark` (multi-select) a checkbox leads the row, inside the marker's
-/// two-cell gutter so the cursor math is unchanged.
-fn row(item: &str, selected: bool, mark: Option<bool>) -> String {
-    format!("{}\n", row_body(item, selected, mark))
+/// One rendered menu row; selected rows get the bold cursor marker.
+fn row(item: &str, selected: bool) -> String {
+    format!("{}\n", row_body(item, selected))
 }
 
-fn row_body(item: &str, selected: bool, mark: Option<bool>) -> String {
+fn row_body(item: &str, selected: bool) -> String {
     // marker + space + item must fit one line or the cursor math breaks
     let width = crate::term::columns().saturating_sub(1);
-    let checked = match mark {
-        Some(true) => "[x] ",
-        Some(false) => "[ ] ",
-        None => "",
-    };
-    let shown = crate::core::render_md::truncate_cells(
-        &format!("{checked}{item}"),
-        width.saturating_sub(2),
-    );
+    let shown = crate::core::render_md::truncate_cells(item, width.saturating_sub(2));
     if selected {
         let p = crate::theme::err();
         format!("{}❯ {shown}{}", p.bold, p.reset)

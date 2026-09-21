@@ -296,18 +296,12 @@ standalone skill repos ship (`SKILL.md` + `references/` at the top), so
 reports what it recognized (skills, extensions, prompts); a repo carrying none of them is called out
 instead of mounting nothing silently.
 
-Run it on a terminal with no scope flag and `install` asks: first where the package goes
-(project-local or global), then — when the repo carries more than one thing — which skills,
-extensions and prompts to mount, as a checkbox list (space toggles, enter installs). The keys only
-ever appear on an attended terminal: piped or CI installs keep the plain defaults (global, mount
-everything), so a script never blocks on a menu. `-l`/`-g` answer the scope question up front and
-`-s NAME` (repeatable, `'*'` for all) narrows the skills without any prompt; the choices live in
-the clone's git config (`llm.skills`, `llm.extensions`, `llm.prompts`), so a plain re-run keeps
-them and `'*'` clears them. A group left entirely checked records nothing — an upstream addition
-is live without re-installing.
+Where the package goes is the only question: `-l` puts the clone in the project's `.llm/pkg/`, `-g`
+(the default) in `~/.llm/pkg/` — a piped or CI install takes the same path, with nothing to
+prompt.
 
 Re-running `install` refreshes a clone (`git fetch` + reset); a pinned `@ref` clone moves only via
-`install repo@new-ref`. `llm list` shows what each package carries and what is live of it,
+`install repo@new-ref`. `llm list` shows what each package carries,
 `llm remove NAME` deletes it. There is no npm lane — git only.
 Review any third-party package before installing: extensions run with full system access.
 
@@ -315,7 +309,6 @@ Review any third-party package before installing: extensions run with full syste
 llm install git:github.com/user/llm-deploy    # → ~/.llm/pkg/llm-deploy
 llm install git:github.com/user/llm-deploy@v2 # pinned
 llm install -l https://github.com/user/my-skill        # project-local skill
-llm install git:github.com/user/llm-deploy -s deploy   # keep one skill only
 llm list
 llm remove llm-deploy
 ```
@@ -328,7 +321,6 @@ Usage: llm install git:github.com/user/repo[@ref] [OPTIONS] SOURCE
 Options:
   -l, --local           Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)
   -g, --global          Install into the user directory (default)
-  -s, --skill NAME      Keep only these skills by name; '*' keeps all (repeatable)
   -h, --help            Show this message and exit
 ```
 

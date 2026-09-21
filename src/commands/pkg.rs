@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
-use crate::{flag_spec, multi_spec};
+use crate::flag_spec;
 
 const INSTALL_SPECS: &[OptSpec] = &[
     flag_spec!(
@@ -19,12 +19,6 @@ const INSTALL_SPECS: &[OptSpec] = &[
         "global",
         Some('g'),
         "Install into the user directory (default)"
-    ),
-    multi_spec!(
-        "skill",
-        Some('s'),
-        "Keep only these skills by name; '*' keeps all (repeatable)",
-        "NAME"
     ),
     flag_spec!("help", Some('h'), "Show this message and exit"),
 ];
@@ -160,24 +154,9 @@ fn install(argv: &[String]) -> i32 {
         return 2;
     }
     let p = crate::theme::err();
-    // scope first (the clone path depends on it): an explicit flag wins,
-    // otherwise an attended terminal gets asked, pipes/CI keep the user dir
-    let mut local = args.flag(&["local"]);
-    let scope_given = local || args.flag(&["global"]);
-    if !scope_given && interactive() {
-        let items = [
-            "project-local  (.llm/pkg/ — this project only)".to_string(),
-            format!("global  ({} · every project)", pkg_root(false).display()),
-        ];
-        match crate::term::lineedit::pick("install where:", &items, true) {
-            Some(0) => local = true,
-            Some(_) => local = false,
-            None => {
-                eprintln!("{}install cancelled{}", p.dim, p.reset);
-                return 1;
-            }
-        }
-    }
+    // the scope flag is the only thing that decides where the clone lands:
+    // a piped install and an attended one take the same path
+    let local = args.flag(&["local"]);
     let root = pkg_root(local);
     let target = root.join(&name);
     if target.exists() {
@@ -240,135 +219,10 @@ fn install(argv: &[String]) -> i32 {
     // nothing (no hooks dir, no root SKILL.md) is otherwise silent — you
     // only notice on the next `/help` that nothing showed up
     let found = carried(&target);
-    let wanted = args.multi(&["skill"]);
-    if wanted.iter().any(|w| w == "*") {
-        clear_keep_list(&target, "llm.skills");
-        clear_keep_list(&target, "llm.extensions");
-        clear_keep_list(&target, "llm.prompts");
-    } else if !wanted.is_empty() {
-        let available: Vec<&str> = found
-            .root_skill
-            .iter()
-            .map(String::as_str)
-            .chain(found.skills.iter().map(String::as_str))
-            .collect();
-        if let Some(missing) = wanted.iter().find(|w| !available.contains(&w.as_str())) {
-            let carries = if available.is_empty() {
-                "no skills".to_string()
-            } else {
-                available.join(", ")
-            };
-            eprintln!(
-                "Error: no skill '{missing}' in {name} (carries: {carries}) — \
-                 the clone is installed; llm remove {name} to drop it"
-            );
-            return 2;
-        }
-        set_keep_list(&target, "llm.skills", &wanted);
-    } else if interactive() && found.total() > 1 {
-        // no --skill, and a terminal to ask in: show everything the repo
-        // carries and let the caller uncheck what should stay dormant.
-        // A cancel keeps the whole package rather than aborting the clone.
-        match choose_items(&found) {
-            Some(keep) => {
-                for (key, names) in [
-                    ("llm.skills", &keep.skills),
-                    ("llm.extensions", &keep.extensions),
-                    ("llm.prompts", &keep.prompts),
-                ] {
-                    match names {
-                        Some(names) => set_keep_list(&target, key, names),
-                        None => clear_keep_list(&target, key),
-                    }
-                }
-            }
-            None => eprintln!("{}keeping everything (cancelled){}", p.dim, p.reset),
-        }
-    }
-    for line in notes(&found, &selected(&target)) {
+    for line in notes(&found) {
         eprintln!("{}  {line}{}", p.dim, p.reset);
     }
     0
-}
-
-/// Is there a human at the keyboard? A piped install (CI, scripts, the
-/// e2e harness with stdin=DEVNULL) must never block on a menu.
-fn interactive() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-/// What the multi-select left checked, per group, in the names the keep
-/// lists store.
-/// What the menu changed, per group: `None` = the group stayed entirely
-/// checked (nothing to record), `Some(names)` = narrowed to those names
-/// (`Some(vec![])` = the whole group off).
-#[derive(Default)]
-struct Keep {
-    skills: Option<Vec<String>>,
-    extensions: Option<Vec<String>>,
-    prompts: Option<Vec<String>>,
-}
-
-/// One flat menu of every mountable item, tagged by kind: skills first (the
-/// repo-root one included), then extensions, then prompts. Returns None when
-/// cancelled. Nothing chosen = nothing mounted, which is a legal answer.
-fn choose_items(found: &Carried) -> Option<Keep> {
-    let kinds = menu_items(found);
-    let items: Vec<String> = kinds
-        .iter()
-        .map(|(kind, name)| format!("{kind:<9} {name}"))
-        .collect();
-    let chosen = crate::term::lineedit::pick_multi(
-        "install which of these? (space toggles, enter installs):",
-        &items,
-    )?;
-    Some(keep_from(&kinds, &chosen))
-}
-
-/// Every mountable item as (kind, name): skills first (the repo-root one
-/// included), then extensions, then prompts — the order the menu shows.
-fn menu_items(found: &Carried) -> Vec<(&'static str, String)> {
-    let mut kinds: Vec<(&'static str, String)> = Vec::new();
-    for name in found.root_skill.iter().chain(found.skills.iter()) {
-        kinds.push(("skill", name.clone()));
-    }
-    for name in &found.extensions {
-        kinds.push(("extension", name.clone()));
-    }
-    for name in &found.prompts {
-        kinds.push(("prompt", name.clone()));
-    }
-    kinds
-}
-
-/// Fold the checked menu indexes back into per-group keep lists. A group
-/// left entirely checked records nothing, so the package keeps following the
-/// repo — a skill or extension added upstream is live without re-installing.
-fn keep_from(kinds: &[(&str, String)], chosen: &[usize]) -> Keep {
-    let mut keep = Keep::default();
-    let kept = |kind: &str| -> Vec<String> {
-        kinds
-            .iter()
-            .enumerate()
-            .filter(|(i, (k, _))| *k == kind && chosen.contains(i))
-            .map(|(_, (_, name))| name.clone())
-            .collect()
-    };
-    let all = |kind: &str| -> usize { kinds.iter().filter(|(k, _)| *k == kind).count() };
-    for kind in ["skill", "extension", "prompt"] {
-        let total = all(kind);
-        let names = kept(kind);
-        if total == 0 || names.len() == total {
-            continue;
-        }
-        match kind {
-            "skill" => keep.skills = Some(names),
-            "extension" => keep.extensions = Some(names),
-            _ => keep.prompts = Some(names),
-        }
-    }
-    keep
 }
 
 /// What an installed package carries, by layout — the same rules the
@@ -384,24 +238,6 @@ pub struct Carried {
     pub prompts: Vec<String>,
 }
 
-impl Carried {
-    /// Everything the package could mount, across the groups.
-    fn total(&self) -> usize {
-        self.root_skill.iter().count()
-            + self.skills.len()
-            + self.extensions.len()
-            + self.prompts.len()
-    }
-}
-
-/// A package's recorded keep lists, one per group: `None` = everything live.
-#[derive(Default, Clone)]
-pub struct Selected {
-    pub skills: Option<Vec<String>>,
-    pub extensions: Option<Vec<String>>,
-    pub prompts: Option<Vec<String>>,
-}
-
 pub fn carried(pkg: &Path) -> Carried {
     let mut out = Carried::default();
     if let Some(def) = crate::agent::skills::pack_root_skill(pkg) {
@@ -415,90 +251,9 @@ pub fn carried(pkg: &Path) -> Carried {
     out
 }
 
-/// The package's selections behind one call.
-pub fn selected(pkg: &Path) -> Selected {
-    Selected {
-        skills: keep_list(pkg, "llm.skills"),
-        extensions: keep_list(pkg, "llm.extensions"),
-        prompts: keep_list(pkg, "llm.prompts"),
-    }
-}
-
-fn keep_list(pkg: &Path, key: &str) -> Option<Vec<String>> {
-    let raw = git(&["config", "--get", key], pkg).ok()?;
-    let raw = raw.trim();
-    if raw.is_empty() || raw == "*" {
-        return None;
-    }
-    // "-" is the recorded "none of this group": the clone stays for the
-    // other groups, but nothing of this one mounts
-    if raw == "-" {
-        return Some(Vec::new());
-    }
-    let names: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    (!names.is_empty()).then_some(names)
-}
-
-/// Record a keep list: `-` for "none of this group", else the names.
-/// The clone is already installed when this runs, so a failed write warns
-/// about the consequence (the whole group mounts) instead of aborting.
-fn set_keep_list(pkg: &Path, key: &str, names: &[String]) {
-    let value = if names.is_empty() {
-        "-".to_string()
-    } else {
-        names.join(",")
-    };
-    if let Err(e) = git(&["config", key, &value], pkg) {
-        eprintln!(
-            "{}Warning: could not record {key} ({e}) — the whole group mounts{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-    }
-}
-
-/// Forget a keep list (`*`): the whole group mounts again.
-fn clear_keep_list(pkg: &Path, key: &str) {
-    if let Err(e) = git(&["config", key, "*"], pkg) {
-        eprintln!(
-            "{}Warning: could not clear {key} ({e}){}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-    }
-}
-
-/// Is `file` inside a package's `extensions/` directory switched on? The
-/// keep list rides the clone's git config, so only package-carried files
-/// can be off — `~/.llm/extensions/` is never filtered.
-pub fn extension_kept(dir: &Path, file: &str) -> bool {
-    dir_kept(dir, file, "llm.extensions")
-}
-
-/// The same for a `commands/` prompt, keyed by stem (the `NAME` in
-/// `llm NAME`), which is how [`file_stems`] records them.
-pub fn prompt_kept(dir: &Path, stem: &str) -> bool {
-    dir_kept(dir, stem, "llm.prompts")
-}
-
-fn dir_kept(dir: &Path, name: &str, key: &str) -> bool {
-    let Some(pkg) = dir.parent() else {
-        return true;
-    };
-    match keep_list(pkg, key) {
-        None => true,
-        Some(keep) => keep.iter().any(|k| k == name),
-    }
-}
-
 /// The dim lines `install` and `list` print for one package: what it
-/// carries, what is live of that, or why nothing is.
-fn notes(found: &Carried, selected: &Selected) -> Vec<String> {
+/// carries, or why nothing mounts.
+fn notes(found: &Carried) -> Vec<String> {
     let mut skills: Vec<String> = found
         .root_skill
         .iter()
@@ -513,15 +268,6 @@ fn notes(found: &Carried, selected: &Selected) -> Vec<String> {
     ] {
         if !items.is_empty() {
             out.push(format!("{label}: {}", items.join(", ")));
-        }
-    }
-    for (label, keep) in [
-        ("skills", &selected.skills),
-        ("extensions", &selected.extensions),
-        ("prompts", &selected.prompts),
-    ] {
-        if let Some(keep) = keep {
-            out.push(format!("only {label}: {}", keep.join(", ")));
         }
     }
     if out.is_empty() {
@@ -629,7 +375,7 @@ fn list(argv: &[String]) -> i32 {
                 d = crate::theme::err().dim
             );
             let found = carried(&path);
-            for line in notes(&found, &selected(&path)) {
+            for line in notes(&found) {
                 eprintln!(
                     "{}  {line}{}",
                     crate::theme::err().dim,
@@ -692,7 +438,7 @@ fn pkg_dirs(local: bool, sub: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Carried, Selected, carried, keep_from, menu_items, notes, parse_source};
+    use super::{Carried, carried, notes, parse_source};
 
     #[test]
     fn carried_recognizes_every_layout() {
@@ -711,68 +457,21 @@ mod tests {
         assert_eq!(found.extensions, vec!["wordcount.py"]);
         assert_eq!(found.prompts, vec!["review"]);
         assert!(
-            notes(&found, &Selected::default())
-                .iter()
-                .any(|l| l == "skills: demo, flat")
+            notes(&found).iter().any(|l| l == "skills: demo, flat"),
+            "{:?}",
+            notes(&found)
         );
 
         // the repo itself becomes one skill once SKILL.md sits at the root
         std::fs::write(dir.join("SKILL.md"), "---\nname: wholegit\n---\nb").unwrap();
         let found = carried(&dir);
         assert_eq!(found.root_skill.as_deref(), Some("wholegit"));
-        let narrowed = Selected {
-            skills: Some(vec![String::from("wholegit")]),
-            ..Default::default()
-        };
-        let lines = notes(&found, &narrowed);
+        let lines = notes(&found);
         assert!(lines.contains(&"skills: wholegit (repo root), demo, flat".to_string()));
-        assert!(lines.contains(&"only skills: wholegit".to_string()));
         // a clone with no hooks at all says why it is silent
-        let empty = notes(&Carried::default(), &Selected::default());
+        let empty = notes(&Carried::default());
         assert!(empty[0].contains("nothing llm can mount"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The interactive menu: one flat list in group order, and the checked
-    /// indexes fold back into per-group keep lists — a group left entirely
-    /// checked records nothing (the repo stays the source of truth).
-    #[test]
-    fn menu_and_keep_lists_fold_by_group() {
-        let found = Carried {
-            root_skill: Some("wholegit".to_string()),
-            skills: vec!["demo".to_string()],
-            extensions: vec!["hello.py".to_string(), "other.py".to_string()],
-            prompts: vec!["review".to_string()],
-        };
-        let kinds = menu_items(&found);
-        let labels: Vec<String> = kinds.iter().map(|(k, n)| format!("{k:<9} {n}")).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "skill     wholegit",
-                "skill     demo",
-                "extension hello.py",
-                "extension other.py",
-                "prompt    review",
-            ]
-        );
-        // everything checked: nothing recorded, install follows the repo
-        let all: Vec<usize> = (0..kinds.len()).collect();
-        let keep = keep_from(&kinds, &all);
-        assert!(keep.skills.is_none() && keep.extensions.is_none() && keep.prompts.is_none());
-        // unchecking one extension narrows that group; a group left fully
-        // checked records nothing
-        let keep = keep_from(&kinds, &[0, 1, 2, 4]);
-        assert_eq!(
-            keep.extensions.as_deref(),
-            Some(&["hello.py".to_string()][..])
-        );
-        assert!(keep.skills.is_none() && keep.prompts.is_none());
-        // unchecking everything records an empty keep list per group (the
-        // clone stays for the other groups, this one mounts nothing)
-        let keep = keep_from(&kinds, &[]);
-        assert_eq!(keep.skills.as_deref(), Some(&[][..]));
-        assert_eq!(keep.extensions.as_deref(), Some(&[][..]));
     }
 
     #[test]

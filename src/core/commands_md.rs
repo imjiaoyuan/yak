@@ -48,9 +48,6 @@ pub fn find(name: &str) -> Option<CommandMd> {
         .into_iter()
         .chain(crate::commands::pkg::command_dirs(false))
     {
-        if !crate::commands::pkg::prompt_kept(&dir, name) {
-            continue;
-        }
         if let Ok(text) = std::fs::read_to_string(dir.join(&file)) {
             return Some(parse(&text));
         }

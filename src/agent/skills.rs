@@ -60,30 +60,16 @@ pub fn parse_skill_md(text: &str, fallback_name: &str, path: PathBuf) -> Option<
 
 /// Load every skill in one directory: `<dir>/<name>/SKILL.md` (the standard
 /// layout) plus flat `<dir>/<name>.md` files.
-/// One installed package's skills: its `skills/` entries — filtered to the
-/// names `llm install --skill` kept, when a selection is recorded — plus the
-/// whole-repo skill when `SKILL.md` sits at the package root. That root shape
-/// (SKILL.md + references/ at the top) is how most standalone skill repos
-/// ship, and the plain `skills/` walk alone would mount nothing from them.
+/// One installed package's skills: its `skills/` entries plus the whole-repo
+/// skill when `SKILL.md` sits at the package root. That root shape — a
+/// `SKILL.md` with its `references/` beside it — is how most standalone skill
+/// repos ship, and the plain `skills/` walk alone would mount nothing from
+/// them.
 pub(crate) fn load_package(pkg: &Path, out: &mut Vec<SkillDef>) {
-    let mut found: Vec<SkillDef> = Vec::new();
     if let Some(def) = pack_root_skill(pkg) {
-        found.push(def);
+        out.push(def);
     }
-    load_dir(&pkg.join("skills"), &mut found);
-    let keep = crate::commands::pkg::selected(pkg).skills;
-    out.extend(keep_selected(found, keep.as_deref()));
-}
-
-/// Apply an `llm install --skill` selection: `None` keeps everything.
-fn keep_selected(found: Vec<SkillDef>, keep: Option<&[String]>) -> Vec<SkillDef> {
-    match keep {
-        None => found,
-        Some(names) => found
-            .into_iter()
-            .filter(|d| names.iter().any(|k| k == &d.name))
-            .collect(),
-    }
+    load_dir(&pkg.join("skills"), out);
 }
 
 /// `SKILL.md` at the package root: the repository itself is one skill, named
@@ -267,7 +253,7 @@ mod tests {
     /// A package installed by `llm install`: the repo root carries SKILL.md
     /// (a standalone skill repo) and `skills/` holds more of them.
     #[test]
-    fn package_mounts_a_root_skill_and_filters_by_selection() {
+    fn package_mounts_a_root_skill_and_its_skills_dir() {
         let pkg = crate::core::testutil::scratch_dir("pkgskill");
         skill_dir(&pkg, "a", "name: a");
         skill_dir(&pkg.join("skills"), "b", "name: b");
@@ -282,18 +268,6 @@ mod tests {
         assert_eq!(names, vec!["wholegit", "b"]);
         assert_eq!(pack_root_skill(&pkg).unwrap().name, "wholegit");
         assert!(pack_root_skill(&empty).is_none());
-
-        // `--skill b` (or the root skill) narrows the mount
-        let keep = vec!["b".to_string()];
-        let filtered = keep_selected(found.clone(), Some(&keep));
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name, "b");
-        let keep = vec!["wholegit".to_string()];
-        assert_eq!(
-            keep_selected(found.clone(), Some(&keep))[0].name,
-            "wholegit"
-        );
-        assert!(keep_selected(found, Some(&[String::from("nope")])).is_empty());
         let _ = std::fs::remove_dir_all(&pkg);
     }
 
