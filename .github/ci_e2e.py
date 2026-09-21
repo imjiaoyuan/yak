@@ -612,19 +612,13 @@ def main():
     ls = run([binary, "list"], env, cwd=work, stdin=subprocess.DEVNULL)
     lsout = ls.stdout + ls.stderr
     assert "pkgrepo" in lsout and "wholegit (repo root)" in lsout, f"list: {lsout[-300:]!r}"
-    # -s narrows the mount, the choice survives a plain refresh, '*' clears it
-    p = run([binary, "install", "-l", pkgrepo, "-s", "demo"], env, cwd=work,
-            stdin=subprocess.DEVNULL)
-    assert p.returncode == 0, f"install -s rc={p.returncode} err={p.stderr[-300:]}"
-    assert "only skills: demo" in p.stdout + p.stderr, f"selection not reported: {(p.stdout + p.stderr)[-300:]!r}"
-    p = run([binary, "install", "-l", pkgrepo, "-s", "nope"], env, cwd=work,
-            stdin=subprocess.DEVNULL)
-    assert p.returncode == 2 and "no skill 'nope'" in p.stdout + p.stderr, \
-        f"unknown --skill not rejected: rc={p.returncode} {(p.stdout + p.stderr)[-300:]!r}"
+    # a plain re-install refreshes the same clone; the scope flags are the
+    # only thing that decides where it lands, so they are exclusive
     p = run([binary, "install", "-l", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)
-    assert "only skills: demo" in p.stdout + p.stderr, \
-        f"refresh dropped the skill selection: {(p.stdout + p.stderr)[-300:]!r}"
+    assert p.returncode == 0, f"refresh rc={p.returncode} err={p.stderr[-300:]}"
+    assert "skills: wholegit (repo root), demo" in p.stdout + p.stderr, \
+        f"refresh lost the layout: {(p.stdout + p.stderr)[-300:]!r}"
     p = run([binary, "install", "-l", "-g", pkgrepo], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert p.returncode == 2, f"-l and -g must conflict: rc={p.returncode}"

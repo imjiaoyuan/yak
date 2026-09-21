@@ -121,7 +121,7 @@ def send(fd, data):
     os.write(fd, data)
 
 
-def install_picker_lane(binary, work, env):
+def install_lane(binary, work, env):
     """Drive `llm install` through both of its pickers on a pty: the scope
     menu and the checkbox selection. The e2e lane installs with flags (it has
     no tty), so the keys — and the keep lists they write — are only real
@@ -157,18 +157,13 @@ def install_picker_lane(binary, work, env):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(work)
-        os.execve(binary, [binary, "install", pkg], env)
+        os.execve(binary, [binary, "install", "-l", pkg], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
 
-    # scope picker: enter takes the highlighted first row (project-local)
-    read_until(fd, rb"install where")
-    send(fd, b"\r")
-    # item picker: uncheck the first row (the repo-root skill), keep the rest
-    read_until(fd, rb"install which of these")
-    send(fd, b" ")
-    send(fd, b"\r")
-    read_until(fd, rb"only skills")
+    # install mounts everything a package carries: no picker, nothing to
+    # answer on the terminal, and -l still decides where the clone lands
+    read_until(fd, rb"skills: ")
     time.sleep(0.3)
     screen = out_bytes()
     _, status = os.waitpid(pid, 0)
@@ -176,12 +171,6 @@ def install_picker_lane(binary, work, env):
 
     clone = os.path.join(work, ".llm", "pkg", name)
     assert os.path.isdir(clone), f"install did not land in the project (screen {screen[-400:]!r})"
-    config = subprocess.run(
-        ["git", "-C", clone, "config", "--get-regexp", "^llm"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    ).stdout
-    assert "llm.skills demo" in config, f"unchecked skill not recorded: {config!r}"
-    assert "llm.extensions *" in config, f"fully checked extensions must stay open: {config!r}"
     return screen
 
 
@@ -441,8 +430,8 @@ def main():
     assert os.waitstatus_to_exitcode(status) == 0, f"exit code {status}"
 
     # -- install pickers: scope menu, then the checkbox item list -----------
-    screen = install_picker_lane(binary, work, env)
-    assert b"only skills: demo" in screen, f"selection not recapped: {screen[-500:]!r}"
+    screen = install_lane(binary, work, env)
+    assert b"skills: " in screen, f"layout not recapped: {screen[-500:]!r}"
 
     print("repl pty smoke passed")
     return 0
