@@ -101,17 +101,6 @@ pub enum Decision {
     Deny(String),
 }
 
-/// Resolve whether a tool call may run. Precedence: the hardcoded refusal
-/// list > the user's ask-list (always prompts, immune to allow policies) >
-/// explicit policy (deny/prompt/allow) > the mode's tier rules
-/// file > the mode's tier gate. The first two hold in every mode; explicit
-/// policies stay strongest in both directions.
-///
-/// The gate is directory-scoped: reads inside the working directory run free,
-/// reads outside it and any file write ask, and a bash command runs free
-/// only when every command it would start is on the read-only whitelist —
-/// writes, deletes, network fetches, interpreters and anything unrecognized
-/// ask. `bash_command` is the raw command line for exec-tier tools.
 /// The ask-list pattern a bash command hits, if any (`None` = no match or a
 /// `!` line exempted it).
 pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
@@ -126,6 +115,17 @@ pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
     }
 }
 
+/// Resolve whether a tool call may run. Precedence: the hardcoded refusal
+/// list > the user's ask-list (always prompts, immune to allow policies) >
+/// explicit policy (deny/prompt/allow) > the mode's tier gate. The first two
+/// hold in every mode; explicit policies stay strongest in both directions.
+///
+/// The gate is directory-scoped: reads inside the working directory run free,
+/// reads outside it and any file write ask, and a bash command runs free
+/// only when every command it would start is on the read-only whitelist —
+/// writes, deletes, network fetches, interpreters and anything unrecognized
+/// ask. `bash_command` is the raw command line for exec-tier tools, and
+/// `escapes_cwd` is the tool's own answer (`Tool::escapes_cwd`).
 pub fn resolve(
     name: &str,
     tier: Tier,
@@ -225,7 +225,8 @@ pub fn command_escapes_cwd(cwd: &std::path::Path, command: &str) -> bool {
 
 /// The path one command token names, if it names one: a literal path (it
 /// carries a separator or starts at `~`), the value half of `--flag=path`
-/// or `VAR=path`. Flags and ordinary words are not paths.
+/// or `VAR=path`. Flags and ordinary words are not paths. Both separators
+/// count: PowerShell on Windows takes `\` as well as `/`.
 fn token_path(tok: &str) -> Option<String> {
     if let Some((_, value)) = tok.split_once('=') {
         return token_path(value);
@@ -234,7 +235,7 @@ fn token_path(tok: &str) -> Option<String> {
         return None;
     }
     let path = expand_env(tok);
-    (path.contains('/') || path.starts_with('~')).then_some(path)
+    (path.contains('/') || path.contains('\\') || path.starts_with('~')).then_some(path)
 }
 
 /// `$VAR`/`${VAR}` replaced from the environment, so `cat $HOME/x` is
@@ -1132,6 +1133,21 @@ mod tests {
         // a bare word, a flag, or a value the `=` half of a flag: not paths
         assert!(!escapes("awk '{print $1}' src/main.rs"));
         assert!(!escapes("cargo test --features=serde"));
+    }
+
+    #[test]
+    fn a_token_naming_a_path_is_recognized_on_every_platform() {
+        // Windows takes `\` as a separator; on unix the token is just a
+        // relative name, so the resolution stays the platform's business
+        assert!(token_path(r"..\other\secrets.txt").is_some());
+        assert!(token_path(r"C:\Windows\win.ini").is_some());
+        assert!(token_path("src/main.rs").is_some());
+        assert!(token_path("--file=/etc/hosts").is_some());
+        assert!(token_path("~/notes.txt").is_some());
+        // flags and ordinary words are not paths
+        assert!(token_path("--verbose").is_none());
+        assert!(token_path("main.rs").is_none());
+        assert!(token_path("--features=serde").is_none());
     }
 
     #[test]
