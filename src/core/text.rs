@@ -70,56 +70,6 @@ pub fn parse_kv(items: &[String]) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-/// Damerau-Levenshtein distance (optimal string alignment) over unicode
-/// scalars: substitution, insertion, deletion and transposition each cost
-/// one edit, matching how command typos actually happen.
-/// The closest name for a probably-typo'd word: a prefix of at least 3
-/// chars, or a small edit distance scaled to the candidate's length.
-/// None when the word reads like plain text.
-pub fn closest_name(word: &str, names: &[&str]) -> Option<String> {
-    if word.starts_with('-') || word.chars().count() < 3 {
-        return None;
-    }
-    let word = word.to_lowercase();
-    names
-        .iter()
-        .filter(|name| name.len() > 1)
-        .filter_map(|name| {
-            if name.starts_with(word.as_str()) {
-                return Some((*name, 0));
-            }
-            let d = edit_distance(&word, name);
-            let max = if name.len() <= 5 { 1 } else { 2 };
-            (d > 0 && d <= max).then_some((*name, d))
-        })
-        .min_by_key(|(name, d)| (*d, *name))
-        .map(|(name, _)| name.to_string())
-}
-
-pub fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let n = a.len();
-    let m = b.len();
-    let mut prev2 = (0..=m).collect::<Vec<usize>>();
-    let mut prev = prev2.clone();
-    let mut cur = vec![0usize; m + 1];
-    for i in 1..=n {
-        cur[0] = i;
-        for j in 1..=m {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(prev2[j - 2] + 1);
-            }
-            cur[j] = best;
-        }
-        std::mem::swap(&mut prev2, &mut prev);
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[m]
-}
-
 /// Human file size with a space and one decimal above bytes ("12 B",
 /// "340 KB", "2.1 GB").
 pub fn human_bytes(n: u64) -> String {
@@ -163,13 +113,5 @@ mod tests {
     fn truncate_appends_ellipsis() {
         assert_eq!(truncate_chars("abcd", 3), "abc…");
         assert_eq!(truncate_chars("ab", 3), "ab");
-    }
-
-    #[test]
-    fn edit_distance_counts_substitutions_and_gaps() {
-        assert_eq!(edit_distance("kitten", "sitting"), 3);
-        assert_eq!(edit_distance("abc", "abc"), 0);
-        assert_eq!(edit_distance("", "abc"), 3);
-        assert_eq!(edit_distance("lgos", "logs"), 1);
     }
 }

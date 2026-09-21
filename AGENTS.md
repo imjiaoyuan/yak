@@ -96,13 +96,11 @@ never binaries.
 
 ## Hard constraint: minimal dependencies
 
-Four crates total: `ureq` (sync HTTP+TLS), `serde`/`serde_json` (with the `preserve_order`
-feature — insertion order matters for JSON output parity), `unicode-width` (real terminal
+Three crates total: `ureq` (sync HTTP+TLS), `serde`/`serde_json` (with the `preserve_order`
+feature — insertion order matters for JSON output parity), and `unicode-width` (real terminal
 cell widths; it hard-wraps the chrome: `$` action lines, tool
 summaries and the logs transcript replay, so those rows match the terminal; the live answer
-stream hard-wraps too so wrapped rows keep the left margin), and `png` + `zune-jpeg` (the two
-image formats prompt-image preparation decodes — header first, pixels only past the ceiling;
-deflate and the JPEG DCT are the parts of a resizer nobody should hand-roll). No async runtime; the CLI is
+stream hard-wraps too so wrapped rows keep the left margin). No async runtime; the CLI is
 synchronous throughout — keep new code sync.
 
 Everything else is handwritten in-tree:
@@ -151,7 +149,7 @@ Module map:
 | `main.rs` | entry: console init, the broken-pipe hook, `dispatch(argv)` |
 | `providers/` | wire adapters, the unified `Msg`/`ToolDef`/`ToolCall` model, the provider catalog |
 | `core/http.rs` | sync POST + SSE, the retry/error taxonomy |
-| `core/` | config, threads store, attachments, prompt_image, text, render_md, paths, templates, export |
+| `core/` | config, threads store, attachments, text, render_md, paths, templates, export |
 | `term/` | line editor, picker, render/TaskView, ticker |
 | `agent/` | the loop, tools, approval, session, compact, ext host, skills, memory, system_prompt |
 | `read/` | streaming text-file reading behind the read tool |
@@ -177,12 +175,9 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   tail never hides a thread). Attachments persist as provenance, not pixels (path/url/mime —
   `stored_messages` strips the payload so a thread file stays small, however many screenshots ride
   it); `rebuild_turns` reloads local files on resume, and a record whose bytes are gone rides as a
-  text note in place of its block. Payloads are normalized on the way in
-  (`core/prompt_image.rs`: a PNG/JPEG past 1568px on the long edge is decoded, box-downscaled and
-  re-encoded as PNG — providers bill pixels, so an oversized screenshot costs the same tokens as a
-  right-sized one while making the request body needlessly large), and the file on disk is left as
-  it was: the store keeps the path, so a resume re-normalizes the same way a fresh send does. Every
-  image in a replayed history is re-billed on every request, so `session::budget_images` — run on
+  text note in place of its block. An attachment rides as the bytes the file holds — nothing is
+  re-encoded, so an oversized screenshot costs what its pixels cost. Every image in a replayed
+  history is re-billed on every request, so `session::budget_images` — run on
   every round, before pricing — drops the pixels from images older than the newest two
   image-carrying user turns, tool results included (provenance stays, so the adapters render the
   dropped payload as a note), and a resume rehydrates only from that window's start: an image out
