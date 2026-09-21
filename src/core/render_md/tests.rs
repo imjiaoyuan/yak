@@ -8,10 +8,10 @@ fn p() -> &'static Palette {
 }
 
 fn render(text: &str) -> String {
-    let mut md = MdStream::indented(0, p());
+    let mut s = StyleStream::indented(0, p());
     let mut out = String::new();
-    md.push_delta(text, &mut out);
-    md.finish(&mut out);
+    s.push_delta(&resolve_setext(text), &mut out);
+    s.finish(&mut out);
     out
 }
 
@@ -38,7 +38,7 @@ const G: &str = "\x1b[38;5;244m"; // gray (quote/border/hr)
 const S: &str = "\x1b[9m"; // strike
 const R: &str = "\x1b[0m";
 
-// ---- MdStream: headings ------------------------------------------
+// ---- replay: headings ------------------------------------------
 
 #[test]
 fn headings_render_styled_by_level() {
@@ -67,7 +67,7 @@ fn one_blank_survives_between_blocks() {
     assert_eq!(render("\n\na\n\n"), "a\n");
 }
 
-// ---- MdStream: inline --------------------------------------------
+// ---- replay: inline --------------------------------------------
 
 #[test]
 fn inline_emphasis_code_and_strike() {
@@ -113,7 +113,7 @@ fn unterminated_markers_stay_literal() {
     assert_eq!(render("a **b *c* d\n"), format!("a **b {I}c{R} d\n"));
 }
 
-// ---- MdStream: fences, quotes, lists, rules ----------------------
+// ---- replay: fences, quotes, lists, rules ----------------------
 
 #[test]
 fn fence_shows_borders_and_indents_content() {
@@ -176,14 +176,13 @@ fn task_lists_keep_the_literal_checkbox() {
 #[test]
 fn hr_renders_dim_rule_capped_at_80() {
     assert_eq!(render("---\n"), format!("{G}{}{R}\n", "─".repeat(80)));
-    let mut md = MdStream::indented(0, p());
-    md.wrap_at(40);
-    let mut out = String::new();
-    md.push_delta("---\n", &mut out);
-    assert_eq!(out, format!("{G}{}{R}\n", "─".repeat(40)));
+    assert_eq!(
+        render_at(0, 40, "---\n"),
+        format!("{G}{}{R}\n", "─".repeat(40))
+    );
 }
 
-// ---- MdStream: tables ---------------------------------------------
+// ---- replay: tables ---------------------------------------------
 
 #[test]
 fn table_rows_pass_through_verbatim() {
@@ -191,37 +190,33 @@ fn table_rows_pass_through_verbatim() {
     assert_eq!(render(t), t);
 }
 
-// ---- MdStream: margins and wrapping --------------------------------
+// ---- replay: margins and wrapping --------------------------------
 
 #[test]
 fn indented_margin_prefixes_content_not_blank_lines() {
-    let mut md = MdStream::indented(2, p());
-    let mut out = String::new();
-    md.push_delta("hi\n\n- a\n", &mut out);
-    md.finish(&mut out);
-    assert_eq!(out, format!("  hi\n\n  {C}- {R}a\n"));
+    assert_eq!(
+        render_at(2, 0, "hi\n\n- a\n"),
+        format!("  hi\n\n  {C}- {R}a\n")
+    );
 }
 
 #[test]
 fn wrapped_lines_carry_the_margin() {
-    let mut md = MdStream::indented(2, p());
-    md.wrap_at(10);
-    let mut out = String::new();
-    md.push_delta("aaaa bbbb cccc dddd\n", &mut out);
-    md.finish(&mut out); // the paragraph line is held for setext lookahead
-    assert_eq!(out, "  aaaa bbbb\n  cccc dddd\n");
+    assert_eq!(
+        render_at(2, 10, "aaaa bbbb cccc dddd\n"),
+        "  aaaa bbbb\n  cccc dddd\n"
+    );
 }
 
 #[test]
 fn wrapped_list_continuations_align_under_content() {
-    let mut md = MdStream::indented(2, p());
-    md.wrap_at(12);
-    let mut out = String::new();
-    md.push_delta("- aaaa bbbb cccc\n", &mut out);
     // cont 2: continuation rows indent past the marker. The break point
     // is the live stream's: the row fills (the space before `bbbb` sits
     // too far from the edge to be taken early)
-    assert_eq!(out, format!("  {C}- {R}aaaa bbb\n    b cccc\n"));
+    assert_eq!(
+        render_at(2, 12, "- aaaa bbbb cccc\n"),
+        format!("  {C}- {R}aaaa bbb\n    b cccc\n")
+    );
 }
 
 // ---- StyleStream: live streaming ------------------------------------
@@ -738,11 +733,11 @@ fn fuzz_random_markup_agrees() {
 
 /// [`render`] at a given margin and wrap width.
 fn render_at(indent: usize, wrap: usize, doc: &str) -> String {
-    let mut md = MdStream::indented(indent, p());
-    md.wrap_at(wrap);
+    let mut s = StyleStream::indented(indent, p());
+    s.wrap = wrap;
     let mut out = String::new();
-    md.push_delta(doc, &mut out);
-    md.finish(&mut out);
+    s.push_delta(&resolve_setext(doc), &mut out);
+    s.finish(&mut out);
     out
 }
 

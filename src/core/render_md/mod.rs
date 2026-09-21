@@ -1,6 +1,5 @@
-//! Terminal markdown rendering, the reference-styled: one style vocabulary over two
-//! engines. [`MdStream`] renders complete lines (session replay, stored
-//! responses). [`StyleStream`] renders live model output
+//! Terminal markdown rendering, the reference-styled: one style vocabulary over one
+//! engine. [`StyleStream`] renders live model output
 //! character-immediately without ever redrawing: the "settled prefix" of
 //! each line streams as it arrives, and only the currently open inline
 //! marker (an unclosed `**`, `` ` ``, `~~` or `[`) is held back until it
@@ -8,7 +7,12 @@
 //! styled output. Malformed syntax degrades to the original text rather
 //! than erroring. Tables pass through verbatim, live and replay alike
 //! (the simple way: column widths need the whole table, and write-once
-//! output cannot restyle what is already on screen).
+//! output cannot restyle what is already on screen). Session replay
+//! (`render_once`) runs the same engine over a whole stored answer, with
+//! the one lookahead the live path cannot afford resolved up front:
+//! `resolve_setext` turns a paragraph line under a `===`/`---` run into a
+//! heading before the engine ever sees it, because a stream has already
+//! handed that line to the terminal and never erases.
 
 use crate::theme::Palette;
 use unicode_width::UnicodeWidthChar;
@@ -36,296 +40,6 @@ fn within_hold(tail: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// MdStream: complete-line rendering (replay)
-// ---------------------------------------------------------------------------
-
-/// Streaming wrapper: feed deltas, whole lines are rendered as they
-/// complete into the caller's chunk buffer (printed by the caller);
-/// `finish` flushes a trailing partial line (with newline) and reports
-/// whether anything was flushed.
-pub struct MdStream {
-    buf: String,
-    state: BlockState,
-}
-
-impl MdStream {
-    /// Content lines get `spaces` spaces of left margin (blank lines stay
-    /// empty), so a rendered answer sits visually apart from the chrome.
-    pub fn indented(spaces: usize, p: &'static Palette) -> MdStream {
-        MdStream {
-            buf: String::new(),
-            state: BlockState::new(" ".repeat(spaces), p),
-        }
-    }
-
-    /// Hard-wrap rendered content at `width` terminal cells (0 = off), so
-    /// terminal soft-wrapping cannot break the left margin.
-    pub fn wrap_at(&mut self, width: usize) {
-        self.state.wrap = width;
-    }
-
-    pub fn push_delta(&mut self, text: &str, rendered: &mut String) {
-        self.buf.push_str(text);
-        while let Some(nl) = self.buf.find('\n') {
-            let line = self.buf[..nl].to_string();
-            self.buf.drain(..nl + 1);
-            render_line(&line, &mut self.state, rendered);
-        }
-    }
-
-    /// Flush a trailing partial line, terminating it with a newline, then
-    /// settle any held block (setext paragraph, buffered table). The
-    /// stream never paints partials: it emits whole lines as they finish,
-    /// so output is "write once" with no in-place erase/redraw flicker.
-    /// Idempotent; returns false when nothing was pending.
-    pub fn finish(&mut self, rendered: &mut String) -> bool {
-        let had = !self.buf.is_empty();
-        if had {
-            let line = std::mem::take(&mut self.buf);
-            render_line(&line, &mut self.state, rendered);
-        }
-        flush_pending(&mut self.state, rendered);
-        self.state.pending_blank = false;
-        had
-    }
-}
-
-struct BlockState {
-    in_fence: bool,
-    /// any block emitted yet (suppress leading blanks)
-    started: bool,
-    /// a source blank line awaits the next block: one blank survives
-    /// between blocks (runs collapse), so replay matches what the live
-    /// stream printed for the same text
-    pending_blank: bool,
-    /// one paragraph line held back: the next line may be a setext
-    /// underline (`====` / `----`) that turns it into a heading
-    pending_para: Option<String>,
-    /// left margin prepended to content lines
-    margin: String,
-    /// wrap width in terminal cells (0 = no wrapping)
-    wrap: usize,
-    p: &'static Palette,
-}
-
-impl BlockState {
-    fn new(margin: String, p: &'static Palette) -> BlockState {
-        BlockState {
-            in_fence: false,
-            started: false,
-            pending_blank: false,
-            pending_para: None,
-            margin,
-            wrap: 0,
-            p,
-        }
-    }
-}
-
-fn render_line(raw: &str, st: &mut BlockState, out: &mut String) {
-    let p = st.p;
-    let t = raw.trim_start();
-    let indent = raw.len() - t.len();
-
-    if st.in_fence {
-        if bare_fence_run(t).is_some() {
-            // a closing fence (any run of three or more); the border prints
-            // as three backticks whatever the run, so a longer fence reads
-            // the same as the opener
-            st.in_fence = false;
-            emit_line(st, &format!("{}```{}", p.code_border, p.reset), out);
-        } else if raw.trim().is_empty() {
-            out.push('\n');
-        } else {
-            // code content: colored, two-space indent carried onto wrapped
-            // continuation rows (the reference's codeBlockIndent)
-            emit_cont(st, &format!("{}  {raw}{}", p.code_block, p.reset), 2, out);
-        }
-        return;
-    }
-
-    if t.is_empty() {
-        // blank: closes whatever is pending; one blank survives to
-        // separate the next block
-        flush_pending(st, out);
-        st.pending_blank = st.started;
-        return;
-    }
-
-    if let Some(rest) = t.strip_prefix("```") {
-        flush_pending(st, out);
-        sep(st, out);
-        let info = rest.trim_start_matches('`').trim();
-        emit_line(st, &format!("{}```{}{}", p.code_border, info, p.reset), out);
-        st.in_fence = true;
-        block_done(st);
-        return;
-    }
-
-    // setext underline: `====`/`----` directly under the held paragraph
-    // line turns it into a heading
-    if st.pending_para.is_some() && is_setext(t) {
-        let para = st.pending_para.take().unwrap();
-        let level = if t.starts_with('=') { 1 } else { 2 };
-        heading_line(st, level, &para, out);
-        block_done(st);
-        return;
-    }
-
-    if is_hr(t) {
-        flush_pending(st, out);
-        sep(st, out);
-        let n = if st.wrap == 0 {
-            HR_MAX
-        } else {
-            st.wrap.min(HR_MAX)
-        };
-        emit_line(st, &format!("{}{}{}", p.hr, "─".repeat(n), p.reset), out);
-        block_done(st);
-        return;
-    }
-
-    let hashes = t.chars().take_while(|c| *c == '#').count();
-    if (1..=6).contains(&hashes) && (t.len() == hashes || t.as_bytes()[hashes] == b' ') {
-        flush_pending(st, out);
-        sep(st, out);
-        heading_line(st, hashes, t[hashes..].trim(), out);
-        block_done(st);
-        return;
-    }
-
-    if let Some(after) = t.strip_prefix('>') {
-        flush_pending(st, out);
-        sep(st, out);
-        let content = after.trim_start();
-        let codes = format!("{}{}", p.quote, p.italic);
-        let layered = layer_style(&render_inline_pal(content, p), &codes);
-        emit_cont(
-            st,
-            &format!("{}│ {}{}{}", p.quote_border, p.reset, layered, p.reset),
-            2,
-            out,
-        );
-        block_done(st);
-        return;
-    }
-
-    if t.starts_with('|') {
-        // tables pass through verbatim, the simple way (live and replay
-        // alike: column widths need the whole table, and write-once
-        // streaming cannot restyle what is already on screen)
-        flush_para(st, out);
-        sep(st, out);
-        emit_line(st, raw, out);
-        block_done(st);
-        return;
-    }
-
-    if let Some((marker_len, ordered)) = list_marker(t) {
-        // a paragraph line held for the setext lookahead belongs *before*
-        // this item: flushing it with `sep` alone would reorder the block
-        flush_pending(st, out);
-        sep(st, out);
-        let level = (1 + indent / 2).min(3);
-        let lead = " ".repeat(4 * (level - 1));
-        let marker_display = if ordered {
-            t[..marker_len].to_string()
-        } else {
-            "-".to_string()
-        };
-        let mut content = t[marker_len..].trim_start().to_string();
-        // `- [x] `/`- [ ] ` ride inside the colored marker (the reference keeps the
-        // literal checkbox)
-        let task = if content.starts_with("[x] ")
-            || content.starts_with("[X] ")
-            || content.starts_with("[ ] ")
-        {
-            content.drain(..4).collect::<String>()
-        } else {
-            String::new()
-        };
-        let head = format!("{lead}{}{marker_display} {task}{}", p.bullet, p.reset);
-        let cont = cell_width(&format!("{lead}{marker_display} {task}"));
-        let inner = render_inline_pal(&content, p);
-        emit_cont(st, &format!("{head}{inner}"), cont, out);
-        block_done(st);
-        return;
-    }
-
-    // paragraph line: hold for setext lookahead
-    flush_para(st, out);
-    st.pending_para = Some(t.to_string());
-}
-
-/// the reference heading styles: h1 = heading color + bold + underline, h2 = color +
-/// bold, h3+ keep their `### ` prefix, styled the same.
-fn heading_line(st: &mut BlockState, level: usize, content: &str, out: &mut String) {
-    let p = st.p;
-    let mut codes = format!("{}{}", p.heading, p.bold);
-    if level == 1 {
-        codes.push_str(&p.underline);
-    }
-    let text = if level >= 3 {
-        format!("{} {content}", "#".repeat(level))
-    } else {
-        content.to_string()
-    };
-    let layered = layer_style(&render_inline_pal(&text, p), &codes);
-    emit_line(st, &format!("{layered}{}", p.reset), out);
-}
-
-/// Emit one blank separator when a source blank line is pending.
-fn sep(st: &mut BlockState, out: &mut String) {
-    if st.pending_blank && st.started {
-        out.push('\n');
-    }
-    st.pending_blank = false;
-}
-
-fn block_done(st: &mut BlockState) {
-    st.started = true;
-    st.pending_blank = false;
-}
-
-/// Flush the setext-lookahead paragraph line as a plain paragraph.
-fn flush_para(st: &mut BlockState, out: &mut String) {
-    if let Some(prev) = st.pending_para.take() {
-        sep(st, out);
-        emit_line(st, &render_inline_pal(&prev, st.p), out);
-        block_done(st);
-    }
-}
-
-fn flush_pending(st: &mut BlockState, out: &mut String) {
-    flush_para(st, out);
-}
-
-/// Append one rendered content line: the margin, then the content
-/// hard-wrapped at `st.wrap` terminal cells so soft-wrapping cannot break
-/// the margin; any open SGR span is re-opened after each break.
-fn emit_line(st: &BlockState, content: &str, out: &mut String) {
-    emit_cont(st, content, 0, out);
-}
-
-/// [`emit_line`] with a continuation indent: wrapped rows restart at the
-/// margin plus `cont` spaces (list markers, quote bars, code indent).
-fn emit_cont(st: &BlockState, content: &str, cont: usize, out: &mut String) {
-    let width = st.wrap.saturating_sub(cont);
-    if width == 0 {
-        out.push_str(&st.margin);
-        out.push_str(content);
-        out.push('\n');
-        return;
-    }
-    // always through the scanner: a line that fits can still be broken early
-    // (a space within WRAP_EARLY cells of the edge, an opening mark that
-    // would end the row), and a tab is measured by column — `cell_width`
-    // cannot do either, so there is no safe shortcut here
-    let cont_pad = format!("{}{}", st.margin, " ".repeat(cont));
-    wrap_scan(content, width, &st.margin, &cont_pad, true, out);
-    out.push('\n');
-}
-
 fn is_setext(t: &str) -> bool {
     let Some(c) = t.chars().next() else {
         return false;
@@ -400,24 +114,8 @@ fn list_marker(t: &str) -> Option<(usize, bool)> {
     None
 }
 
-/// Apply `codes` around an already-styled string and re-open them after
-/// every inner reset, so nested inline spans keep the outer style (the
-/// trick the reference uses for quotes and headings).
-fn layer_style(inner: &str, codes: &str) -> String {
-    if codes.is_empty() {
-        return inner.to_string();
-    }
-    let reset = "\x1b[0m";
-    let patched = if inner.contains(reset) {
-        inner.replace(reset, &format!("{reset}{codes}"))
-    } else {
-        inner.to_string()
-    };
-    format!("{codes}{patched}")
-}
-
 // ---------------------------------------------------------------------------
-// Inline resolver — one decision layer, two emitters (replay and stream)
+// Inline resolver — one decision layer, shared by the row emitters
 // ---------------------------------------------------------------------------
 
 /// The styled spans the resolver produces; each renderer maps a span to
@@ -589,26 +287,6 @@ fn scan_inline_events(
     i
 }
 
-/// Inline scanner over a complete string: the shared resolver run at
-/// `eol` (nothing holds), rendered straight into one styled string.
-fn render_inline_pal(s: &str, p: &Palette) -> String {
-    let mut out = String::with_capacity(s.len());
-    scan_inline_events(s, 0, true, &mut |ev| match ev {
-        InlEvent::Lit(ch) => out.push(ch),
-        InlEvent::Styled(span, content) => {
-            out.push_str(&span_codes(p, span));
-            out.push_str(content);
-            out.push_str(&p.reset);
-        }
-    });
-    out
-}
-// ---------------------------------------------------------------------------
-// StyleStream: live write-once styled streaming
-// ---------------------------------------------------------------------------
-
-/// Live styled streaming: model text renders the reference-style as it arrives and
-/// is written exactly once — no erase, no redraw, no cursor motion. Each
 /// line is classified from its first characters (heading, quote, list,
 /// fence, table, rule) and the settled prefix streams; an unclosed inline
 /// marker holds only its own span until it closes or the line ends (then
@@ -720,6 +398,13 @@ impl StyleStream {
     pub fn wrap_terminal(&mut self) {
         self.dynamic = true;
         self.refresh_width();
+    }
+
+    /// Replay mode: wrap at a fixed `width` for the whole text, so a stored
+    /// answer renders the same however the window is sized later.
+    pub fn wrap_at(&mut self, width: usize) {
+        self.dynamic = false;
+        self.wrap = width;
     }
 
     fn refresh_width(&mut self) {
@@ -1610,11 +1295,68 @@ pub fn wrap_block(text: &str, width: usize, margin: usize) -> String {
 /// Render a complete markdown text in one shot (session replay, stored
 /// responses) at `indent` columns of left margin.
 pub fn render_once(text: &str, indent: usize) -> String {
-    let mut md = MdStream::indented(indent, crate::theme::out());
-    md.wrap_at(crate::term::columns().saturating_sub(indent).max(20));
+    let mut s = StyleStream::indented(indent, crate::theme::out());
+    s.wrap_at(crate::term::columns().saturating_sub(indent).max(20));
     let mut out = String::new();
-    md.push_delta(text, &mut out);
-    md.finish(&mut out);
+    s.push_delta(&resolve_setext(text), &mut out);
+    s.finish(&mut out);
+    out
+}
+
+/// An ATX heading line: one to six `#`, then the end of the line or a space.
+fn is_atx(t: &str) -> bool {
+    let hashes = t.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&hashes) && (t.len() == hashes || t.as_bytes()[hashes] == b' ')
+}
+
+/// Replay-only pre-pass: a paragraph line followed by a `===`/`---` run is a
+/// setext heading, and a line's shape is otherwise only known once the next
+/// one arrives. The live path cannot wait for that lookahead — it has already
+/// handed the line to the terminal and never erases — so replay resolves it
+/// here, before the streaming engine sees the text, and one engine serves
+/// both. The line shapes mirror `render_line`'s order: fence, blank, ATX,
+/// quote, table and list lines are never the heading's text.
+fn resolve_setext(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    // the last emitted plain line: (offset in `out`, its trimmed text) — a
+    // setext underline under it turns that line into a heading instead
+    let mut held: Option<(usize, String)> = None;
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let nl = if line.ends_with('\n') { "\n" } else { "" };
+        let t = body.trim_start();
+        let plain = if in_fence {
+            if bare_fence_run(t).is_some() {
+                in_fence = false;
+            }
+            false
+        } else if t.is_empty() {
+            false
+        } else if t.starts_with("```") {
+            in_fence = true;
+            false
+        } else if held.is_some() && is_setext(t) {
+            let (at, para) = held.take().unwrap();
+            let level = if t.starts_with('=') { 1 } else { 2 };
+            out.truncate(at);
+            out.push_str(&"#".repeat(level));
+            out.push(' ');
+            out.push_str(&para);
+            out.push('\n');
+            continue;
+        } else {
+            !is_hr(t)
+                && !is_atx(t)
+                && !t.starts_with('>')
+                && !t.starts_with('|')
+                && list_marker(t).is_none()
+        };
+        let at = out.len();
+        out.push_str(body);
+        out.push_str(nl);
+        held = plain.then(|| (at, t.to_string()));
+    }
     out
 }
 
