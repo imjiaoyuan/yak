@@ -2,8 +2,10 @@ use super::*;
 
 /// Fetch a URL and hand the model readable text: HTML is stripped to text
 /// with its <title> extracted, JSON/XML/plain text pass through untouched, and
-/// the final URL is reported when redirects moved the fetch. Reads are
-/// Tier::Read, so the agent can fetch freely without an approval prompt.
+/// the final URL is reported when redirects moved the fetch. Fetching is
+/// Tier::Exec: it is the one way out of the machine and the one door
+/// untrusted content comes in by, so ask mode confirms it like any other
+/// command that leaves the working tree.
 pub(super) struct FetchTool;
 
 impl Tool for FetchTool {
@@ -11,7 +13,7 @@ impl Tool for FetchTool {
         "webfetch"
     }
     fn tier(&self) -> Tier {
-        Tier::Read
+        Tier::Exec
     }
     fn description(&self) -> &str {
         "Fetch a URL as text (HTML stripped); JSON, XML and plain text pass through."

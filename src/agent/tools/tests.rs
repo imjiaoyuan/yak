@@ -815,6 +815,23 @@ fn tool_defs_stay_under_the_wire_budget() {
 }
 
 #[test]
+fn webfetch_is_exec_tier_and_the_path_gate_sees_a_missing_file() {
+    let tools = builtin_tools();
+    let fetch = tools
+        .iter()
+        .find(|t| t.name() == "webfetch")
+        .expect("mounted");
+    // the one way off the machine asks in ask mode like any other exec call
+    assert_eq!(fetch.tier(), Tier::Exec);
+    // a path that does not exist yet still counts as reaching outside
+    let read = tools.iter().find(|t| t.name() == "read").expect("mounted");
+    assert!(read.escapes_cwd(
+        &json!({"path": "/etc/does-not-exist-here/x"}),
+        std::path::Path::new("/home/user/proj")
+    ));
+}
+
+#[test]
 fn every_file_tool_reports_the_paths_it_would_reach_outside_the_cwd() {
     let cwd = std::path::Path::new("/home/user/proj");
     let tools = builtin_tools();

@@ -189,9 +189,12 @@ pub fn resolve(
         (Tier::Read, true) => Decision::Ask("reading outside the working directory".to_string()),
         (Tier::Write, _) => Decision::Ask("writing files requires approval".to_string()),
         (Tier::Exec, _) if bash_command.is_some_and(readonly_command) => Decision::Auto,
-        (Tier::Exec, _) => {
-            Decision::Ask("running a non-read-only command requires approval".to_string())
-        }
+        (Tier::Exec, _) => Decision::Ask(match bash_command {
+            Some(_) => "running a non-read-only command requires approval".to_string(),
+            // a non-shell exec tool (webfetch, an extension): the tier is the
+            // whole reason, so name it
+            None => format!("tool '{name}' is exec-tier: it reaches outside the working tree"),
+        }),
     }
 }
 
