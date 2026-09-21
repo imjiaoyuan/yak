@@ -128,7 +128,9 @@ Under context pressure an oversized tool result is cut to its head and tail; the
 archived under `~/.llm/observations/` and the marker names its id, so `recall` pages the cut middle
 back (`id`, optional `offset` — the reply's `next_offset` continues) instead of re-running the
 command that produced it. Resuming a thread that no longer fits repeats the cut before the first
-request, silently, and the archive is keyed by the result's content, so nothing piles up.
+request, silently, and the archive is keyed by the result's content, so nothing piles up. When
+whole turns are summarized away, the raw turns are archived the same way and the summary names that
+observation id — a summary paraphrases, and one `recall` gets the exact history back.
 
 ### The interactive session
 
@@ -246,8 +248,9 @@ the attachments that filled it, instead of coming back as an opaque 413.
 Nothing here guesses a context window: gateways rarely publish one, and a made-up number either
 pays for a summary nobody needed or dies on a request the provider refuses anyway. So the agent
 learns it from the provider itself — when a request comes back saying the prompt does not fit, it
-compacts the conversation below that size, retries, and remembers the size for the rest of the
-session (the request note and the proactive compaction then work as usual). Set
+compacts the conversation below that size, retries, and remembers it — for the rest of the session,
+and in `agent.model_windows` on disk, so the next run compacts before that wall instead of walking
+into it again (the request note and the proactive compaction then work as usual). Set
 `context_window` (or a `model_windows` entry) when you already know the number and want the
 proactive gate from the first turn.
 

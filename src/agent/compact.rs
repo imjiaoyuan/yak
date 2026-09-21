@@ -343,6 +343,26 @@ fn content_id(text: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Archive the turns a summary is about to replace, so `recall` can page the
+/// exact history back: a summary is a paraphrase, and this is the only copy
+/// of what it paraphrased. Content-addressed like a pruned tool result, so
+/// re-compacting the same prefix rewrites nothing. `None` when it cannot be
+/// written — a marker pointing at nothing would be worse than no marker.
+pub fn archive_prefix(prefix: &[Msg], archive_dir: &std::path::Path) -> Option<String> {
+    let text = serialize_prefix(prefix);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let id = content_id(&text);
+    let path = archive_dir.join(format!("{id}.txt"));
+    if !path.exists()
+        && (std::fs::create_dir_all(archive_dir).is_err() || std::fs::write(&path, &text).is_err())
+    {
+        return None;
+    }
+    Some(id)
+}
+
 /// Project one over-budget tool result down to head + marker + tail,
 /// archiving the whole original under its content id. `None` when the result
 /// fits (or the archive cannot be written: a marker pointing at nothing
@@ -847,6 +867,24 @@ mod tests {
     /// The archive is keyed by content, so pruning the same bytes twice (one
     /// thread resumed under pressure over and over) touches one file and the
     /// marker stays the same.
+    #[test]
+    fn a_replaced_prefix_is_archived_exactly() {
+        let dir = crate::core::testutil::scratch_dir("compact-prefix-archive");
+        let history = [user("fix the parser"), user("and add a test")];
+        let id = archive_prefix(&history, &dir).expect("archived");
+        let stored = std::fs::read_to_string(dir.join(format!("{id}.txt"))).unwrap();
+        assert!(stored.contains("fix the parser") && stored.contains("and add a test"));
+        assert!(
+            stored.starts_with("user: "),
+            "the summarizer's own rendering"
+        );
+        // content-addressed: re-compacting the same prefix rewrites nothing
+        assert_eq!(archive_prefix(&history, &dir).as_deref(), Some(id.as_str()));
+        // an empty prefix has nothing to point at
+        assert!(archive_prefix(&[], &dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_archive_is_content_addressed() {
         let dir = obs_dir();

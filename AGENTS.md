@@ -224,14 +224,20 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   usage-derived estimate). Lossless, not lossy: the untouched original is archived to
   `observation_dir()` (`~/.llm/observations/<content-id>.txt`, the 64-bit FNV-1a of the text, so
   pruning the same result again after a resume rewrites one file rather than piling up copies)
-  and the marker carries that id so `recall` pages the cut middle back. Per-result fail-open on
+  and the marker carries that id so `recall` pages the cut middle back. The replaced prefix itself
+  is archived the same way before the summary takes its place and the summary names that
+  observation id: a summary is a paraphrase, so the exact turns stay one `recall` away. Per-result
+  fail-open on
   archive write failure (keep the whole text rather than leave a marker pointing at nothing), and
   char-indexed cuts keep CJK on codepoint boundaries. A resumed thread that no longer fits is
   projected down the same way before its first request, silently (`Session::prune_seed_to_fit`),
   so the notice cannot repeat turn after turn. No window is ever guessed: config may name one, and
   an unset one is learned from the provider's own refusal — the refused size becomes the session's
   window, the history is compacted below it, and the round is retried (bounded), so the run
-  survives a number this side had no way to know. A compaction that cannot run — summarizer error,
+  survives a number this side had no way to know, and the learned number is written to
+  `agent.model_windows` (best-effort — a warning when the write fails, never a failed run) so a
+  later run compacts before that wall instead of walking into it again. A compaction that cannot
+  run — summarizer error,
   empty summary, no cut point — is not silent: it reports a `compact_stalled` notice naming why,
   once per run, because a session left quietly over its window is the one failure compaction
   exists to prevent; a round the provider reported no usage for is priced from the text instead,

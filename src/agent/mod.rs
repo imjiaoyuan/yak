@@ -880,6 +880,9 @@ fn compact_now(
     // recovered from the previous summary (the first user message is long
     // gone by then).
     let dropped = &history[..cut];
+    // the raw prefix is archived before it is replaced: the summary is a
+    // paraphrase, and this is the only surviving copy of the exact turns
+    let archived = compact::archive_prefix(dropped, &compact::observation_dir());
     let task = match dropped.first() {
         Some(Msg::Summary { text }) => compact::extract_original_task(text),
         _ => dropped.iter().find_map(|m| match m {
@@ -893,9 +896,14 @@ fn compact_now(
     });
     let tail = history.split_off(cut);
     history.clear();
-    history.push(Msg::Summary {
-        text: compact::compose_summary(task.as_deref(), &summary),
-    });
+    let mut text = compact::compose_summary(task.as_deref(), &summary);
+    if let Some(id) = archived {
+        text.push_str(&format!(
+            "\n\n[the {cut} messages this replaced are archived as observation {id} — recall it \
+             when an exact wording or detail matters]"
+        ));
+    }
+    history.push(Msg::Summary { text });
     history.extend(tail);
     after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
     on_update(AgentUpdate::Compacted { removed: cut });
