@@ -61,7 +61,7 @@ anywhere), and the dim `secs · this task: input N · output N · cache N%` foot
 share only when the provider reports prompt-cache hits; all three are the task's own
 rounds summed — a re-sent prompt per round, so never a context size — while the session's
 cumulative counters and the window's occupancy live in `/status`); answers stream character-immediately and styled the reference-like in a left-indent-2 block
-on a TTY through `StyleStream` (`core/render_md.rs`), write-once — no erase, no redraw: each line
+on a TTY through `StyleStream` (`core/render_md/`), write-once — no erase, no redraw: each line
 classifies from its first chars (heading, quote, list, fence, table, rule) and the settled prefix
 streams, while an unclosed inline marker (`**`, `` ` ``, `~~`, `[`) holds only its own span until it
 resolves or the line ends (then it flushes literally — the one physical cost of write-once styled
@@ -79,7 +79,7 @@ retracts only a row it painted — a wait that ends at once (the round after a s
 not blink a frame under printed text, and `turn_end` restarts it only when one is already up (the
 tool cycle's `resume_running`/`resume_wait` cover the waits): everything the answer area shows is
 append-only, which `ci_repl.py` asserts by rejecting any erase sequence after the answer's first
-byte; replay (`MdStream` via `render_once`) renders the same style vocabulary over whole lines — h1
+byte; replay (`render_once`) runs the same engine over whole lines — h1
 color+bold+underline, h3+ keep their `### ` prefix, visible ``` fences (the border always prints as
 three backticks, and a fence may be indented — the common shape inside a list item — in which case
 its closing run must still close the block: the live stream holds a line that is only whitespace and
@@ -167,7 +167,9 @@ across processes with `LLM_SESSION_ID`.
   ask-list is extension-proof); yolo is the default mode (`--approval-mode ask` / `[agent]
   approval_mode = "always-ask"` restores prompting; the legacy `~/.llm/trust.json` is ignored — its
   trusted-project flip became dead weight once everything started in yolo), `/yolo` toggles the
-  mode; the shell command gates are two layers in either mode: the hardcoded `FORBIDDEN_COMMANDS`
+  mode; a per-tool policy in `[agent] tools` (`allow`/`deny`/`prompt`) overrides the tier for one
+  tool, and `--tools read,grep,edit` narrows the registry a run is offered; the shell command
+  gates are two layers in either mode: the hardcoded `FORBIDDEN_COMMANDS`
   (`approval.rs`: `sudo`/`su`/`doas`, `mkfs*`/`mkswap`, `dd`/`shred`/`wipefs`, `fdisk`/`parted`,
   `shutdown`/`reboot`/`poweroff`/`halt`/`init`) plus `forbidden_command`'s shape checks (fork bomb,
   redirects into real device nodes — `/dev/null` and other sinks are exempt, `2>/dev/null` is stream
@@ -332,7 +334,7 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   the depth alone; `/login` runs the wizard (catalog + Cloudflare/Azure URL templates + custom;
   hidden-input key capture, an omitted key falls back to the catalog entry's env var as a `${VAR}`
   reference), `/logout` the removal picker (clearing the default when it pointed at the removed
-  provider). Pickers build from `providers/catalog.rs` (the reference's provider registry, 40 entries incl.
+  provider). Pickers build from `providers/catalog.rs` (the reference's provider registry, 38 entries incl.
   opencode-go in both wire kinds and four local runtimes: ollama, lm-studio, llama.cpp, vllm;
   OAuth-only and cloud-signature providers deliberately absent). A fresh session still starts on the
   stored default.
