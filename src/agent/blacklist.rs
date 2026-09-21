@@ -103,8 +103,10 @@ impl Blacklist {
     }
 
     /// Load both homes (user, then project). Missing files contribute
-    /// nothing; unreadable files degrade silently — a guard file must never
-    /// take the agent down.
+    /// nothing (deleting the seeded file is how its rules are reset); a file
+    /// that exists but cannot be read is reported and skipped — a guard file
+    /// must never take the agent down, but it must not vanish silently
+    /// either.
     pub fn load(cwd: &Path) -> Blacklist {
         // project last: its lines win by last-match semantics
         let user = crate::core::config::user_dir().join("blacklist");
@@ -117,19 +119,30 @@ impl Blacklist {
         }
         let mut merged = Blacklist::default();
         for path in files {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                let one = Blacklist::parse(&text);
-                merged.entries.extend(one.entries);
-                // a directive is a whole-file switch: the last file that
-                // mentions it wins, so the project copy overrides the user's
-                if one.ask_outside_cwd
-                    || text.lines().any(|l| {
-                        l.trim()
-                            .eq_ignore_ascii_case(format!("!{OUTSIDE_CWD}").as_str())
-                    })
-                {
-                    merged.ask_outside_cwd = one.ask_outside_cwd;
+            // a missing file contributes nothing (deleting it is how the
+            // defaults are reset); an existing file that cannot be read is a
+            // guard the user believes is on, so it says so
+            if !path.exists() {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: cannot read {}: {e}", path.display());
+                    continue;
                 }
+            };
+            let one = Blacklist::parse(&text);
+            merged.entries.extend(one.entries);
+            // a directive is a whole-file switch: the last file that
+            // mentions it wins, so the project copy overrides the user's
+            if one.ask_outside_cwd
+                || text.lines().any(|l| {
+                    l.trim()
+                        .eq_ignore_ascii_case(format!("!{OUTSIDE_CWD}").as_str())
+                })
+            {
+                merged.ask_outside_cwd = one.ask_outside_cwd;
             }
         }
         merged
