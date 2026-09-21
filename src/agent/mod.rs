@@ -1224,29 +1224,36 @@ fn gate_call<'a>(
     } else {
         None
     };
-    let (ask, reason) =
-        match approval::resolve(tool.name(), tool.tier(), escapes, approval, bash_command) {
-            approval::Decision::Deny(r) => return Err(denial(format!("denied: {r}"))),
-            approval::Decision::Ask(r) => (true, r),
-            approval::Decision::Auto => (false, String::new()),
-        };
+    // one ask-list lookup for the whole call: resolve() needs it to decide
+    // and the prompt needs the pattern to highlight and to spare on `a`
+    let hit = bash_command.and_then(|cmd| approval::blacklist_hit(approval, cmd));
+    let (ask, reason) = match approval::resolve_with_hit(
+        tool.name(),
+        tool.tier(),
+        escapes,
+        approval,
+        bash_command,
+        hit.clone(),
+    ) {
+        approval::Decision::Deny(r) => return Err(denial(format!("denied: {r}"))),
+        approval::Decision::Ask(r) => (true, r),
+        approval::Decision::Auto => (false, String::new()),
+    };
     let preview = tool.preview(&call.arguments);
     let diff = tool.diff(&call.arguments, cwd).filter(|d| !d.is_empty());
     // a bash command that hit the ask-list carries its pattern down to the
     // prompt (highlighted there) and to the `a` answer, which spares the
     // pattern — not the whole bash tool — for the session. The outside-cwd
     // directive rides the same channel as a pseudo-pattern.
-    let matched_pattern = bash_command
-        .and_then(|cmd| approval::blacklist_hit(approval, cmd))
-        .or_else(|| {
-            (escapes
-                && approval.blacklist.asks_outside_cwd()
-                && !approval
-                    .blacklist_session_allows
-                    .iter()
-                    .any(|a| a == crate::agent::blacklist::OUTSIDE_CWD))
-            .then(|| crate::agent::blacklist::OUTSIDE_CWD.to_string())
-        });
+    let matched_pattern = hit.or_else(|| {
+        (escapes
+            && approval.blacklist.asks_outside_cwd()
+            && !approval
+                .blacklist_session_allows
+                .iter()
+                .any(|a| a == crate::agent::blacklist::OUTSIDE_CWD))
+        .then(|| crate::agent::blacklist::OUTSIDE_CWD.to_string())
+    });
     // a blacklist ask prompts even when an extension said allow:
     // gating every run of the pattern is the file's whole point
     if ask && (!extension_allowed || matched_pattern.is_some()) {

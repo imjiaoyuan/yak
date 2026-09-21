@@ -121,17 +121,22 @@ pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
 /// hold in every mode; explicit policies stay strongest in both directions.
 ///
 /// The gate is directory-scoped: reads inside the working directory run free,
-/// reads outside it and any file write ask, and a bash command runs free
-/// only when every command it would start is on the read-only whitelist —
-/// writes, deletes, network fetches, interpreters and anything unrecognized
-/// ask. `bash_command` is the raw command line for exec-tier tools, and
-/// `escapes_cwd` is the tool's own answer (`Tool::escapes_cwd`).
-pub fn resolve(
+/// any file write asks, and a bash command runs free only when every command
+/// it would start is on the read-only whitelist — writes, deletes, network
+/// fetches, interpreters and anything unrecognized ask. A read that leaves
+/// the working directory is the `outside-cwd` directive's job, so it asks in
+/// either mode unless that directive is off. `bash_command` is the raw command
+/// line for exec-tier tools, and `escapes_cwd` is the tool's own answer
+/// (`Tool::escapes_cwd`). `resolve_with_hit` is the entry the loop uses: it
+/// has the ask-list pattern in hand already (it carries it down to the prompt
+/// and to `a`), so a command line is lexed once per call rather than twice.
+pub fn resolve_with_hit(
     name: &str,
     tier: Tier,
     escapes_cwd: bool,
     cfg: &ApprovalConfig,
     bash_command: Option<&str>,
+    hit: Option<String>,
 ) -> Decision {
     // Shell commands face two file-independent layers, in either mode: the
     // hardcoded refusals first (privilege escalation, filesystem and machine
@@ -140,8 +145,7 @@ pub fn resolve(
     // ask-list, whose hit forces the approval prompt even in yolo unless a
     // `!` line exempted the pattern or `a` approved it earlier this session.
     let mut blacklist_ask: Option<String> = None;
-    if let Some(cmd) = bash_command
-        && let Some(pattern) = blacklist_hit(cfg, cmd)
+    if let Some(pattern) = hit
         && !cfg.blacklist_session_allows.iter().any(|a| a == &pattern)
     {
         blacklist_ask = Some(format!(
@@ -184,12 +188,14 @@ pub fn resolve(
     if cfg.mode == Mode::Yolo {
         return Decision::Auto;
     }
-    match (tier, escapes_cwd) {
-        (Tier::Read, false) => Decision::Auto,
-        (Tier::Read, true) => Decision::Ask("reading outside the working directory".to_string()),
-        (Tier::Write, _) => Decision::Ask("writing files requires approval".to_string()),
-        (Tier::Exec, _) if bash_command.is_some_and(readonly_command) => Decision::Auto,
-        (Tier::Exec, _) => Decision::Ask(match bash_command {
+    // ask mode's remaining gates: a write, or a command that is not wholly
+    // read-only. A read outside the working directory never reaches here —
+    // the `outside-cwd` directive above is that rule's only switch.
+    match tier {
+        Tier::Read => Decision::Auto,
+        Tier::Write => Decision::Ask("writing files requires approval".to_string()),
+        Tier::Exec if bash_command.is_some_and(readonly_command) => Decision::Auto,
+        Tier::Exec => Decision::Ask(match bash_command {
             Some(_) => "running a non-read-only command requires approval".to_string(),
             // a non-shell exec tool (webfetch, an extension): the tier is the
             // whole reason, so name it
@@ -768,13 +774,36 @@ mod tests {
         }
     }
 
+    /// [`resolve_with_hit`] with the ask-list looked up here — the shape the
+    /// loop had before it started handing the pattern down itself.
+    fn resolve(
+        name: &str,
+        tier: Tier,
+        escapes_cwd: bool,
+        cfg: &ApprovalConfig,
+        bash_command: Option<&str>,
+    ) -> Decision {
+        let hit = bash_command.and_then(|cmd| blacklist_hit(cfg, cmd));
+        resolve_with_hit(name, tier, escapes_cwd, cfg, bash_command, hit)
+    }
+
     #[test]
     fn mode_tier_matrix() {
         assert_eq!(Mode::default(), Mode::Yolo);
         let read = resolve("read", Tier::Read, false, &cfg(Mode::AlwaysAsk, &[]), None);
         assert_eq!(read, Decision::Auto);
         let read_out = resolve("read", Tier::Read, true, &cfg(Mode::AlwaysAsk, &[]), None);
-        assert!(matches!(read_out, Decision::Ask(_)));
+        assert_eq!(
+            read_out,
+            Decision::Auto,
+            "outside-cwd is the directive's call, not ask mode's"
+        );
+        let mut outside = cfg(Mode::AlwaysAsk, &[]);
+        outside.blacklist = crate::agent::blacklist::Blacklist::parse("outside-cwd");
+        assert!(matches!(
+            resolve("read", Tier::Read, true, &outside, None),
+            Decision::Ask(_)
+        ));
         let write = resolve(
             "write",
             Tier::Write,

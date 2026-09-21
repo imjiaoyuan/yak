@@ -215,7 +215,8 @@ worker polled the same way (`send_raw_interruptible`/`get_with`).
   (`Tool::escapes_cwd`): the shared `path`/`paths` arguments by default — a `read` batch is checked
   path by path — and an env-expanded scan of the command line for `bash`, where a token whose
   expansion cannot be resolved counts as escaping rather than as harmless. The seeded file ships
-  the directive on.
+  the directive on, and it is the *only* switch for out-of-cwd asks: ask mode has no separate
+  read-outside rule of its own, so `!outside-cwd` releases that prompt in both modes.
 - **Compaction** (`compact.rs`): estimate tokens (last usage + chars/4 tail), cut at a
   boundary, summarize, plus a tool-result pruner at compaction pressure
   (`prune_tool_results`: results over 8192 chars become head 4096 + a middle marker + tail 1024
