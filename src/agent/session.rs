@@ -271,12 +271,19 @@ impl Session {
                     } else {
                         format!("keeping the partial answer ({chars} chars), continuing")
                     };
-                    eprintln!(
-                        "{}{}stream dropped ({error}) — {what}{}",
-                        p.dim,
-                        crate::theme::NOTICE,
-                        p.reset
-                    );
+                    if crate::providers::is_truncation(&error) {
+                        // the transport closed cleanly but the provider never
+                        // said it was done: that is a warning about the answer
+                        // on screen, not a failed link like a mid-stream drop
+                        eprintln!("{}! {error}; {what}{}", p.red, p.reset);
+                    } else {
+                        eprintln!(
+                            "{}{}stream dropped ({error}) — {what}{}",
+                            p.dim,
+                            crate::theme::NOTICE,
+                            p.reset
+                        );
+                    }
                     view.borrow_mut().resume_wait();
                 }
                 AgentUpdate::ToolResultsPruned { count } => {

@@ -431,6 +431,17 @@ pub(crate) fn decoded_text(a: &Attachment) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("text attachment {name} must be valid UTF-8"))
 }
 
+/// The error a stream that closes without its completion marker produces:
+/// the answer half-arrived, so the round is not a clean turn, but the link
+/// did not fail either. Callers that show it mark it as a warning (`!`) about
+/// the answer, not as a broken run.
+pub const TRUNCATED_STREAM: &str = "stream ended without a completion marker ([DONE] / message_stop) — the answer may be truncated";
+
+/// Whether a stream error is that truncation rather than a wire failure.
+pub fn is_truncation(error: &str) -> bool {
+    error == TRUNCATED_STREAM
+}
+
 /// Run an SSE request, parsing each event's data as JSON and handing
 /// (event_type, value) to `on_value`. An `error` event aborts with its
 /// message (parsed when possible, raw otherwise). A stream that closes
@@ -471,10 +482,7 @@ pub fn stream_events(
     result.map_err(|e| e.to_string())?;
     match stream_error {
         Some(err) => Err(err),
-        None if !saw_done => Err(
-            "stream ended without a completion marker ([DONE] / message_stop) — the answer may be truncated"
-                .to_string(),
-        ),
+        None if !saw_done => Err(TRUNCATED_STREAM.to_string()),
         None => Ok(()),
     }
 }

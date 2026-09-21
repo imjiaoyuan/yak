@@ -324,7 +324,10 @@ starts on the stored default.
   while all chrome keeps the original near-monochrome set byte-for-byte — default terminal color
   for content, bold for emphasis, gray (90/2) for chrome and metadata, red reserved for errors.
   The only hues are the green preview text on `$` tool lines and the bold-cyan `Allow?` question
-  (diffs: additions default, deletions gray, headers/context dim). `theme::out()`/`theme::err()`
+  (diffs: additions default, deletions gray, headers/context dim). A notice about the run itself —
+  never about the answer — leads with a two-cell marker (`theme::NOTICE`): `· ` dim for routine
+  maintenance (retrying, pruning, a dropped stream, the budget notice) and `! ` red for the ones
+  that need someone (`! compaction stalled: …`, a stream that ended without its completion marker). `theme::out()`/`theme::err()`
   cache one `Palette` per stream and `NO_COLOR`, `TERM=dumb` and non-terminal streams strip every
   SGR byte so redirected output and logs stay escape-free (cursor control like the spinner's
   `\r\x1b[2K` is not color and stays). **Never hand-write an escape sequence outside
