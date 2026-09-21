@@ -47,12 +47,6 @@ const SPECS: &[OptSpec] = &[
     ),
     flag_spec!("yolo", None, "Alias for --approval-mode yolo"),
     value_spec!(
-        "max-turns",
-        None,
-        "Max agent turns per task (0 = unlimited, the default)",
-        "N"
-    ),
-    value_spec!(
         "token-budget",
         None,
         "Cumulative input-token budget per task (0 = unlimited, the default)",
@@ -277,15 +271,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     blacklist::Blacklist::ensure_default();
     approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
 
-    // turns: 0 = unlimited. other agents run unbounded agent loops guarded
-    // by compaction and budgets; a turn cap cut legitimate long tasks short.
-    // --max-turns remains as an explicit escape hatch.
-    let max_turns: usize = args
-        .opt(&(["max-turns"]))
-        .map(|s| s.parse::<usize>())
-        .transpose()
-        .map_err(|e| format!("invalid --max-turns: {e}"))?
-        .unwrap_or(0);
+    // no turn cap: other agents run unbounded agent loops guarded by
+    // compaction and the token budget, and a turn cap cut legitimate long
+    // tasks short more often than it saved one
+    let max_turns: usize = 0;
 
     // one request body's ceiling: a gateway in front of the model may refuse
     // far less than the provider documents, so the local pre-flight can be

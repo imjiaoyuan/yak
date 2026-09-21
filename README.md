@@ -82,7 +82,9 @@ is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole se
 directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
 for approval in either mode — a file tool's `path`/`paths` argument, or a shell command line naming
 one (`!outside-cwd` switches it off). The file is seeded with the syntax as comments and
-`outside-cwd` active; deleting it just resets it to those rules. It is a prompt, not a fence: the
+`outside-cwd` active; deleting it just resets it to those rules. It is the single switch for
+out-of-cwd asks in either mode — `!outside-cwd` also releases ask mode's out-of-cwd read rule. It is
+a prompt, not a fence: the
 check is lexical, so a path a shell builds at runtime (`p=/etc/passwd; cat $p`) is not seen, and
 neither is an argument an extension tool names for itself.
 
@@ -92,8 +94,8 @@ Want to approve things yourself? Use `--approval-mode ask` for one run, or put
 - **Free:** reading files in your project, and read-only commands like `ls`, `git status`, `rg`,
   `cargo test`.
 - **Asks first:** file writes and edits, branch changes like `git push`, reading a path that leaves
-your project (the seeded `outside-cwd` rule), a `webfetch` (the one way off the machine), an
-`outside-cwd` match your project cannot be sure of, and anything it cannot recognise as safe.
+your project (the seeded `outside-cwd` rule), a `webfetch` (the one way off the machine), and
+anything it cannot recognise as safe.
 
 File edits show a unified diff right above the question. Type `a` to allow that tool for the rest of
 the session. `/yolo` flips the mode on and off mid-session.
@@ -160,7 +162,7 @@ usage accounting and persistence are identical to a normal run; the interactive 
 `--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on
 Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the
 context, so the total is what a runaway task actually costs. It warns at 80% and stops cleanly at
-100%. (`--max-turns` still exists as an explicit cap; `0` or unset means unlimited.)
+100%.
 `--max-request-bytes` caps one request body in bytes (32MB by default): lower it when a gateway in
 front of the model refuses less than the provider documents.
 
