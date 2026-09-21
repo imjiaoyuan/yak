@@ -257,7 +257,7 @@ impl Session {
                     let p = crate::theme::err();
                     eprintln!(
                         "{}! compaction stalled: {reason} — the context stays over the window{}",
-                        p.dim, p.reset
+                        p.red, p.reset
                     );
                     view.borrow_mut().resume_wait();
                 }
@@ -363,8 +363,10 @@ impl Session {
                 if outcome.budget_exhausted {
                     let p = crate::theme::err();
                     eprintln!(
-                        "{}  token budget reached — follow up to continue{}",
-                        p.gray, p.reset
+                        "{}{}token budget reached — follow up to continue{}",
+                        p.gray,
+                        crate::theme::NOTICE,
+                        p.reset
                     );
                 }
                 // the history moves into the seed (no clone of the whole
