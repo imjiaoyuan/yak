@@ -23,7 +23,7 @@ pub(super) fn configure_shell_command(command: &mut Command) {
 
 /// Image bytes from the clipboard, if any: AppleScript writes the PNGf
 /// record to a temp file (osascript cannot emit binary to stdout).
-pub fn paste_clipboard_image() -> Option<Vec<u8>> {
+pub fn paste_clipboard_image() -> Result<Clip, String> {
     let path = std::env::temp_dir().join(format!("llm-paste-{}.png", std::process::id()));
     let script = format!(
         "set theFile to (open for access (POSIX file \"{}\") with write permission)\n\
@@ -38,9 +38,12 @@ pub fn paste_clipboard_image() -> Option<Vec<u8>> {
         .unwrap_or(false);
     if !ok {
         let _ = std::fs::remove_file(&path);
-        return None;
+        return Err("no image on the clipboard".into());
     }
-    let bytes = std::fs::read(&path).ok();
+    let bytes = std::fs::read(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
-    bytes
+    if bytes.is_empty() {
+        return Err("no image on the clipboard".into());
+    }
+    Ok(Clip::Bytes(bytes))
 }

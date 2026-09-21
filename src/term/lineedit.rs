@@ -234,54 +234,64 @@ impl LineEditor {
                     // inserted into the line (the path auto-attaches on
                     // submit); a text clipboard pastes via the terminal's
                     // own bracketed paste instead
+                    let mut notice: Option<String> = None;
                     match crate::platform::paste_clipboard_image() {
-                        Some(bytes) => match crate::core::attachments::sniff_mime(&bytes) {
-                            Some(mime) => {
-                                let ext = match mime {
-                                    "image/jpeg" => "jpg",
-                                    "image/gif" => "gif",
-                                    "image/webp" => "webp",
-                                    _ => "png",
-                                };
-                                let dir = crate::core::config::user_dir().join("tmp");
-                                let _ = std::fs::create_dir_all(&dir);
-                                let path =
-                                    dir.join(format!("paste-{}.{}", crate::core::db::ulid(), ext));
-                                if std::fs::write(&path, &bytes).is_ok() {
-                                    // the path still lands in the submitted
-                                    // text (auto-attach scans for it), but the
-                                    // buffer shows a short atomic token — the
-                                    // same placeholder big text pastes use
-                                    paste_seq += 1;
-                                    let token = format!("[paste #{paste_seq} image]");
-                                    pastes.push((token.clone(), path.display().to_string()));
-                                    buf.insert_str(cursor, &token);
-                                    cursor += token.len();
-                                    nav.reset(self.history.len());
-                                    line.draw(&mut out, prompt, &buf, cursor, is_command);
+                        Ok(crate::platform::Clip::Bytes(bytes)) => {
+                            match crate::core::attachments::sniff_mime(&bytes) {
+                                Some(mime) => {
+                                    let ext = match mime {
+                                        "image/jpeg" => "jpg",
+                                        "image/gif" => "gif",
+                                        "image/webp" => "webp",
+                                        _ => "png",
+                                    };
+                                    let dir = crate::core::config::user_dir().join("tmp");
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let path = dir.join(format!(
+                                        "paste-{}.{}",
+                                        crate::core::db::ulid(),
+                                        ext
+                                    ));
+                                    if std::fs::write(&path, &bytes).is_ok() {
+                                        // the path still lands in the submitted
+                                        // text (auto-attach scans for it), but the
+                                        // buffer shows a short atomic token — the
+                                        // same placeholder big text pastes use
+                                        paste_seq += 1;
+                                        let token = format!("[paste #{paste_seq} image]");
+                                        pastes.push((token.clone(), path.display().to_string()));
+                                        buf.insert_str(cursor, &token);
+                                        cursor += token.len();
+                                        nav.reset(self.history.len());
+                                        line.draw(&mut out, prompt, &buf, cursor, is_command);
+                                    } else {
+                                        notice = Some(format!("cannot write {}", path.display()));
+                                    }
                                 }
+                                None => notice = Some("no image on the clipboard".into()),
                             }
-                            None => {
-                                let _ = writeln!(
-                                    out,
-                                    "{}(no image on the clipboard){}",
-                                    crate::theme::err().dim,
-                                    crate::theme::err().reset
-                                );
-                                line.rows = 0;
-                                line.draw(&mut out, prompt, &buf, cursor, is_command);
-                            }
-                        },
-                        None => {
-                            let _ = writeln!(
-                                out,
-                                "{}(no image on the clipboard){}",
-                                crate::theme::err().dim,
-                                crate::theme::err().reset
-                            );
-                            line.rows = 0;
+                        }
+                        // a copied image *file* (a file manager's copy): its own
+                        // path is the useful text, and auto-attach reads the
+                        // file from there — no temp copy needed
+                        Ok(crate::platform::Clip::File(path)) => {
+                            let text = path.display().to_string();
+                            buf.insert_str(cursor, &text);
+                            cursor += text.len();
+                            nav.reset(self.history.len());
                             line.draw(&mut out, prompt, &buf, cursor, is_command);
                         }
+                        Err(why) => notice = Some(why),
+                    }
+                    if let Some(why) = notice {
+                        let _ = writeln!(
+                            out,
+                            "{}({why}){}",
+                            crate::theme::err().dim,
+                            crate::theme::err().reset
+                        );
+                        line.rows = 0;
+                        line.draw(&mut out, prompt, &buf, cursor, is_command);
                     }
                 }
                 0x0f => {

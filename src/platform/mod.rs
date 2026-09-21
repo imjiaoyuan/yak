@@ -4,7 +4,7 @@
 //! provide a complete implementation behind the same surface; there is no
 //! platform fallback that silently weakens a feature.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -97,6 +97,14 @@ impl RawByte {
             RawByte::Timeout => None,
         }
     }
+}
+
+/// What a clipboard image paste produced: the image itself (the caller sniffs
+/// it and writes it to a temp file) or the path of a copied image file — a
+/// file manager's copy carries a `text/uri-list`, not pixels.
+pub enum Clip {
+    Bytes(Vec<u8>),
+    File(PathBuf),
 }
 
 /// Terminal dimensions in cells.

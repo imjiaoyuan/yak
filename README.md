@@ -174,9 +174,10 @@ content blocks. Text becomes a document block on Anthropic models and an extra t
 Anything the chosen model cannot accept is refused before the request leaves your machine.
 
 In a session, ctrl+v pastes the clipboard image as a short `[paste #N image]` token (the
-temp-file path rides underneath and attaches on submit), and any local image path you type attaches
-itself. Long conversations keep only the newest image attachments; older ones collapse into short
-text notes.
+temp-file path rides underneath and attaches on submit) — whatever image type the clipboard
+offers — a copied image *file* as its own path, and any local image path you type attaches
+itself. A clipboard that carries no image says what it does hold instead. Long conversations keep
+only the newest image attachments; older ones collapse into short text notes.
 
 ### Sessions
 
