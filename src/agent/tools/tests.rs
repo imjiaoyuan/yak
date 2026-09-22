@@ -3,6 +3,15 @@ use super::fetch::{extract_title, html_to_text};
 use super::write::write_atomic;
 use super::*;
 
+/// grep/glob delegate to ripgrep; CI runners without it skip those tests
+/// (the tools themselves report the missing binary to the model).
+fn rg_available() -> bool {
+    std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 #[test]
 fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
     let dir = crate::core::testutil::scratch_dir("atomic");
@@ -272,6 +281,9 @@ fn edit_requires_unique_matches_and_no_overlap() {
 
 #[test]
 fn grep_literal_and_ignore_case() {
+    if !rg_available() {
+        return;
+    }
     let dir = crate::core::testutil::scratch_dir("grep");
     std::fs::write(dir.join("one.txt"), "Hello world\nbye\n").unwrap();
     std::fs::write(dir.join("two.txt"), "nope\n").unwrap();
@@ -301,12 +313,7 @@ fn grep_literal_and_ignore_case() {
 
 #[test]
 fn grep_regex_delegates_to_ripgrep() {
-    // regex mode needs ripgrep; environments without it keep the literal path
-    if std::process::Command::new("rg")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !rg_available() {
         return;
     }
     let dir = crate::core::testutil::scratch_dir("grep-re");
@@ -314,13 +321,11 @@ fn grep_regex_delegates_to_ripgrep() {
     std::fs::write(dir.join("b.txt"), "nothing\n").unwrap();
 
     let out = GrepTool.execute(
-        &json!({"pattern": "fn\\s+main", "regex": true, "path": dir.display().to_string()}),
+        &json!({"pattern": "fn\\s+main", "path": dir.display().to_string()}),
         Path::new("."),
         &mut |_| {},
     );
     assert!(!out.is_error(), "{}", out.content);
-    // rg prints `path:line:text` (the literal path adds a space after the
-    // line number); both are the same shape for the model to read
     assert!(
         out.content.contains("a.rs:1:fn main() {}"),
         "{}",
@@ -330,7 +335,7 @@ fn grep_regex_delegates_to_ripgrep() {
 
     // a bad pattern is reported as an error, never a crash
     let bad = GrepTool.execute(
-        &json!({"pattern": "(", "regex": true, "path": dir.display().to_string()}),
+        &json!({"pattern": "(", "path": dir.display().to_string()}),
         Path::new("."),
         &mut |_| {},
     );
@@ -378,6 +383,9 @@ fn a_timed_out_command_keeps_its_partial_output() {
 
 #[test]
 fn glob_finds_matching_files() {
+    if !rg_available() {
+        return;
+    }
     let dir = crate::core::testutil::scratch_dir("glob");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/a.rs"), "").unwrap();
@@ -394,6 +402,9 @@ fn glob_finds_matching_files() {
 
 #[test]
 fn grep_context_dedups_overlapping_matches() {
+    if !rg_available() {
+        return;
+    }
     let dir = crate::core::testutil::scratch_dir("grepctx");
     // hits on adjacent lines with context 1: every line appears exactly
     // once, shared context included
@@ -417,6 +428,9 @@ fn grep_context_dedups_overlapping_matches() {
 
 #[test]
 fn grep_survives_a_directory_symlink_cycle() {
+    if !rg_available() {
+        return;
+    }
     let dir = crate::core::testutil::scratch_dir("greplink");
     std::fs::write(dir.join("needle.txt"), "find me\n").unwrap();
     #[cfg(unix)]
