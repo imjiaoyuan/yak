@@ -107,12 +107,39 @@ pub fn should_compact(estimate: u64, trigger: u64) -> bool {
     trigger > 0 && estimate >= trigger
 }
 
+/// The room every auto-compaction leaves below the model's real window for the
+/// next answer and the summarizer call itself — the reference's reserve
+/// (the compaction module), copied so a trigger anchored to a known window draws
+/// the same line it draws.
+pub const RESERVE_TOKENS: u64 = 16_384;
+
+/// Anchor a compaction trigger to the model's real window when it is known:
+/// `min(configured, window - reserve)` — the reference's `window - reserve` ceiling
+/// (the compaction module), with a lower user-configured rung still allowed to
+/// win. Unknown window (a gateway that never publishes one): the configured
+/// rung stands and the ladder alone guards the run.
+pub fn effective_trigger(configured: u64, window: Option<u64>) -> u64 {
+    window.map_or(configured, |w| {
+        configured.min(w.saturating_sub(RESERVE_TOKENS))
+    })
+}
+
 /// The next rung of the ladder: every compaction this session runs doubles the
 /// room, so a conversation that keeps growing is summarized a few times (64k,
 /// 128k, 256k ...) instead of on every round that sits above one fixed number,
-/// and each summary buys back twice the conversation the last one did.
+/// and each summary buys back twice the conversation the last one did. With a
+/// known window the doubling still happens but is capped by
+/// [`next_effective_trigger`], so the ladder climbs to the reference's ceiling instead of
+/// past it.
 pub fn next_trigger(trigger: u64) -> u64 {
     trigger.saturating_mul(2)
+}
+
+/// The rung a compaction moves to: double it, still capped by the known window
+/// (a 128k model climbs 64k -> 112k ceiling; a 200k one 64k -> 128k -> 184k
+/// ceiling). Unknown window: plain doubling, the old ladder.
+pub fn next_effective_trigger(trigger: u64, window: Option<u64>) -> u64 {
+    effective_trigger(next_trigger(trigger), window)
 }
 
 /// Should this round rewrite the conversation prefix (trim old attachments,
@@ -674,6 +701,40 @@ mod tests {
         );
         assert!(should_compact(128_000, second));
         assert_eq!(next_trigger(u64::MAX), u64::MAX, "saturates, never wraps");
+    }
+
+    /// A known window anchors the ladder: the configured rung wins while it is
+    /// under the ceiling, the doubling stops at `window - reserve` (the reference's
+    /// ceiling), and a small window clamps the very first rung.
+    #[test]
+    fn a_known_window_anchors_the_trigger() {
+        // no window: the configured rung stands, untouched
+        assert_eq!(effective_trigger(64_000, None), 64_000);
+        // 200k window: climb 64k -> 128k -> the ceiling, then stay there
+        let w = Some(200_000u64);
+        let ceiling = 200_000 - RESERVE_TOKENS;
+        let mut rung = effective_trigger(64_000, w);
+        assert_eq!(rung, 64_000);
+        rung = next_effective_trigger(rung, w);
+        assert_eq!(rung, 128_000);
+        rung = next_effective_trigger(rung, w);
+        assert_eq!(rung, ceiling);
+        assert_eq!(
+            next_effective_trigger(rung, w),
+            ceiling,
+            "the ceiling is a fixed point"
+        );
+        // a 128k window caps the second rung (128k would be the whole window)
+        let w = Some(128_000u64);
+        assert_eq!(effective_trigger(64_000, w), 64_000);
+        assert_eq!(next_effective_trigger(64_000, w), 128_000 - RESERVE_TOKENS);
+        // a 32k window clamps the first rung to 32k - reserve
+        assert_eq!(
+            effective_trigger(64_000, Some(32_000)),
+            32_000 - RESERVE_TOKENS
+        );
+        // a user-configured rung under the ceiling is honored
+        assert_eq!(effective_trigger(20_000, Some(200_000)), 20_000);
     }
 
     #[test]
