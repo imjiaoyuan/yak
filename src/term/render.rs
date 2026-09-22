@@ -841,22 +841,3 @@ mod tests {
         assert!(!r.dangling, "the last row ends with a newline");
     }
 }
-
-#[cfg(test)]
-mod dbg3 {
-    use super::*;
-    #[test]
-    fn probe_hold() {
-        let mut r = Renderer::new();
-        for i in 0..5 {
-            r.push_delta(&format!("line {i}\n"));
-            let held = r.backlog.trim_end_matches('\n').to_string();
-            eprintln!(
-                "after line {i}: held={:?} dangling={} pending_nl={}",
-                held,
-                r.dangling,
-                r.pending.matches('\n').count()
-            );
-        }
-    }
-}
