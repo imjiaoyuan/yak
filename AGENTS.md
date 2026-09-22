@@ -189,11 +189,13 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
 - `config.json` — the single settings file (0600, `jsonfmt::dumps_indent(2)`, merge-preserving
   hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion
   everywhere, the top-level `models` family (`default` + optional `thinking` — one shared model
-  every mode starts on; the per-model `options` table), the `agent` behavior section
+  every mode starts on; the per-model `options` table, where `context_window` — an optional
+  per-model token count — anchors auto-compaction to the model's real window instead of the
+  ladder alone), the `agent` behavior section
   (approval/tools/skills, `compact_at_tokens` — the occupancy that starts auto-compaction, the
-  ladder's first rung, which the loop doubles after each compaction it runs, so nothing here ever
-  asks for a model's context window — `keep_recent_tokens` (the tail each compaction keeps, clamped
-  to half the rung),
+  ladder's first rung, doubled after each compaction it runs and capped at the model's
+  `context_window` minus a 16384 reserve when one is recorded — `keep_recent_tokens` (the tail each
+  compaction keeps, clamped to half the rung),
   `tools` policies, `disabled_skills`, `cache_ttl` — how long a provider should hold this
   conversation's prompt-cache entry, `5m` (the API default) or `1h`, for the wires that take one),
   the `aliases` object (hand-edited; no

@@ -250,16 +250,22 @@ across processes with `LLM_SESSION_ID`.
   attachment-bearing messages for a name+mime note every round, before the request is built; a
   compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
   `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
-  the one failure compaction exists to prevent; compaction is driven by an absolute threshold
-  (`agent.compact_at_tokens`, 64k by default) — the ladder's first rung, doubled by the loop after
-  each compaction the session runs, so a long conversation is summarized at 64k, then 128k, then
-  256k — and no model's context window is asked for or guessed at anywhere in that path (a prompt
-  the provider refuses still forces a compaction, whose retry sets the next rung at the refused
-  size, in memory only); a round the provider reported no usage for is priced from the text instead, so a gateway
-  that omits the counts cannot switch the gate off), Every
-  request closes with a request-only `<context>N tokens left before auto-compaction</context>` user
-  turn (`context_note` in `mod.rs`: the room until the trigger, plus the task's input-token room when
-  `--token-budget` is set) — the reference style budget awareness so the model can choose to wrap up; it is
+  the one failure compaction exists to prevent; the check runs *before* each model request, not
+  after a completed turn, so a ctrl-c that kills the round cannot skip it (a resumed thread is
+  compacted on its first request); the trigger is the ladder's rung (`agent.compact_at_tokens`, 64k
+  by default, doubled after each compaction) capped by the model's real window when the per-model
+  option `context_window` records one — `min(rung, window - 16384)`, the reference's reserve, so a 32k model
+  compacts at 16k and a 200k one climbs 64k → 128k → 184k instead of past the window; a prompt the
+  provider refuses still forces one compaction and retry, bounded, and a known window also catches
+  the silent overflows a gateway hides behind a 200 — usage above the window, or a length stop that
+  produced nothing after consuming ≥99% of it — with the same forced-compact-and-retry; a round the
+  provider reported no usage for is priced from the text instead, so a gateway
+  that omits the counts cannot switch the gate off; ctrl-c keeps the round's own messages — the
+  pending prompt and any partial answer already streamed — so /resume starts from what was actually
+  said, not a gap), Every
+  request closes with a request-only `<context>… tokens left</context>` user
+  turn only when `--token-budget` is set (`context_note` in `mod.rs`: the task's input-token room) —
+  the reference style budget awareness so the model can choose to wrap up; it is
   never persisted and rides after the Anthropic cache tip, so the prompt-cache prefix is untouched.
   Read-only calls from one assistant message (every tool at `Tier::Read`) run concurrently on scope
   threads after a serial gating pass — approvals, extension `tool_call` hooks and the ToolStart
