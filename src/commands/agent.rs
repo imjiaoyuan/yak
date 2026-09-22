@@ -4,7 +4,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::agent::approval::{self, ApprovalConfig, Policy};
+use crate::agent::approval::{ApprovalConfig, Policy};
 use crate::agent::blacklist;
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::core::config;
@@ -38,14 +38,12 @@ const SPECS: &[OptSpec] = &[
         "Comma-separated tool subset (default: all)",
         "NAMES"
     ),
-    value_spec!("approval-mode", None, "ask or yolo (default: yolo)", "MODE"),
     value_spec!(
         "thinking",
         None,
         "Reasoning effort: off, minimal, low, medium, high or xhigh",
         "LEVEL"
     ),
-    flag_spec!("yolo", None, "Alias for --approval-mode yolo"),
     value_spec!(
         "token-budget",
         None,
@@ -242,21 +240,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     // model resolution: -m > LLM_MODEL > session's model > the default
     let model = crate::providers::resolve_run_model(args, conv_model.clone())?;
 
-    // approval config: CLI > [agent] settings > yolo default
-    let mode_str = if args.flag(&["yolo"]) {
-        "yolo".to_string()
-    } else {
-        args.opt(&["approval-mode"])
-            .map(str::to_string)
-            .or_else(|| settings.approval_mode.clone())
-            .unwrap_or_else(|| "yolo".to_string())
-    };
-    let mode = approval::Mode::parse(&mode_str)
-        .ok_or_else(|| format!("invalid --approval-mode '{mode_str}' (ask or yolo)"))?;
-    let mut approval_cfg = ApprovalConfig {
-        mode,
-        ..Default::default()
-    };
+    // approval config: per-tool policies from [agent] settings, plus the
+    // command blacklist. There is no ask mode — calls run unless a policy or
+    // the blacklist says otherwise.
+    let mut approval_cfg = ApprovalConfig::default();
     for (tool, policy) in &settings.tool_policies {
         match Policy::parse(policy) {
             Some(p) => {
@@ -346,9 +333,9 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     let mut session = crate::agent::session::Session {
         max_request_bytes,
-        // the auto-compaction ladder's first rung (agent.compact_at_tokens) and
-        // the tail each compaction keeps: no model's context window is asked for
-        // anything here, and a provider that refuses a prompt still forces one
+        // the auto-compaction trigger (agent.compact_at_tokens, used only when
+        // the window is unknown) and the tail each compaction keeps: a provider
+        // that refuses a prompt still forces one
         compact: settings.compact_config(),
         // how long the provider holds this conversation's cache entries
         // (agent.cache_ttl); None leaves its own default in place

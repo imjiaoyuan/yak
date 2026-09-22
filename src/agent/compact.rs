@@ -2,22 +2,19 @@
 //! turn boundary keeping a recent window, and summarize the dropped prefix
 //! with one tool-free LLM call (the reference's single-strategy approach).
 
-use std::path::{Path, PathBuf};
-
 use crate::core::http::{Event, Usage};
 use crate::providers::Msg;
 use crate::providers::PromptInput;
 
 #[derive(Clone)]
 pub struct CompactConfig {
-    /// The first auto-compaction trigger, in tokens (`agent.compact_at_tokens`).
-    /// It doubles after each compaction the session actually runs, so a long
-    /// conversation is summarized a few times — at 64k, then 128k, then 256k —
-    /// instead of at every round that happens to sit above one fixed number.
+    /// The auto-compaction trigger in tokens (`agent.compact_at_tokens`), used
+    /// only when the model's context window is unknown: a known window anchors
+    /// the trigger at `window - reserve` (the reference's rule) and this value is ignored.
     /// `0` switches automatic compaction off; a provider that refuses a prompt
     /// still forces one, so a session that ran into a wall is not left there.
     pub trigger_tokens: u64,
-    /// The tail compaction keeps.
+    /// The tail compaction keeps (the reference's default is 20k).
     pub keep_recent_tokens: u64,
 }
 
@@ -25,7 +22,7 @@ impl Default for CompactConfig {
     fn default() -> CompactConfig {
         CompactConfig {
             trigger_tokens: 64_000,
-            keep_recent_tokens: 32_000,
+            keep_recent_tokens: 20_000,
         }
     }
 }
@@ -109,37 +106,14 @@ pub fn should_compact(estimate: u64, trigger: u64) -> bool {
 
 /// The room every auto-compaction leaves below the model's real window for the
 /// next answer and the summarizer call itself — the reference's reserve
-/// (the compaction module), copied so a trigger anchored to a known window draws
-/// the same line it draws.
+/// (the compaction module).
 pub const RESERVE_TOKENS: u64 = 16_384;
 
-/// Anchor a compaction trigger to the model's real window when it is known:
-/// `min(configured, window - reserve)` — the reference's `window - reserve` ceiling
-/// (the compaction module), with a lower user-configured rung still allowed to
-/// win. Unknown window (a gateway that never publishes one): the configured
-/// rung stands and the ladder alone guards the run.
+/// The auto-compaction trigger: `window - reserve` when the model's window is
+/// known (the reference's rule, the compaction module), else the configured fallback. There
+/// is no ladder — the trigger is anchored to the window, not a running count.
 pub fn effective_trigger(configured: u64, window: Option<u64>) -> u64 {
-    window.map_or(configured, |w| {
-        configured.min(w.saturating_sub(RESERVE_TOKENS))
-    })
-}
-
-/// The next rung of the ladder: every compaction this session runs doubles the
-/// room, so a conversation that keeps growing is summarized a few times (64k,
-/// 128k, 256k ...) instead of on every round that sits above one fixed number,
-/// and each summary buys back twice the conversation the last one did. With a
-/// known window the doubling still happens but is capped by
-/// [`next_effective_trigger`], so the ladder climbs to the reference's ceiling instead of
-/// past it.
-pub fn next_trigger(trigger: u64) -> u64 {
-    trigger.saturating_mul(2)
-}
-
-/// The rung a compaction moves to: double it, still capped by the known window
-/// (a 128k model climbs 64k -> 112k ceiling; a 200k one 64k -> 128k -> 184k
-/// ceiling). Unknown window: plain doubling, the old ladder.
-pub fn next_effective_trigger(trigger: u64, window: Option<u64>) -> u64 {
-    effective_trigger(next_trigger(trigger), window)
+    window.map_or(configured, |w| w.saturating_sub(RESERVE_TOKENS))
 }
 
 /// Should this round rewrite the conversation prefix (trim old attachments,
@@ -179,13 +153,61 @@ pub fn find_cut(history: &[Msg], keep_recent: u64) -> Option<usize> {
     None
 }
 
-const SUMMARIZER_SYSTEM: &str = "You compress coding-agent conversations into a dense summary. \
-                                 Keep every fact needed to continue the work. Do not add commentary.";
+const SUMMARIZER_SYSTEM: &str = "You are a context summarization assistant. Your task is to read a \
+                                 conversation between a user and an AI assistant, then produce a \
+                                 structured summary following the exact format specified. Do NOT \
+                                 continue the conversation. Do NOT respond to any questions in the \
+                                 conversation. ONLY output the structured summary.";
 
-const TEMPLATE: &str = "Summarize this conversation for continuation. Use exactly these sections:\n\
-                        ## Goal\n## Constraints\n## Progress\n## Key Decisions\n## Next Steps\n\
-                        ## Critical Context\n\nThen append:\n<read-files>\n<modified-files>\n\
-                        listing the file paths that were read and modified.";
+const SECTIONS: &str = "## Goal\n\
+                         [What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\
+                         \n\
+                         ## Constraints & Preferences\n\
+                         - [Any constraints, preferences, or requirements mentioned by user]\n\
+                         - [Or \"(none)\" if none were mentioned]\n\
+                         \n\
+                         ## Progress\n\
+                         ### Done\n\
+                         - [x] [Completed tasks/changes]\n\
+                         \n\
+                         ### In Progress\n\
+                         - [ ] [Current work]\n\
+                         \n\
+                         ### Blocked\n\
+                         - [Issues preventing progress, if any]\n\
+                         \n\
+                         ## Key Decisions\n\
+                         - **[Decision]**: [Brief rationale]\n\
+                         \n\
+                         ## Next Steps\n\
+                         1. [Ordered list of what should happen next]\n\
+                         \n\
+                         ## Critical Context\n\
+                         - [Any data, examples, or references needed to continue]\n\
+                         - [Or \"(none)\" if not applicable]\n\
+                         \n\
+                         Keep each section concise. Preserve exact file paths, function names, and \
+                         error messages.";
+
+const TEMPLATE: &str = "The messages above are a conversation to summarize. Create a structured \
+                        context checkpoint summary that another LLM will use to continue the work.\n\
+                        \n\
+                        Use this EXACT format:\n\
+                        \n";
+
+const UPDATE_TEMPLATE: &str = "The messages above are NEW conversation messages to incorporate into \
+                              the existing summary provided in <previous-summary> tags.\n\
+                              \n\
+                              Update the existing structured summary with new information. RULES:\n\
+                              - PRESERVE all existing information from the previous summary\n\
+                              - ADD new progress, decisions, and context from the new messages\n\
+                              - UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed\n\
+                              - UPDATE \"Next Steps\" based on what was accomplished\n\
+                              - PRESERVE exact file paths, function names, and error messages\n\
+                              - If something is no longer relevant, you may remove it\n\
+                              \n\
+                              Use this EXACT format:\n\
+                              \n";
 
 /// Serialize a message prefix for the summarizer, truncating each entry.
 fn serialize_prefix(prefix: &[Msg]) -> String {
@@ -224,15 +246,30 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
     out
 }
 
-/// Run the summarization call: streaming, no tools.
+/// Run the summarization call: streaming, no tools. A prefix that already
+/// starts with a summary is an incremental update (the reference's
+/// `UPDATE_SUMMARIZATION_PROMPT`), not a from-scratch re-summary.
 pub fn summarize(
     model: &crate::providers::ResolvedModel,
     prefix: &[Msg],
 ) -> Result<String, String> {
-    let prompt = format!(
-        "{TEMPLATE}\n\n<conversation>\n{}</conversation>",
-        serialize_prefix(prefix)
-    );
+    let (template, conversation) = match prefix.first() {
+        Some(Msg::Summary { text }) => (
+            UPDATE_TEMPLATE,
+            format!(
+                "<previous-summary>\n{text}\n</previous-summary>\n\n<conversation>\n{}</conversation>",
+                serialize_prefix(&prefix[1..])
+            ),
+        ),
+        _ => (
+            TEMPLATE,
+            format!(
+                "<conversation>\n{}</conversation>",
+                serialize_prefix(prefix)
+            ),
+        ),
+    };
+    let prompt = format!("{template}\n{SECTIONS}\n\n{conversation}");
     let input = PromptInput {
         max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: Some(SUMMARIZER_SYSTEM),
@@ -253,27 +290,6 @@ pub fn summarize(
         }
     })?;
     Ok(text.trim().to_string())
-}
-
-const TASK_MARK: &str = "# Original task\n";
-const SUMMARY_MARK: &str = "\n# Summary\n";
-
-/// Compose the stored summary text: the original task verbatim on top, the
-/// compressive summary below. Long-running work must not drift from what
-/// was actually asked — the summary compresses, the task never does.
-pub fn compose_summary(task: Option<&str>, summary: &str) -> String {
-    match task.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(task) => format!("{TASK_MARK}{task}{SUMMARY_MARK}\n{summary}"),
-        None => summary.to_string(),
-    }
-}
-
-/// Pull the preserved original task back out of a stored summary (the
-/// re-compaction path: the first user message is long gone by then).
-pub fn extract_original_task(summary: &str) -> Option<String> {
-    let rest = summary.strip_prefix(TASK_MARK)?;
-    let end = rest.find(SUMMARY_MARK)?;
-    Some(rest[..end].to_string())
 }
 
 /// How many of the most recent attachment-bearing messages keep their
@@ -344,7 +360,9 @@ pub fn trim_old_attachments(history: &mut [Msg]) {
 /// Pruning sizes (the compaction-tool-result-pruner defaults, in chars
 /// not bytes): a tool result over the threshold becomes its head, a marker
 /// naming what was cut, and its tail. Head + tail stay under the threshold,
-/// so a pruned result never re-qualifies and a second pass is a no-op.
+/// so a pruned result never re-qualifies and a second pass is a no-op. The
+/// cut middle is dropped — the reference's compaction is lossy, and the untouched
+/// original still lives in the thread file and the session log.
 pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
 pub const PRUNE_HEAD_CHARS: usize = 4096;
 pub const PRUNE_TAIL_CHARS: usize = 1024;
@@ -360,63 +378,12 @@ pub const STALE_PRUNE_THRESHOLD_CHARS: usize = 32_768;
 /// still need verbatim.
 pub const KEEP_FRESH_MESSAGES: usize = 6;
 
-/// Where pruned tool-result originals live, so `recall` can page them back.
-/// Beside the thread store (`~/.llm/observations/`), not inside a project.
-pub fn observation_dir() -> PathBuf {
-    crate::core::config::user_dir().join("observations")
-}
-
-/// Archive key for a pruned result, derived from its content rather than
-/// minted per cut. Pruning is part of the load path too (a resumed thread
-/// that no longer fits is projected down again), so the same bytes must land
-/// in the same file: re-pruning rewrites nothing and no two copies of one
-/// result pile up. Not an id or an RNG — a 64-bit content fingerprint, which
-/// is all `recall` needs to find the file back.
-fn content_id(text: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a
-    for b in text.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// Archive the turns a summary is about to replace, so `recall` can page the
-/// exact history back: a summary is a paraphrase, and this is the only copy
-/// of what it paraphrased. Content-addressed like a pruned tool result, so
-/// re-compacting the same prefix rewrites nothing. `None` when it cannot be
-/// written — a marker pointing at nothing would be worse than no marker.
-pub fn archive_prefix(prefix: &[Msg], archive_dir: &std::path::Path) -> Option<String> {
-    let text = serialize_prefix(prefix);
-    if text.trim().is_empty() {
-        return None;
-    }
-    let id = content_id(&text);
-    let path = archive_dir.join(format!("{id}.txt"));
-    if !path.exists()
-        && (std::fs::create_dir_all(archive_dir).is_err() || std::fs::write(&path, &text).is_err())
-    {
-        return None;
-    }
-    Some(id)
-}
-
-/// Project one over-budget tool result down to head + marker + tail,
-/// archiving the whole original under its content id. `None` when the result
-/// fits (or the archive cannot be written: a marker pointing at nothing
-/// would be worse than the full text). Returns the projected text and the
-/// tokens it keeps out of the next request.
-fn prune_one(content: &str, archive_dir: &Path, threshold: usize) -> Option<(String, u64)> {
+/// Project one over-budget tool result down to head + marker + tail. `None`
+/// when the result fits. Returns the projected text and the tokens it keeps
+/// out of the next request.
+fn prune_one(content: &str, threshold: usize) -> Option<(String, u64)> {
     let total = content.chars().count();
     if total <= threshold {
-        return None;
-    }
-    let id = content_id(content);
-    let path = archive_dir.join(format!("{id}.txt"));
-    if !path.exists()
-        && (std::fs::create_dir_all(archive_dir).is_err()
-            || std::fs::write(&path, content).is_err())
-    {
         return None;
     }
     // char-indexed cuts: byte offsets would split CJK text mid-codepoint
@@ -435,9 +402,7 @@ fn prune_one(content: &str, archive_dir: &Path, threshold: usize) -> Option<(Str
     let dropped = total - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
     let projected = format!(
         "{head}\n[... {dropped} chars of the middle were cut to fit the context window; \
-         the full result is archived as observation {id} — call recall with \
-         id=\"{id}\" and offset={PRUNE_HEAD_CHARS} to page the missing middle back, or \
-         re-read the file if that is cheaper ...]\n{tail}"
+         re-run the command or re-read the file if you need them ...]\n{tail}"
     );
     let freed = text_tokens(content).saturating_sub(text_tokens(&projected));
     Some((projected, freed))
@@ -452,31 +417,13 @@ pub struct PrunedResults {
     pub freed_tokens: u64,
 }
 
-/// Resolve an observation id to its archive file. The id comes from the
-/// model (a marker in the transcript), so anything that is not a plain
-/// alphanumeric token — a `/`, a `..`, an empty string — is not an id and
-/// must never reach the filesystem.
-pub fn observation_path(dir: &Path, id: &str) -> Option<PathBuf> {
-    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(dir.join(format!("{id}.txt")))
-}
-
 /// Replace over-budget tool-result text with head + marker + tail. Runs only
 /// once compaction pressure is confirmed, before the summarizer picks its
 /// cut — it costs no model call and may relieve enough to skip
 /// summarization entirely (the caller subtracts `freed_tokens` to see that).
-///
-/// The cut middle is not lost: the full original is archived under
-/// `archive_dir` and the marker carries its observation id, so the model can
-/// `recall` the exact bytes back instead of re-running the command.
-///
-/// Fail open per result: if the archive cannot be written, that result keeps
-/// its full text rather than leave a marker pointing at nothing.
-pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResults {
+pub fn prune_tool_results(history: &mut [Msg]) -> PrunedResults {
     let len = history.len();
-    prune_matching(history, archive_dir, PRUNE_THRESHOLD_CHARS, len)
+    prune_matching(history, PRUNE_THRESHOLD_CHARS, len)
 }
 
 /// The every-round pass, run before each request regardless of compaction
@@ -484,24 +431,13 @@ pub fn prune_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResu
 /// prefix (everything before the last [`KEEP_FRESH_MESSAGES`] messages) are
 /// projected down too. Recent results stay verbatim — the model usually
 /// needs those — while a huge one from earlier in the task stops being
-/// re-sent every round. Same archive, same idempotence as the pressure
-/// pass, so the notice fires once per result.
-pub fn prune_stale_tool_results(history: &mut [Msg], archive_dir: &Path) -> PrunedResults {
+/// re-sent every round.
+pub fn prune_stale_tool_results(history: &mut [Msg]) -> PrunedResults {
     let stale_up_to = history.len().saturating_sub(KEEP_FRESH_MESSAGES);
-    prune_matching(
-        history,
-        archive_dir,
-        STALE_PRUNE_THRESHOLD_CHARS,
-        stale_up_to,
-    )
+    prune_matching(history, STALE_PRUNE_THRESHOLD_CHARS, stale_up_to)
 }
 
-fn prune_matching(
-    history: &mut [Msg],
-    archive_dir: &Path,
-    threshold: usize,
-    up_to: usize,
-) -> PrunedResults {
+fn prune_matching(history: &mut [Msg], threshold: usize, up_to: usize) -> PrunedResults {
     let mut out = PrunedResults {
         count: 0,
         freed_tokens: 0,
@@ -510,7 +446,7 @@ fn prune_matching(
         let Msg::ToolResult { content, .. } = msg else {
             continue;
         };
-        let Some((projected, freed)) = prune_one(content, archive_dir, threshold) else {
+        let Some((projected, freed)) = prune_one(content, threshold) else {
             continue;
         };
         *content = projected;
@@ -527,12 +463,6 @@ mod tests {
 
     fn user(s: &str) -> Msg {
         Msg::user(s)
-    }
-
-    /// A throwaway archive dir; each test gets its own so parallel runs do
-    /// not race on the same observation files.
-    fn obs_dir() -> std::path::PathBuf {
-        crate::core::testutil::scratch_dir("obs-test")
     }
 
     /// The prefix-rewrite gate must sit strictly below the compaction gate:
@@ -658,9 +588,9 @@ mod tests {
 
     #[test]
     fn keep_recent_never_outgrows_the_trigger_it_guards() {
-        // the default trigger honors the full configured tail
+        // the default trigger honors the full configured tail (the reference's 20k)
         let big = CompactConfig::default();
-        assert_eq!(big.effective_keep_recent(big.trigger_tokens), 32_000);
+        assert_eq!(big.effective_keep_recent(big.trigger_tokens), 20_000);
         // a small trigger clamps it to half, so a cut always exists once
         // compaction is due (before the clamp, find_cut returned None forever
         // and the run died on a provider context error)
@@ -685,71 +615,26 @@ mod tests {
         assert_eq!(find_cut(&history, 32_000), None);
     }
 
-    /// The trigger is one number for every model behind the gateway, and it
-    /// doubles after each compaction instead of staying where it started.
     #[test]
-    fn the_trigger_compacts_and_then_doubles() {
-        let cfg = CompactConfig::default();
-        assert_eq!(cfg.trigger_tokens, 64_000);
-        assert!(!should_compact(63_999, cfg.trigger_tokens));
-        assert!(should_compact(64_000, cfg.trigger_tokens));
-        let second = next_trigger(cfg.trigger_tokens);
-        assert_eq!(second, 128_000);
-        assert!(
-            !should_compact(64_000, second),
-            "the earlier size is room now"
-        );
-        assert!(should_compact(128_000, second));
-        assert_eq!(next_trigger(u64::MAX), u64::MAX, "saturates, never wraps");
+    fn should_compact_uses_the_configured_trigger() {
+        assert!(!should_compact(63_999, 64_000));
+        assert!(should_compact(64_000, 64_000));
+        // off: there is no line to cross
+        assert!(!should_compact(u64::MAX, 0));
     }
 
-    /// A known window anchors the ladder: the configured rung wins while it is
-    /// under the ceiling, the doubling stops at `window - reserve` (the reference's
-    /// ceiling), and a small window clamps the very first rung.
+    /// A known window anchors the trigger at `window - reserve` (the reference's rule);
+    /// the configured value is only the fallback for an unknown window.
     #[test]
     fn a_known_window_anchors_the_trigger() {
-        // no window: the configured rung stands, untouched
+        // no window: the configured fallback stands
         assert_eq!(effective_trigger(64_000, None), 64_000);
-        // 200k window: climb 64k -> 128k -> the ceiling, then stay there
+        // a known window wins outright
         let w = Some(200_000u64);
-        let ceiling = 200_000 - RESERVE_TOKENS;
-        let mut rung = effective_trigger(64_000, w);
-        assert_eq!(rung, 64_000);
-        rung = next_effective_trigger(rung, w);
-        assert_eq!(rung, 128_000);
-        rung = next_effective_trigger(rung, w);
-        assert_eq!(rung, ceiling);
-        assert_eq!(
-            next_effective_trigger(rung, w),
-            ceiling,
-            "the ceiling is a fixed point"
-        );
-        // a 128k window caps the second rung (128k would be the whole window)
-        let w = Some(128_000u64);
-        assert_eq!(effective_trigger(64_000, w), 64_000);
-        assert_eq!(next_effective_trigger(64_000, w), 128_000 - RESERVE_TOKENS);
-        // a 32k window clamps the first rung to 32k - reserve
-        assert_eq!(
-            effective_trigger(64_000, Some(32_000)),
-            32_000 - RESERVE_TOKENS
-        );
-        // a user-configured rung under the ceiling is honored
-        assert_eq!(effective_trigger(20_000, Some(200_000)), 20_000);
-    }
-
-    #[test]
-    fn summary_composes_and_extracts_the_original_task() {
-        let s = compose_summary(Some("fix the login bug"), "## Goal\nfix login");
-        assert!(s.starts_with("# Original task\nfix the login bug\n# Summary\n"));
-        assert_eq!(
-            extract_original_task(&s).as_deref(),
-            Some("fix the login bug"),
-            "re-compaction recovers the task verbatim"
-        );
-        // no task → bare summary; garbage → None
-        assert_eq!(compose_summary(None, "just summary"), "just summary");
-        assert_eq!(compose_summary(Some("  "), "s"), "s");
-        assert_eq!(extract_original_task("no marks here"), None);
+        assert_eq!(effective_trigger(64_000, w), 200_000 - RESERVE_TOKENS);
+        assert_eq!(effective_trigger(20_000, w), 200_000 - RESERVE_TOKENS);
+        // a small window saturates at 0 rather than underflowing
+        assert_eq!(effective_trigger(64_000, Some(8_000)), 0);
     }
 
     #[test]
@@ -822,20 +707,18 @@ mod tests {
 
     #[test]
     fn oversized_tool_results_prune_to_head_marker_tail() {
-        let original = "x".repeat(20_000);
         let mut history = vec![
             Msg::ToolResult {
                 call_id: "1".into(),
                 name: "bash".into(),
-                content: original.clone(),
+                content: "x".repeat(20_000),
                 error: None,
                 attachments: Vec::new(),
             },
             Msg::tool_result("2", "bash", "small"),
         ];
-        let dir = obs_dir();
         let before = estimate_tokens(&history, None);
-        let pruned = prune_tool_results(&mut history, &dir);
+        let pruned = prune_tool_results(&mut history);
         assert_eq!(pruned.count, 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
@@ -851,14 +734,6 @@ mod tests {
             content.len() < PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 300,
             "pruned content is bounded"
         );
-        // the cut middle is archived and the marker names its id, so recall
-        // can page the exact original back instead of re-running the command
-        let id = observation_id_from_marker(content).expect("marker carries an observation id");
-        let archived = std::fs::read_to_string(observation_path(&dir, &id).unwrap()).unwrap();
-        assert_eq!(
-            archived, original,
-            "the archive holds the untouched original"
-        );
         // pruning tells the caller what it frees, so a pressure check that
         // rests on the provider's usage figure (which still covers the
         // un-pruned prefix) can see the relief
@@ -866,7 +741,7 @@ mod tests {
         assert_eq!(before - after, pruned.freed_tokens);
         assert!(pruned.freed_tokens > 3_000, "{}", pruned.freed_tokens);
         // a pruned result is under threshold: the second pass is a no-op
-        let again = prune_tool_results(&mut history, &dir);
+        let again = prune_tool_results(&mut history);
         assert_eq!((again.count, again.freed_tokens), (0, 0));
         // small results are untouched
         match &history[1] {
@@ -891,8 +766,7 @@ mod tests {
         // the dump sits well before the fresh window
         let mut history = vec![small.clone(), big()];
         history.extend(filler(KEEP_FRESH_MESSAGES + 2));
-        let dir = obs_dir();
-        let pruned = prune_stale_tool_results(&mut history, &dir);
+        let pruned = prune_stale_tool_results(&mut history);
         assert_eq!(pruned.count, 1, "only the old dump");
         assert!(pruned.freed_tokens > 8_000);
         match (&history[0], &history[1]) {
@@ -903,102 +777,21 @@ mod tests {
             _ => unreachable!(),
         }
         // idempotent: the next round changes nothing and reports nothing
-        let again = prune_stale_tool_results(&mut history, &dir);
+        let again = prune_stale_tool_results(&mut history);
         assert_eq!((again.count, again.freed_tokens), (0, 0));
 
         // a result of the same size inside the fresh window stays whole
         let mut fresh = filler(1);
         fresh.push(big());
-        let untouched = prune_stale_tool_results(&mut fresh, &obs_dir());
+        let untouched = prune_stale_tool_results(&mut fresh);
         assert_eq!(untouched.count, 0, "recent results stay verbatim");
-    }
-
-    /// Pull the id back out the way a reader (or the recall tool) would.
-    fn observation_id_from_marker(content: &str) -> Option<String> {
-        let rest = content.split("observation ").nth(1)?;
-        Some(rest.split_whitespace().next()?.to_string())
-    }
-
-    #[test]
-    fn a_failed_archive_keeps_the_full_text() {
-        // a marker must never point at a file that was not written: if the
-        // archive dir cannot be created, pruning leaves the result alone
-        let mut history = vec![Msg::tool_result("1", "bash", "x".repeat(20_000))];
-        // a regular file where the archive directory should be: create_dir_all fails
-        let blocker = crate::core::testutil::scratch_path("obs-file");
-        std::fs::write(&blocker, "not a directory").unwrap();
-        let blocked = blocker.join("observations");
-        assert_eq!(prune_tool_results(&mut history, &blocked).count, 0);
-        match &history[0] {
-            Msg::ToolResult { content, .. } => assert_eq!(content.chars().count(), 20_000),
-            _ => unreachable!(),
-        }
-    }
-
-    /// The archive is keyed by content, so pruning the same bytes twice (one
-    /// thread resumed under pressure over and over) touches one file and the
-    /// marker stays the same.
-    #[test]
-    fn a_replaced_prefix_is_archived_exactly() {
-        let dir = crate::core::testutil::scratch_dir("compact-prefix-archive");
-        let history = [user("fix the parser"), user("and add a test")];
-        let id = archive_prefix(&history, &dir).expect("archived");
-        let stored = std::fs::read_to_string(dir.join(format!("{id}.txt"))).unwrap();
-        assert!(stored.contains("fix the parser") && stored.contains("and add a test"));
-        assert!(
-            stored.starts_with("user: "),
-            "the summarizer's own rendering"
-        );
-        // content-addressed: re-compacting the same prefix rewrites nothing
-        assert_eq!(archive_prefix(&history, &dir).as_deref(), Some(id.as_str()));
-        // an empty prefix has nothing to point at
-        assert!(archive_prefix(&[], &dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_archive_is_content_addressed() {
-        let dir = obs_dir();
-        let big = Msg::tool_result("1", "read", "y".repeat(30_000));
-        let mut first = vec![big.clone()];
-        prune_tool_results(&mut first, &dir);
-        let id1 = match &first[0] {
-            Msg::ToolResult { content, .. } => {
-                observation_id_from_marker(content).expect("marker id")
-            }
-            _ => unreachable!(),
-        };
-        // a second, independent view of the same result (a re-read thread):
-        // same archive, same id, no second file
-        let mut second = vec![big];
-        prune_tool_results(&mut second, &dir);
-        assert_eq!(first, second, "identical input, identical projection");
-        let files: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            files,
-            vec![format!("{id1}.txt")],
-            "one file per distinct content"
-        );
-    }
-
-    #[test]
-    fn observation_ids_cannot_escape_their_directory() {
-        let dir = std::path::Path::new("/tmp/observations");
-        assert!(observation_path(dir, "01jz5k9h7q2m3n4p5r6s7t8v9w").is_some());
-        // traversal, separators and empty ids are refused, not cleaned up
-        assert_eq!(observation_path(dir, "../../etc/passwd"), None);
-        assert_eq!(observation_path(dir, "a/b"), None);
-        assert_eq!(observation_path(dir, ""), None);
     }
 
     #[test]
     fn pruning_cuts_on_codepoint_boundaries() {
         // byte-indexed slicing would split a CJK char mid-codepoint
         let mut history = vec![Msg::tool_result("1", "read", "中".repeat(10_000))];
-        assert_eq!(prune_tool_results(&mut history, &obs_dir()).count, 1);
+        assert_eq!(prune_tool_results(&mut history).count, 1);
         let content = match &history[0] {
             Msg::ToolResult { content, .. } => content,
             _ => unreachable!(),

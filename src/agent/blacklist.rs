@@ -219,10 +219,107 @@ impl Blacklist {
     }
 
     /// Word-level glob match: `*` `?` `[...]`, no `**` (words have no
-    /// depth). Delegates to the gitignore segment matcher.
+    /// depth).
     fn matches(&self, pattern: &str, word: &str) -> bool {
-        crate::gitignore::word_matches(pattern, word)
+        word_matches(pattern, word)
     }
+}
+
+/// Word-level glob: `*` `?` `[...]`, no `**` (words have no depth).
+fn word_matches(pattern: &str, word: &str) -> bool {
+    seg_match(pattern, word)
+}
+
+/// Segment matcher over `&str` slices: no per-call allocation (this runs for
+/// every command word against every pattern).
+fn seg_match(pat: &str, text: &str) -> bool {
+    let Some(p0) = pat.chars().next() else {
+        return text.is_empty();
+    };
+    let rest_pat = &pat[p0.len_utf8()..];
+    match p0 {
+        '*' => {
+            seg_match(rest_pat, text)
+                || match text.chars().next() {
+                    Some(t0) => seg_match(pat, &text[t0.len_utf8()..]),
+                    None => false,
+                }
+        }
+        '?' => match text.chars().next() {
+            Some(t0) => seg_match(rest_pat, &text[t0.len_utf8()..]),
+            None => false,
+        },
+        '\\' if !rest_pat.is_empty() => {
+            let esc = rest_pat.chars().next().expect("checked non-empty");
+            match text.chars().next() {
+                Some(t0) if t0 == esc => {
+                    seg_match(&rest_pat[esc.len_utf8()..], &text[t0.len_utf8()..])
+                }
+                _ => false,
+            }
+        }
+        '[' => {
+            let Some((hit, after_class)) = match_class(rest_pat, text) else {
+                return false; // unterminated class
+            };
+            match (hit, text.chars().next()) {
+                (true, Some(t0)) => seg_match(after_class, &text[t0.len_utf8()..]),
+                _ => false,
+            }
+        }
+        c => match text.chars().next() {
+            Some(t0) if t0 == c => seg_match(rest_pat, &text[t0.len_utf8()..]),
+            _ => false,
+        },
+    }
+}
+
+/// Evaluate a `[...]` class (optional leading `!`/`^` negation, `a-z`
+/// ranges, `]` literal when first) against `text`'s first char. Returns
+/// (hit, pattern past the closing bracket), or None when it never closes.
+fn match_class<'p>(pat: &'p str, text: &str) -> Option<(bool, &'p str)> {
+    let t0 = text.chars().next();
+    let mut idx = 0usize;
+    let mut negate = false;
+    if matches!(pat.chars().next(), Some('!') | Some('^')) {
+        negate = true;
+        idx += 1;
+    }
+    let mut hit = false;
+    let mut first = true;
+    loop {
+        let Some(c) = pat[idx..].chars().next() else {
+            return None; // unterminated class
+        };
+        if c == ']' && !first {
+            idx += 1;
+            break;
+        }
+        first = false;
+        let after_lo = idx + c.len_utf8();
+        // a range `a-z`: the '-' is one byte, so after_lo + 1 is a boundary
+        if let (Some('-'), Some(hi)) = (
+            pat[after_lo..].chars().next(),
+            pat[after_lo + 1..].chars().next(),
+        ) && hi != ']'
+        {
+            if let Some(t) = t0
+                && t >= c
+                && t <= hi
+            {
+                hit = true;
+            }
+            idx = after_lo + 1 + hi.len_utf8();
+            continue;
+        }
+        if let Some(t) = t0
+            && t == c
+        {
+            hit = true;
+        }
+        idx = after_lo;
+    }
+    Some((hit != negate, &pat[idx..]))
 }
 
 #[cfg(test)]
@@ -294,6 +391,17 @@ mod tests {
         );
         assert_eq!(b.evaluate(&["ls".into()], &["ls".into()]), Match::None);
         assert_eq!(b.entries.len(), 2);
+    }
+
+    #[test]
+    fn question_and_char_classes_match_within_a_word() {
+        assert!(word_matches("file?.txt", "file1.txt"));
+        assert!(!word_matches("file?.txt", "file12.txt"));
+        assert!(word_matches("[abc].txt", "b.txt"));
+        assert!(!word_matches("[abc].txt", "d.txt"));
+        assert!(word_matches("[a-c].txt", "c.txt"));
+        assert!(word_matches("rm", "rm"));
+        assert!(!word_matches("rm", "rmdir"));
     }
 
     #[test]

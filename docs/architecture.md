@@ -137,55 +137,37 @@ across processes with `LLM_SESSION_ID`.
   prompt and agent; `Loaded` keeps path/url/mime/bytes provenance so one load feeds both the wire
   (`request()`) and the log store (`stored()`); magic-byte `sniff_mime` covers stdin and clipboard
   bytes; `wants_stdin()` lets `-a -` claim stdin away from the prompt text.
-- The agent (`src/agent/`, the whole binary): sync loop over the same `Event` stream — `tools/` (ten
+- The agent (`src/agent/`, the whole binary): sync loop over the same `Event` stream — `tools/` (eight
   handwritten tools, one file per tool behind the shared `mod.rs`: `update_plan` (the reference shape
   checklist — a `{step, status}` list with at most one `in_progress`; it touches nothing, so it is
   Read-tier and never prompts, and the plan lives in the model's own tool call so no harness-side
-  state is needed), read (one `path` or a `paths` batch of up to 5, `read_one` shared by both
-  shapes), write, edit with exact-match spans (both landing through a same-dir temp-file + rename so
-  a crash mid-write cannot truncate the target, the existing mode carried over) plus a
-  whitespace-flexible fallback (per-line trailing whitespace, CRLF, smart quotes/dashes — the reference's fuzzy
-  matching) so a near-miss oldText still applies, bash streaming live through
+  state is needed), read (`path`/`offset`/`limit`; bare text with a the reference-shaped continuation note,
+  images become vision attachments), write, edit with exact-match spans (both landing through a
+  same-dir temp-file + rename so a crash mid-write cannot truncate the target, the existing mode
+  carried over; the reference's exact, unique-match rule), bash streaming live through
   `platform::run_shell_stream` in a new session/process group (a timed-out kill keeps the partial
   output it already printed — the deadline and the output are independent facts — and reports
-  `Command timed out after Ns (process killed)`), grep (literal by default; `regex: true` passes the
-  pattern to ripgrep, so a regex lookup stays inside the tool instead of becoming a bash pipeline),
-  glob, ls, webfetch (exec-tier — ask mode confirms a fetch, the one way off the machine),
-  recall (`observation_path` accepts only a plain alphanumeric id — a
-  model-supplied `/` or `..` is refused, not cleaned, so it can never leave `~/.llm/observations/`;
-  char-offset paging, `next_offset` continues); write and edit declare an optional `then_run`
-  command whose execution lives in the loop, not the tool — `fuse_then_run` in `mod.rs` runs it as
-  an ordinary `bash` call through the same gate/approval/blacklist path and folds the output into
-  the mutation's result, so action fusion never widens the trust surface (skipped when the mutation
-  failed; a failing follow-up is reported without turning the applied edit into an error); bash
-  previews show as `run` via `display_verb`), `approval.rs` (read/write/exec tiers + a
-  readonly-command whitelist — `readonly_command`: every command position on the list, git/cargo by
-  read-only subcommand, redirection, command substitution (`$(..)`/backticks) and flag-writes (`sort
-  -o`, `date -s`) rejected, git `branch`/`remote`/`config` read-only only in their bare or
-  one-argument read forms — so ask mode only prompts for state-changing work: writes, non-read-only
-  commands, out-of-cwd reads; symlink-aware `escapes_cwd`, fed per call by the tool's own
-  `Tool::escapes_cwd` (the shared `path`/`paths` arguments by default, a `$VAR`-expanded scan of
-  the command line for `bash`, so a read-only `cat /etc/passwd` is no way around the gate); an
-  extension's `tool_call` reply may
-  deny, rewrite args, or `decision: "allow"` to skip the ask (a blacklist ask still prompts — the
-  ask-list is extension-proof); yolo is the default mode (`--approval-mode ask` / `[agent]
-  approval_mode = "always-ask"` restores prompting; the legacy `~/.llm/trust.json` is ignored — its
-  trusted-project flip became dead weight once everything started in yolo), `/yolo` toggles the
-  mode; a per-tool policy in `[agent] tools` (`allow`/`deny`/`prompt`) overrides the tier for one
-  tool, and `--tools read,grep,edit` narrows the registry a run is offered; the shell command
-  gates are two layers in either mode: the hardcoded `FORBIDDEN_COMMANDS`
-  (`approval.rs`: `sudo`/`su`/`doas`, `mkfs*`/`mkswap`, `dd`/`shred`/`wipefs`, `fdisk`/`parted`,
-  `shutdown`/`reboot`/`poweroff`/`halt`/`init`) plus `forbidden_command`'s shape checks (fork bomb,
-  redirects into real device nodes — `/dev/null` and other sinks are exempt, `2>/dev/null` is stream
-  hygiene — and `rm` whose target word is `/`, `/*`, `~` or `$HOME`, matched on the whole word so
-  `rm -rf /tmp/build` stays ordinary cleanup) are outright `Deny`, none of which any file, flag or
-  `!` line can switch off; then the user-editable ask-list (`blacklist.rs`: `~/.llm/blacklist` plus
-  the nearest `.llm/blacklist`, project lines winning by last match; word patterns hit a command
-  position anywhere in the line, segment patterns match the whole segment, globs work, `!`
-  re-allows), seeded with `rm`, `git push --force*` and the active `outside-cwd` directive: a hit is
-  an `Ask` in either mode — immune to
-  allow policies — with the matched pattern highlighted in the prompt, and `a` spares the pattern
-  for the session (`blacklist_session_allows`, never persisted), `session.rs` (the Session: one
+  `Command timed out after Ns (process killed)`; no default timeout), grep and glob
+  both delegate to ripgrep (`rg --fixed-strings` when `literal: true`, `.gitignore` respected,
+  hidden files included), ls, webfetch (the one way off the machine); bash previews show as `run`
+  via `display_verb`), `approval.rs` (read/write/exec tiers used for the parallel read batch and the
+  hardcoded-refusal scoping — there is no ask mode: a call runs unless the hardcoded list refuses it,
+  a `[agent] tools` policy denies/prompts it, or the blacklist asks; symlink-aware `escapes_cwd`, fed
+  per call by the tool's own `Tool::escapes_cwd` (the shared `path` argument by default, a
+  `$VAR`-expanded scan of the command line for `bash`), an extension's `tool_call` reply may deny,
+  rewrite args, or `decision: "allow"` to skip the ask (a blacklist ask still prompts — the ask-list
+  is extension-proof); the hardcoded `FORBIDDEN_COMMANDS` (`approval.rs`: `sudo`/`su`/`doas`,
+  `mkfs*`/`mkswap`, `dd`/`shred`/`wipefs`, `fdisk`/`parted`, `shutdown`/`reboot`/`poweroff`/`halt`/
+  `init`) plus `forbidden_command`'s shape checks (fork bomb, redirects into real device nodes —
+  `/dev/null` and other sinks are exempt, `2>/dev/null` is stream hygiene — and `rm` whose target
+  word is `/`, `/*`, `~` or `$HOME`, matched on the whole word so `rm -rf /tmp/build` stays ordinary
+  cleanup) are outright `Deny`, none of which any file, flag or `!` line can switch off; then the
+  user-editable ask-list (`blacklist.rs`: `~/.llm/blacklist` plus the nearest `.llm/blacklist`,
+  project lines winning by last match; word patterns hit a command position anywhere in the line,
+  segment patterns match the whole segment, globs work, `!` re-allows), seeded with `rm`,
+  `git push --force*` and the active `outside-cwd` directive: a hit is an `Ask` — immune to allow
+  policies — with the matched pattern highlighted in the prompt, and `a` spares the pattern for the
+  session (`blacklist_session_allows`, never persisted), `session.rs` (the Session: one
   model + tools + accumulated history, thinking level, steer queue shared with the KeyWatcher, turn
   persistence (failed and interrupted rounds too, so a late stream drop cannot erase the transcript
   from /resume), the wire messages the thread file stores verbatim; `rebuild_tools` is the single
@@ -220,10 +202,10 @@ across processes with `LLM_SESSION_ID`.
   mounts a `subagent` tool that runs a child `llm --json` with its own tools and system prompt from
   `~/.llm/agents/*.md` / `.llm/agents/*.md` (defined and discovered entirely inside the extension;
   `examples/agents/` ships four)), `repl.rs` (slash commands `/help /model /thinking /login /logout
-  /resume /tree /export /clear /skill:<name> /yolo /status /reload /exit` — /memory /init /settings
-  /tools /skills /compact were removed: memory is hand-edited, config is hand-edited, compaction is
-  automatic (token-threshold in the loop; `Session::compact_prefix` went with the command), and
-  extension state shows in /status + /reload; `run_skill` submits a `<skill name dir>` task — the
+  /resume /tree /export /clear /skill:<name> /status /reload /exit` — /memory /init /settings
+  /tools /skills /compact were removed: config is hand-edited, compaction is automatic
+  (token-threshold in the loop), and extension state shows in /status + /reload; `run_skill` submits
+  a `<skill name dir>` task — the
   dir is what lets a slash-run skill read its own `references/`), `!cmd` shell passthrough with
   bash-style tab completion — command positions (first word, or right after `|`/`&`/`;`) complete
   executable names from `$PATH`, later words complete filesystem paths as typed, dirs getting a
@@ -244,25 +226,24 @@ across processes with `LLM_SESSION_ID`.
   `(failed)`), `skills` the discovered skills; either row disappears when its list is empty, six
   names is the cap (`+N more`), and the ctrl+o page reprints the same rows; `--fork` branches the
   loaded session onto a new thread id sharing its turns so far via `threads::Store::fork_thread`),
-  `compact.rs` (cut at a turn boundary keeping a 32k-token recent window; the stored Summary
-  composes the original task verbatim above the compressed sections — re-compaction recovers it from
-  the previous summary — and `trim_old_attachments` swaps attachments older than the last two
+  `compact.rs` (cut at a turn boundary keeping a 20k-token recent window, the reference's default; the stored
+  summary is the summarizer's own text — re-compaction updates it incrementally through
+  `<previous-summary>` tags — and `trim_old_attachments` swaps attachments older than the last two
   attachment-bearing messages for a name+mime note every round, before the request is built; a
   compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
   `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
   the one failure compaction exists to prevent; the check runs *before* each model request, not
   after a completed turn, so a ctrl-c that kills the round cannot skip it (a resumed thread is
-  compacted on its first request); the trigger is the ladder's rung (`agent.compact_at_tokens`, 64k
-  by default, doubled after each compaction) capped by the model's real window when the per-model
-  option `context_window` records one — `min(rung, window - 16384)`, the reference's reserve, so a 32k model
-  compacts at 16k and a 200k one climbs 64k → 128k → 184k instead of past the window; a prompt the
-  provider refuses still forces one compaction and retry, bounded, and a known window also catches
-  the silent overflows a gateway hides behind a 200 — usage above the window, or a length stop that
-  produced nothing after consuming ≥99% of it — with the same forced-compact-and-retry; a round the
-  provider reported no usage for is priced from the text instead, so a gateway
-  that omits the counts cannot switch the gate off; ctrl-c keeps the round's own messages — the
-  pending prompt and any partial answer already streamed — so /resume starts from what was actually
-  said, not a gap), Every
+  compacted on its first request); the trigger is `window - 16384` — the model's real window minus
+  the reference's reserve — when the per-model option `context_window` records one, else
+  `agent.compact_at_tokens` (64k by default) for an unknown window; it never changes across the run;
+  a prompt the provider refuses still forces one compaction and retry, bounded, and a known window
+  also catches the silent overflows a gateway hides behind a 200 — usage above the window, or a
+  length stop that produced nothing after consuming ≥99% of it — with the same
+  forced-compact-and-retry; a round the provider reported no usage for is priced from the text
+  instead, so a gateway that omits the counts cannot switch the gate off; ctrl-c keeps the round's
+  own messages — the pending prompt and any partial answer already streamed — so /resume starts from
+  what was actually said, not a gap), Every
   request closes with a request-only `<context>… tokens left</context>` user
   turn only when `--token-budget` is set (`context_note` in `mod.rs`: the task's input-token room) —
   the reference style budget awareness so the model can choose to wrap up; it is
@@ -283,22 +264,14 @@ middle marker + tail 1024 before the summarizer runs, and the pass reports `free
 subtracts them from the usage-derived estimate, because re-estimating over the same usage marker
 reports the identical number and would let the summarizer run anyway; a resumed thread that no
 longer fits is projected down the same way before its first request, silently
-(`Session::prune_seed_to_fit`), so the notice cannot repeat turn after turn); lossless, not lossy:
-the untouched original is archived to `observation_dir()` (`~/.llm/observations/<content-id>.txt`,
-the 64-bit FNV-1a of the text, so pruning the same result again after a resume rewrites one file
-rather than piling up copies) and the marker carries that id so the `recall` built-in can page the
-cut middle back — per-result fail-open (`create_dir_all`/`write` failure keeps the whole text rather
-than leave a marker pointing at nothing), and char-indexed cuts keep CJK on codepoint boundaries,
-`memory.rs` (`~/.llm/LLM.md`, one manual region; `section()` injects into the agent system prompt
-and names the path even when the file is absent or empty — the block is what tells the agent where
-durable preferences go, so it must never be conditional; there is no `/memory` command and no
-`remember` tool, memory is manual-only, the built-in prompt only points at the file), `skills.rs`
+(`Session::prune_seed_to_fit`), so the notice cannot repeat turn after turn); the cut middle is
+dropped, the reference's lossy shape, char-indexed cuts keep CJK on codepoint boundaries, `skills.rs`
 (SKILL.md discovery, `skills_block()` caps at 2000 chars with per-entry trigger lines capped at 160
 — the list rides every request, the full file is one `read` away), `settings.rs`, `system_prompt.rs`
-(built-ins + memory + AGENTS.md/CLAUDE.md project-instruction discovery + an environment line — OS ·
-shell · git repo · project type with its verify command — + skills + a self-extension block naming
-the extensions/skills dirs and the manifest-header form; a continuation from a stored prompt keeps
-it verbatim and refreshes only the trailing cwd line). The system prompt stays byte-identical across
+(the reference's shape: persona, an available-tools list, guidelines, AGENTS.override.md/AGENTS.md/CLAUDE.md
+project-instruction discovery, skills, and a self-extension block naming the extensions/skills dirs
+and the manifest-header form; a continuation from a stored prompt keeps it verbatim and refreshes
+only the trailing cwd line). The system prompt stays byte-identical across
 every round: providers cache by request prefix (DeepSeek context caching, Anthropic prompt caching),
 so any per-turn mutation re-bills the whole history at cache-miss price. Both adapters engage the
 cache deliberately: the anthropic one sends explicit `cache_control` breakpoints (on the system text
@@ -330,8 +303,8 @@ steering queue and the loop drains them at the next tool boundary; leftovers bec
 the answer owns the current row (`term::screen`'s dangling flag), the watcher defers its `queued:`
 notice to the render thread, which prints it at the next settle point (`TaskView::flush_notices`) —
 erasing the row in place tore the streamed text apart and dropped the continuation at column 0.
-- Plugins ride one plumbing: every extension tool is Exec-tier, so ask mode prompts for every
-  extension call (yolo, the default, runs them free) and per-tool policies still win; commands-dir
+- Plugins ride one plumbing: extension tools run free like `bash` — there is no ask mode — and a
+  per-tool policy or the blacklist still gates them; commands-dir
   prompts (`core/commands_md.rs`: `~/.llm/commands/*.md` plus the nearest `.llm/commands/`, project
   wins) have no CLI dispatch — the REPL's unknown `/name` falls back to them, expanding `$input`
   through `core/templates.rs` (the internal substitution engine).

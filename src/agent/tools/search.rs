@@ -1,11 +1,7 @@
 use super::*;
 
-/// Lines longer than this are truncated in a grep hit.
+/// Lines longer than this are truncated in a grep hit (the reference's value).
 pub(super) const GREP_LINE_LIMIT: usize = 500;
-
-/// Files larger than this are skipped by grep (reading them whole would
-/// spike memory; the model can target them with bash instead).
-pub(super) const GREP_MAX_FILE: u64 = 32 * 1024 * 1024;
 
 pub(super) struct GrepTool;
 
@@ -17,20 +13,20 @@ impl Tool for GrepTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Search file contents. Literal substring by default; `regex: true` for a regular \
-         expression (needs ripgrep). Respects .gitignore. Returns path:line:text matches."
+        "Search file contents for a pattern (needs ripgrep). Returns matching lines with file \
+         paths and line numbers. Respects .gitignore."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Text to find"},
-                "path": {"type": "string", "description": "File or directory to search (default .)"},
+                "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+                "path": {"type": "string", "description": "Directory or file to search (default .)"},
                 "glob": {"type": "string", "description": "Only search files matching this glob, e.g. *.rs"},
-                "ignore_case": {"type": "boolean"},
-                "context": {"type": "integer", "description": "Lines of context"},
+                "ignoreCase": {"type": "boolean", "description": "Case-insensitive search"},
+                "context": {"type": "integer", "description": "Lines of context around each match"},
                 "limit": {"type": "integer", "description": "Max matches (default 100)"},
-                "regex": {"type": "boolean", "description": "Treat `pattern` as a regex via ripgrep (default false)"}
+                "literal": {"type": "boolean", "description": "Treat pattern as a literal string"}
             },
             "required": ["pattern"]
         })
@@ -39,135 +35,61 @@ impl Tool for GrepTool {
         format!("\"{}\"", args["pattern"].as_str().unwrap_or("?"))
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        if args["regex"].as_bool().unwrap_or(false) {
-            return grep_regex(args, cwd);
-        }
         let pattern = args["pattern"].as_str().unwrap_or("");
-        let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
-        let context = args["context"].as_u64().unwrap_or(0) as usize;
         let limit = args["limit"].as_u64().unwrap_or(100) as usize;
-        let glob = args["glob"].as_str().and_then(parse_pattern);
-        let needle = if ignore_case {
-            pattern.to_lowercase()
-        } else {
-            pattern.to_string()
-        };
-
         let root = resolve_path(cwd, args["path"].as_str().unwrap_or("."));
-        let files = gather_files(&root, glob.as_ref());
-        let mut matches: Vec<String> = Vec::new();
-        let mut skipped = 0usize;
-        'outer: for path in files {
-            if crate::read::is_binary_path(&path) {
-                continue;
-            }
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
-            };
-            if meta.len() > GREP_MAX_FILE {
-                skipped += 1;
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let lines: Vec<&str> = text.lines().collect();
-            // context ranges grow monotonically with the match order, so a
-            // watermark replaces the per-line dedup set (which was O(n²))
-            let mut printed_to = 0usize;
-            let mut i = 0usize;
-            while i < lines.len() {
-                let hit = if ignore_case {
-                    lines[i].to_lowercase().contains(&needle)
-                } else {
-                    lines[i].contains(needle.as_str())
-                };
-                if hit {
-                    let lo = i.saturating_sub(context).max(printed_to);
-                    let hi = (i + context).min(lines.len() - 1);
-                    for (offset, line) in lines[lo..=hi].iter().enumerate() {
-                        let mut l = line.to_string();
-                        crate::core::text::truncate_ellipsis(&mut l, GREP_LINE_LIMIT);
-                        matches.push(format!(
-                            "{}:{}: {}",
-                            display_rel(cwd, &path),
-                            lo + offset + 1,
-                            l
-                        ));
-                    }
-                    printed_to = hi + 1;
-                    if matches.len() >= limit {
-                        break 'outer;
-                    }
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-            }
+        let mut cmd = std::process::Command::new("rg");
+        cmd.arg("--no-heading")
+            .arg("--with-filename")
+            .arg("--line-number")
+            .arg("--color")
+            .arg("never")
+            .arg("--hidden");
+        if args["literal"].as_bool().unwrap_or(false) {
+            cmd.arg("--fixed-strings");
         }
-        if matches.is_empty() {
-            return ToolOutput::ok("no matches\n");
+        if args["ignoreCase"].as_bool().unwrap_or(false) {
+            cmd.arg("-i");
         }
-        let mut out = matches.join("\n");
-        out.push('\n');
-        if skipped > 0 {
-            out.push_str(&format!(
-                "\n[{skipped} file(s) over {GREP_MAX_FILE} bytes skipped; use bash]\n"
-            ));
+        if let Some(c) = args["context"].as_u64().filter(|c| *c > 0) {
+            cmd.arg("-C").arg(c.to_string());
+        }
+        if let Some(g) = args["glob"].as_str().filter(|g| !g.is_empty()) {
+            cmd.arg("-g").arg(g);
+        }
+        cmd.arg("--").arg(pattern).arg(&root);
+        cmd.current_dir(cwd);
+        let Ok(out) = cmd.output() else {
+            return ToolOutput::err("grep needs ripgrep (`rg`) on PATH");
+        };
+        // rg exits 2 on a bad pattern; 1 means no matches, which is not an error
+        if out.status.code() == Some(2) {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            return ToolOutput::err(truncate_marked(&msg, MAX_LINES, MAX_BYTES));
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            return ToolOutput::ok("No matches found");
+        }
+        let more = lines.len().saturating_sub(limit);
+        lines.truncate(limit);
+        let mut out = lines
+            .into_iter()
+            .map(|l| {
+                // bound a minified line: the path:line prefix is short, so the
+                // surviving ~500 chars are content, not path
+                let mut l = l.to_string();
+                crate::core::text::truncate_ellipsis(&mut l, GREP_LINE_LIMIT);
+                l
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if more > 0 {
+            out.push_str(&format!("\n... +{more} more matches"));
         }
         ToolOutput::ok(truncate_marked(&out, MAX_LINES, MAX_BYTES))
     }
-}
-
-/// Regex search, delegated to ripgrep (the tool the model was previously told
-/// to reach for via bash). Keeping it inside the tool means a regex lookup no
-/// longer forces the model out of the tool surface into a shell pipeline.
-/// `rg` already honors .gitignore and prints `path:line:text` with
-/// `--no-heading`, so the output matches the literal path verbatim.
-fn grep_regex(args: &Value, cwd: &Path) -> ToolOutput {
-    let pattern = args["pattern"].as_str().unwrap_or("");
-    let limit = args["limit"].as_u64().unwrap_or(100) as usize;
-    let mut cmd = std::process::Command::new("rg");
-    cmd.arg("--no-heading")
-        .arg("--line-number")
-        .arg("--color")
-        .arg("never");
-    if args["ignore_case"].as_bool().unwrap_or(false) {
-        cmd.arg("-i");
-    }
-    if let Some(c) = args["context"].as_u64().filter(|c| *c > 0) {
-        cmd.arg("-C").arg(c.to_string());
-    }
-    if let Some(g) = args["glob"].as_str().filter(|g| !g.is_empty()) {
-        cmd.arg("-g").arg(g);
-    }
-    cmd.arg("--")
-        .arg(pattern)
-        .arg(args["path"].as_str().unwrap_or("."));
-    cmd.current_dir(cwd);
-    let Ok(out) = cmd.output() else {
-        return ToolOutput::err(
-            "regex search needs ripgrep (`rg`) on PATH; install it or drop `regex`",
-        );
-    };
-    // rg exits 2 on a bad pattern; 1 means no matches, which is not an error
-    if out.status.code() == Some(2) {
-        let msg = String::from_utf8_lossy(&out.stderr);
-        return ToolOutput::err(truncate_marked(&msg, MAX_LINES, MAX_BYTES));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
-        return ToolOutput::ok("no matches\n");
-    }
-    let more = lines.len().saturating_sub(limit);
-    lines.truncate(limit);
-    let mut out = lines.join("\n");
-    if more > 0 {
-        out.push_str(&format!("\n... +{more} more matches\n"));
-    }
-    out.push('\n');
-    ToolOutput::ok(truncate_marked(&out, MAX_LINES, MAX_BYTES))
 }
 
 pub(super) struct GlobTool;
@@ -180,15 +102,16 @@ impl Tool for GlobTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Find files by glob pattern (e.g. src/**/*.rs). Respects .gitignore."
+        "Search for files by glob pattern. Returns matching file paths relative to the search \
+         directory. Respects .gitignore. Needs ripgrep."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string"},
-                "path": {"type": "string", "description": "Directory to search (default .)"},
-                "limit": {"type": "integer", "description": "Maximum results (default 1000)"}
+                "pattern": {"type": "string", "description": "Glob pattern to match files, e.g. '*.rs', '**/*.json', or 'src/**/*.rs'"},
+                "path": {"type": "string", "description": "Directory to search in (default: current directory)"},
+                "limit": {"type": "integer", "description": "Maximum number of results (default: 1000)"}
             },
             "required": ["pattern"]
         })
@@ -197,49 +120,47 @@ impl Tool for GlobTool {
         args["pattern"].as_str().unwrap_or("?").to_string()
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        let raw = args["pattern"].as_str().unwrap_or("");
+        let pattern = args["pattern"].as_str().unwrap_or("");
         let limit = args["limit"].as_u64().unwrap_or(1000) as usize;
         let root = resolve_path(cwd, args["path"].as_str().unwrap_or("."));
-        let files = gather_files(&root, None);
-        // compile once, match per file (parsing per file allocated per entry)
-        let Some(pattern) = parse_pattern(raw) else {
-            return ToolOutput::err(format!("invalid glob pattern '{raw}'"));
+        // search cwd-relative so results read `src/x.rs`, not `./src/x.rs`
+        let search = match root.strip_prefix(cwd) {
+            Ok(rel) if rel.as_os_str().is_empty() => std::path::PathBuf::from("."),
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => root.clone(),
         };
+        let mut cmd = std::process::Command::new("rg");
+        cmd.arg("--files")
+            .arg("--hidden")
+            .arg("-g")
+            .arg(pattern)
+            .arg(&search);
+        cmd.current_dir(cwd);
+        let Ok(out) = cmd.output() else {
+            return ToolOutput::err("glob needs ripgrep (`rg`) on PATH");
+        };
+        if out.status.code() == Some(2) {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            return ToolOutput::err(truncate_marked(&msg, MAX_LINES, MAX_BYTES));
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
         let mut hits: Vec<String> = Vec::new();
-        for path in files {
-            let rel = display_rel(cwd, &path);
-            if pattern_matches_path(&pattern, &rel, false) {
-                hits.push(rel);
-                if hits.len() >= limit {
-                    break;
-                }
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            let l = l.strip_prefix("./").unwrap_or(l);
+            hits.push(l.replace('\\', "/"));
+            if hits.len() >= limit {
+                break;
             }
         }
         if hits.is_empty() {
-            return ToolOutput::ok("no matches\n");
+            return ToolOutput::ok("No files found matching pattern");
         }
         let mut out = hits.join("\n");
         out.push('\n');
         ToolOutput::ok(out)
     }
-}
-
-pub(super) fn gather_files(root: &Path, glob: Option<&crate::gitignore::Pattern>) -> Vec<PathBuf> {
-    if root.is_file() {
-        return vec![root.to_path_buf()];
-    }
-    let scopes = scopes_for(root);
-    let mut files = Vec::new();
-    collect_files(root, root, &scopes, &mut files);
-    if let Some(glob) = glob {
-        files.retain(|f| {
-            let rel = f
-                .strip_prefix(root)
-                .map(|r| r.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            pattern_matches_path(glob, &rel, false)
-        });
-    }
-    files.sort();
-    files
 }

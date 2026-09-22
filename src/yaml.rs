@@ -1,88 +1,13 @@
-//! Minimal YAML subset parser — zero deps, no emitter (nothing writes YAML).
+//! Minimal flat frontmatter parser — zero deps, no emitter (nothing writes
+//! YAML).
 //!
 //! One consumer shape: the frontmatter of a `SKILL.md` or a commands-dir
-//! prompt, always reduced through `as_map` to flat string pairs.
-//!
-//! Supported: nested maps, string/int/bool/null scalars, quoted strings,
-//! block scalars (`|` and `>`), `- item` string lists, comments.
-//! Not supported: anchors, aliases, flow collections, tags, multi-doc.
+//! prompt, reduced to flat `key: value` string pairs. `description`/`system`
+//! may be multi-line (a `|`/`>` block scalar, or indented continuation
+//! lines). Nested maps and lists are skipped, not modelled: nothing in-tree
+//! reads them.
 
 use std::collections::BTreeMap;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Yaml {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Str(String),
-    Map(Vec<(String, Yaml)>),
-    List(Vec<Yaml>),
-}
-
-impl Yaml {
-    #[cfg(test)]
-    pub fn get(&self, key: &str) -> Option<&Yaml> {
-        match self {
-            Yaml::Map(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Yaml::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn as_map(&self) -> Option<BTreeMap<String, String>> {
-        match self {
-            Yaml::Map(pairs) => Some(
-                pairs
-                    .iter()
-                    .map(|(k, v)| {
-                        let val = match v {
-                            Yaml::Str(s) => s.clone(),
-                            Yaml::Int(i) => i.to_string(),
-                            Yaml::Bool(b) => b.to_string(),
-                            Yaml::Null => String::new(),
-                            other => yaml_scalar_repr(other),
-                        };
-                        (k.clone(), val)
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn as_str_list(&self) -> Option<Vec<String>> {
-        match self {
-            Yaml::List(items) => Some(
-                items
-                    .iter()
-                    .map(|i| match i {
-                        Yaml::Str(s) => s.clone(),
-                        other => yaml_scalar_repr(other),
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        }
-    }
-}
-
-fn yaml_scalar_repr(y: &Yaml) -> String {
-    match y {
-        Yaml::Str(s) => s.clone(),
-        Yaml::Int(i) => i.to_string(),
-        Yaml::Bool(b) => b.to_string(),
-        Yaml::Null => "null".into(),
-        _ => String::new(),
-    }
-}
 
 #[derive(Debug)]
 pub struct YamlError(pub String);
@@ -97,53 +22,10 @@ fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
-fn strip_comment(value: &str) -> String {
-    // remove trailing comment outside quotes
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut prev_space = true;
-    for (i, c) in value.char_indices() {
-        match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '#' if prev_space && !in_single && !in_double => {
-                return value[..i].trim_end().to_string();
-            }
-            _ => {}
-        }
-        prev_space = c == ' ' || c == '\t';
-    }
-    value.trim_end().to_string()
-}
-
-fn parse_scalar(raw: &str) -> Yaml {
-    let s = raw.trim();
-    if s.is_empty() || s == "~" || s == "null" {
-        return Yaml::Null;
-    }
-    if s == "true" || s == "True" {
-        return Yaml::Bool(true);
-    }
-    if s == "false" || s == "False" {
-        return Yaml::Bool(false);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return Yaml::Int(i);
-    }
-    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
-        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
-    {
-        return Yaml::Str(s[1..s.len() - 1].to_string());
-    }
-    Yaml::Str(s.to_string())
-}
-
-/// Parse a YAML subset document.
 /// Split `---\n` yaml frontmatter from the body that follows the closing
-/// `\n---`: returns (frontmatter, rest-after-the-delimiter). Shared by the
-/// markdown-carried definitions (skills, user prompts/commands).
+/// `\n---`: returns (frontmatter, rest-after-the-delimiter). Tolerates CRLF.
+/// Shared by the markdown-carried definitions (skills, user prompts/commands).
 pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
-    // tolerate CRLF files (Windows editors): both delimiter spellings
     let rest = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))?;
@@ -154,28 +36,68 @@ pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     Some((&rest[..idx], after))
 }
 
-pub fn parse(text: &str) -> Result<Yaml, YamlError> {
+/// Parse a flat frontmatter document into string pairs. Values are strings
+/// throughout: `true`/`false`, integers and `null`/`~` become their string
+/// forms. A top-level line without a `key:` is an error — half-parsed
+/// frontmatter must not silently drop a key — while a nested map or list
+/// under a key is skipped, since no consumer reads one.
+pub fn parse(text: &str) -> Result<BTreeMap<String, String>, YamlError> {
     let lines: Vec<&str> = text.lines().collect();
+    let mut map = BTreeMap::new();
     let mut pos = 0;
-    let value = parse_block(&lines, &mut pos, 0)?;
-    if pos < lines.len() {
-        // a structure the subset cannot represent must not be silently
-        // dropped: half-parsed frontmatter is a real error
-        return Err(YamlError(format!(
-            "unparsed lines remain starting at: {}",
-            lines[pos]
-        )));
+    while pos < lines.len() {
+        let line = lines[pos];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            pos += 1;
+            continue;
+        }
+        if indent_of(line) > 0 {
+            return Err(YamlError(format!(
+                "unexpected indented line at top level: {trimmed}"
+            )));
+        }
+        let Some(colon) = find_colon(trimmed) else {
+            return Err(YamlError(format!("expected 'key: value' at: {trimmed}")));
+        };
+        let key = trimmed[..colon].trim().trim_matches('"').trim_matches('\'');
+        let raw = trimmed[colon + 1..].trim();
+        pos += 1;
+        let value = if raw == "|" || raw == "|-" || raw == ">" || raw == ">-" {
+            parse_block_scalar(&lines, &mut pos, indent_of(line), raw.starts_with('>'))
+        } else if raw.is_empty() {
+            // a value on following indented lines, or nested structure the
+            // flat model has no use for
+            if next_is_plain(&lines, pos, indent_of(line) + 1) {
+                parse_plain_block(&lines, &mut pos, indent_of(line) + 1)
+            } else {
+                skip_block(&lines, &mut pos, indent_of(line));
+                String::new()
+            }
+        } else {
+            // a non-empty plain scalar may continue on indented lines
+            // (`description: a\n  b`): fold them in so the value is not lost
+            let mut s = strip_comment(raw).to_string();
+            if next_is_plain(&lines, pos, indent_of(line) + 1) {
+                let more = parse_plain_block(&lines, &mut pos, indent_of(line) + 1);
+                if !more.is_empty() {
+                    s.push(' ');
+                    s.push_str(&more);
+                }
+            }
+            scalar_string(&s)
+        };
+        map.insert(key.to_string(), value);
     }
-    Ok(value)
+    Ok(map)
 }
 
-/// The next content line at or after `pos` (skipping blanks and comments)
-/// with its indent and trimmed text.
-fn next_content_line<'a>(lines: &[&'a str], pos: usize) -> Option<(usize, &'a str)> {
+/// The next content line (skipping blanks and comments), as (indent, text).
+fn peek_content<'a>(lines: &[&'a str], pos: usize) -> Option<(usize, &'a str)> {
     let mut i = pos;
     while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with('#') {
             i += 1;
             continue;
         }
@@ -184,136 +106,20 @@ fn next_content_line<'a>(lines: &[&'a str], pos: usize) -> Option<(usize, &'a st
     None
 }
 
-fn parse_block(lines: &[&str], pos: &mut usize, min_indent: usize) -> Result<Yaml, YamlError> {
-    // skip blanks/comments
-    while *pos < lines.len()
-        && (lines[*pos].trim().is_empty() || lines[*pos].trim_start().starts_with('#'))
-    {
-        *pos += 1;
+/// True when the following indented lines are a plain-text continuation
+/// (no `key: value` and no `- ` list) rather than nested structure.
+fn next_is_plain(lines: &[&str], pos: usize, min_indent: usize) -> bool {
+    match peek_content(lines, pos) {
+        Some((ind, text)) if ind >= min_indent => {
+            !text.starts_with("- ") && text != "-" && find_colon(text).is_none()
+        }
+        _ => false,
     }
-    if *pos >= lines.len() || indent_of(lines[*pos]) < min_indent {
-        return Ok(Yaml::Null);
-    }
-    let base = indent_of(lines[*pos]);
-    if lines[*pos].trim_start().starts_with("- ") || lines[*pos].trim_end() == "-" {
-        return parse_list(lines, pos, base);
-    }
-    parse_map(lines, pos, base)
 }
 
-fn parse_list(lines: &[&str], pos: &mut usize, base: usize) -> Result<Yaml, YamlError> {
-    let mut items = Vec::new();
-    while *pos < lines.len() {
-        let line = lines[*pos];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            *pos += 1;
-            continue;
-        }
-        if indent_of(line) != base {
-            break;
-        }
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("- ") {
-            items.push(parse_scalar(&strip_comment(rest)));
-            *pos += 1;
-        } else if trimmed == "-" {
-            *pos += 1;
-            let nested = parse_block(lines, pos, base + 1)?;
-            items.push(nested);
-        } else {
-            break;
-        }
-    }
-    Ok(Yaml::List(items))
-}
-
-fn parse_map(lines: &[&str], pos: &mut usize, base: usize) -> Result<Yaml, YamlError> {
-    let mut pairs: Vec<(String, Yaml)> = Vec::new();
-    while *pos < lines.len() {
-        let line = lines[*pos];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            *pos += 1;
-            continue;
-        }
-        if indent_of(line) != base {
-            break;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("- ") {
-            break;
-        }
-        let Some(colon) = find_colon(trimmed) else {
-            return Err(YamlError(format!("expected 'key:' at: {trimmed}")));
-        };
-        let key_raw = trimmed[..colon].trim();
-        let key = key_raw.trim_matches('"').trim_matches('\'').to_string();
-        let value_raw = strip_comment(&trimmed[colon + 1..]);
-        *pos += 1;
-        let value_raw = value_raw.trim();
-        let value =
-            if value_raw == "|" || value_raw == "|-" || value_raw == ">" || value_raw == ">-" {
-                parse_block_scalar(lines, pos, base, value_raw.starts_with('>'))
-            } else if value_raw.is_empty() {
-                // a sequence may sit at the parent key's own indent (the
-                // common YAML style), not only one level deeper
-                if let Some((ind, next)) = next_content_line(lines, *pos)
-                    && ind == base
-                    && (next.starts_with("- ") || next == "-")
-                {
-                    parse_list(lines, pos, base)?
-                } else if text_block_ahead(lines, *pos, base + 1) {
-                    parse_plain_block(lines, pos, base + 1)
-                } else {
-                    parse_block(lines, pos, base + 1)?
-                }
-            } else {
-                // a non-empty plain scalar may continue on indented lines
-                // (`description: a\n  b`): fold them in instead of leaving
-                // them unparsed, which would drop the whole frontmatter and
-                // silently blank the skill's trigger.
-                let mut s = value_raw.to_string();
-                if text_block_ahead(lines, *pos, base + 1)
-                    && let Yaml::Str(more) = parse_plain_block(lines, pos, base + 1)
-                    && !more.is_empty()
-                {
-                    s.push(' ');
-                    s.push_str(&more);
-                }
-                parse_scalar(&s)
-            };
-        pairs.push((key, value));
-    }
-    Ok(Yaml::Map(pairs))
-}
-
-/// True when the upcoming indented lines are a plain-text block (no
-/// `key: value` maps and no `- ` lists) rather than nested structure.
-fn text_block_ahead(lines: &[&str], pos: usize, min_indent: usize) -> bool {
-    let mut i = pos;
-    while i < lines.len() {
-        let line = lines[i];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            i += 1;
-            continue;
-        }
-        if indent_of(line) < min_indent {
-            return false;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("- ") || trimmed == "-" {
-            return false;
-        }
-        if find_colon(trimmed).is_some() {
-            return false;
-        }
-        return true;
-    }
-    false
-}
-
-/// Fold indented plain lines into one scalar: single newlines collapse to
-/// a space, blank lines stay as newlines (YAML plain multiline scalars).
-fn parse_plain_block(lines: &[&str], pos: &mut usize, min_indent: usize) -> Yaml {
+/// Fold indented plain lines into one scalar: single newlines collapse to a
+/// space, blank lines stay as newlines (YAML plain multiline scalars).
+fn parse_plain_block(lines: &[&str], pos: &mut usize, min_indent: usize) -> String {
     let mut out = String::new();
     while *pos < lines.len() {
         let line = lines[*pos];
@@ -328,13 +134,33 @@ fn parse_plain_block(lines: &[&str], pos: &mut usize, min_indent: usize) -> Yaml
         if ind < min_indent {
             break;
         }
+        let text = line.trim_start();
+        if text.starts_with("- ") || text == "-" || find_colon(text).is_some() {
+            break;
+        }
         if !out.is_empty() && !out.ends_with('\n') && !out.ends_with(' ') {
             out.push(' ');
         }
-        out.push_str(line[ind..].trim());
+        out.push_str(text);
         *pos += 1;
     }
-    Yaml::Str(out.trim().to_string())
+    out.trim().to_string()
+}
+
+/// Skip an unmodelled nested block: every line indented past `base`, plus
+/// the blank lines between them.
+fn skip_block(lines: &[&str], pos: &mut usize, base: usize) {
+    while *pos < lines.len() {
+        let line = lines[*pos];
+        if line.trim().is_empty() {
+            *pos += 1;
+            continue;
+        }
+        if indent_of(line) <= base {
+            break;
+        }
+        *pos += 1;
+    }
 }
 
 fn find_colon(s: &str) -> Option<usize> {
@@ -359,13 +185,53 @@ fn find_colon(s: &str) -> Option<usize> {
     None
 }
 
-fn parse_block_scalar(lines: &[&str], pos: &mut usize, base: usize, folded: bool) -> Yaml {
+/// Strip a trailing `# comment` outside quotes.
+fn strip_comment(value: &str) -> String {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_space = true;
+    for (i, c) in value.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if prev_space && !in_single && !in_double => {
+                return value[..i].trim_end().to_string();
+            }
+            _ => {}
+        }
+        prev_space = c == ' ' || c == '\t';
+    }
+    value.trim_end().to_string()
+}
+
+/// A scalar as its string form: quotes stripped, booleans/null normalized,
+/// everything else verbatim (integers already read as their text).
+fn scalar_string(s: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() || t == "~" || t == "null" {
+        String::new()
+    } else if t == "true" || t == "True" {
+        "true".to_string()
+    } else if t == "false" || t == "False" {
+        "false".to_string()
+    } else if (t.starts_with('"') && t.ends_with('"') && t.len() >= 2)
+        || (t.starts_with('\'') && t.ends_with('\'') && t.len() >= 2)
+    {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// A `|`/`>` block scalar: literal keeps newlines, folded collapses single
+/// newlines to spaces and keeps blank-line breaks. Trailing blank lines are
+/// trimmed.
+fn parse_block_scalar(lines: &[&str], pos: &mut usize, base: usize, folded: bool) -> String {
     let mut content_lines: Vec<String> = Vec::new();
     let mut block_indent: Option<usize> = None;
     while *pos < lines.len() {
         let line = lines[*pos];
         if line.trim().is_empty() {
-            // blank line: part of the scalar if more content follows
             content_lines.push(String::new());
             *pos += 1;
             continue;
@@ -384,12 +250,10 @@ fn parse_block_scalar(lines: &[&str], pos: &mut usize, base: usize, folded: bool
         content_lines.push(line[bi..].to_string());
         *pos += 1;
     }
-    // trim trailing blank lines
     while content_lines.last().is_some_and(|l| l.is_empty()) {
         content_lines.pop();
     }
-    let text = if folded {
-        // fold single newlines into spaces, keep blank-line breaks
+    if folded {
         let mut out = String::new();
         let mut pending_break = false;
         for l in &content_lines {
@@ -407,8 +271,7 @@ fn parse_block_scalar(lines: &[&str], pos: &mut usize, base: usize, folded: bool
         out
     } else {
         content_lines.join("\n")
-    };
-    Yaml::Str(text)
+    }
 }
 
 #[cfg(test)]
@@ -416,133 +279,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_template_file() {
-        let text = "\
-# comment
-model: deepseek/deepseek-chat
-prompt: |
-  You are a code reviewer.
-  Review this: $input
-system: \"be strict\"
-extract: true
-defaults:
-  style: terse
-options:
-  temperature: 0.2
-items:
-  - a.md
-  - b.md
-";
-        let y = parse(text).unwrap();
+    fn parses_flat_pairs_and_block_scalars() {
+        let text = "# comment\nname: pdf\ndescription: |\n  Extract tables\n  from PDFs\nsystem: \"be strict\"\ndisable_model_invocation: true\ncount: 5\n";
+        let map = parse(text).unwrap();
+        assert_eq!(map.get("name").map(String::as_str), Some("pdf"));
         assert_eq!(
-            y.get("model").unwrap().as_str(),
-            Some("deepseek/deepseek-chat")
+            map.get("description").map(String::as_str),
+            Some("Extract tables\nfrom PDFs")
         );
+        assert_eq!(map.get("system").map(String::as_str), Some("be strict"));
         assert_eq!(
-            y.get("prompt").unwrap().as_str(),
-            Some("You are a code reviewer.\nReview this: $input")
+            map.get("disable_model_invocation").map(String::as_str),
+            Some("true")
         );
-        assert_eq!(y.get("system").unwrap().as_str(), Some("be strict"));
-        assert_eq!(*y.get("extract").unwrap(), Yaml::Bool(true));
-        assert_eq!(
-            y.get("defaults").unwrap().as_map().unwrap().get("style"),
-            Some(&"terse".to_string())
-        );
-        assert_eq!(
-            y.get("items").unwrap().as_str_list().unwrap(),
-            vec!["a.md", "b.md"]
-        );
+        assert_eq!(map.get("count").map(String::as_str), Some("5"));
     }
 
     #[test]
     fn parses_folded_scalar() {
-        let text = "system: >\n  one two\n  three\n";
-        let y = parse(text).unwrap();
-        assert_eq!(y.get("system").unwrap().as_str(), Some("one two three"));
+        let map = parse("system: >\n  one two\n  three\n").unwrap();
+        assert_eq!(map.get("system").map(String::as_str), Some("one two three"));
     }
 
     #[test]
-    fn parses_indented_multiline_plain_scalar() {
-        let text = "name: x\ndescription:\n  first line\n  second line\nother: y\n";
-        let y = parse(text).unwrap();
-        assert_eq!(y.get("name").unwrap().as_str(), Some("x"));
+    fn indented_plain_continuation_folds_onto_the_value() {
+        let map = parse("name: x\ndescription:\n  first line\n  second line\nother: y\n").unwrap();
         assert_eq!(
-            y.get("description").unwrap().as_str(),
+            map.get("description").map(String::as_str),
             Some("first line second line")
         );
-        assert_eq!(y.get("other").unwrap().as_str(), Some("y"));
-    }
-
-    #[test]
-    fn plain_scalar_continues_on_indented_lines() {
-        // the shape a hand-written SKILL.md often uses: `description: a`
-        // followed by indented continuation lines. Without folding these
-        // lines the whole frontmatter fails and the trigger is lost.
-        let text =
-            "name: pdf\ndescription: Extract tables\n  from scanned PDFs\n  and CSV exports\n";
-        let y = parse(text).unwrap();
+        assert_eq!(map.get("other").map(String::as_str), Some("y"));
+        // a non-empty scalar keeps its indented continuation lines
+        let map = parse("description: Extract tables\n  from scanned PDFs\n  and CSV\n").unwrap();
         assert_eq!(
-            y.get("description").unwrap().as_str(),
-            Some("Extract tables from scanned PDFs and CSV exports")
-        );
-        assert_eq!(y.get("name").unwrap().as_str(), Some("pdf"));
-    }
-
-    #[test]
-    fn nested_map_after_multiline_scalar_still_parses() {
-        let text = "description:\n  text line\nmetadata:\n  author: vercel\n  version: '1.0.0'\n";
-        let y = parse(text).unwrap();
-        assert_eq!(y.get("description").unwrap().as_str(), Some("text line"));
-        assert_eq!(
-            y.get("metadata").unwrap().as_map().unwrap().get("author"),
-            Some(&"vercel".to_string())
+            map.get("description").map(String::as_str),
+            Some("Extract tables from scanned PDFs and CSV")
         );
     }
 
     #[test]
-    fn parses_int_and_trailing_comment() {
-        let y = parse("count: 5  # five\n").unwrap();
-        assert_eq!(*y.get("count").unwrap(), Yaml::Int(5));
-    }
-
-    #[test]
-    fn frontmatter_tolerates_crlf_files() {
-        let text = "---\r\nmodel: m1\r\n---\r\nbody here";
-        let (fm, after) = split_frontmatter(text).expect("crlf frontmatter splits");
-        assert!(fm.contains("model"));
-        let y = parse(fm).unwrap();
-        assert_eq!(y.get("model").and_then(|v| v.as_str()), Some("m1"));
-        assert_eq!(after.trim_start_matches('\n'), "body here");
-    }
-
-    #[test]
-    fn multibyte_keys_do_not_panic() {
-        let y = parse("描述: 你好\nother: x\n").unwrap();
-        assert_eq!(y.get("描述").unwrap().as_str(), Some("你好"));
-        assert_eq!(y.get("other").unwrap().as_str(), Some("x"));
-    }
-
-    #[test]
-    fn same_indent_sequences_parse_under_their_key() {
-        // the common YAML style: list items at the parent key's own indent
-        let y = parse("name: x\ntools:\n- read\n- write\nafter: y\n").unwrap();
+    fn nested_maps_are_skipped_without_losing_flat_keys() {
+        let map = parse("name: x\nmetadata:\n  author: vercel\n  version: '1.0.0'\n").unwrap();
+        assert_eq!(map.get("name").map(String::as_str), Some("x"));
         assert_eq!(
-            y.get("tools").unwrap().as_str_list(),
-            Some(vec!["read".to_string(), "write".to_string()])
+            map.get("metadata").map(String::as_str),
+            Some(""),
+            "a nested map flattens to an empty value"
         );
-        assert_eq!(y.get("after").and_then(|v| v.as_str()), Some("y"));
-        // one level deeper keeps working
-        let y = parse("tools:\n  - read\n  - write\n").unwrap();
-        assert_eq!(y.get("tools").unwrap().as_str_list().unwrap().len(), 2);
     }
 
     #[test]
-    fn unparsable_leftover_lines_error_instead_of_vanishing() {
-        // a stray list item after a map makes the parser stop early; the
-        // remainder must surface as an error, not vanish
-        let err = parse("a: 1\nb:\n  c: 2\n- orphan\n").unwrap_err();
-        assert!(err.0.contains("unparsed lines remain"), "{}", err.0);
-        // and a malformed line is its own error
+    fn crlf_frontmatter_and_multibyte_keys() {
+        let (fm, after) = split_frontmatter("---\r\nname: m1\r\n---\r\nbody").unwrap();
+        assert!(fm.contains("name"));
+        assert_eq!(after.trim_start_matches('\n'), "body");
+        let map = parse("描述: 你好\nother: x\n").unwrap();
+        assert_eq!(map.get("描述").map(String::as_str), Some("你好"));
+        assert_eq!(map.get("other").map(String::as_str), Some("x"));
+    }
+
+    #[test]
+    fn a_line_without_a_key_errors_instead_of_vanishing() {
+        assert!(parse("a: 1\njust text without a colon\n").is_err());
         assert!(parse("a: 1\n<garbage>\n").is_err());
+    }
+
+    #[test]
+    fn a_trailing_comment_is_stripped_outside_quotes() {
+        let map = parse("count: 5  # five\n").unwrap();
+        assert_eq!(map.get("count").map(String::as_str), Some("5"));
     }
 }

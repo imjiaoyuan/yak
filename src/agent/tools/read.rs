@@ -1,16 +1,8 @@
 use super::*;
 
-/// Max files one `read` call may batch.
-pub(super) const READ_MAX_FILES: usize = 5;
-
-/// The read tool serves one window at a time; bash/grep keep MAX_LINES.
-/// the reference's value: 2000 lines under the same 50KB cap — one call covers a whole
-/// typical source file, so the model spends fewer round trips paging.
-pub(super) const READ_MAX_LINES: usize = 2000;
-
 /// Images the read tool will base64 into the model request; beyond this we
 /// have no downscaler, so we refuse rather than balloon the context.
-pub(super) const IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct ReadTool;
 
@@ -22,83 +14,26 @@ impl Tool for ReadTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "Read file contents: `path` for one file or `paths` (up to 5) for several. `offset`/`limit` \
-         slice lines; images become vision input. Other binary formats are refused with a hint at \
-         local tooling (pdftotext, samtools, ...)."
+        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). \
+         Images are sent as attachments. For text files, output is truncated to 2000 lines or \
+         50KB (whichever is hit first). Use offset/limit for large files. When you need the full \
+         file, continue with offset until complete."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "One file path"},
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Up to 5 paths, one call"},
-                "offset": {"type": "integer", "description": "1-based start line"},
-                "limit": {"type": "integer", "description": "Max lines per file"},
+                "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+                "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed)"},
+                "limit": {"type": "integer", "description": "Maximum number of lines to read"}
             },
-            "required": []
+            "required": ["path"]
         })
     }
     fn preview(&self, args: &Value) -> String {
-        if let Some(list) = args["paths"].as_array().filter(|a| !a.is_empty()) {
-            let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
-            return names.join(", ");
-        }
         args["path"].as_str().unwrap_or("?").to_string()
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        let multi: Vec<String> = match args["paths"].as_array() {
-            Some(list) => list
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-            None => Vec::new(),
-        };
-        if multi.is_empty() {
-            if args["path"].as_str().is_none() {
-                return ToolOutput::err("read: pass `path` (one file) or `paths` (several)");
-            }
-            return self.read_one(args, cwd);
-        }
-        if multi.len() > READ_MAX_FILES {
-            return ToolOutput::err(format!(
-                "read: at most {READ_MAX_FILES} files per call, got {} — split the work",
-                multi.len()
-            ));
-        }
-        // one slice for every file: offset/limit apply uniformly
-        let mut combined = String::new();
-        let mut attachments = Vec::new();
-        let mut ok = 0usize;
-        for p in &multi {
-            let mut one = json!({"path": p});
-            if let Some(o) = args.get("offset") {
-                one["offset"] = o.clone();
-            }
-            if let Some(l) = args.get("limit") {
-                one["limit"] = l.clone();
-            }
-            let out = self.read_one(&one, cwd);
-            combined.push_str(&out.content);
-            combined.push('\n');
-            let failed = out.is_error();
-            attachments.extend(out.attachments);
-            if !failed {
-                ok += 1;
-            }
-        }
-        if ok == 0 {
-            ToolOutput::err(combined.trim_end().to_string())
-        } else {
-            let mut out = ToolOutput::ok(combined.trim_end().to_string());
-            out.attachments = attachments;
-            out
-        }
-    }
-}
-
-impl ReadTool {
-    /// The single-file body both call shapes share.
-    fn read_one(&self, args: &Value, cwd: &Path) -> ToolOutput {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
         if let Some(mime) = image_mime(&path) {
             let bytes = match std::fs::read(&path) {
@@ -136,8 +71,8 @@ impl ReadTool {
         let limit = args["limit"]
             .as_u64()
             .map(|l| l as usize)
-            .unwrap_or(READ_MAX_LINES)
-            .clamp(1, READ_MAX_LINES);
+            .unwrap_or(MAX_LINES)
+            .clamp(1, MAX_LINES);
         let w = match crate::read::window(&path, offset, limit) {
             Ok(w) => w,
             Err(crate::read::Error::Io(e)) => {
@@ -164,7 +99,7 @@ impl ReadTool {
         };
         if w.lines.is_empty() {
             return match w.total {
-                crate::read::LineCount::Exact(0) => ToolOutput::ok("(empty file)"),
+                crate::read::LineCount::Exact(0) => ToolOutput::ok(""),
                 crate::read::LineCount::Exact(n) => ToolOutput::err(format!(
                     "offset {offset} is past the end of the file ({n} lines)"
                 )),
@@ -173,17 +108,11 @@ impl ReadTool {
                 }
             };
         }
-        let numbered: Vec<String> = w
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(i, l)| format!("{}: {}", w.start + i, l))
-            .collect();
         // assemble under the byte cap at line boundaries, so the note can
         // point at the first line the model has not actually seen
         let mut out = String::new();
         let mut kept = 0usize;
-        for line in &numbered {
+        for line in &w.lines {
             if out.len() + line.len() + 1 > MAX_BYTES {
                 break;
             }
@@ -193,32 +122,30 @@ impl ReadTool {
             out.push_str(line);
             kept += 1;
         }
-        let byte_cut = kept < numbered.len();
-        let last = w.start + kept - 1;
+        let byte_cut = kept < w.lines.len();
+        let last = w.start + kept.saturating_sub(1);
         if !w.eof || byte_cut {
             // one note for both stop reasons: lines remain unseen either way,
             // and the model needs the resume offset in both
-            out.push_str(&format!(
-                "\n[Showing lines {}-{} of {}. Use offset={} to continue.]\n",
-                w.start,
-                last,
-                w.total.describe(),
-                last + 1
-            ));
+            if byte_cut {
+                out.push_str(&format!(
+                    "\n\n[Showing lines {}-{} of {} (50KB limit). Use offset={} to continue.]",
+                    w.start,
+                    last,
+                    w.total.describe(),
+                    last + 1
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+                    w.start,
+                    last,
+                    w.total.describe(),
+                    last + 1
+                ));
+            }
         }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let header = format!(
-            "[{} · text · {} lines · {} · showing {}-{}]\n",
-            name,
-            w.total.describe(),
-            crate::core::text::human_bytes(w.size),
-            w.start,
-            last
-        );
-        ToolOutput::ok(format!("{header}{out}"))
+        ToolOutput::ok(out)
     }
 }
 

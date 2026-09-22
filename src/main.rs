@@ -4,7 +4,6 @@ mod agent;
 mod b64;
 mod commands;
 mod core;
-mod gitignore;
 mod jsonfmt;
 mod platform;
 mod providers;

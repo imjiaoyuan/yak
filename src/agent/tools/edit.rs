@@ -11,22 +11,22 @@ impl Tool for EditTool {
         Tier::Write
     }
     fn description(&self) -> &str {
-        "Make targeted text edits. Each `oldText` must match exactly once in the original (a \
-         whitespace-flexible pass rescues a miss); all edits match the original, not one another."
+        "Edit a single file using exact text replacement. Every edits[].oldText must match a \
+         unique, non-overlapping region of the original file."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "then_run": {"type": "string", "description": THEN_RUN_DESCRIPTION},
+                "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
                 "edits": {
                     "type": "array",
+                    "description": "One or more targeted replacements, matched against the original file, not incrementally.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "oldText": {"type": "string"},
-                            "newText": {"type": "string"}
+                            "oldText": {"type": "string", "description": "Exact text for one targeted replacement; must be unique in the file."},
+                            "newText": {"type": "string", "description": "Replacement text for this targeted edit."}
                         },
                         "required": ["oldText", "newText"]
                     }
@@ -107,101 +107,28 @@ impl Tool for EditTool {
     }
 }
 
-/// Locate one edit's oldText in the original: an exact match first, then a
-/// whitespace-flexible pass (the reference's fuzzy matching — per-line trailing
-/// whitespace dropped, CRLF treated as LF, lookalike punctuation folded).
-/// Unique matches only; the errors tell the model how to self-correct.
+/// Locate one edit's oldText in the original: exact, unique match only (the reference's
+/// rule). The errors tell the model how to self-correct.
 pub(super) fn locate_edit(
     original: &str,
     old: &str,
     path: &Path,
 ) -> Result<(usize, usize), String> {
-    if let Some(i) = original.find(old) {
-        if original[i + old.len()..].contains(old) {
-            return Err(format!(
-                "oldText matches more than once in {} (include surrounding lines to disambiguate):\n{old}",
-                path.display()
-            ));
+    match original.find(old) {
+        Some(i) => {
+            if original[i + old.len()..].contains(old) {
+                return Err(format!(
+                    "oldText matches more than once in {} (include surrounding lines to disambiguate):\n{old}",
+                    path.display()
+                ));
+            }
+            Ok((i, i + old.len()))
         }
-        return Ok((i, i + old.len()));
-    }
-    let spans = fuzzy_spans(original, old);
-    match spans.len() {
-        1 => Ok(spans[0]),
-        0 => Err(format!(
+        None => Err(format!(
             "oldText not found in {} (it must match the file exactly, including whitespace and newlines):\n{old}",
             path.display()
         )),
-        n => Err(format!(
-            "oldText matches {n} times in {} after whitespace-flexible matching (include surrounding lines to disambiguate):\n{old}",
-            path.display()
-        )),
     }
-}
-
-/// Fold the lookalike punctuation models routinely mistype onto ASCII.
-pub(super) fn fuzzy_char(ch: char) -> char {
-    match ch {
-        '\u{2018}' | '\u{2019}' => '\'',
-        '\u{201C}' | '\u{201D}' => '"',
-        '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
-        '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{3000}' => ' ',
-        other => other,
-    }
-}
-
-/// A whitespace-flexible view of a text for edit matching: per-line trailing
-/// whitespace dropped, `\r` dropped, lookalikes folded. Returns the folded
-/// text plus, per byte of it, the original byte range that byte's char came
-/// from — so a match maps back onto the original span exactly: a match
-/// ending on a normal char stops at that char's original end, while one
-/// ending on a line joiner consumes the original line break and any dropped
-/// trailing whitespace before it.
-pub(super) fn fuzzy_text(orig: &str) -> (String, Vec<(usize, usize)>) {
-    let mut text = String::with_capacity(orig.len());
-    let mut map: Vec<(usize, usize)> = Vec::with_capacity(orig.len() + 1);
-    let mut off = 0usize;
-    // original offset just past the previous line's kept content
-    let mut prev_kept_end = 0usize;
-    for (li, line) in orig.split('\n').enumerate() {
-        let kept = &line[..line.trim_end().len()];
-        if li > 0 {
-            // the joiner covers the previous line's dropped tail plus '\n'
-            text.push('\n');
-            for _ in 0..'\n'.len_utf8() {
-                map.push((prev_kept_end, off));
-            }
-        }
-        for (i, ch) in kept.char_indices() {
-            let c = fuzzy_char(ch);
-            let s = off + i;
-            text.push(c);
-            for _ in 0..c.len_utf8() {
-                map.push((s, s + ch.len_utf8()));
-            }
-        }
-        prev_kept_end = off + kept.len();
-        off += line.len() + 1; // past this line and its '\n'
-    }
-    (text, map)
-}
-
-/// All original-coordinate spans where `old` matches after normalization.
-pub(super) fn fuzzy_spans(orig: &str, old: &str) -> Vec<(usize, usize)> {
-    let (hay, map) = fuzzy_text(orig);
-    let (needle, _) = fuzzy_text(old);
-    let mut spans = Vec::new();
-    if needle.is_empty() {
-        return spans;
-    }
-    let mut from = 0usize;
-    while let Some(pos) = hay[from..].find(&needle) {
-        let s = from + pos;
-        let e = s + needle.len();
-        spans.push((map[s].0, map[e - 1].1));
-        from = e;
-    }
-    spans
 }
 
 /// A unified-diff style preview of exact-match edits: one linear walk over

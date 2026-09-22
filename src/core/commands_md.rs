@@ -19,9 +19,7 @@ pub fn parse(text: &str) -> CommandMd {
     let mut system = None;
     let mut body = text.trim().to_string();
     if let Some((fm, after)) = crate::yaml::split_frontmatter(text) {
-        if let Ok(y) = crate::yaml::parse(fm)
-            && let Some(map) = y.as_map()
-        {
+        if let Ok(map) = crate::yaml::parse(fm) {
             system = map.get("system").filter(|s| !s.is_empty()).cloned();
         }
         body = after.trim_start_matches('\n').trim().to_string();

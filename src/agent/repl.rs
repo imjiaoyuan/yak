@@ -1,7 +1,6 @@
 //! The interactive REPL: prompt loop, slash commands, banners, model
 //! switching, session resume and shell passthrough.
 
-use crate::agent::approval;
 use crate::agent::session::Session;
 use std::io::{IsTerminal, Write};
 
@@ -297,7 +296,7 @@ fn repl_help(session: &Session, skills: &[crate::agent::skills::SkillDef]) -> St
         p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /yolo /reload /exit · !cmd runs shell · /help lists all");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, skills, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", session.model.qualified_id()),
@@ -365,7 +364,6 @@ fn name_row(label: &str, pad: &str, names: &[String]) -> String {
 const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/clear",
-    "/yolo",
     "/status",
     "/exit",
     "/model",
@@ -493,7 +491,7 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
         .unwrap_or_default();
     let p = crate::theme::err();
     eprintln!(
-        "{p0}llm agent{r} {d}v{v} ·{r} {b}{m}{t}{r} {d}· {a}{r}",
+        "{p0}llm agent{r} {d}v{v} ·{r} {b}{m}{t}{r}",
         p0 = p.bold,
         r = p.reset,
         d = p.dim,
@@ -501,7 +499,6 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
         v = crate::VERSION,
         m = session.model.qualified_id(),
         t = thinking,
-        a = session.approval.mode.label()
     );
     eprint!("{}{}{}", p.dim, info_rows(session, skills, " "), p.reset);
 }
@@ -771,7 +768,6 @@ fn repl_command(
                 "/export [PATH] write this conversation to markdown",
                 "/clear         fresh session",
                 "/status        usage, context and plugins",
-                "/yolo          toggle auto-approval",
                 "/reload        reload skills/extensions",
                 "/exit          quit",
                 "paste an image with ctrl+v, or just type its path",
@@ -889,20 +885,6 @@ fn repl_command(
                 );
             }
         }
-        "/yolo" => {
-            // a toggle: the way back to ask mode is the same command
-            let mode = match session.approval.mode {
-                approval::Mode::Yolo => approval::Mode::AlwaysAsk,
-                approval::Mode::AlwaysAsk => approval::Mode::Yolo,
-            };
-            session.approval.mode = mode;
-            let note = match mode {
-                approval::Mode::Yolo => " · everything auto-approved",
-                approval::Mode::AlwaysAsk => " · only in-directory reads auto",
-            };
-            let p = crate::theme::err();
-            eprintln!("{}approval → {}{note}{}", p.dim, mode.label(), p.reset);
-        }
         "/clear" => {
             session.clear();
             eprint!("\x1b[2J\x1b[H");
@@ -958,11 +940,10 @@ fn repl_command(
                 r = p.reset
             );
             eprintln!(
-                "  {d}tokens  {r}cumulative input {} · output {}{} · approval {} · tools {} · thinking {}",
+                "  {d}tokens  {r}cumulative input {} · output {}{} · tools {} · thinking {}",
                 humanize_tokens(session.usage.input),
                 humanize_tokens(session.usage.output),
                 cache_note(session.usage, session.last_usage),
-                session.approval.mode.label(),
                 session.tools.len(),
                 session.thinking.as_deref().unwrap_or("(model default)"),
                 d = p.dim,
@@ -1240,8 +1221,8 @@ mod tests {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
-            "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "yolo",
-            "tree", "export", "help", "exit",
+            "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "tree",
+            "export", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }

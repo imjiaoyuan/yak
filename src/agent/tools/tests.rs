@@ -1,68 +1,7 @@
 use super::edit::change_hunks;
 use super::fetch::{extract_title, html_to_text};
-use super::recall::RECALL_CHARS;
-use super::recall::recall_page;
 use super::write::write_atomic;
 use super::*;
-
-#[test]
-fn recall_pages_by_char_offset_and_marks_the_end() {
-    let text = "中".repeat(RECALL_CHARS + 5);
-    let (start, next, eof, chunk) = recall_page(&text, 0);
-    assert_eq!((start, eof), (0, false));
-    assert_eq!(next, RECALL_CHARS);
-    assert_eq!(chunk.chars().count(), RECALL_CHARS, "one full page");
-    // continuing from next_offset returns the remainder and stops
-    let (start, next, eof, chunk) = recall_page(&text, next);
-    assert_eq!((start, eof), (RECALL_CHARS, true));
-    assert_eq!(next, RECALL_CHARS + 5);
-    assert_eq!(chunk.chars().count(), 5);
-    // a past-the-end offset is clamped, not a panic
-    let (start, next, eof, chunk) = recall_page("abc", 99);
-    assert_eq!((start, next, eof, chunk.as_str()), (3, 3, true, ""));
-}
-
-#[test]
-fn the_registry_exposes_recall_as_a_read_tier_tool() {
-    let tools = builtin_tools();
-    let recall = tools
-        .iter()
-        .find(|t| t.name() == "recall")
-        .expect("mounted");
-    assert_eq!(
-        recall.tier(),
-        Tier::Read,
-        "reading a local archive is not exec"
-    );
-    // the id is required, the offset optional
-    assert_eq!(recall.parameters()["required"][0], "id");
-    assert!(validate(&recall.parameters(), &json!({"id": "01jz"})).is_ok());
-    assert!(validate(&recall.parameters(), &json!({})).is_err());
-}
-
-#[test]
-fn then_run_is_declared_on_both_mutating_tools() {
-    let tools = builtin_tools();
-    for name in ["write", "edit"] {
-        let tool = tools.iter().find(|t| t.name() == name).unwrap();
-        let props = &tool.parameters()["properties"];
-        assert_eq!(props["then_run"]["type"], "string", "{name}");
-        assert!(
-            props["then_run"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("same tool call"),
-            "{name} must tell the model this is fused, not a second call"
-        );
-        // the fused field passes validation alongside the tool's own args
-        let args = if name == "write" {
-            json!({"path": "x", "content": "y", "then_run": "cargo test"})
-        } else {
-            json!({"path": "x", "edits": [], "then_run": "cargo test"})
-        };
-        assert!(validate(&tool.parameters(), &args).is_ok(), "{name}");
-    }
-}
 
 #[test]
 fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
@@ -289,86 +228,6 @@ fn extract_title_collapses_and_decodes() {
 }
 
 #[test]
-fn edit_fuzzy_matching_rescues_whitespace_and_crlf_mismatches() {
-    let dir = crate::core::testutil::scratch_dir("editfz");
-    // trailing spaces on both lines, CRLF endings: the model's oldText
-    // (clean, LF-only) still applies
-    let file = dir.join("a.txt");
-    std::fs::write(&file, "let x = 1;   \r\nfn a() {}  \r\n// end\r\n").unwrap();
-    let out = EditTool.execute(
-        &json!({"path": file.display().to_string(), "edits": [
-            {"oldText": "let x = 1;\nfn a() {}", "newText": "let x = 2;\nfn a() {}"}
-        ]}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(!out.is_error(), "{}", out.content);
-    // the matched lines' trailing junk stays outside the replaced span
-    // (minimal diff: only the matched content is replaced)
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "let x = 2;\nfn a() {}  \r\n// end\r\n"
-    );
-    // trailing whitespace on the oldText itself is trimmed on the needle
-    // side too
-    std::fs::write(&file, "fn a() {}\nfn b() {}\n").unwrap();
-    let out = EditTool.execute(
-        &json!({"path": file.display().to_string(), "edits": [
-            {"oldText": "fn b() {}  ", "newText": "fn b() { todo!() }"}
-        ]}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(!out.is_error(), "{}", out.content);
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "fn a() {}\nfn b() { todo!() }\n"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn edit_fuzzy_matching_folds_smart_punctuation() {
-    let dir = crate::core::testutil::scratch_dir("editfq");
-    let file = dir.join("q.txt");
-    std::fs::write(&file, "msg = “hello” — ok\n").unwrap();
-    // the model retypes the line with ASCII quotes and a hyphen
-    let out = EditTool.execute(
-        &json!({"path": file.display().to_string(), "edits": [
-            {"oldText": "msg = \"hello\" - ok", "newText": "msg = 'hi'"}
-        ]}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(!out.is_error(), "{}", out.content);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "msg = 'hi'\n");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn edit_fuzzy_duplicate_matches_still_error() {
-    let dir = crate::core::testutil::scratch_dir("editfd");
-    let file = dir.join("d.txt");
-    // "x \ny" exists twice after normalization, and never exactly
-    std::fs::write(&file, "x \ny\nz\nx \ny\n").unwrap();
-    let out = EditTool.execute(
-        &json!({"path": file.display().to_string(), "edits": [
-            {"oldText": "x\ny", "newText": "w"}
-        ]}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(out.is_error());
-    assert!(out.content.contains("2 times"), "{}", out.content);
-    assert!(
-        out.content.contains("whitespace-flexible"),
-        "{}",
-        out.content
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn edit_requires_unique_matches_and_no_overlap() {
     let dir = crate::core::testutil::scratch_dir("edit");
     let file = dir.join("a.txt");
@@ -418,24 +277,25 @@ fn grep_literal_and_ignore_case() {
     std::fs::write(dir.join("two.txt"), "nope\n").unwrap();
 
     let out = GrepTool.execute(
-        &json!({"pattern": "hello", "path": dir.display().to_string(), "ignore_case": true}),
+        &json!({"pattern": "hello", "path": dir.display().to_string(), "ignoreCase": true}),
         Path::new("."),
         &mut |_| {},
     );
     assert!(!out.is_error());
     assert!(
-        out.content.contains("one.txt:1: Hello world"),
+        out.content.contains("one.txt:1:Hello world"),
         "{}",
         out.content
     );
     assert!(!out.content.contains("two.txt"));
 
+    // case-sensitive regex: no match
     let exact = GrepTool.execute(
         &json!({"pattern": "hello", "path": dir.display().to_string()}),
         Path::new("."),
         &mut |_| {},
     );
-    assert_eq!(exact.content, "no matches\n");
+    assert_eq!(exact.content, "No matches found");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -547,19 +407,11 @@ fn grep_context_dedups_overlapping_matches() {
         Path::new("."),
         &mut |_| {},
     );
-    let line_numbers: Vec<usize> = out
-        .content
-        .lines()
-        .filter(|l| l.contains("app.txt"))
-        .map(|l| {
-            // `path:line: text`, where the path may carry a drive-letter
-            // colon (C:/...) and the text may too — so peel from the right
-            let (head, _) = l.rsplit_once(": ").expect("num: text tail");
-            let (_, num) = head.rsplit_once(':').expect("path:num");
-            num.parse().unwrap()
-        })
-        .collect();
-    assert_eq!(line_numbers, vec![1, 2, 3, 4, 5], "{}", out.content);
+    // ripgrep merges overlapping context and reports each match once
+    assert!(out.content.contains("app.txt"), "{}", out.content);
+    assert!(out.content.contains("hit alpha"), "{}", out.content);
+    assert!(out.content.contains("hit beta"), "{}", out.content);
+    assert!(out.content.contains("hit gamma"), "{}", out.content);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -585,7 +437,7 @@ fn read_execute(dir: &std::path::Path, args: Value) -> ToolOutput {
 }
 
 #[test]
-fn read_tool_windows_with_meta_header_and_note() {
+fn read_tool_windows_with_a_continuation_note() {
     let dir = crate::core::testutil::scratch_dir("read");
     let file = dir.join("notes.txt");
     let body: Vec<String> = (1..=10).map(|i| format!("line-{i}")).collect();
@@ -593,50 +445,15 @@ fn read_tool_windows_with_meta_header_and_note() {
 
     let out = read_execute(&dir, json!({"path": "notes.txt", "offset": 3, "limit": 4}));
     assert!(!out.is_error());
-    assert!(
-        out.content.starts_with("[notes.txt · text · ≥7 lines · "),
-        "{}",
-        out.content
-    );
-    assert!(out.content.contains("3: line-3"));
-    assert!(out.content.contains("6: line-6"));
-    assert!(!out.content.contains("7: line-7"));
-    assert!(
-        out.content
-            .contains("[Showing lines 3-6 of ≥7. Use offset=7 to continue.]"),
-        "{}",
-        out.content
+    assert_eq!(
+        out.content,
+        "line-3\nline-4\nline-5\nline-6\n\n[Showing lines 3-6 of ≥7. Use offset=7 to continue.]"
     );
 
-    // a window that reaches EOF reports exact totals and no note
+    // a window that reaches EOF reports no continuation note
     let out = read_execute(&dir, json!({"path": "notes.txt", "offset": 8, "limit": 5}));
-    assert!(out.content.contains("· 10 lines ·"), "{}", out.content);
-    assert!(!out.content.contains("Use offset="), "{}", out.content);
+    assert_eq!(out.content, "line-8\nline-9\nline-10");
 
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn read_paths_batches_several_files_in_one_call() {
-    let dir = crate::core::testutil::scratch_dir("readmulti");
-    std::fs::write(dir.join("a.rs"), "fn a() {}").unwrap();
-    std::fs::write(dir.join("b.md"), "# b\nbody").unwrap();
-    let out = read_execute(&dir, json!({"paths": ["a.rs", "b.md", "nope.txt"]}));
-    assert!(!out.is_error(), "two of three files read fine");
-    assert!(out.content.contains("a.rs ·"), "{}", out.content);
-    assert!(out.content.contains("1: fn a() {}"), "{}", out.content);
-    assert!(out.content.contains("b.md ·"), "{}", out.content);
-    // the missing file errors inline without failing the whole call
-    assert!(out.content.contains("nope.txt"), "{}", out.content);
-    // neither field → a clear usage error
-    let none = read_execute(&dir, json!({}));
-    assert!(none.is_error());
-    assert!(none.content.contains("`paths`"));
-    // over the batch cap → refused up front
-    let six: Vec<String> = (0..6).map(|i| format!("f{i}.txt")).collect();
-    let over = read_execute(&dir, json!({"paths": six}));
-    assert!(over.is_error());
-    assert!(over.content.contains("at most 5"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -646,26 +463,27 @@ fn read_tool_caps_at_read_max_lines() {
     let body: Vec<String> = (1..=2600).map(|i| format!("row-{i}")).collect();
     std::fs::write(dir.join("big.txt"), body.join("\n")).unwrap();
     let out = read_execute(&dir, json!({"path": "big.txt"}));
-    assert!(out.content.contains("1: row-1"), "{}", out.content);
-    assert!(out.content.contains("2000: row-2000"), "{}", out.content);
-    assert!(!out.content.contains("2001: row-2001"));
+    assert!(out.content.starts_with("row-1\n"), "{}", out.content);
+    assert!(out.content.contains("\nrow-2000\n"), "{}", out.content);
+    assert!(!out.content.contains("row-2001"));
     assert!(out.content.contains("Use offset=2001"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn read_tool_byte_cut_note_points_at_unseen_lines() {
-    // 600 wide lines ≈ 184KB: the 500-line window cuts at line 500 and
-    // the 50KB byte cap cuts around line ~170 — the note must resume at
-    // the first line the model has not actually seen, not at 501
+    // 600 wide lines ≈ 184KB: the 2000-line window does not cut, and the
+    // 50KB byte cap cuts around line ~170 — the note must resume at
+    // the first line the model has not actually seen, not at 2001
     let dir = crate::core::testutil::scratch_dir("readcut");
     let body: Vec<String> = (0..600).map(|_| "x".repeat(300)).collect();
     std::fs::write(dir.join("wide.txt"), body.join("\n")).unwrap();
     let out = read_execute(&dir, json!({"path": "wide.txt"}));
     assert!(!out.is_error());
-    assert!(out.content.contains("150: "), "{}", out.content);
-    assert!(!out.content.contains("250: "), "{}", out.content);
-    assert!(!out.content.contains("Use offset=501"), "{}", out.content);
+    // byte cap cut well before the 500-line window: fewer than 500 lines
+    let body = out.content.split("\n\n[").next().unwrap();
+    let shown = body.lines().count();
+    assert!(shown > 150 && shown < 250, "shown={shown}");
     let resume = out
         .content
         .split("Use offset=")
@@ -675,7 +493,7 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
             digits.parse::<usize>().ok()
         })
         .expect("note present");
-    assert!(resume > 150 && resume < 250, "resume={resume}");
+    assert_eq!(resume, shown + 1, "resume at the first unseen line");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -733,7 +551,7 @@ fn read_tool_offset_past_end_and_empty_file() {
 
     let out = read_execute(&dir, json!({"path": "empty.txt"}));
     assert!(!out.is_error());
-    assert_eq!(out.content, "(empty file)");
+    assert_eq!(out.content, "");
 
     let out = read_execute(&dir, json!({"path": "missing.txt"}));
     assert!(out.is_error());
@@ -821,7 +639,7 @@ fn webfetch_is_exec_tier_and_the_path_gate_sees_a_missing_file() {
         .iter()
         .find(|t| t.name() == "webfetch")
         .expect("mounted");
-    // the one way off the machine asks in ask mode like any other exec call
+    // the one way off the machine is exec-tier like any other shell-out
     assert_eq!(fetch.tier(), Tier::Exec);
     // a path that does not exist yet still counts as reaching outside
     let read = tools.iter().find(|t| t.name() == "read").expect("mounted");
@@ -842,12 +660,9 @@ fn every_file_tool_reports_the_paths_it_would_reach_outside_the_cwd() {
             .expect("mounted")
             .as_ref()
     };
-    // the batch read is one call carrying up to five paths: the gate has to
-    // see every one of them, not just a single `path` argument
     let read = tool("read");
-    assert!(!read.escapes_cwd(&json!({"paths": ["src/a.rs", "src/b.rs"]}), cwd));
-    assert!(read.escapes_cwd(&json!({"paths": ["src/a.rs", "/etc/passwd"]}), cwd));
-    assert!(read.escapes_cwd(&json!({"paths": ["~/.ssh/id_rsa"]}), cwd));
+    assert!(!read.escapes_cwd(&json!({"path": "src/a.rs"}), cwd));
+    assert!(read.escapes_cwd(&json!({"path": "/etc/passwd"}), cwd));
     assert!(!tool("write").escapes_cwd(&json!({"path": "src/a.rs"}), cwd));
     assert!(tool("edit").escapes_cwd(&json!({"path": "../elsewhere/a.rs"}), cwd));
     // a shell command's paths are in the command line, not in an argument

@@ -10,11 +10,9 @@ use crate::providers::CacheTtl;
 /// next to their consumers. CLI flags override whatever is set here.
 #[derive(Default)]
 pub struct AgentSettings {
-    pub approval_mode: Option<String>,
-    /// the first occupancy that triggers auto-compaction, in tokens; the ladder
-    /// climbs from here (doubling after each compaction) and is capped by the
-    /// model's known window minus the reserve (see
-    /// `compact::effective_trigger`)
+    /// the auto-compaction trigger in tokens, used only when the model's
+    /// context window is unknown (a known window anchors the trigger at
+    /// `window - reserve`, see `compact::effective_trigger`)
     pub compact_at_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     /// ceiling on one serialized request body, in bytes; a gateway in front of
@@ -39,16 +37,14 @@ impl AgentSettings {
         self.cache_ttl.as_deref().and_then(CacheTtl::parse)
     }
 
-    /// Compaction limits for a run. The trigger is `compact_at_tokens` (64k by
-    /// default): the first rung of a ladder that doubles after each compaction.
-    /// When the resolved model records a `context_window`, the loop anchors the
-    /// rung to `window - reserve` (the reference's ceiling) — see
-    /// `compact::effective_trigger`. `keep_recent_tokens` is the tail each
-    /// compaction keeps, clamped to half the trigger by `effective_keep_recent`.
+    /// Compaction limits for a run. `compact_at_tokens` is the fallback
+    /// trigger for an unknown window (64k by default); a known window anchors
+    /// the trigger at `window - reserve` instead. `keep_recent_tokens` is the
+    /// tail each compaction keeps (20k by default, the reference's value).
     pub fn compact_config(&self) -> CompactConfig {
         CompactConfig {
             trigger_tokens: self.compact_at_tokens.unwrap_or(64_000),
-            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(32_000),
+            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(20_000),
         }
     }
 }
@@ -93,10 +89,6 @@ pub fn parse(raw: &str) -> AgentSettings {
     let Some(agent) = value.get("agent") else {
         return s;
     };
-    s.approval_mode = agent
-        .get("approval_mode")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
     s.compact_at_tokens = agent.get("compact_at_tokens").and_then(|v| v.as_u64());
     s.keep_recent_tokens = agent.get("keep_recent_tokens").and_then(|v| v.as_u64());
     s.max_request_bytes = agent
@@ -171,7 +163,6 @@ mod agent_settings_tests {
     }
   },
   "agent": {
-    "approval_mode": "yolo",
     "compact_at_tokens": 250000,
     "keep_recent_tokens": 100,
     "disabled_skills": ["old-thing"],
@@ -179,7 +170,6 @@ mod agent_settings_tests {
   }
 }"#;
         let s = parse(raw);
-        assert_eq!(s.approval_mode.as_deref(), Some("yolo"));
         assert_eq!(s.compact_at_tokens, Some(250_000));
         assert_eq!(s.keep_recent_tokens, Some(100));
         assert_eq!(

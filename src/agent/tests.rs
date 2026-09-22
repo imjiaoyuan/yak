@@ -33,110 +33,6 @@ fn compaction_shifts_the_seed_boundary() {
     assert_eq!(advance_seed_boundary(0, 3), 1);
 }
 
-/// A throwaway cwd for the fusion tests (they never touch the repo).
-fn fuse_dir() -> std::path::PathBuf {
-    let dir = crate::core::testutil::scratch_dir("fuse");
-    std::fs::write(dir.join("x.txt"), "hello\n").unwrap();
-    dir
-}
-
-fn edit_call(then_run: &str) -> ToolCall {
-    ToolCall {
-        id: "1".into(),
-        name: "edit".into(),
-        arguments: json!({
-            "path": "x.txt",
-            "edits": [{"oldText": "hello", "newText": "world"}],
-            "then_run": then_run
-        }),
-    }
-}
-
-#[test]
-fn then_run_fuses_the_command_into_the_mutation_result() {
-    let dir = fuse_dir();
-    let tools = tools::builtin_tools();
-    let mut approval = approval::ApprovalConfig::default();
-    let out = fuse_then_run(
-        tools::ToolOutput::ok("applied 1 edit"),
-        &edit_call("cat x.txt"),
-        &tools,
-        &dir,
-        &mut approval,
-        &mut |_| panic!("yolo mode must not prompt for the fused command"),
-    );
-    assert!(!out.is_error(), "the applied edit keeps its status");
-    assert!(out.content.contains("applied 1 edit"));
-    assert!(
-        out.content.contains("[then_run] $ cat x.txt"),
-        "{}",
-        out.content
-    );
-    assert!(
-        out.content.contains("hello"),
-        "the command output rides the same result: {}",
-        out.content
-    );
-}
-
-#[test]
-fn then_run_never_fires_on_a_failed_mutation_or_a_plain_call() {
-    let dir = fuse_dir();
-    let tools = tools::builtin_tools();
-    let mut approval = approval::ApprovalConfig::default();
-    // the edit failed (bad match): running its validation would be noise
-    let out = fuse_then_run(
-        tools::ToolOutput::err("oldText did not match"),
-        &edit_call("touch ran.txt"),
-        &tools,
-        &dir,
-        &mut approval,
-        &mut |_| panic!("a failed mutation must not run its follow-up"),
-    );
-    assert!(out.is_error());
-    assert!(!out.content.contains("[then_run]"), "{}", out.content);
-    assert!(!dir.join("ran.txt").exists(), "nothing ran");
-    // a bash call carrying then_run is not recursively fused
-    let bash = ToolCall {
-        id: "2".into(),
-        name: "bash".into(),
-        arguments: json!({"command": "echo hi", "then_run": "touch ran.txt"}),
-    };
-    let out = fuse_then_run(
-        tools::ToolOutput::ok("hi\n"),
-        &bash,
-        &tools,
-        &dir,
-        &mut approval,
-        &mut |_| panic!("only edit/write fuse"),
-    );
-    assert_eq!(out.content, "hi\n");
-}
-
-#[test]
-fn then_run_still_passes_the_approval_gate() {
-    // ask mode: the fused command is gated like any other exec call, and
-    // a denial is reported without failing the applied edit
-    let dir = fuse_dir();
-    let tools = tools::builtin_tools();
-    let mut approval = approval::ApprovalConfig::default();
-    approval.mode = approval::Mode::AlwaysAsk;
-    let out = fuse_then_run(
-        tools::ToolOutput::ok("applied 1 edit"),
-        &edit_call("touch ran.txt"),
-        &tools,
-        &dir,
-        &mut approval,
-        &mut |_| ApprovalResponse::Deny,
-    );
-    assert!(!out.is_error(), "the edit still landed");
-    assert!(out.content.contains("not run: denied"), "{}", out.content);
-    assert!(
-        !dir.join("ran.txt").exists(),
-        "a denied follow-up did not run"
-    );
-}
-
 #[test]
 fn summarize_shows_ten_lines_plus_count() {
     assert_eq!(summarize("a\nb\nc\nd\ne\n"), "a\nb\nc\nd\ne");
@@ -532,8 +428,8 @@ fn a_refused_prompt_forces_a_compaction_and_the_round_is_retried() {
     assert_eq!(outcome.final_text, "ok");
 }
 
-/// A model whose `context_window` is recorded compacts against the window, not
-/// the raw ladder: a seed over the anchored trigger is summarized *before* the
+/// A model whose `context_window` is recorded compacts against the window: a
+/// seed over the anchored trigger is summarized *before* the
 /// first request of the task goes out, so a resumed over-window thread never
 /// sends its raw history once.
 #[test]
@@ -1072,7 +968,7 @@ fn context_note_reports_the_room_left() {
         "{note}"
     );
     // no task budget: no note at all — how long the conversation may run is
-    // the auto-compaction ladder's business, not a number handed to the model
+    // auto-compaction's business, not a number handed to the model
     opts.token_budget = 0;
     assert!(context_note(&opts, 0).is_none());
 }

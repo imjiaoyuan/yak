@@ -545,8 +545,8 @@ pub struct ResolvedModel {
     /// the model's context window in tokens, when the user has recorded one
     /// (per-model option `context_window`). The agent loop anchors compaction
     /// to it (`compact::effective_trigger`); a gateway that never publishes
-    /// its window stays None and the loop falls back to the ladder plus the
-    /// provider's own overflow refusal.
+    /// its window stays None and the loop falls back to `agent.compact_at_tokens`
+    /// plus the provider's own overflow refusal.
     pub context_window: Option<u64>,
     /// -o key=value options (temperature, max_tokens, top_p, ...)
     pub options: Vec<(String, String)>,

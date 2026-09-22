@@ -288,7 +288,9 @@ pub(crate) fn run_with_progress(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                let timed_out = Instant::now() >= deadline;
+                // 0 means no timeout (bash's default): only enforce the
+                // deadline when the caller asked for one
+                let timed_out = timeout > 0 && Instant::now() >= deadline;
                 if interrupt.load(Ordering::Relaxed) || timed_out {
                     let interrupted = interrupt.load(Ordering::Relaxed);
                     kill_process_tree(child.id());

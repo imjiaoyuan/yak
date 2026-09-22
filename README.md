@@ -65,14 +65,14 @@ another command.
 
 ### Approvals
 
-The agent runs in **yolo mode** by default: it does whatever it needs without asking. What stops it
-is a hard refusal, never a prompt, and it comes in two layers.
+The agent runs automatically: it does whatever it needs without asking. What stops it is a hard
+refusal or a blacklist ask, never a broad ask-first mode, and it comes in two layers.
 
 **Hardcoded — nothing can switch these off.** Privilege escalation (`sudo`, `su`, `doas`),
 filesystem creation and destruction (`mkfs*`, `mkswap`, `fdisk`, `parted`, `dd`, `shred`, `wipefs`),
 machine control (`shutdown`, `reboot`, `poweroff`, `halt`, `init`), a fork bomb, a write into a real
 device node (`> /dev/sda` — `2>/dev/null` is fine), and `rm` aimed at `/` or `~`. These are refused
-in yolo *and* ask mode, and no config or file edit can re-enable them.
+outright, and no config or file edit can re-enable them.
 
 **Your blacklist file — remove or add freely.** `~/.llm/blacklist` for every project, plus
 `.llm/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the
@@ -80,57 +80,39 @@ hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is n
 is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment
 (`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. One line is a
 directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
-for approval in either mode — a file tool's `path`/`paths` argument, or a shell command line naming
-one (`!outside-cwd` switches it off). The file is seeded with the syntax as comments and
-`outside-cwd` active; deleting it just resets it to those rules. It is the single switch for
-out-of-cwd asks in either mode — `!outside-cwd` also releases ask mode's out-of-cwd read rule. It is
-a prompt, not a fence: the
-check is lexical, so a path a shell builds at runtime (`p=/etc/passwd; cat $p`) is not seen, and
-neither is an argument an extension tool names for itself.
+for approval — a file tool's `path` argument, or a shell command line naming one (`!outside-cwd`
+switches it off). The file is seeded with the syntax as comments and `outside-cwd` active; deleting
+it just resets it to those rules. It is a prompt, not a fence: the check is lexical, so a path a
+shell builds at runtime (`p=/etc/passwd; cat $p`) is not seen, and neither is an argument an
+extension tool names for itself.
 
-Want to approve things yourself? Use `--approval-mode ask` for one run, or put
-`"approval_mode": "always-ask"` in `config.json` to make it the default. In ask mode:
-
-- **Free:** reading files in your project, and read-only commands like `ls`, `git status`, `rg`,
-  `cargo test`.
-- **Asks first:** file writes and edits, branch changes like `git push`, reading a path that leaves
-your project (the seeded `outside-cwd` rule), a `webfetch` (the one way off the machine), and
-anything it cannot recognise as safe.
-
-File edits show a unified diff right above the question. Type `a` to allow that tool for the rest of
-the session. `/yolo` flips the mode on and off mid-session.
+A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to spare that pattern
+for the rest of the session.
 
 ### Tools
 
-Ten built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`,
-`recall`. The agent picks them itself; `--tools read,grep` narrows the set.
+Eight built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`.
+The agent picks them itself; `--tools read,grep` narrows the set.
 
 `update_plan` is the agent's own checklist for multi-step work: a list of steps, each `pending`,
 `in_progress` or `completed`, with at most one in progress. Marking a step done as it finishes keeps
 a long task from losing track of what is left; it touches nothing, so it never asks for approval.
 
-The `read` tool pages through large files instead of loading them whole. Every answer starts with a
-header naming the file, its size and the range shown; `offset` and `limit` walk through it in
-2000-line windows (50 KB per call, single lines capped at 2000 characters so a minified bundle
-cannot flood the context). `paths` reads up to five files at once. Binary formats are refused with a
-hint at the right local tool — `pdftotext` for PDFs, `samtools` for BAM/CRAM, `duckdb` for
-Parquet/HDF5, `libreoffice --headless --convert-to csv` for old Office files.
+The `read` tool pages through large files instead of loading them whole: `offset` and `limit` walk
+through them in 2000-line windows (50 KB per call, single lines capped at 2000 characters so a
+minified bundle cannot flood the context). Text returns bare, with a `[Showing lines a-b of N. Use
+offset=... to continue.]` note when more remains. Binary formats are refused with a hint at the right
+local tool — `pdftotext` for PDFs, `samtools` for BAM/CRAM, `duckdb` for Parquet/HDF5,
+`libreoffice --headless --convert-to csv` for old Office files. Images are read as vision
+attachments.
 
 `webfetch <url>` grabs a page and returns it as text (HTML stripped, http(s) only,
 proxies honoured) so the agent can read docs without a shell.
 
-`write` and `edit` take an optional `then_run`: the command runs in the same tool call once the
-mutation succeeds (skipped on failure; a non-zero exit is reported but keeps the change). The
-edit-then-validate pattern costs one round-trip instead of two, and the command still passes the
-normal `bash` gate, so approval and the blacklist apply to it.
-
-Under context pressure an oversized tool result is cut to its head and tail; the full text is
-archived under `~/.llm/observations/` and the marker names its id, so `recall` pages the cut middle
-back (`id`, optional `offset` — the reply's `next_offset` continues) instead of re-running the
-command that produced it. Resuming a thread that no longer fits repeats the cut before the first
-request, silently, and the archive is keyed by the result's content, so nothing piles up. When
-whole turns are summarized away, the raw turns are archived the same way and the summary names that
-observation id — a summary paraphrases, and one `recall` gets the exact history back.
+`edit` applies one or more exact-match replacements in one call; `write` creates or overwrites a
+file. Under context pressure an oversized tool result is cut to its head and tail with a note naming
+what was dropped — the full text stays in the session log, and the model can re-run the command or
+re-read the file when it needs the middle back.
 
 ### The interactive session
 
@@ -215,14 +197,8 @@ Both live in your user directory.
 `.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). The agent lists
 them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system
 prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill
-points at resolve wherever you started the session. Turn one off with `disable_model_invocation`, or
+points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or
 all of them with `[agent] disabled_skills`.
-
-**Memory** is a plain markdown file: `~/.llm/LLM.md`. The system prompt always names that path —
-even before the file exists — so "remember this" has somewhere to go: ask the agent to remember a
-preference and it edits that file for you. Durable preferences live there; repo-specific rules
-belong in a project `AGENTS.md` instead. Nothing is written behind your back — the edit is a normal
-file change you can review, change or delete.
 
 Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (and `NO_PROXY`)
 automatically.
@@ -234,17 +210,16 @@ Under the `"agent"` key of `config.json`:
 ```json
 {
   "agent": {
-    "approval_mode": "always-ask",
     "max_request_bytes": 8000000,
     "tools": {"bash": "prompt"}
   }
 }
 ```
 
-`approval_mode` is `yolo` (default) or `always-ask`. `tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes`
-caps one request body in bytes (32MB by default) — lower it when a gateway in front of the model
-refuses less than the provider documents, and the run refuses the oversized body locally, naming
-the attachments that filled it, instead of coming back as an opaque 413.
+`tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes` caps one request body in
+bytes (32MB by default) — lower it when a gateway in front of the model refuses less than the
+provider documents, and the run refuses the oversized body locally, naming the attachments that
+filled it, instead of coming back as an opaque 413.
 
 `cache_ttl` picks how long the provider should hold this conversation's prompt-cache entry: `5m` (the
 default, what every provider gives) or `1h`. Only the Anthropic Messages API takes a lifetime — the
@@ -253,14 +228,12 @@ pays for itself as soon as one gap lapses a five-minute one: an approval prompt,
 coffee break otherwise leaves the next round re-writing the whole conversation instead of reading it
 back.
 
-Compaction is driven by an absolute threshold, `compact_at_tokens` (64k by default): the one number
-a user can pick without knowing anything about the model behind the gateway. Each compaction the
-session runs doubles it, so a long conversation is summarized at 64k, then 128k, then 256k — a few
-summaries for a very long session, not one on every round that sits above a fixed line. Nothing
-here asks for a model's context window or guesses at one. A request that comes back saying the
-prompt does not fit still compacts the conversation at once, retries, and sets the next rung at the
-size that was refused, so the session does not walk into that wall again — in memory only: no file
-records it and nothing reports it.
+Compaction runs when the priced context passes `window - 16384` — the model's real context window
+minus a reserve, the reference's rule — or `compact_at_tokens` (64k by default) when the window is unknown (a
+per-model `context_window` option in `config.json` records one). It keeps the most recent
+`keep_recent_tokens` (20k by default) and summarizes the dropped prefix. A request that comes back
+saying the prompt does not fit still compacts the conversation at once and retries, so the session
+does not walk into that wall again — in memory only: no file records it and nothing reports it.
 
 The command blacklist is a plain file, not a config key: `~/.llm/blacklist` for everything you run,
 and `.llm/blacklist` for one project (its lines win; the two are concatenated). It only adds refusals
@@ -443,9 +416,8 @@ commands, and events it wants to hear about. After that it calls back when the m
 when you type a matching `/command`, and at turn and tool boundaries. The `tool_call` event is the
 useful one for gating — your extension can deny a call or rewrite its arguments.
 
-Extension tools start at the same trust level as `bash`: they run freely in yolo mode, and in ask
-mode each call prompts. You can lower a tool's tier if you have reviewed it — see
-[`docs/extensions.md`](docs/extensions.md). `[agent] tools` policies and `--tools` still apply.
+Extension tools run freely like `bash`; a `[agent] tools` policy or the blacklist still gates them.
+See [`docs/extensions.md`](docs/extensions.md).
 
 Anything an extension prints to stderr is a human channel: it lands in the diagnostics tail, and
 while a call is in flight it streams into that call's tool log line by line, so a long tool can

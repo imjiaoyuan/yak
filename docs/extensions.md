@@ -229,24 +229,20 @@ Reply without a `content` field (or `null`) to observe only. The replacement is 
 tool output (2000 lines / 50 KB), the last rewrite wins when several extensions reply, and the
 whole path is **fail-open**: a timeout, a crash or a malformed reply leaves the tool's own result
 exactly as produced. The thread file still keeps the original, so a bad rewrite cannot erase
-evidence from the session log — the model can re-run the command or page the result back with
-`recall`.
+evidence from the session log — the model can re-run the command or re-read the file.
 
 ## Approval, tiers and policies
 
-Every extension tool is **exec-tier** by default: the approval matrix treats it exactly like
-`bash`. A tool may declare a lower tier — `# tier: write` in a script manifest, or
-`"tier": "read"` on a tool in the `initialize` reply — and then the matrix treats it like the
-corresponding built-in (a `read` tool runs unprompted in ask mode). This is a trust decision:
-lower it only for tools you would let run anyway, since a mislabeled tool bypasses the prompt. The agent's default mode is **yolo** — extension tools run free unless a
-per-tool policy says otherwise. In ask mode (`--approval-mode ask`, or config
-`approval_mode = "always-ask"`) every extension tool call prompts (`Allow? [Y/n/a]` — `a`
-remembers for the session). A command in the hardcoded core (privilege escalation, filesystem or
-machine destruction, a fork bomb, a write into a device node) or one you added to `~/.llm/blacklist`
-or `.llm/blacklist` is refused outright in either mode; the blacklist is matched against the `bash`
-tool's command line only — an extension tool is whatever its script does, so gate it with `tool_call`
-if it can do damage. The blacklist file only *adds* refusals; the core cannot be edited away.
-Explicit per-tool policies in config.json win over everything, in either direction:
+Every extension tool is **exec-tier** by default and runs free like `bash`. A tool may declare a
+lower tier — `# tier: write` in a script manifest, or `"tier": "read"` on a tool in the
+`initialize` reply — which groups it into the read-only parallel batch. There is no ask mode: a call
+runs unless a per-tool policy says otherwise, the hardcoded core refuses it, or the blacklist asks.
+A command in the hardcoded core (privilege escalation, filesystem or machine destruction, a fork
+bomb, a write into a device node) or one you added to `~/.llm/blacklist` or `.llm/blacklist` is
+refused or asks; the blacklist is matched against the `bash` tool's command line only — an extension
+tool is whatever its script does, so gate it with `tool_call` if it can do damage. The blacklist
+file only *adds* refusals; the core cannot be edited away. Explicit per-tool policies in config.json
+win over everything, in either direction:
 
 ```json
 {"agent": {"tools": {"deploy": "allow", "git_push": "deny"}}}
@@ -308,7 +304,7 @@ tool that spawns a real `llm` child in its own context window and hands the conc
 tool result.
 
 ```bash
-llm --json --no-session --approval-mode yolo --tools read,grep \
+llm --json --no-session --tools read,grep \
     -m <model> --thinking <level> --append-system-prompt "<agent body>" "Task: ..."
 ```
 
@@ -322,9 +318,8 @@ llm --json --no-session --approval-mode yolo --tools read,grep \
   no parsing of human-facing text.
 - The child is stopped on the host's `interrupt` and on its own deadline, `LLM_SUBAGENT_DEPTH`
   refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all.
-- Ask mode prompts once for the `subagent` call (exec tier); the child runs `--approval-mode yolo`
-  because nobody is at its terminal, so the definition's `tools:` line — not the child's approval
-  mode — is what bounds it.
+- The `subagent` call runs free like any exec tool (there is no ask mode); the definition's
+  `tools:` line is what bounds the child.
 
 `examples/agents/` ships four definitions to copy: `scout` and `reviewer` (read-only), `planner`
 (think-only) and `worker` (can edit and run commands).

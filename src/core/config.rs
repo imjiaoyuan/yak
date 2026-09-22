@@ -34,9 +34,8 @@ pub struct Provider {
 /// Platform user directory: LLM_USER_PATH env override, else ~/.llm
 /// (matching the project-level .llm/ convention). Resolved once per process:
 /// the env never changes mid-run (no code writes it) and the directory is
-/// created on first use, so the ~20 call sites — several per request, all the
-/// way down to `observation_dir` on every agent round — pay neither the env
-/// lookup nor the `create_dir_all` syscall again.
+/// created on first use, so the ~20 call sites — several per request — pay
+/// neither the env lookup nor the `create_dir_all` syscall again.
 pub fn user_dir() -> PathBuf {
     static DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
         let path = match std::env::var_os("LLM_USER_PATH") {

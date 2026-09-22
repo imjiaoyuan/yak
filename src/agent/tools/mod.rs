@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::approval::{self, Tier};
-use crate::gitignore::{collect_files, parse_pattern, pattern_matches_path, scopes_for};
 use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
@@ -18,7 +17,6 @@ use fetch::FetchTool;
 use fs::LsTool;
 use plan::PlanTool;
 use read::ReadTool;
-use recall::RecallTool;
 use search::{GlobTool, GrepTool};
 use write::WriteTool;
 
@@ -106,9 +104,9 @@ pub trait Tool: Send + Sync {
         None
     }
     /// Whether the call reaches outside the working directory: the gate's
-    /// input for the `outside-cwd` directive and for ask mode's read rule.
-    /// The default reads the shared `path`/`paths` arguments; `bash`
-    /// overrides it with a scan of its command line.
+    /// input for the `outside-cwd` blacklist directive. The default reads
+    /// the tool's `path` argument; `bash` overrides it with a scan of its
+    /// command line.
     fn escapes_cwd(&self, args: &Value, cwd: &Path) -> bool {
         approval::args_escape_cwd(cwd, args)
     }
@@ -130,12 +128,6 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// The `then_run` field shared by `write` and `edit`: the fused follow-up
-/// command (action fusion — the mutation and its validation are one call).
-pub(crate) const THEN_RUN_DESCRIPTION: &str = "Optional command to run next, in the same tool call, after this \
-     mutation succeeds — e.g. run, build, test or restart it. Skipped when the mutation fails; a \
-     non-zero exit is reported but keeps the change.";
-
 /// The built-in tool registry: ten handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
@@ -148,7 +140,6 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
-        Box::new(RecallTool),
     ]
 }
 
@@ -377,19 +368,12 @@ pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
     }
 }
 
-fn display_rel(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd)
-        .map(|r| r.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
-}
-
 mod bash;
 mod edit;
 mod fetch;
 mod fs;
 mod plan;
 mod read;
-mod recall;
 mod search;
 mod write;
 

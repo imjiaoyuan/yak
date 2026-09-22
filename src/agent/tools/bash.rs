@@ -10,15 +10,16 @@ impl Tool for BashTool {
         Tier::Exec
     }
     fn description(&self) -> &str {
-        "Run a shell command (build, test, run). Output merges stdout and stderr; a nonzero exit \
-         is an error."
+        "Execute a shell command in the current working directory. Returns stdout and stderr. \
+         Output is truncated to last 2000 lines or 50KB (whichever is hit first). Optionally \
+         provide a timeout in seconds."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string"},
-                "timeout": {"type": "integer", "description": "Seconds before the process group is killed (default 120)"}
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (optional, no default timeout)"}
             },
             "required": ["command"]
         })
@@ -33,7 +34,8 @@ impl Tool for BashTool {
     }
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
         let command = args["command"].as_str().unwrap_or("");
-        let timeout = args["timeout"].as_u64().unwrap_or(120);
+        // 0 means no timeout (the reference's default: the command runs until it exits)
+        let timeout = args["timeout"].as_u64().unwrap_or(0);
         let outcome = crate::platform::run_shell_stream(
             command,
             cwd,

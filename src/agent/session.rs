@@ -69,26 +69,21 @@ impl Session {
     /// A resumed thread can already be over the window. Project its
     /// oversized tool results down before the first request — the very cut
     /// the loop's own prune would make at the first turn end, only silent, so
-    /// resuming a big thread does not repeat that notice turn after turn. The
-    /// archive is content-addressed, so this rewrites nothing it did last
-    /// time, and a thread that fits costs one estimate.
+    /// resuming a big thread does not repeat that notice turn after turn. A
+    /// thread that fits costs one estimate.
     pub fn prune_seed_to_fit(&mut self) {
-        self.prune_seed_to_fit_at(&crate::agent::compact::observation_dir());
-    }
-
-    fn prune_seed_to_fit_at(&mut self, archive_dir: &std::path::Path) {
         if self.seed.is_empty() {
             return;
         }
         let estimate = crate::agent::compact::estimate_tokens(&self.seed, None);
         // a resumed thread is priced against the model's real window when one
-        // is recorded, else the configured ladder rung
+        // is recorded, else the configured fallback
         let trigger = crate::agent::compact::effective_trigger(
             self.compact.trigger_tokens,
             self.model.context_window,
         );
         if crate::agent::compact::should_compact(estimate, trigger) {
-            crate::agent::compact::prune_tool_results(&mut self.seed, archive_dir);
+            crate::agent::compact::prune_tool_results(&mut self.seed);
         }
     }
 
@@ -316,12 +311,10 @@ impl Session {
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
                     let s = if count == 1 { "" } else { "s" };
-                    let dir = crate::agent::compact::observation_dir();
                     eprintln!(
-                        "{}{}pruned {count} oversized tool result{s} from context (full text archived under {}){}",
+                        "{}{}pruned {count} oversized tool result{s} from context (full text stays in the session log){}",
                         p.dim,
                         crate::theme::NOTICE,
-                        dir.display(),
                         p.reset
                     );
                     view.borrow_mut().resume_wait();
@@ -961,13 +954,11 @@ mod tests {
     /// them again on the first turn end (and say so every turn).
     #[test]
     fn a_resumed_seed_over_the_window_is_projected_down_once() {
-        let dir = crate::core::testutil::scratch_dir("seed-prune");
-        let big = "z".repeat(40_000);
         let mut session = tight_session(vec![
             Msg::user("read the log"),
-            Msg::tool_result("1", "read", big.clone()),
+            Msg::tool_result("1", "read", "z".repeat(40_000)),
         ]);
-        session.prune_seed_to_fit_at(&dir);
+        session.prune_seed_to_fit();
         let content = match &session.seed[1] {
             Msg::ToolResult { content, .. } => content.clone(),
             _ => panic!("expected the tool result"),
@@ -980,31 +971,16 @@ mod tests {
             content.starts_with(&"z".repeat(64)),
             "the head of the result is kept in context"
         );
-        // the untouched original is on disk under the id the marker names
-        let id = content
-            .split("observation ")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .expect("marker carries an observation id")
-            .to_string();
-        assert_eq!(
-            std::fs::read_to_string(dir.join(format!("{id}.txt"))).unwrap(),
-            big
-        );
-        // already-projected and under the window: a second pass changes
-        // nothing at all, so no new file either
+        // already-projected: a second pass changes nothing at all
         let before = format!("{:?}", session.seed);
-        session.prune_seed_to_fit_at(&dir);
+        session.prune_seed_to_fit();
         assert_eq!(format!("{:?}", session.seed), before);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     /// A thread that fits is left exactly as loaded — the projection is a
     /// pressure measure, not a property of every resume.
     #[test]
     fn a_resumed_seed_under_the_window_is_left_alone() {
-        // the seed fits, so nothing is archived and this tree must stay absent
-        let dir = crate::core::testutil::scratch_path("seed-keep");
         let seed = vec![
             Msg::user("read the log"),
             Msg::tool_result("1", "read", "q".repeat(40_000)),
@@ -1014,9 +990,8 @@ mod tests {
             trigger_tokens: 128_000,
             keep_recent_tokens: 32_000,
         };
-        session.prune_seed_to_fit_at(&dir);
+        session.prune_seed_to_fit();
         assert_eq!(session.seed, seed);
-        assert!(!dir.exists(), "nothing archived when nothing was cut");
     }
 
     /// A round that failed late (stream drop after tool rounds) must still

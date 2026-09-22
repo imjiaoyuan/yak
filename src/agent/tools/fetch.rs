@@ -4,8 +4,7 @@ use super::*;
 /// with its <title> extracted, JSON/XML/plain text pass through untouched, and
 /// the final URL is reported when redirects moved the fetch. Fetching is
 /// Tier::Exec: it is the one way out of the machine and the one door
-/// untrusted content comes in by, so ask mode confirms it like any other
-/// command that leaves the working tree.
+/// untrusted content comes in by.
 pub(super) struct FetchTool;
 
 impl Tool for FetchTool {

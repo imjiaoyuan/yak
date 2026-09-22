@@ -57,7 +57,6 @@ pub struct Window {
     pub start: usize,
     /// the scan reached end-of-input inside the window.
     pub eof: bool,
-    pub size: u64,
 }
 
 /// Windowed read for the agent's read tool: one open, one stat; the NUL
@@ -68,7 +67,6 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
         return Err(Error::Binary { ext });
     }
     let file = std::fs::File::open(path).map_err(io_err)?;
-    let size = file.metadata().map_err(io_err)?.len();
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     if is_binary(reader.fill_buf().map_err(io_err)?) {
         return Err(Error::Binary { ext });
@@ -86,7 +84,6 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
         total: w.total,
         start: w.start,
         eof: w.eof,
-        size,
     })
 }
 
@@ -110,12 +107,6 @@ pub(crate) fn binary_hint(ext: &str) -> Option<&'static str> {
 
 fn io_err(e: std::io::Error) -> Error {
     Error::Io(e.to_string())
-}
-
-/// True when the path's extension marks it as binary — the grep tool skips
-/// these without reading them (the read tool refuses them with a hint).
-pub(crate) fn is_binary_path(path: &Path) -> bool {
-    BINARY_EXTS.contains(&ext_of(path).as_str())
 }
 
 fn ext_of(path: &Path) -> String {

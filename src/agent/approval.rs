@@ -21,40 +21,13 @@ pub enum Tier {
 impl Tier {
     /// An extension may declare a tool's tier (its `initialize` reply or a
     /// manifest `tier:` field). This is a trust decision made by whoever
-    /// installed the extension: a tool claiming `read` runs unprompted in
-    /// ask mode, so only lower the tier for tools you would let run anyway.
+    /// installed the extension: a tool claiming `read` joins the read-only
+    /// parallel batch, so only lower the tier for tools you would let run anyway.
     pub fn parse(s: &str) -> Option<Tier> {
         match s.trim().to_ascii_lowercase().as_str() {
             "read" | "readonly" | "read-only" => Some(Tier::Read),
             "write" => Some(Tier::Write),
             "exec" | "execute" => Some(Tier::Exec),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    /// reads inside the working directory auto, everything else prompts
-    AlwaysAsk,
-    /// everything auto; blacklisted commands still prompt before running
-    #[default]
-    Yolo,
-}
-
-impl Mode {
-    /// Canonical lowercase name (also what the UI displays).
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::AlwaysAsk => "ask",
-            Mode::Yolo => "yolo",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Mode> {
-        match s {
-            "always-ask" | "ask" => Some(Mode::AlwaysAsk),
-            "yolo" | "full-auto" => Some(Mode::Yolo),
             _ => None,
         }
     }
@@ -80,7 +53,6 @@ impl Policy {
 
 #[derive(Default)]
 pub struct ApprovalConfig {
-    pub mode: Mode,
     pub tool_policies: HashMap<String, Policy>,
     /// command ask-list (`~/.llm/blacklist` + `.llm/blacklist`); a hit
     /// forces the approval prompt in either mode, after the destructive
@@ -117,16 +89,10 @@ pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
 
 /// Resolve whether a tool call may run. Precedence: the hardcoded refusal
 /// list > the user's ask-list (always prompts, immune to allow policies) >
-/// explicit policy (deny/prompt/allow) > the mode's tier gate. The first two
-/// hold in every mode; explicit policies stay strongest in both directions.
-///
-/// The gate is directory-scoped: reads inside the working directory run free,
-/// any file write asks, and a bash command runs free only when every command
-/// it would start is on the read-only whitelist — writes, deletes, network
-/// fetches, interpreters and anything unrecognized ask. A read that leaves
-/// the working directory is the `outside-cwd` directive's job, so it asks in
-/// either mode unless that directive is off. `bash_command` is the raw command
-/// line for exec-tier tools, and `escapes_cwd` is the tool's own answer
+/// explicit policy (deny/prompt/allow) > auto. Everything not caught by one
+/// of those runs: there is no ask mode — a call either passes the blacklist
+/// and policies, or it does not. `bash_command` is the raw command line for
+/// exec-tier tools, and `escapes_cwd` is the tool's own answer
 /// (`Tool::escapes_cwd`). `resolve_with_hit` is the entry the loop uses: it
 /// has the ask-list pattern in hand already (it carries it down to the prompt
 /// and to `a`), so a command line is lexed once per call rather than twice.
@@ -138,12 +104,12 @@ pub fn resolve_with_hit(
     bash_command: Option<&str>,
     hit: Option<String>,
 ) -> Decision {
-    // Shell commands face two file-independent layers, in either mode: the
-    // hardcoded refusals first (privilege escalation, filesystem and machine
-    // destruction, a fork bomb, a write into a device node — a refusal, not
-    // a prompt: no run makes these the right answer), then the user's
-    // ask-list, whose hit forces the approval prompt even in yolo unless a
-    // `!` line exempted the pattern or `a` approved it earlier this session.
+    // Shell commands face two file-independent layers: the hardcoded refusals
+    // first (privilege escalation, filesystem and machine destruction, a fork
+    // bomb, a write into a device node — a refusal, not a prompt: no run makes
+    // these the right answer), then the user's ask-list, whose hit forces the
+    // approval prompt unless a `!` line exempted the pattern or `a` approved
+    // it earlier this session.
     let mut blacklist_ask: Option<String> = None;
     if let Some(pattern) = hit
         && !cfg.blacklist_session_allows.iter().any(|a| a == &pattern)
@@ -153,8 +119,7 @@ pub fn resolve_with_hit(
         ));
     }
     // the `outside-cwd` directive gives a path leaving the working directory
-    // the same standing a matched pattern has — it asks in either mode
-    // unless `a` spared it this session
+    // the same standing a matched pattern has
     if escapes_cwd
         && cfg.blacklist.asks_outside_cwd()
         && !cfg
@@ -185,36 +150,14 @@ pub fn resolve_with_hit(
     if let Some(reason) = blacklist_ask {
         return Decision::Ask(reason);
     }
-    if cfg.mode == Mode::Yolo {
-        return Decision::Auto;
-    }
-    // ask mode's remaining gates: a write, or a command that is not wholly
-    // read-only. A read outside the working directory never reaches here —
-    // the `outside-cwd` directive above is that rule's only switch.
-    match tier {
-        Tier::Read => Decision::Auto,
-        Tier::Write => Decision::Ask("writing files requires approval".to_string()),
-        Tier::Exec if bash_command.is_some_and(readonly_command) => Decision::Auto,
-        Tier::Exec => Decision::Ask(match bash_command {
-            Some(_) => "running a non-read-only command requires approval".to_string(),
-            // a non-shell exec tool (webfetch, an extension): the tier is the
-            // whole reason, so name it
-            None => format!("tool '{name}' is exec-tier: it reaches outside the working tree"),
-        }),
-    }
+    Decision::Auto
 }
 
-/// True when any of a call's `path`/`paths` arguments leaves the working
-/// directory.
+/// True when a call's `path` argument leaves the working directory.
 pub fn args_escape_cwd(cwd: &std::path::Path, args: &serde_json::Value) -> bool {
-    let one = args.get("path").and_then(|p| p.as_str());
-    let many = args
-        .get("paths")
-        .and_then(|p| p.as_array())
-        .map(|list| list.iter().filter_map(|p| p.as_str()))
-        .into_iter()
-        .flatten();
-    one.into_iter().chain(many).any(|p| escapes_cwd(cwd, p))
+    args.get("path")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| escapes_cwd(cwd, p))
 }
 
 /// True when a shell command line names a path outside the working
@@ -455,151 +398,6 @@ fn command_positions(seg: &str, depth: usize) -> Vec<String> {
     out
 }
 
-/// Read-only commands a bash call may start without asking. Deliberately
-/// conservative: anything that can write, delete, fetch, interpret code or
-/// is simply unknown asks. `git push` is as far from this list as it gets.
-const READONLY_COMMANDS: &[&str] = &[
-    // file inspection
-    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "readlink", "dirname",
-    "basename", "realpath", "tree", // search
-    "grep", "egrep", "fgrep", "rg", "ripgrep", "findstr",
-    // text processing (no -i, no output redirection — checked separately)
-    "sort", "uniq", "diff", "comm", "cmp", "cut", "column", "jq",
-    // process / system inspection
-    "ps", "pgrep", "uname", "whoami", "hostname", "date", "which", "type", "whereis", "echo",
-    "printf", "true", "false", "test",
-    "[",
-    // git read-only subcommands are matched specially below
-];
-
-/// cargo subcommands that only touch the build cache and read the project
-/// (the agent's core workflow; `cargo run`/`install`/`publish` stay gated).
-const READONLY_CARGO: &[&str] = &[
-    "build",
-    "test",
-    "check",
-    "tree",
-    "clippy",
-    "metadata",
-    "version",
-    "locate-project",
-    "pkgid",
-    "rustc-version",
-];
-
-/// git subcommands that never mutate anything.
-const READONLY_GIT: &[&str] = &[
-    "status",
-    "log",
-    "diff",
-    "show",
-    "branch",
-    "remote",
-    "blame",
-    "shortlog",
-    "describe",
-    "ls-files",
-    "ls-remote",
-    "rev-parse",
-    "reflog",
-    "grep",
-    "cat-file",
-    "config",
-    "check-ignore",
-];
-
-/// True when every command a bash call would start is on the read-only
-/// whitelist. Overrides checked separately: output redirection (a write in
-/// disguise), `find` with `-delete`/`-exec` (whitelisted word, mutating
-/// flags), and `git` subcommands.
-pub fn readonly_command(command: &str) -> bool {
-    if command.contains('>') {
-        return false;
-    }
-    // command substitution smuggles any program past a whitelisted command
-    // word (`echo $(rm -rf x)`) — reject it outright
-    if command.contains("$(") || command.contains('`') {
-        return false;
-    }
-    for seg in split_compound(command) {
-        let positions = command_positions(&seg, 0);
-        if positions.is_empty() {
-            return false;
-        }
-        let mut rest = positions.iter();
-        let first = rest.next().unwrap().as_str();
-        // `git` is whitelisted only for its read-only subcommands (the
-        // positions list stops at the command word, so the subcommand comes
-        // from the segment tokens, past global flags like -C)
-        if first == "git" {
-            let toks = tokens(&seg);
-            let sub = toks
-                .iter()
-                // skip "git" itself (the positions list already ends there
-                // for direct calls; a `bash -c 'git status'` payload keeps
-                // the whole line in tokens)
-                .skip_while(|t| t.as_str() != "git")
-                .skip(1)
-                .find(|t| !t.starts_with('-'))
-                .map(String::as_str)
-                .unwrap_or("");
-            if !READONLY_GIT.contains(&sub) {
-                return false;
-            }
-            // `git branch x`, `git remote add x y` and `git config k v` all
-            // mutate: these three subcommands are read-only only in their
-            // bare, flag-only form (config additionally in its one-argument
-            // `git config key` read form)
-            if matches!(sub, "branch" | "remote" | "config") {
-                let non_flag = toks
-                    .iter()
-                    .skip_while(|t| t.as_str() != "git")
-                    .skip(2) // "git" and the subcommand itself
-                    .filter(|t| !t.starts_with('-'))
-                    .count();
-                let read = match sub {
-                    "config" => non_flag <= 1,
-                    _ => non_flag == 0,
-                };
-                if !read {
-                    return false;
-                }
-            }
-            continue;
-        }
-        if first == "cargo" {
-            let toks = tokens(&seg);
-            let sub = toks
-                .iter()
-                .skip(1)
-                .find(|t| !t.starts_with('-'))
-                .map(String::as_str)
-                .unwrap_or("");
-            if !READONLY_CARGO.contains(&sub) {
-                return false;
-            }
-            continue;
-        }
-        // `sort -o f` and `date -s ...` write through flags instead of `>`
-        let flags_write = match first {
-            "sort" => tokens(&seg)
-                .iter()
-                .any(|t| t == "-o" || t.starts_with("--output")),
-            "date" => tokens(&seg).iter().any(|t| t == "-s" || t == "--set"),
-            _ => false,
-        };
-        if flags_write {
-            return false;
-        }
-        // `find` is deliberately absent from the whitelist: its mutating
-        // forms (-delete/-exec) hide behind a read-only-looking command word
-        if !READONLY_COMMANDS.contains(&first) {
-            return false;
-        }
-    }
-    true
-}
-
 /// The commands that must never run, in either mode, whatever any config key
 /// or ask-list file says: privilege escalation, filesystem creation and
 /// destruction, and machine-level control. Hardcoded on purpose — this is
@@ -752,9 +550,8 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
                 );
             } else {
                 eprintln!(
-                    "Error: approval needed for {tier:?}-tier tool '{tool}' but no terminal is available. \
-                     Re-run with --yolo or an allow policy.",
-                    tier = req.tier,
+                    "Error: approval needed for '{tool}' but no terminal is available. \
+                     Add an allow policy or remove the gating line.",
                     tool = req.tool,
                 );
             }
@@ -768,9 +565,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn cfg(mode: Mode, policies: &[(&str, Policy)]) -> ApprovalConfig {
+    fn cfg(policies: &[(&str, Policy)]) -> ApprovalConfig {
         ApprovalConfig {
-            mode,
             tool_policies: policies.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             blacklist: crate::agent::blacklist::Blacklist::default(),
             blacklist_session_allows: Vec::new(),
@@ -791,44 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn mode_tier_matrix() {
-        assert_eq!(Mode::default(), Mode::Yolo);
-        let read = resolve("read", Tier::Read, false, &cfg(Mode::AlwaysAsk, &[]), None);
-        assert_eq!(read, Decision::Auto);
-        let read_out = resolve("read", Tier::Read, true, &cfg(Mode::AlwaysAsk, &[]), None);
-        assert_eq!(
-            read_out,
-            Decision::Auto,
-            "outside-cwd is the directive's call, not ask mode's"
-        );
-        let mut outside = cfg(Mode::AlwaysAsk, &[]);
-        outside.blacklist = crate::agent::blacklist::Blacklist::parse("outside-cwd");
-        assert!(matches!(
-            resolve("read", Tier::Read, true, &outside, None),
-            Decision::Ask(_)
-        ));
-        let write = resolve(
-            "write",
-            Tier::Write,
-            false,
-            &cfg(Mode::AlwaysAsk, &[]),
-            None,
-        );
-        assert!(matches!(write, Decision::Ask(_)));
-        let exec = resolve("bash", Tier::Exec, false, &cfg(Mode::AlwaysAsk, &[]), None);
-        assert!(matches!(exec, Decision::Ask(_)));
-        assert_eq!(
-            resolve("bash", Tier::Exec, true, &cfg(Mode::Yolo, &[]), None),
-            Decision::Auto
-        );
-    }
-
-    #[test]
-    fn the_outside_cwd_directive_asks_in_either_mode() {
-        let mut config = cfg(Mode::Yolo, &[]);
+    fn the_outside_cwd_directive_asks() {
+        let mut config = cfg(&[]);
         config.blacklist = crate::agent::blacklist::Blacklist::parse("outside-cwd");
-        // yolo runs everything by default; the directive asks for a path
-        // that leaves the working directory, any tier
+        // the directive asks for a path that leaves the working directory
         assert!(matches!(
             resolve("read", Tier::Read, true, &config, None),
             Decision::Ask(_)
@@ -850,107 +612,46 @@ mod tests {
             resolve("read", Tier::Read, true, &config, None),
             Decision::Auto
         );
-        // and without the directive, yolo never asks
+        // and without the directive, nothing asks
         assert_eq!(
-            resolve("read", Tier::Read, true, &cfg(Mode::Yolo, &[]), None),
+            resolve("read", Tier::Read, true, &cfg(&[]), None),
             Decision::Auto
         );
     }
 
     #[test]
-    fn readonly_bash_commands_run_free() {
-        for cmd in [
-            "ls -la",
-            "git status",
-            "git diff HEAD~1",
-            "git log --oneline | head -5",
-            "cat a.txt b.txt",
-            "rg pattern src/",
-            "cargo test --lib",
-            "ps aux | grep llm",
-            "bash -c 'git status'",
-        ] {
-            let d = resolve(
-                "bash",
-                Tier::Exec,
-                false,
-                &cfg(Mode::AlwaysAsk, &[]),
-                Some(cmd),
-            );
-            assert_eq!(d, Decision::Auto, "{cmd} should run free");
-        }
-    }
-
-    #[test]
-    fn dangerous_bash_commands_ask() {
-        for cmd in [
-            "rm -rf build",
-            "git push origin main",
-            "git commit -m x",
-            "git checkout -b feat",
-            "curl https://x",
-            "python script.py",
-            "node build.js",
-            "cat a.txt > b.txt",
-            "sed -i 's/a/b/' f.txt",
-            "find . -name x -delete",
-            "find . -name x -exec rm {} ;",
-            "bash -c 'git push'",
-            "npm install",
-            "chmod +x run.sh",
-        ] {
-            let d = resolve(
-                "bash",
-                Tier::Exec,
-                false,
-                &cfg(Mode::AlwaysAsk, &[]),
-                Some(cmd),
-            );
-            assert!(matches!(d, Decision::Ask(_)), "{cmd} should ask");
-        }
-    }
-
-    #[test]
-    fn the_hardcoded_core_is_refused_in_every_mode() {
+    fn the_hardcoded_core_is_refused() {
         // no blacklist file, no config: these are refused anyway
-        for mode in [Mode::Yolo, Mode::AlwaysAsk] {
-            for cmd in [
-                "sudo apt install x",
-                "su -",
-                "doas rm x",
-                "mkfs.ext4 /dev/sda1",
-                "dd if=img of=/dev/sdb",
-                "shutdown now",
-                "reboot",
-                "halt",
-                "echo hi | sudo tee /etc/hosts",
-                "cat img.iso > /dev/sdb",
-                "echo x >>/dev/sda",
-                ":(){ :|:& };:",
-                "rm -rf /",
-                "rm -rf ~",
-                "rm -rf /*",
-            ] {
-                let d = resolve("bash", Tier::Exec, false, &cfg(mode, &[]), Some(cmd));
-                assert!(
-                    matches!(d, Decision::Deny(_)),
-                    "{cmd} must be denied in {mode:?}, got {d:?}"
-                );
-            }
+        for cmd in [
+            "sudo apt install x",
+            "su -",
+            "doas rm x",
+            "mkfs.ext4 /dev/sda1",
+            "dd if=img of=/dev/sdb",
+            "shutdown now",
+            "reboot",
+            "halt",
+            "echo hi | sudo tee /etc/hosts",
+            "cat img.iso > /dev/sdb",
+            "echo x >>/dev/sda",
+            ":(){ :|:& };:",
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf /*",
+        ] {
+            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            assert!(
+                matches!(d, Decision::Deny(_)),
+                "{cmd} must be denied, got {d:?}"
+            );
         }
         // the reason names the offending command, so the model can adapt
-        let d = resolve(
-            "bash",
-            Tier::Exec,
-            false,
-            &cfg(Mode::Yolo, &[]),
-            Some("sudo -i"),
-        );
+        let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some("sudo -i"));
         assert_eq!(d, Decision::Deny("'sudo' is never allowed".into()));
     }
 
     #[test]
-    fn ordinary_commands_still_run_in_yolo() {
+    fn ordinary_commands_run_free() {
         for cmd in [
             "ls",
             "git status",
@@ -964,14 +665,14 @@ mod tests {
             "rm notes.txt",
             "rm -rf /home/me/proj/target",
         ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
-            assert_eq!(d, Decision::Auto, "{cmd} should run free in yolo");
+            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} should run free");
         }
     }
 
     #[test]
     fn a_blacklist_line_cannot_re_enable_a_hardcoded_refusal() {
-        let mut c = cfg(Mode::Yolo, &[]);
+        let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("!sudo\n!rm -rf /");
         assert!(matches!(
             resolve("bash", Tier::Exec, false, &c, Some("sudo -i")),
@@ -984,8 +685,8 @@ mod tests {
     }
 
     #[test]
-    fn a_blacklisted_command_asks_even_in_yolo() {
-        let mut c = cfg(Mode::Yolo, &[]);
+    fn a_blacklisted_command_asks() {
+        let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\n!rm -rf ./build");
         // the hit is a prompt now, not a refusal
         match resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")) {
@@ -1000,7 +701,7 @@ mod tests {
             Decision::Auto
         );
         // the ask survives an allow policy: gating every run is the point
-        let mut c = cfg(Mode::Yolo, &[("bash", Policy::Allow)]);
+        let mut c = cfg(&[("bash", Policy::Allow)]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm");
         assert!(matches!(
             resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
@@ -1010,7 +711,7 @@ mod tests {
 
     #[test]
     fn an_always_answer_spares_the_pattern_for_the_session() {
-        let mut c = cfg(Mode::Yolo, &[]);
+        let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\ngit push --force*");
         c.blacklist_session_allows.push("rm".into());
         assert_eq!(
@@ -1032,7 +733,7 @@ mod tests {
 
     #[test]
     fn the_default_ask_list_gates_rm_and_force_pushes() {
-        let mut c = cfg(Mode::Yolo, &[]);
+        let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse(
             &crate::agent::blacklist::Blacklist::default_file(),
         );
@@ -1058,22 +759,9 @@ mod tests {
     }
 
     #[test]
-    fn the_hardcoded_core_beats_the_ask_prompt_too() {
-        let c = cfg(Mode::AlwaysAsk, &[]);
-        let d = resolve("bash", Tier::Exec, false, &c, Some("sudo apt install x"));
-        assert!(
-            matches!(d, Decision::Deny(_)),
-            "a hardcoded refusal must never prompt, got {d:?}"
-        );
-        // a command that is merely non-read-only still prompts
-        let d = resolve("bash", Tier::Exec, false, &c, Some("npm install"));
-        assert!(matches!(d, Decision::Ask(_)));
-    }
-
-    #[test]
-    fn yolo_lets_dev_null_redirects_run_free() {
+    fn dev_null_redirects_run_free() {
         // real-world exploration commands from the field: every `2>/dev/null`
-        // is stream hygiene, not destruction — these must never prompt
+        // is stream hygiene, not destruction
         for cmd in [
             "ls -la scripts/ evo/ && echo --- && cat requirements.txt && \
              ls tests 2>/dev/null || echo \"no tests dir\"",
@@ -1084,8 +772,8 @@ mod tests {
             "wc -l <file >>/dev/null",
             "python x.py &>/dev/null",
         ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(Mode::Yolo, &[]), Some(cmd));
-            assert_eq!(d, Decision::Auto, "{cmd} must run free in yolo");
+            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} must run free");
         }
         // a real device target is refused by the shape check; `dd of=` paths
         // are caught by the program list, not the redirect scan
@@ -1094,53 +782,6 @@ mod tests {
         assert!(!redirects_into_device("dd if=a of=/dev/nvme0n1"));
         assert!(!redirects_into_device("x 2>/dev/null"));
         assert!(!redirects_into_device("x > /dev/stdout"));
-    }
-
-    #[test]
-    fn readonly_list_rejects_command_substitution_and_flag_writes() {
-        for cmd in [
-            "echo $(rm -rf x)",
-            "cat `rm -rf x`",
-            "echo hi | sort -o /tmp/f",
-            "date -s 2030-01-01",
-        ] {
-            assert!(!readonly_command(cmd), "{cmd} is not read-only");
-        }
-        // bare and flag-only listing forms stay read-only
-        assert!(readonly_command("git branch"));
-        assert!(readonly_command("git branch -a"));
-        assert!(readonly_command("git config user.name"));
-        assert!(readonly_command("git remote -v"));
-        assert!(readonly_command("sort input.txt"));
-    }
-
-    #[test]
-    fn mutating_git_forms_are_not_readonly() {
-        for cmd in [
-            "git branch -D feat",
-            "git branch new",
-            "git remote add origin url",
-            "git remote remove origin",
-            "git config user.email a@b.c",
-            "git config --global user.name n",
-        ] {
-            assert!(!readonly_command(cmd), "{cmd} must not run free");
-        }
-    }
-
-    #[test]
-    fn writes_always_ask_in_ask_mode() {
-        let d = resolve(
-            "write",
-            Tier::Write,
-            false,
-            &cfg(Mode::AlwaysAsk, &[]),
-            None,
-        );
-        assert!(matches!(d, Decision::Ask(_)));
-        // an extension allow skips the ask at the gate, not here
-        let yolo = resolve("write", Tier::Write, false, &cfg(Mode::Yolo, &[]), None);
-        assert_eq!(yolo, Decision::Auto);
     }
 
     #[test]
@@ -1191,16 +832,10 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_of_paths_is_checked_like_a_single_one() {
+    fn a_path_argument_is_checked() {
         let cwd = std::path::Path::new("/home/user/proj");
-        assert!(!args_escape_cwd(
-            cwd,
-            &json!({"paths": ["src/a.rs", "src/b.rs"]})
-        ));
-        assert!(args_escape_cwd(
-            cwd,
-            &json!({"paths": ["src/a.rs", "/etc/passwd"]})
-        ));
+        assert!(!args_escape_cwd(cwd, &json!({"path": "src/a.rs"})));
+        assert!(args_escape_cwd(cwd, &json!({"path": "/etc/passwd"})));
         assert!(args_escape_cwd(cwd, &json!({"path": "../secrets"})));
         assert!(!args_escape_cwd(cwd, &json!({"pattern": "x"})));
     }
@@ -1245,12 +880,12 @@ mod tests {
     }
 
     #[test]
-    fn policies_override_modes() {
+    fn per_tool_policies_win() {
         let deny = resolve(
             "bash",
             Tier::Exec,
             false,
-            &cfg(Mode::Yolo, &[("bash", Policy::Deny)]),
+            &cfg(&[("bash", Policy::Deny)]),
             None,
         );
         assert!(matches!(deny, Decision::Deny(_)));
@@ -1258,7 +893,7 @@ mod tests {
             "bash",
             Tier::Exec,
             false,
-            &cfg(Mode::AlwaysAsk, &[("bash", Policy::Allow)]),
+            &cfg(&[("bash", Policy::Allow)]),
             None,
         );
         assert_eq!(allow, Decision::Auto);
@@ -1266,7 +901,7 @@ mod tests {
             "read",
             Tier::Read,
             false,
-            &cfg(Mode::Yolo, &[("read", Policy::Prompt)]),
+            &cfg(&[("read", Policy::Prompt)]),
             None,
         );
         assert!(matches!(prompt, Decision::Ask(_)));

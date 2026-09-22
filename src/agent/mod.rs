@@ -6,7 +6,6 @@ pub mod approval;
 pub mod blacklist;
 pub mod compact;
 pub mod ext;
-pub mod memory;
 pub mod repl;
 pub mod session;
 pub mod settings;
@@ -58,8 +57,7 @@ pub enum AgentUpdate {
         error: String,
     },
     /// oversized tool results were replaced by head+marker+tail views to
-    /// relieve context pressure (the full text stays in the session log and
-    /// is archived for the `recall` tool under its placeholder's id)
+    /// relieve context pressure (the full text stays in the session log)
     ToolResultsPruned {
         count: usize,
     },
@@ -76,7 +74,6 @@ pub enum ApprovalResponse {
 /// An approval prompt for one gated tool call.
 pub struct ApprovalRequest<'a> {
     pub tool: &'a str,
-    pub tier: approval::Tier,
     pub preview: &'a str,
     /// optional change preview (edit/write diffs) shown under the action line
     pub diff: Option<&'a str>,
@@ -364,13 +361,10 @@ pub fn run_agent(
     // bounded, so a provider that refuses everything ends the run
     const MAX_OVERFLOW_COMPACTIONS: usize = 2;
     let mut overflow_compactions = 0usize;
-    // The auto-compaction ladder: compaction runs when the priced context
-    // crosses this, and each compaction doubles it (see `next_trigger`), so a
-    // long session is summarized a few times instead of at every round above
-    // one fixed number. With a known model window the rung is capped at
-    // `window - reserve` (the reference's ceiling), so the ladder climbs to it rather
-    // than past it. 0 switches it off; a provider that refuses a prompt still
-    // forces one.
+    // The auto-compaction trigger: `window - reserve` when the model's window
+    // is known (the reference's rule), else the configured fallback. It never changes
+    // across the run. 0 switches it off; a provider that refuses a prompt
+    // still forces one.
     let mut compact_trigger = opts
         .compact
         .as_ref()
@@ -463,8 +457,8 @@ pub fn run_agent(
         // image turns keep their pixels — including anything a tool result or
         // a steering message added mid-run.
         crate::agent::session::budget_images(&mut history);
-        // the compaction this round runs under: the ladder's current rung, which
-        // rises as the session is summarized
+        // the compaction this round runs under: the window-anchored trigger
+        // (or the configured fallback), unchanged across the run
         let cfg_now = opts.compact.as_ref().map(|c| compact::CompactConfig {
             trigger_tokens: compact_trigger,
             ..c.clone()
@@ -538,7 +532,7 @@ pub fn run_agent(
             }
             // The provider refusing a prompt that does not fit its window is
             // the one authoritative statement about it there is: compact the
-            // history now, whatever the ladder says, and retry the round.
+            // history now, whatever the trigger says, and retry the round.
             // Bounded: a provider that refuses everything ends the run
             // instead of looping.
             if round.text.is_empty()
@@ -817,8 +811,7 @@ fn price_and_rewrite(
     if rewrite {
         compact::trim_old_attachments(history);
         // the pass is idempotent, so its notice fires at most once per result
-        // (a resume replays the same archived id)
-        let stale = compact::prune_stale_tool_results(history, &compact::observation_dir());
+        let stale = compact::prune_stale_tool_results(history);
         if stale.count > 0 {
             on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
         }
@@ -837,8 +830,7 @@ struct AfterTurn {
     usage_marker: Option<(usize, Usage)>,
     /// stable cache prefix, or None once the rebuild rewrote below the summary
     cache_stable: Option<usize>,
-    /// the ladder rung the next round compacts at: `next_effective_trigger`
-    /// when a compaction ran, unchanged when one stalled
+    /// the window-anchored trigger for this run (unchanged by a compaction)
     trigger: u64,
 }
 
@@ -877,7 +869,7 @@ fn maybe_compact(
         // The usage marker covers the un-pruned prefix, so re-estimating over
         // it would report the identical number; subtract what the projection
         // frees.
-        let pruned = compact::prune_tool_results(history, &compact::observation_dir());
+        let pruned = compact::prune_tool_results(history);
         if pruned.count > 0 {
             estimate = estimate.saturating_sub(pruned.freed_tokens);
             (sink.on_update)(AgentUpdate::ToolResultsPruned {
@@ -886,13 +878,10 @@ fn maybe_compact(
         }
     }
     if compact::should_compact(estimate, cfg.trigger_tokens) {
-        // a compaction ran this turn: the next rung doubles, capped by the
-        // known window (the reference's ceiling)
+        // the trigger is window-anchored, not a running count: it stays where
+        // it is after a compaction (the reference's rule)
         match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
-            Ok(()) => {
-                after.trigger =
-                    compact::next_effective_trigger(cfg.trigger_tokens, model.context_window)
-            }
+            Ok(()) => {}
             // The history is untouched either way: the run continues, but a
             // session that keeps growing past the trigger has to say why
             Err(reason) => sink.stalled(reason),
@@ -944,35 +933,9 @@ fn compact_now(
     if summary.trim().is_empty() {
         return Err("the summarizer returned nothing".to_string());
     }
-    // the original task rides verbatim on top of the summary: long-running
-    // work must not drift from what was asked. On re-compaction it is
-    // recovered from the previous summary (the first user message is long
-    // gone by then).
-    let dropped = &history[..cut];
-    // the raw prefix is archived before it is replaced: the summary is a
-    // paraphrase, and this is the only surviving copy of the exact turns
-    let archived = compact::archive_prefix(dropped, &compact::observation_dir());
-    let task = match dropped.first() {
-        Some(Msg::Summary { text }) => compact::extract_original_task(text),
-        _ => dropped.iter().find_map(|m| match m {
-            Msg::User { text, .. } => Some(text.clone()),
-            _ => None,
-        }),
-    };
-    let task = task.map(|mut t| {
-        crate::core::text::truncate_ellipsis(&mut t, 4000);
-        t
-    });
     let tail = history.split_off(cut);
     history.clear();
-    let mut text = compact::compose_summary(task.as_deref(), &summary);
-    if let Some(id) = archived {
-        text.push_str(&format!(
-            "\n\n[the {cut} messages this replaced are archived as observation {id} — recall it \
-             when an exact wording or detail matters]"
-        ));
-    }
-    history.push(Msg::Summary { text });
+    history.push(Msg::Summary { text: summary });
     history.extend(tail);
     after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
     on_update(AgentUpdate::Compacted { removed: cut });
@@ -984,7 +947,7 @@ fn compact_now(
     Ok(())
 }
 
-/// Force a compaction regardless of the ladder: a provider refused the prompt
+/// Force a compaction regardless of the trigger: a provider refused the prompt
 /// (400 overflow), or reported usage past the known window without one (silent
 /// overflow). The caller retries the round on success, bounded by
 /// `MAX_OVERFLOW_COMPACTIONS`. A failure reports through the sink and the run
@@ -1168,8 +1131,8 @@ fn run_tool_calls(
 /// truncated, with a count of the lines that did not fit.
 /// Budget awareness: a terse note reporting how much room the
 /// task has left, in input tokens. `None` when no task budget is set: how much
-/// longer the conversation can run is the auto-compaction ladder's business,
-/// not something the model is asked to steer by, and this side cannot report a
+/// longer the conversation can run is auto-compaction's business, not something
+/// the model is asked to steer by, and this side cannot report a
 /// context size it does not know anyway. Kept short and factual — the note
 /// exists so the model can choose to wrap up, not to make it narrate.
 fn context_note(opts: &AgentOptions, spent_input: u64) -> Option<String> {
@@ -1231,52 +1194,6 @@ fn rewrite_tool_result(
     if let Some(replacement) = hooks.rewrite_tool_result(&params) {
         out.content = tools::truncate_marked(&replacement, tools::MAX_LINES, tools::MAX_BYTES);
     }
-    out
-}
-
-/// Action fusion: fold an `edit`/`write` call's optional `then_run` command
-/// into its result. The model's edit-then-validate pattern is one intent, so
-/// running the follow-up here saves a whole model round-trip; the command is
-/// executed as an ordinary `bash` call (same lookup, approval and blacklist),
-/// and a failure is reported in the text without turning the applied edit
-/// into an error.
-fn fuse_then_run(
-    mut out: tools::ToolOutput,
-    call: &ToolCall,
-    tools: &[Box<dyn tools::Tool>],
-    cwd: &std::path::Path,
-    approval: &mut approval::ApprovalConfig,
-    on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
-) -> tools::ToolOutput {
-    if out.is_error() || !matches!(call.name.as_str(), "edit" | "write") {
-        return out;
-    }
-    let Some(command) = call
-        .arguments
-        .get("then_run")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(str::to_string)
-    else {
-        return out;
-    };
-    let bash = ToolCall {
-        id: format!("{}__then_run", call.id),
-        name: "bash".to_string(),
-        arguments: json!({"command": command}),
-    };
-    let body = match gate_call(&bash, tools, cwd, approval, on_approval, false) {
-        Err(denied) => format!("not run: {}", denied.message),
-        Ok(cleared) => {
-            cleared
-                .tool
-                .execute_call(&bash, cwd, &mut |_: &str| {})
-                .content
-        }
-    };
-    out.content
-        .push_str(&format!("\n\n[then_run] $ {command}\n{body}"));
     out
 }
 
@@ -1368,7 +1285,6 @@ fn gate_call<'a>(
     if ask && (!extension_allowed || matched_pattern.is_some()) {
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),
-            tier: tool.tier(),
             preview: &preview,
             diff: diff.as_deref(),
             reason: &reason,
@@ -1466,9 +1382,9 @@ fn prepare_call<'a>(
     Ok(cleared)
 }
 
-/// Finish one call after execution: fuse an edit/write's `then_run`, let
-/// extensions rewrite the model-visible result, emit ToolEnd, and push the
-/// result onto the history. Shared by both paths so ordering is identical.
+/// Finish one call after execution: let extensions rewrite the model-visible
+/// result, emit ToolEnd, and push the result onto the history. Shared by both
+/// paths so ordering is identical.
 fn finish_call(
     call: &ToolCall,
     out: tools::ToolOutput,
@@ -1476,19 +1392,10 @@ fn finish_call(
     repeat_note: Option<String>,
     history: &mut Vec<Msg>,
 ) {
-    let tools = ctx.tools;
-    let cwd = ctx.cwd;
     let hooks = ctx.hooks;
-    let approval = &mut *ctx.approval;
-    let on_approval = &mut *ctx.on_approval;
     let on_update = &mut *ctx.on_update;
-    // action fusion: an edit/write may fuse its follow-up validation command
-    // into the same result, which removes the extra model round-trip (the
-    // command still passes the normal bash gate, so approval and the
-    // blacklist apply to it)
-    let out = fuse_then_run(out, call, tools, cwd, approval, on_approval);
     // extensions may replace the model-visible result (the enabler for
-    // reducer/observation plugins — see `docs/extensions.md`); the rewrite is
+    // log-reducer/redactor plugins — see `docs/extensions.md`); the rewrite is
     // re-capped and fail-open, so a broken plugin costs its own rewrite and
     // never the tool's result
     let out = rewrite_tool_result(out, hooks, call);

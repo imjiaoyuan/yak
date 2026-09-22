@@ -19,15 +19,15 @@ impl Tool for WriteTool {
         Tier::Write
     }
     fn description(&self) -> &str {
-        "Create or overwrite a file (parent directories are created)."
+        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. \
+         Automatically creates parent directories."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-                "then_run": {"type": "string", "description": THEN_RUN_DESCRIPTION}
+                "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+                "content": {"type": "string", "description": "Content to write to the file"}
             },
             "required": ["path", "content"]
         })

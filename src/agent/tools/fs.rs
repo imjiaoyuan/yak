@@ -10,7 +10,8 @@ impl Tool for LsTool {
         Tier::Read
     }
     fn description(&self) -> &str {
-        "List a directory's entries, alphabetical, directories suffixed with /."
+        "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
+         directories. Includes dotfiles."
     }
     fn parameters(&self) -> Value {
         json!({

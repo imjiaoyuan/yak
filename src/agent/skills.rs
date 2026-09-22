@@ -31,23 +31,18 @@ pub struct SkillDef {
 /// never lose a usable skill.
 pub fn parse_skill_md(text: &str, fallback_name: &str, path: PathBuf) -> Option<SkillDef> {
     let (fm, _) = crate::yaml::split_frontmatter(text)?;
-    let map = yaml::parse(fm).ok().and_then(|y| y.as_map());
+    let map = yaml::parse(fm).ok().unwrap_or_default();
     let name = map
-        .as_ref()
-        .and_then(|m| m.get("name").cloned())
+        .get("name")
+        .cloned()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| fallback_name.to_string());
     if name.is_empty() {
         return None;
     }
-    let description = map
-        .as_ref()
-        .and_then(|m| m.get("description"))
-        .cloned()
-        .unwrap_or_default();
+    let description = map.get("description").cloned().unwrap_or_default();
     let model_invocation = map
-        .as_ref()
-        .and_then(|m| m.get("disable_model_invocation"))
+        .get("disable-model-invocation")
         .map(|v| v != "true")
         .unwrap_or(true);
     Some(SkillDef {
@@ -222,7 +217,7 @@ mod tests {
     #[test]
     fn falls_back_to_dir_name_and_honors_disable() {
         let def = parse_skill_md(
-            "---\ndescription: x\ndisable_model_invocation: true\n---\nbody",
+            "---\ndescription: x\ndisable-model-invocation: true\n---\nbody",
             "dirskill",
             PathBuf::from("/s/dirskill/SKILL.md"),
         )
