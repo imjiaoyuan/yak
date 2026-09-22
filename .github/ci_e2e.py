@@ -680,8 +680,14 @@ def main():
     assert isinstance(tip["content"], list) \
         and tip["content"][-1].get("cache_control", {}).get("type") == "ephemeral", \
         f"conversation tip unmarked: {json.dumps(tip)[:300]}"
-    assert not any("cache_control" in json.dumps(m) for m in msgs if m is not tip), \
-        f"marker leaked onto earlier turns: {json.dumps(msgs)[:300]}"
+    # a task opened on a carried history marks two breakpoints: the tip above,
+    # and the anchor naming the prefix the previous request already wrote —
+    # the first request of a task would otherwise re-write the whole history
+    # at write price instead of reading it back
+    marked = [i for i, m in enumerate(msgs) if "cache_control" in json.dumps(m)]
+    tip_index = msgs.index(tip)
+    assert marked == [tip_index - 1, tip_index], \
+        f"the anchor must name the carried prefix: {json.dumps(msgs)[:300]}"
 
     # unknown words are agent tasks now, and the agent always sends tools
     ch = run([binary, "chat", "hi"], env, stdin=subprocess.DEVNULL)

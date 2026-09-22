@@ -83,6 +83,15 @@ impl Session {
         }
     }
 
+    /// How much of the carried history the previous request in this
+    /// conversation already sent, as a prefix length — what the next run
+    /// starts its cache breakpoints from. None on a session's first task:
+    /// nothing was sent yet, and a marker on a prefix no request ever carried
+    /// is a breakpoint the provider cannot match.
+    pub fn cache_anchor(&self) -> Option<usize> {
+        (!self.seed.is_empty()).then_some(self.seed.len())
+    }
+
     /// Reset the in-memory session: drop history, forget the conversation id
     /// and token counters. The stored log is untouched.
     pub fn clear(&mut self) {
@@ -132,6 +141,7 @@ impl Session {
             reasoning: self.thinking.clone(),
             hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
+            cache_anchor: self.cache_anchor(),
         };
         let model_id = self.model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
@@ -435,6 +445,7 @@ impl Session {
             reasoning: self.thinking.clone(),
             hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
+            cache_anchor: self.cache_anchor(),
         };
         let task_start = std::time::Instant::now();
         // the terminal path renders the reasoning trace through TaskView;
@@ -886,6 +897,19 @@ mod tests {
             json: false,
             persist_error: None,
         }
+    }
+
+    /// A conversation carried into the next task names the cache anchor for
+    /// it, so the first request of a REPL turn or a resume reads the history
+    /// back instead of writing it again. A session with nothing carried has
+    /// no anchor to name, and neither has one that just started over.
+    #[test]
+    fn a_carried_history_names_the_cache_anchor() {
+        assert_eq!(tight_session(Vec::new()).cache_anchor(), None);
+        let mut carried = tight_session(vec![Msg::user("hi"), Msg::assistant("ok")]);
+        assert_eq!(carried.cache_anchor(), Some(2));
+        carried.clear();
+        assert_eq!(carried.cache_anchor(), None);
     }
 
     /// Resuming a thread that no longer fits projects its oversized results

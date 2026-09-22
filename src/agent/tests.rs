@@ -1,5 +1,27 @@
-use super::{RunCallbacks, RunRequest, advance_seed_boundary};
+use super::{RunCallbacks, RunRequest, advance_seed_boundary, usable_anchor};
 use serde_json::json;
+
+/// A continuation names the anchor for its first request; an anchor the
+/// history does not have (a caller that counted the seed before a resume
+/// pruned it, or a nonsense 0) is dropped rather than sent as a breakpoint
+/// nothing can match.
+#[test]
+fn a_cache_anchor_is_only_used_when_the_history_has_it() {
+    assert_eq!(usable_anchor(None, 10), None);
+    assert_eq!(usable_anchor(Some(10), 10), Some(10));
+    assert_eq!(usable_anchor(Some(3), 10), Some(3));
+    assert_eq!(
+        usable_anchor(Some(0), 10),
+        None,
+        "an empty prefix is no hint"
+    );
+    assert_eq!(
+        usable_anchor(Some(11), 10),
+        None,
+        "a pruned seed is shorter than the caller counted"
+    );
+    assert_eq!(usable_anchor(Some(1), 0), None);
+}
 
 /// Compaction drops `cut` messages and inserts one summary, so the run's
 /// own region moves; a boundary consumed by the cut lands on the summary.
@@ -316,6 +338,7 @@ fn test_opts() -> AgentOptions<'static> {
         reasoning: None,
         hooks: empty_extensions(),
         cache_key: None,
+        cache_anchor: None,
     }
 }
 
@@ -887,6 +910,7 @@ fn context_note_reports_the_room_left() {
         reasoning: None,
         hooks: &crate::agent::ext::Extensions::empty(),
         cache_key: None,
+        cache_anchor: None,
     };
     let note = context_note(&opts, 3_000).unwrap();
     assert!(

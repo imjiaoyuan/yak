@@ -294,8 +294,13 @@ last message the previous request carried — the stable anchor `PromptInput::ca
 resolved at assembly so a trailing tool-result run lands inside the marked block — plus on the
 current conversation tip; colliding onto one block when a tool round adds no user turn, and skipping
 the never-resent one-shot prompt) because Messages API caching is opt-in and a marker on the moving
-tip alone would rewrite the whole history at write price every round and read none of it back, and
-it folds `cache_read`+`cache_creation` into `Usage.input` to match openai-compat's whole-prompt
+tip alone would rewrite the whole history at write price every round and read none of it back. The
+anchor is carried across task boundaries too: `Session::cache_anchor` names the seed a resumed
+thread or the next REPL task hands over (`AgentOptions::cache_anchor`, dropped when the loop's own
+projection shortened that seed), so a task's *first* request opens a breakpoint window on the prefix
+the previous request already wrote instead of carrying the tip alone, and Anthropic's
+`message_start` seeds the input/cached token counts, and it folds `cache_read`+`cache_creation` into
+`Usage.input` to match openai-compat's whole-prompt
 `prompt_tokens`; the openai-compat side is automatic server-side, with a `prompt_cache_key` (the
 session's `cache_key`) pinning one conversation to one replica — automatic caching is per-replica,
 so a round-robin hop serves the next round cold — and its hit count parsed from all three usage

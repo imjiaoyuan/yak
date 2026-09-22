@@ -113,6 +113,14 @@ pub struct AgentOptions<'a> {
     /// per-replica, so without it a round-robin hop re-bills the whole
     /// prompt. None for a one-shot call with no stable conversation.
     pub cache_key: Option<&'a str>,
+    /// how much of `seed` the previous request in this conversation already
+    /// carried, as a prefix length (see `PromptInput::cache_anchor`). None
+    /// opens a conversation. A run seeded from a resumed thread or from the
+    /// previous task of a REPL session otherwise carries only the moving-tip
+    /// breakpoint on its first request, and a provider that reads its cache
+    /// back by prefix finds nothing above it — the whole history is written
+    /// at cache-write price at the start of every task instead of read back.
+    pub cache_anchor: Option<usize>,
 }
 
 pub struct AgentOutcome {
@@ -271,6 +279,15 @@ pub struct RunCallbacks<'a> {
     pub steer: &'a mut dyn FnMut() -> Vec<String>,
 }
 
+/// The cache anchor a run starts its first round from: the caller's, when it
+/// names a prefix this history actually has. A caller counts the seed before
+/// the loop projects it down (a resume prunes oversized results), so the
+/// number it holds can be out of range — dropped rather than trusted, since a
+/// marker past the tip would only be a breakpoint nothing can match.
+fn usable_anchor(anchor: Option<usize>, history_len: usize) -> Option<usize> {
+    anchor.filter(|n| *n > 0 && *n <= history_len)
+}
+
 /// Run the agent loop: stream an assistant response, execute its tool calls,
 /// feed results back, repeat until the model stops calling tools or the turn
 /// budget hits. Tool errors become error results (data, not failure); only
@@ -338,10 +355,6 @@ pub fn run_agent(
     // the whole history each round (O(n²) over a long task). Reset to None
     // wherever history is rebuilt (a compaction) so indices stay honest.
     let mut usage_marker: Option<(usize, Usage)> = None;
-    // prefix length that has stopped changing (see PromptInput::cache_anchor):
-    // set after each completed round, cleared wherever the loop edits history
-    // in place, so a provider reading its own cache back never sees a prefix
-    // that was rewritten under it.
     // one compaction-stalled notice per run (see `compact_after_turn`)
     let mut compact_stalled = false;
     // how many times a refused request was answered with a fresh compaction:
@@ -354,7 +367,15 @@ pub fn run_agent(
     // every round that sits above one fixed number. 0 switches it off; a
     // provider that refuses a prompt still forces one below.
     let mut compact_trigger = opts.compact.as_ref().map_or(0, |c| c.trigger_tokens);
-    let mut cache_stable: Option<usize> = None;
+    // a caller continuing a conversation (a resumed thread, the next task of a
+    // REPL session) names the seed here, so the first request of the task
+    // carries a second breakpoint on a prefix the provider still holds;
+    // without it the moving tip alone re-writes the whole history at
+    // cache-write price. Set after each completed round (the request's whole
+    // conversation is what the next one extends) and cleared wherever history
+    // is edited in place, so a provider reading its own cache back never sees
+    // a prefix that was rewritten under it.
+    let mut cache_stable: Option<usize> = usable_anchor(opts.cache_anchor, history.len());
     let mut final_text = String::new();
     let mut interrupted = false;
     // mid-stream drops recovered so far; the cap keeps a link that drops
