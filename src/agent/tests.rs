@@ -294,7 +294,7 @@ fn a_stalled_compaction_is_reported_once() {
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = compact_after_turn(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
     }
     assert_eq!(
         history.len(),
@@ -312,7 +312,7 @@ fn a_stalled_compaction_is_reported_once() {
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = compact_after_turn(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
     }
     assert_eq!(stalled(&updates), 1);
 }
@@ -456,12 +456,12 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     );
 }
 
-/// The window is learned, not guessed: a provider refusing a prompt for not
-/// fitting its window is the only authority on the size, so the refusal must
-/// become the session's window, the history must be compacted below it, and the
-/// round retried — the run survives the one number this side could not know.
+/// A provider refusing a prompt for not fitting its window is answered with a
+/// forced compaction below the cut and a retry — the run survives the wall it
+/// could not see (the window is not known here, so the refusal is the only
+/// signal there is).
 #[test]
-fn a_refused_prompt_teaches_the_window_and_the_round_is_retried() {
+fn a_refused_prompt_forces_a_compaction_and_the_round_is_retried() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -492,8 +492,6 @@ fn a_refused_prompt_teaches_the_window_and_the_round_is_retried() {
                     )
                     .as_bytes(),
                 );
-                // the mock keeps accepting: the run may come back (the window
-                // the refusal taught is what the next gate measures against)
             }
         }
     });
@@ -526,6 +524,155 @@ fn a_refused_prompt_teaches_the_window_and_the_round_is_retried() {
     assert!(
         hits >= 3,
         "the refusal, a summary of what it refused, then the retry: {hits} requests"
+    );
+    assert!(
+        matches!(outcome.history.first(), Some(Msg::Summary { .. })),
+        "the prefix below the cut became a summary"
+    );
+    assert_eq!(outcome.final_text, "ok");
+}
+
+/// A model whose `context_window` is recorded compacts against the window, not
+/// the raw ladder: a seed over the anchored trigger is summarized *before* the
+/// first request of the task goes out, so a resumed over-window thread never
+/// sends its raw history once.
+#[test]
+fn a_known_window_compacts_before_the_first_request() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            read_request(&mut c);
+            // n=0 is the summarizer (forced by the pre-request check), n=1 the
+            // first real round
+            let content = if n == 0 { "compressed" } else { "ok" };
+            let body = format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n\
+                 data: [DONE]\n\n"
+            );
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    let mut model = mock_model(port);
+    model.context_window = Some(20_000);
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let mut opts = test_opts();
+    opts.compact = Some(compact::CompactConfig {
+        trigger_tokens: 64_000,
+        keep_recent_tokens: 0,
+    });
+    let mut approval = approval::ApprovalConfig::default();
+    // 20k window minus the 16384 reserve anchors the trigger at 3616; a seed
+    // of ~5000 tokens is over it, so the first request already sees a summary
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![Msg::user("the task"), Msg::user("x".repeat(20_000))],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the pre-request compaction must succeed");
+    drop(server);
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "one summary, then the first request"
+    );
+    assert!(
+        matches!(outcome.history.first(), Some(Msg::Summary { .. })),
+        "the over-window seed was summarized before the first request"
+    );
+    assert_eq!(outcome.final_text, "ok");
+}
+
+/// A gateway that reports usage past the known window without a 400 (z.ai's
+/// silent swallow) is answered with a forced compaction and retry, exactly like
+/// an outright refusal — the run must not quietly carry on over its window.
+#[test]
+fn a_silent_overflow_forces_a_compaction_and_the_round_is_retried() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            read_request(&mut c);
+            if n == 0 {
+                // a successful round that still reports 50000 input tokens —
+                // past the 20000 window it ran under, with no refusal
+                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n\
+                            data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                            data: {\"usage\":{\"prompt_tokens\":50000,\"completion_tokens\":5}}\n\n\
+                            data: [DONE]\n\n";
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            } else {
+                // n=1 is the summarizer; n=2 is the retried round
+                let content = if n == 1 { "compressed" } else { "ok" };
+                let body = format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n\
+                     data: [DONE]\n\n"
+                );
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+    });
+    let mut model = mock_model(port);
+    model.context_window = Some(20_000);
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let mut opts = test_opts();
+    opts.compact = Some(compact::CompactConfig {
+        trigger_tokens: 64_000,
+        keep_recent_tokens: 0,
+    });
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![Msg::user("the task"), Msg::user("more")],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the silent overflow must be answered with a compaction, not a drift");
+    drop(server);
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        "the overflow round, a summary of it, then the retry"
     );
     assert!(
         matches!(outcome.history.first(), Some(Msg::Summary { .. })),

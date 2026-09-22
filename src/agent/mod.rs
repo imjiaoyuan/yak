@@ -358,7 +358,7 @@ pub fn run_agent(
     // the whole history each round (O(n²) over a long task). Reset to None
     // wherever history is rebuilt (a compaction) so indices stay honest.
     let mut usage_marker: Option<(usize, Usage)> = None;
-    // one compaction-stalled notice per run (see `compact_after_turn`)
+    // one compaction-stalled notice per run (see `maybe_compact`)
     let mut compact_stalled = false;
     // how many times a refused request was answered with a fresh compaction:
     // bounded, so a provider that refuses everything ends the run
@@ -366,10 +366,16 @@ pub fn run_agent(
     let mut overflow_compactions = 0usize;
     // The auto-compaction ladder: compaction runs when the priced context
     // crosses this, and each compaction doubles it (see `next_trigger`), so a
-    // long session is summarized at 64k, then 128k, then 256k ... instead of at
-    // every round that sits above one fixed number. 0 switches it off; a
-    // provider that refuses a prompt still forces one below.
-    let mut compact_trigger = opts.compact.as_ref().map_or(0, |c| c.trigger_tokens);
+    // long session is summarized a few times instead of at every round above
+    // one fixed number. With a known model window the rung is capped at
+    // `window - reserve` (the reference's ceiling), so the ladder climbs to it rather
+    // than past it. 0 switches it off; a provider that refuses a prompt still
+    // forces one.
+    let mut compact_trigger = opts
+        .compact
+        .as_ref()
+        .map(|c| compact::effective_trigger(c.trigger_tokens, model.context_window))
+        .unwrap_or(0);
     // a caller continuing a conversation (a resumed thread, the next task of a
     // REPL session) names the seed here, so the first request of the task
     // carries a second breakpoint on a prefix the provider still holds;
@@ -464,6 +470,26 @@ pub fn run_agent(
             ..c.clone()
         });
         price_and_rewrite(&mut history, usage_marker, cfg_now.as_ref(), on_update);
+        // the reference's pre-request compaction check (the reference session): a session
+        // that was interrupted — or resumed — over its window is compacted
+        // before this request goes out, so ctrl-c cannot skip the gate the way
+        // a check that only runs after a completed turn can.
+        {
+            let mut sink = StallSink::new(&mut compact_stalled, on_update);
+            let after = maybe_compact(
+                model,
+                &mut history,
+                usage_marker,
+                cfg_now.as_ref(),
+                seed_boundary,
+                cache_stable,
+                &mut sink,
+            );
+            seed_boundary = after.seed_boundary;
+            usage_marker = after.usage_marker;
+            cache_stable = after.cache_stable;
+            compact_trigger = after.trigger;
+        }
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
@@ -491,53 +517,45 @@ pub fn run_agent(
         if let Some(e) = round.error.take() {
             if crate::core::http::interrupted() {
                 interrupted = true;
+                // keep the interrupted round's own messages: the pending
+                // prompt and any partial answer already streamed, so /resume
+                // starts from what was actually said instead of a gap the
+                // transcript never recorded (the network-drop recovery below
+                // keeps partial output the same way).
+                if has_pending {
+                    history.push(pending.take().expect("checked above"));
+                }
+                if !round.text.is_empty() {
+                    final_text = round.text.clone();
+                    history.push(Msg::Assistant {
+                        text: round.text,
+                        tool_calls: vec![],
+                        reasoning: None,
+                        reasoning_meta: None,
+                    });
+                }
                 break;
             }
             // The provider refusing a prompt that does not fit its window is
-            // the only authoritative statement about that window there is: a
-            // gateway rarely publishes one, and a guess either pays for a
-            // summary nobody needed or dies right here. Learn it — the refused
-            // size becomes this session's window — compact the history below
-            // it, and retry the round. Bounded: a provider that refuses
-            // everything ends the run instead of looping.
-            // The provider refusing a prompt that does not fit is the moment a
-            // session runs into a wall it could not see: nothing here knows the
-            // model's window, and nothing tries to. Compact now, whatever the
-            // ladder says, and set the next rung at the size that was refused,
-            // so the run can carry on and does not walk into that wall again
-            // this session. In memory only: no file records it, no line
-            // reports it. Bounded, so a provider that refuses everything ends
-            // the run instead of looping.
+            // the one authoritative statement about it there is: compact the
+            // history now, whatever the ladder says, and retry the round.
+            // Bounded: a provider that refuses everything ends the run
+            // instead of looping.
             if round.text.is_empty()
                 && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
                 && crate::core::http::context_overflow(&e)
                 && let Some(cfg) = cfg_now.as_ref()
             {
-                compact_trigger =
-                    compact_trigger.max(compact::estimate_tokens(&history, usage_marker));
-                let refused = compact::CompactConfig {
-                    trigger_tokens: compact_trigger,
-                    ..cfg.clone()
-                };
-                let mut after = AfterTurn {
-                    seed_boundary,
-                    usage_marker,
-                    cache_stable,
-                    trigger: compact_trigger,
-                };
-                let sink = StallSink::new(&mut compact_stalled, on_update);
-                if compact_now(
+                let mut sink = StallSink::new(&mut compact_stalled, on_update);
+                if force_compact(
                     model,
                     &mut history,
-                    &refused,
-                    &mut after,
-                    &mut *sink.on_update,
-                )
-                .is_ok()
-                {
-                    seed_boundary = after.seed_boundary;
-                    usage_marker = after.usage_marker;
-                    cache_stable = after.cache_stable;
+                    cfg,
+                    &mut seed_boundary,
+                    &mut usage_marker,
+                    &mut cache_stable,
+                    &mut sink,
+                ) {
                     overflow_compactions += 1;
                     continue;
                 }
@@ -625,23 +643,33 @@ pub fn run_agent(
             }),
         );
 
-        // compaction check after each completed turn (see `compact_after_turn`)
-        let mut sink = StallSink::new(&mut compact_stalled, on_update);
-        let after = compact_after_turn(
-            model,
-            &mut history,
-            usage_marker,
-            cfg_now.as_ref(),
-            seed_boundary,
-            cache_stable,
-            &mut sink,
-        );
-        seed_boundary = after.seed_boundary;
-        usage_marker = after.usage_marker;
-        cache_stable = after.cache_stable;
-        // a compaction this turn moved the ladder up; one that stalled left it
-        // where it was, so the next round tries again at the same size
-        compact_trigger = after.trigger;
+        // A gateway can overflow silently — no 400, just a usage report past
+        // the window, or a length stop that consumed the whole window and
+        // produced nothing (the reference's the overflow module cases 2 and 3). The window must
+        // be known to see it; then it is the same forced-compact-and-retry as
+        // an outright refusal, bounded the same way.
+        if let (Some(u), Some(w)) = (usage, model.context_window)
+            && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
+            && let Some(cfg) = cfg_now.as_ref()
+        {
+            let silent = u.input > w;
+            let truncated = stop == StopReason::Length && u.output == 0 && u.input >= w * 99 / 100;
+            if silent || truncated {
+                let mut sink = StallSink::new(&mut compact_stalled, on_update);
+                if force_compact(
+                    model,
+                    &mut history,
+                    cfg,
+                    &mut seed_boundary,
+                    &mut usage_marker,
+                    &mut cache_stable,
+                    &mut sink,
+                ) {
+                    overflow_compactions += 1;
+                    continue;
+                }
+            }
+        }
 
         if stop == StopReason::Length {
             // truncated output: don't act on possibly-mangled calls, let the
@@ -809,17 +837,18 @@ struct AfterTurn {
     usage_marker: Option<(usize, Usage)>,
     /// stable cache prefix, or None once the rebuild rewrote below the summary
     cache_stable: Option<usize>,
-    /// the ladder rung the next round compacts at; `next_trigger` when a
-    /// compaction ran this turn, unchanged when one stalled
+    /// the ladder rung the next round compacts at: `next_effective_trigger`
+    /// when a compaction ran, unchanged when one stalled
     trigger: u64,
 }
 
-/// Compact after a completed turn when the estimate says the window is under
-/// pressure: prune oversized tool results first (no model call, and it may
-/// relieve enough to skip summarizing at all), then summarize at a turn
-/// boundary. A compaction that cannot run reports why through the sink instead
-/// of leaving the session quietly over its window.
-fn compact_after_turn(
+/// Compact when the estimate says the window is under pressure: prune
+/// oversized tool results first (no model call, and it may relieve enough to
+/// skip summarizing at all), then summarize at a turn boundary. Runs before a
+/// request goes out (the reference's pre-request check), so an interrupted or resumed
+/// session cannot skip it. A compaction that cannot run reports why through
+/// the sink instead of leaving the session quietly over its window.
+fn maybe_compact(
     model: &crate::providers::ResolvedModel,
     history: &mut Vec<Msg>,
     usage_marker: Option<(usize, Usage)>,
@@ -857,9 +886,13 @@ fn compact_after_turn(
         }
     }
     if compact::should_compact(estimate, cfg.trigger_tokens) {
-        // a compaction ran this turn: the next one gets twice the room
+        // a compaction ran this turn: the next rung doubles, capped by the
+        // known window (the reference's ceiling)
         match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
-            Ok(()) => after.trigger = compact::next_trigger(cfg.trigger_tokens),
+            Ok(()) => {
+                after.trigger =
+                    compact::next_effective_trigger(cfg.trigger_tokens, model.context_window)
+            }
             // The history is untouched either way: the run continues, but a
             // session that keeps growing past the trigger has to say why
             Err(reason) => sink.stalled(reason),
@@ -949,6 +982,40 @@ fn compact_now(
     after.usage_marker = None;
     after.cache_stable = None;
     Ok(())
+}
+
+/// Force a compaction regardless of the ladder: a provider refused the prompt
+/// (400 overflow), or reported usage past the known window without one (silent
+/// overflow). The caller retries the round on success, bounded by
+/// `MAX_OVERFLOW_COMPACTIONS`. A failure reports through the sink and the run
+/// carries on — over its window, but loudly.
+fn force_compact(
+    model: &crate::providers::ResolvedModel,
+    history: &mut Vec<Msg>,
+    cfg: &compact::CompactConfig,
+    seed_boundary: &mut usize,
+    usage_marker: &mut Option<(usize, Usage)>,
+    cache_stable: &mut Option<usize>,
+    sink: &mut StallSink<'_>,
+) -> bool {
+    let mut after = AfterTurn {
+        seed_boundary: *seed_boundary,
+        usage_marker: *usage_marker,
+        cache_stable: *cache_stable,
+        trigger: cfg.trigger_tokens,
+    };
+    match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
+        Ok(()) => {
+            *seed_boundary = after.seed_boundary;
+            *usage_marker = after.usage_marker;
+            *cache_stable = after.cache_stable;
+            true
+        }
+        Err(reason) => {
+            sink.stalled(reason);
+            false
+        }
+    }
 }
 
 /// The mutable sinks a tool round reports through. Bundled so the call runner
