@@ -121,9 +121,9 @@ pub struct AgentOptions<'a> {
     /// back by prefix finds nothing above it — the whole history is written
     /// at cache-write price at the start of every task instead of read back.
     pub cache_anchor: Option<usize>,
-    /// how long the provider should hold its cache entry (`agent.cache_ttl`),
-    /// for the wires that take one; None leaves the provider's own default
-    pub cache_ttl: Option<&'a str>,
+    /// how long the provider should hold its cache entry, for the wires that
+    /// take one (`agent.cache_ttl`); None leaves the provider's own default
+    pub cache_ttl: Option<crate::providers::CacheTtl>,
 }
 
 pub struct AgentOutcome {

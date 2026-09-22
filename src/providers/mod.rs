@@ -498,6 +498,41 @@ pub fn complete_json(req: &HttpRequest) -> Result<Value, String> {
     Ok(value)
 }
 
+/// How long a provider should keep this conversation's prompt-cache entry
+/// (`agent.cache_ttl`). Only Anthropic's Messages API takes a lifetime: its
+/// own default is five minutes, which is what `Default` names, so a config
+/// that says `5m` leaves the request byte-identical to one that says nothing.
+/// The hour exists for the gaps interactive work makes — an approval prompt,
+/// a long test run — after which a lapsed entry would be re-written whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheTtl {
+    /// what the provider gives on its own (Anthropic: five minutes)
+    Default,
+    /// the long-lived entry, billed at a higher write rate
+    Hour,
+}
+
+impl CacheTtl {
+    /// The config spellings, `5m` and `1h`; None for anything else, so the
+    /// caller that read the file can refuse it loudly.
+    pub fn parse(raw: &str) -> Option<CacheTtl> {
+        match raw {
+            "5m" => Some(CacheTtl::Default),
+            "1h" => Some(CacheTtl::Hour),
+            _ => None,
+        }
+    }
+
+    /// The `cache_control.ttl` the wire carries, or None for the provider's
+    /// own lifetime — the field is then absent, never `"5m"`.
+    pub fn field(self) -> Option<&'static str> {
+        match self {
+            CacheTtl::Default => None,
+            CacheTtl::Hour => Some("1h"),
+        }
+    }
+}
+
 /// A model resolved from config, ready to execute a prompt.
 pub struct ResolvedModel {
     pub provider_name: String,
@@ -537,13 +572,9 @@ pub struct PromptInput<'a> {
     /// `prompt_cache_key`): keeps one conversation on one cache replica
     pub cache_key: Option<&'a str>,
     /// how long the provider should hold this prompt's cache entry, for the
-    /// wires that take one (`agent.cache_ttl`): `1h` asks for the long entry,
-    /// `5m` is the default every provider already gives. None means "no
-    /// opinion" and leaves the request byte-identical to one that never named
-    /// a lifetime. Only the Anthropic Messages API has the knob — the
-    /// openai-compat wire caches automatically, server-side, with nothing to
-    /// set.
-    pub cache_ttl: Option<&'a str>,
+    /// wires that take one (`agent.cache_ttl`). None means "no opinion" and
+    /// leaves the request to the provider's own lifetime.
+    pub cache_ttl: Option<CacheTtl>,
     /// the largest body this request may serialize to; refusing an oversized
     /// body locally beats paying for the upload only to read a gateway's
     /// opaque 413 back (`agent.max_request_bytes`)

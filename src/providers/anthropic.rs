@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{Attachment, Msg, PromptInput, ResolvedModel};
+use super::{Attachment, CacheTtl, Msg, PromptInput, ResolvedModel};
 use crate::core::attachments::{Kind, kind_of};
 use crate::core::http::{Event, HttpRequest, StopReason, Usage};
 
@@ -54,23 +54,22 @@ fn attachment_block(a: &Attachment) -> Result<Value, String> {
 }
 
 /// The `cache_control` value one breakpoint carries. An entry lives five
-/// minutes unless the request asks otherwise; `1h` (`agent.cache_ttl`) buys
-/// the long one, which interactive work needs — an approval prompt, a long
-/// test run or a user reading the answer spaces two rounds further apart
-/// than five minutes often enough, and every entry that lapses means the next
-/// round re-writes the whole prompt at write price. `5m` is the API's own
-/// default, so it leaves the field off: naming the default keeps the wire
-/// byte-identical to a request that never named a lifetime.
-fn marker(ttl: Option<&str>) -> Value {
-    match ttl {
-        Some(t) if t != "5m" => json!({"type": "ephemeral", "ttl": t}),
-        _ => json!({"type": "ephemeral"}),
+/// minutes unless the request asks for the hour, which interactive work needs
+/// — an approval prompt, a long test run or a user reading the answer spaces
+/// two rounds further apart than five minutes often enough, and every entry
+/// that lapses means the next round re-writes the whole prompt at write price.
+/// `CacheTtl` owns which lifetime that is and how the config spells it; the
+/// provider's own default leaves the field off entirely.
+fn marker(ttl: Option<CacheTtl>) -> Value {
+    match ttl.and_then(CacheTtl::field) {
+        Some(t) => json!({"type": "ephemeral", "ttl": t}),
+        None => json!({"type": "ephemeral"}),
     }
 }
 
 /// Mark one message's last content block as a prompt-cache breakpoint.
 /// Caching is opt-in on the Messages API; without a marker nothing caches.
-fn mark_message(msg: &mut Value, ttl: Option<&str>) {
+fn mark_message(msg: &mut Value, ttl: Option<CacheTtl>) {
     let content = &mut msg["content"];
     if content.is_string() {
         let text = content.as_str().unwrap_or("").to_string();
@@ -94,7 +93,7 @@ fn mark_message(msg: &mut Value, ttl: Option<&str>) {
 /// (stable, so this round reads everything up to it) and the tip is where
 /// this request ends (so the next round reads this one in turn). The system
 /// block carries the third, which covers tools+system together.
-fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>, ttl: Option<&str>) {
+fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>, ttl: Option<CacheTtl>) {
     let Some(last) = messages.len().checked_sub(1) else {
         return;
     };
@@ -799,7 +798,7 @@ mod tests {
         let mut i = input(&history, &tools);
         i.system = Some("you are llm");
         i.cache_anchor = Some(2);
-        i.cache_ttl = Some("1h");
+        i.cache_ttl = Some(CacheTtl::Hour);
         let body = build_body(&model("anthropic"), &i, false).unwrap();
         assert_eq!(
             body["system"][0]["cache_control"],
@@ -826,7 +825,7 @@ mod tests {
         // carries the lifetime too
         let mut i = input(&history, &tools);
         i.cache_anchor = Some(2);
-        i.cache_ttl = Some("1h");
+        i.cache_ttl = Some(CacheTtl::Hour);
         let body = build_body(&model("anthropic"), &i, false).unwrap();
         assert_eq!(
             body["tools"][0]["cache_control"],
@@ -834,11 +833,12 @@ mod tests {
             "{body}"
         );
 
-        // `5m` is the API's own default: naming it adds no field, so the
-        // request stays byte-identical to one that named no lifetime
+        // `CacheTtl::Default` is the API's own five minutes: asking for it
+        // adds no field, so the request stays byte-identical to one that
+        // asked for no lifetime at all
         let mut five = input(&history, &tools);
         five.cache_anchor = Some(2);
-        five.cache_ttl = Some("5m");
+        five.cache_ttl = Some(CacheTtl::Default);
         let plain = build_body(&model("anthropic"), &five, false).unwrap();
         assert!(
             !serde_json::to_string(&plain).unwrap().contains("\"ttl\""),

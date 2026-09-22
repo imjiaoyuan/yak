@@ -347,7 +347,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         compact: settings.compact_config(),
         // how long the provider holds this conversation's cache entries
         // (agent.cache_ttl); None leaves its own default in place
-        cache_ttl: settings.cache_ttl.clone(),
+        cache_ttl: settings.cache_ttl(),
         model,
         tools: Vec::new(),
         system,

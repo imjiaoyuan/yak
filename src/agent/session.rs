@@ -29,7 +29,7 @@ pub struct Session {
     pub compact: CompactConfig,
     /// how long to ask the provider to hold this conversation's prompt-cache
     /// entries (`agent.cache_ttl`); None uses the provider's own default
-    pub cache_ttl: Option<String>,
+    pub cache_ttl: Option<crate::providers::CacheTtl>,
     pub no_session: bool,
     pub store: Option<threads::Store>,
     pub approval: ApprovalConfig,
@@ -145,7 +145,7 @@ impl Session {
             hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
             cache_anchor: self.cache_anchor(),
-            cache_ttl: self.cache_ttl.as_deref(),
+            cache_ttl: self.cache_ttl,
         };
         let model_id = self.model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
@@ -450,7 +450,7 @@ impl Session {
             hooks: &self.extensions,
             cache_key: Some(self.cache_key.as_str()),
             cache_anchor: self.cache_anchor(),
-            cache_ttl: self.cache_ttl.as_deref(),
+            cache_ttl: self.cache_ttl,
         };
         let task_start = std::time::Instant::now();
         // the terminal path renders the reasoning trace through TaskView;

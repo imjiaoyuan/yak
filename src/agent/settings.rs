@@ -4,6 +4,7 @@ use std::fs;
 
 use crate::agent::compact::CompactConfig;
 use crate::core::config::config_path;
+use crate::providers::CacheTtl;
 
 /// `[agent]` settings from config.json — everything optional, defaults live
 /// next to their consumers. CLI flags override whatever is set here.
@@ -19,15 +20,23 @@ pub struct AgentSettings {
     /// refusal that comes back names nothing usable
     pub max_request_bytes: Option<usize>,
     /// how long a provider should hold this conversation's prompt-cache
-    /// entries: `5m` (what every provider gives by default) or `1h`. Only
-    /// Anthropic's Messages API takes a TTL; the openai-compat wire caches
-    /// automatically, with nothing to set.
+    /// entries, as the file spells it (`5m` or `1h`); `cache_ttl()` is the
+    /// typed read and `load` refuses a spelling neither of them knows
     pub cache_ttl: Option<String>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
     pub disabled_skills: Vec<String>,
 }
 
 impl AgentSettings {
+    /// The configured prompt-cache lifetime. Everything reaching the wire goes
+    /// through here, so the one place that knows how the file spells a
+    /// lifetime is `CacheTtl::parse` — which `load` already consulted, and
+    /// which a caller bypassing `load` cannot turn into a lifetime nobody
+    /// asked for.
+    pub fn cache_ttl(&self) -> Option<CacheTtl> {
+        self.cache_ttl.as_deref().and_then(CacheTtl::parse)
+    }
+
     /// Compaction limits for a run. The trigger is `compact_at_tokens` (64k by
     /// default): one number, the same whatever model serves the run, picked
     /// without knowing anything about the model behind the gateway — and the
@@ -66,7 +75,7 @@ pub fn load() -> AgentSettings {
     // exactly like one that asked for nothing: refuse it here, where the file
     // is read, rather than quietly caching for five minutes
     if let Some(ttl) = settings.cache_ttl.as_deref()
-        && !matches!(ttl, "5m" | "1h")
+        && CacheTtl::parse(ttl).is_none()
     {
         eprintln!("Error: agent.cache_ttl is '{ttl}' (5m or 1h)");
         std::process::exit(1);
@@ -129,11 +138,24 @@ mod agent_settings_tests {
     /// own default is then what applies, and the request says nothing about it.
     #[test]
     fn a_cache_ttl_comes_from_the_agent_section() {
-        assert_eq!(parse("{}").cache_ttl, None);
-        let s = parse(r#"{"agent": {"cache_ttl": "1h"}}"#);
-        assert_eq!(s.cache_ttl.as_deref(), Some("1h"));
-        let s = parse(r#"{"agent": {"cache_ttl": "5m"}}"#);
-        assert_eq!(s.cache_ttl.as_deref(), Some("5m"));
+        assert_eq!(parse("{}").cache_ttl(), None);
+        assert_eq!(
+            parse(r#"{"agent": {"cache_ttl": "1h"}}"#).cache_ttl(),
+            Some(CacheTtl::Hour)
+        );
+        // naming the provider's own five minutes is still saying nothing
+        assert_eq!(
+            parse(r#"{"agent": {"cache_ttl": "5m"}}"#).cache_ttl(),
+            Some(CacheTtl::Default)
+        );
+        // anything else parses to nothing, which `load` refuses out loud
+        assert_eq!(
+            parse(r#"{"agent": {"cache_ttl": "60m"}}"#).cache_ttl(),
+            None
+        );
+        // only the long entry reaches the wire as a field
+        assert_eq!(CacheTtl::Hour.field(), Some("1h"));
+        assert_eq!(CacheTtl::Default.field(), None);
     }
 
     #[test]
