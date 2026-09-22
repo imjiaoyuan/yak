@@ -434,8 +434,8 @@ def main():
                 "name": f"{name}__{tname}",
                 "description": (t.get("description") or f"{name} tool {tname}"),
                 "parameters": schema,
-                # MCP tools run arbitrary code out of process: exec tier
-                # keeps them behind the approval question by default.
+                # MCP tools run arbitrary code out of process: exec tier,
+                # gated only by the blacklist and per-tool policies.
                 "tier": "exec",
                 "server": name,
                 "tool": tname,

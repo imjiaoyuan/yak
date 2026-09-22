@@ -28,7 +28,7 @@ two built-ins of the same names cover the case where no file exists at all.
 
 How a child runs
 ----------------
-    llm --json --no-session --approval-mode yolo --tools <definition> \
+    llm --json --no-session --tools <definition> \
         [--model M] [--thinking L] --append-system-prompt <body> "Task: ..."
 
 `--json` is the line-delimited event stream this extension parses: tool calls
@@ -51,11 +51,11 @@ extension anyway, so the guard only has to catch a hand-run child.
 `interrupt` message, which a reader thread picks up while the main thread is
 busy — every running child is killed on the spot (this is why stdin is read
 by a thread rather than by the protocol loop).
-*Trust.* The child runs `--approval-mode yolo`: there is nobody at its
-terminal to answer a prompt. The parent call is the approval point — this is
-an ordinary exec-tier extension tool, so ask mode prompts for it once, and
-the definition's `tools:` line is what the child may then touch. Read-only
-agents (scout, reviewer) therefore stay read-only.
+*Trust.* The child runs without approvals: there is nobody at its terminal
+to answer a prompt. The parent call is the approval point — this is an
+ordinary exec-tier extension tool, and the definition's `tools:` line is
+what the child may then touch. Read-only agents (scout, reviewer) therefore
+stay read-only.
 """
 
 import json
@@ -278,7 +278,7 @@ def llm_binary():
 def run_child(binary, agent, prompt, label, depth):
     """Run one child to completion. Returns (ok, text)."""
     tools = child_tools(agent)
-    cmd = [binary, "--json", "--no-session", "--approval-mode", "yolo"]
+    cmd = [binary, "--json", "--no-session"]
     if tools:
         cmd += ["--tools", ",".join(tools)]
     if agent.get("model"):

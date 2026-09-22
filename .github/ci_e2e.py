@@ -530,7 +530,7 @@ def main():
 
     # extension lane: the host spawns the extension, mounts its tool, the
     # model calls it, and the second round returns the final answer
-    a = run([binary, "--yolo", "--no-session",
+    a = run([binary, "--no-session",
              "use the echo tool with text 'hi from model'"], env, cwd=work,
             stdin=subprocess.DEVNULL)
     assert a.returncode == 0, f"agent rc={a.returncode} err={a.stderr[-800:]}"
@@ -544,7 +544,7 @@ def main():
     # replaces what the model reads (the reducer/redactor seam)
     with open(os.path.join(work, "big.log"), "w") as f:
         f.write("NOISE line\n" * 500)
-    rw = run([binary, "--yolo", "--no-session", "-m", "mock-rw/m-rw", "read the log"],
+    rw = run([binary, "--no-session", "-m", "mock-rw/m-rw", "read the log"],
              env, cwd=work, stdin=subprocess.DEVNULL)
     assert rw.returncode == 0, f"rewrite lane rc={rw.returncode} err={rw.stderr[-800:]}"
     tool_msgs = [m for m in (seen.get("rw_round2") or []) if m.get("role") == "tool"]
@@ -554,7 +554,7 @@ def main():
 
     # manifest script tool lane: the host mounts the header-declared tool
     # and runs the script per call (single argument rides as argv[1])
-    w = run([binary, "--yolo", "--no-session", "-m", "mock-wc/m-wc",
+    w = run([binary, "--no-session", "-m", "mock-wc/m-wc",
              "count the text"], env, cwd=work, stdin=subprocess.DEVNULL)
     assert w.returncode == 0, f"wc agent rc={w.returncode} err={w.stderr[-800:]}"
     assert "wordcount" in (seen.get("tools") or []), \
@@ -632,7 +632,7 @@ def main():
     # builtin-tool lane: the model writes a real file through the write
     # tool; round 2 must carry the tool result back as a role:"tool"
     # message paired with the assistant tool_calls turn
-    w = run([binary, "--yolo", "--no-session", "-m", "mock-write/m-write",
+    w = run([binary, "--no-session", "-m", "mock-write/m-write",
              "create hello.txt"], env, cwd=work, stdin=subprocess.DEVNULL)
     assert w.returncode == 0, f"write agent rc={w.returncode} err={w.stderr[-800:]}"
     hello = os.path.join(work, "hello.txt")
@@ -652,7 +652,7 @@ def main():
     # agent round pins tools+system behind one cache_control marker and
     # leaves a first-round prompt unmarked; the continued prompt marks the
     # conversation tip once history exists
-    an = run([binary, "--yolo", "--no-session", "-m", "mock-ant/m-ant",
+    an = run([binary, "--no-session", "-m", "mock-ant/m-ant",
               "hi"], env, stdin=subprocess.DEVNULL)
     assert an.returncode == 0 and "ant ok" in an.stdout + an.stderr, \
         f"anthropic agent rc={an.returncode} err={an.stderr[-300:]!r}"
@@ -702,7 +702,7 @@ def main():
 
     # --json lane: the same task writes a line-delimited event stream instead
     # of the terminal UI — the contract the subagent example extension parses
-    js = run([binary, "--json", "--yolo", "--no-session", "-m", "mock/m-a", "hi"],
+    js = run([binary, "--json", "--no-session", "-m", "mock/m-a", "hi"],
              env, stdin=subprocess.DEVNULL)
     assert js.returncode == 0, f"json lane rc={js.returncode} err={js.stderr[-500:]}"
     events = []
@@ -746,7 +746,7 @@ def main():
     # a legacy codepage is what Windows CI actually runs under; pinning it on
     # unix too makes the lane prove the example survives one everywhere
     sub_env = dict(env, LLM_BIN=os.path.abspath(binary), PYTHONIOENCODING="cp1252")
-    sb = run([binary, "--yolo", "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
+    sb = run([binary, "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
              sub_env, cwd=work, stdin=subprocess.DEVNULL)
     assert sb.returncode == 0, f"subagent lane rc={sb.returncode} err={sb.stderr[-800:]}"
     assert "parent saw the subagent" in sb.stdout + sb.stderr, \
@@ -766,7 +766,7 @@ def main():
 
     # piped stdin is the task; the REPL is never entered without a tty
     import io
-    piped = subprocess.run([binary, "--yolo", "--no-session"],
+    piped = subprocess.run([binary, "--no-session"],
                            input="piped task text", capture_output=True, text=True,
                            env=env, timeout=120)
     assert piped.returncode == 0 and "final answer after tool" in piped.stdout, \
@@ -779,14 +779,14 @@ def main():
     other = tempfile.mkdtemp()
     stray = tempfile.mkdtemp()
     for home, marker in ((here, "alpha marker"), (other, "beta marker")):
-        r = run([binary, "--yolo", "-m", "mock/m-a", marker], env, cwd=home,
+        r = run([binary, "-m", "mock/m-a", marker], env, cwd=home,
                 stdin=subprocess.DEVNULL)
         assert r.returncode == 0, f"scoped run rc={r.returncode} err={r.stderr[-300:]!r}"
     # pin the thread files' ages so "newest" does not ride the filesystem's
     # mtime granularity: beta (other) is the newest anywhere
     pin_thread_mtimes(user, {here: -5, other: 100})
 
-    fallback = run([binary, "--yolo", "-c", "-m", "mock/m-a", "stray turn"], env,
+    fallback = run([binary, "-c", "-m", "mock/m-a", "stray turn"], env,
                    cwd=stray, stdin=subprocess.DEVNULL)
     body = json.dumps(seen.get("last_messages"))
     assert fallback.returncode == 0 and "continuing" in fallback.stderr, \
@@ -794,7 +794,7 @@ def main():
     assert "beta marker" in body and "alpha marker" not in body, \
         f"fallback did not take the newest thread: {body[-300:]!r}"
 
-    local = run([binary, "--yolo", "-c", "-m", "mock/m-a", "local turn"], env,
+    local = run([binary, "-c", "-m", "mock/m-a", "local turn"], env,
                 cwd=here, stdin=subprocess.DEVNULL)
     body = json.dumps(seen.get("last_messages"))
     assert local.returncode == 0 and "continuing" not in local.stderr, \

@@ -15,8 +15,8 @@ which backend answered.
 
 Page fetching is deliberately not mounted: the built-in `webfetch`
 already covers it, so this example mounts only the capability the host
-lacks. All extension tools are exec-tier: the approval matrix applies as
-usual. Protocol: newline-delimited JSON on stdio, one reply per request
+lacks. All extension tools are exec-tier, gated only by the blacklist and
+per-tool policies. Protocol: newline-delimited JSON on stdio, one reply per request
 id (docs/extensions.md has the reference).
 """
 
