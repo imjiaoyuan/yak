@@ -449,6 +449,9 @@ def main():
                     },
                 },
                 "models": {"default": "mock/m-a"},
+                # the anthropic lane asserts the long prompt-cache lifetime
+                # reaches the wire; no other provider takes one
+                "agent": {"cache_ttl": "1h"},
             },
             f,
         )
@@ -658,8 +661,8 @@ def main():
     b_agent = bodies[0]
     sys_blocks = b_agent.get("system")
     assert isinstance(sys_blocks, list) and len(sys_blocks) == 1 \
-        and sys_blocks[0].get("cache_control", {}).get("type") == "ephemeral", \
-        f"system breakpoint missing: {json.dumps(b_agent.get('system'))[:200]}"
+        and sys_blocks[0].get("cache_control") == {"type": "ephemeral", "ttl": "1h"}, \
+        f"system breakpoint missing its lifetime: {json.dumps(b_agent.get('system'))[:200]}"
     assert "write" in [t.get("name") for t in b_agent.get("tools", [])], \
         f"builtin tools missing: {b_agent.get('tools')}"
     assert not any("cache_control" in json.dumps(m) for m in b_agent.get("messages", [])), \
@@ -688,6 +691,8 @@ def main():
     tip_index = msgs.index(tip)
     assert marked == [tip_index - 1, tip_index], \
         f"the anchor must name the carried prefix: {json.dumps(msgs)[:300]}"
+    assert msgs[tip_index - 1]["content"][-1]["cache_control"] == \
+        {"type": "ephemeral", "ttl": "1h"}, f"anchor lifetime: {json.dumps(msgs[tip_index - 1])[:300]}"
 
     # unknown words are agent tasks now, and the agent always sends tools
     ch = run([binary, "chat", "hi"], env, stdin=subprocess.DEVNULL)

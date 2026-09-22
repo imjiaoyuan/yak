@@ -121,6 +121,9 @@ pub struct AgentOptions<'a> {
     /// back by prefix finds nothing above it — the whole history is written
     /// at cache-write price at the start of every task instead of read back.
     pub cache_anchor: Option<usize>,
+    /// how long the provider should hold its cache entry (`agent.cache_ttl`),
+    /// for the wires that take one; None leaves the provider's own default
+    pub cache_ttl: Option<&'a str>,
 }
 
 pub struct AgentOutcome {
@@ -481,6 +484,7 @@ pub fn run_agent(
             note: note.as_deref(),
             cache_anchor: cache_stable,
             cache_key: opts.cache_key,
+            cache_ttl: opts.cache_ttl,
         };
 
         let mut round = stream_round(model, &input, opts.stream, on_update);

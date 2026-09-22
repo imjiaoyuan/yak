@@ -192,7 +192,9 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   ladder's first rung, which the loop doubles after each compaction it runs, so nothing here ever
   asks for a model's context window — `keep_recent_tokens` (the tail each compaction keeps, clamped
   to half the rung),
-  `tools` policies, `disabled_skills`), the `aliases` object (hand-edited; no
+  `tools` policies, `disabled_skills`, `cache_ttl` — how long a provider should hold this
+  conversation's prompt-cache entry, `5m` (the API default) or `1h`, for the wires that take one),
+  the `aliases` object (hand-edited; no
   CLI command edits it), and the two plugin tables (`extensions.disabled`/`tool_timeout`).
   This file deliberately deviates from the reference's config.toml + keys.json +
   default_model.txt + model_options.json split.

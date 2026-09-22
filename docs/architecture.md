@@ -298,7 +298,10 @@ tip alone would rewrite the whole history at write price every round and read no
 anchor is carried across task boundaries too: `Session::cache_anchor` names the seed a resumed
 thread or the next REPL task hands over (`AgentOptions::cache_anchor`, dropped when the loop's own
 projection shortened that seed), so a task's *first* request opens a breakpoint window on the prefix
-the previous request already wrote instead of carrying the tip alone, and Anthropic's
+the previous request already wrote instead of carrying the tip alone. `agent.cache_ttl` picks the
+entry's lifetime (the API's five-minute default, or the hour interactive work wants — an approval
+prompt or a long test run outlives the short one, and the next round then re-writes the prompt);
+the default emits no field, so a config that names it changes nothing on the wire. Anthropic's
 `message_start` seeds the input/cached token counts, and it folds `cache_read`+`cache_creation` into
 `Usage.input` to match openai-compat's whole-prompt
 `prompt_tokens`; the openai-compat side is automatic server-side, with a `prompt_cache_key` (the

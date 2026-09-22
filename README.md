@@ -244,6 +244,13 @@ caps one request body in bytes (32MB by default) — lower it when a gateway in 
 refuses less than the provider documents, and the run refuses the oversized body locally, naming
 the attachments that filled it, instead of coming back as an opaque 413.
 
+`cache_ttl` picks how long the provider should hold this conversation's prompt-cache entry: `5m` (the
+default, what every provider gives) or `1h`. Only the Anthropic Messages API takes a lifetime — the
+OpenAI-compatible wire caches automatically. The long entry is billed at a higher write rate, and it
+pays for itself as soon as one gap lapses a five-minute one: an approval prompt, a long test run or a
+coffee break otherwise leaves the next round re-writing the whole conversation instead of reading it
+back.
+
 Compaction is driven by an absolute threshold, `compact_at_tokens` (64k by default): the one number
 a user can pick without knowing anything about the model behind the gateway. Each compaction the
 session runs doubles it, so a long conversation is summarized at 64k, then 128k, then 256k — a few

@@ -217,6 +217,7 @@ pub fn summarize(
         note: None,
         cache_anchor: None,
         cache_key: None,
+        cache_ttl: None,
     };
     let mut text = String::new();
     model.stream(&input, true, &mut |event| {

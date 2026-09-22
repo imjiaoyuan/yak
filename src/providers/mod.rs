@@ -536,6 +536,14 @@ pub struct PromptInput<'a> {
     /// opaque conversation id for providers that route by it (OpenAI-style
     /// `prompt_cache_key`): keeps one conversation on one cache replica
     pub cache_key: Option<&'a str>,
+    /// how long the provider should hold this prompt's cache entry, for the
+    /// wires that take one (`agent.cache_ttl`): `1h` asks for the long entry,
+    /// `5m` is the default every provider already gives. None means "no
+    /// opinion" and leaves the request byte-identical to one that never named
+    /// a lifetime. Only the Anthropic Messages API has the knob — the
+    /// openai-compat wire caches automatically, server-side, with nothing to
+    /// set.
+    pub cache_ttl: Option<&'a str>,
     /// the largest body this request may serialize to; refusing an oversized
     /// body locally beats paying for the upload only to read a gateway's
     /// opaque 413 back (`agent.max_request_bytes`)
@@ -701,6 +709,7 @@ pub(crate) mod testutil {
             note: None,
             cache_anchor: None,
             cache_key: None,
+            cache_ttl: None,
         }
     }
 

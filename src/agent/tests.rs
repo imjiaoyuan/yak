@@ -339,6 +339,7 @@ fn test_opts() -> AgentOptions<'static> {
         hooks: empty_extensions(),
         cache_key: None,
         cache_anchor: None,
+        cache_ttl: None,
     }
 }
 
@@ -911,6 +912,7 @@ fn context_note_reports_the_room_left() {
         hooks: &crate::agent::ext::Extensions::empty(),
         cache_key: None,
         cache_anchor: None,
+        cache_ttl: None,
     };
     let note = context_note(&opts, 3_000).unwrap();
     assert!(

@@ -18,6 +18,11 @@ pub struct AgentSettings {
     /// the model may refuse far less than the provider documents, and the
     /// refusal that comes back names nothing usable
     pub max_request_bytes: Option<usize>,
+    /// how long a provider should hold this conversation's prompt-cache
+    /// entries: `5m` (what every provider gives by default) or `1h`. Only
+    /// Anthropic's Messages API takes a TTL; the openai-compat wire caches
+    /// automatically, with nothing to set.
+    pub cache_ttl: Option<String>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
     pub disabled_skills: Vec<String>,
 }
@@ -56,7 +61,17 @@ pub fn load() -> AgentSettings {
         eprintln!("Error: failed to parse {}: not valid JSON", path.display());
         std::process::exit(1);
     }
-    parse(&raw)
+    let settings = parse(&raw);
+    // a lifetime no provider knows is a typo, and the request it shapes looks
+    // exactly like one that asked for nothing: refuse it here, where the file
+    // is read, rather than quietly caching for five minutes
+    if let Some(ttl) = settings.cache_ttl.as_deref()
+        && !matches!(ttl, "5m" | "1h")
+    {
+        eprintln!("Error: agent.cache_ttl is '{ttl}' (5m or 1h)");
+        std::process::exit(1);
+    }
+    settings
 }
 
 pub fn parse(raw: &str) -> AgentSettings {
@@ -77,6 +92,10 @@ pub fn parse(raw: &str) -> AgentSettings {
         .get("max_request_bytes")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
+    s.cache_ttl = agent
+        .get("cache_ttl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if let Some(tools) = agent.get("tools").and_then(|v| v.as_object()) {
         for (name, policy) in tools {
             if let Some(p) = policy.as_str() {
@@ -104,6 +123,17 @@ mod agent_settings_tests {
         assert_eq!(parse("{}").max_request_bytes, None);
         let s = parse(r#"{"agent": {"max_request_bytes": 8000000}}"#);
         assert_eq!(s.max_request_bytes, Some(8_000_000));
+    }
+
+    /// The prompt-cache lifetime is absent unless configured — the provider's
+    /// own default is then what applies, and the request says nothing about it.
+    #[test]
+    fn a_cache_ttl_comes_from_the_agent_section() {
+        assert_eq!(parse("{}").cache_ttl, None);
+        let s = parse(r#"{"agent": {"cache_ttl": "1h"}}"#);
+        assert_eq!(s.cache_ttl.as_deref(), Some("1h"));
+        let s = parse(r#"{"agent": {"cache_ttl": "5m"}}"#);
+        assert_eq!(s.cache_ttl.as_deref(), Some("5m"));
     }
 
     #[test]

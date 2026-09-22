@@ -53,21 +53,36 @@ fn attachment_block(a: &Attachment) -> Result<Value, String> {
     }
 }
 
+/// The `cache_control` value one breakpoint carries. An entry lives five
+/// minutes unless the request asks otherwise; `1h` (`agent.cache_ttl`) buys
+/// the long one, which interactive work needs — an approval prompt, a long
+/// test run or a user reading the answer spaces two rounds further apart
+/// than five minutes often enough, and every entry that lapses means the next
+/// round re-writes the whole prompt at write price. `5m` is the API's own
+/// default, so it leaves the field off: naming the default keeps the wire
+/// byte-identical to a request that never named a lifetime.
+fn marker(ttl: Option<&str>) -> Value {
+    match ttl {
+        Some(t) if t != "5m" => json!({"type": "ephemeral", "ttl": t}),
+        _ => json!({"type": "ephemeral"}),
+    }
+}
+
 /// Mark one message's last content block as a prompt-cache breakpoint.
 /// Caching is opt-in on the Messages API; without a marker nothing caches.
-fn mark_message(msg: &mut Value) {
+fn mark_message(msg: &mut Value, ttl: Option<&str>) {
     let content = &mut msg["content"];
     if content.is_string() {
         let text = content.as_str().unwrap_or("").to_string();
         *content = json!([{
             "type": "text",
             "text": text,
-            "cache_control": {"type": "ephemeral"}
+            "cache_control": marker(ttl)
         }]);
     } else if let Some(blocks) = content.as_array_mut()
         && let Some(block) = blocks.last_mut()
     {
-        block["cache_control"] = json!({"type": "ephemeral"});
+        block["cache_control"] = marker(ttl);
     }
 }
 
@@ -79,7 +94,7 @@ fn mark_message(msg: &mut Value) {
 /// (stable, so this round reads everything up to it) and the tip is where
 /// this request ends (so the next round reads this one in turn). The system
 /// block carries the third, which covers tools+system together.
-fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>) {
+fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>, ttl: Option<&str>) {
     let Some(last) = messages.len().checked_sub(1) else {
         return;
     };
@@ -88,9 +103,9 @@ fn mark_cache_breakpoints(messages: &mut [Value], anchor: Option<usize>) {
     // past the tip is not a stable prefix and would collide with the tip
     // marker (the API refuses more than one breakpoint per block)
     if let Some(i) = anchor.filter(|i| *i < last) {
-        mark_message(&mut messages[i]);
+        mark_message(&mut messages[i], ttl);
     }
-    mark_message(&mut messages[last]);
+    mark_message(&mut messages[last], ttl);
 }
 
 pub fn build_body(
@@ -219,7 +234,7 @@ pub fn build_body(
     // rides AFTER the conversation-tip breakpoint: it is volatile, so the
     // cached tip must stay on the real conversation, not on the note.
     if !input.history.is_empty() {
-        mark_cache_breakpoints(&mut messages, anchor);
+        mark_cache_breakpoints(&mut messages, anchor, input.cache_ttl);
     }
     if let Some(note) = input.note {
         messages.push(json!({"role": "user", "content": note}));
@@ -236,7 +251,7 @@ pub fn build_body(
         body["system"] = json!([{
             "type": "text",
             "text": system,
-            "cache_control": {"type": "ephemeral"}
+            "cache_control": marker(input.cache_ttl)
         }]);
     }
     if !input.tools.is_empty() {
@@ -251,7 +266,7 @@ pub fn build_body(
         if input.system.is_none()
             && let Some(last) = tools.last_mut()
         {
-            last["cache_control"] = json!({"type": "ephemeral"});
+            last["cache_control"] = marker(input.cache_ttl);
         }
         body["tools"] = Value::Array(tools);
         // no parallel flag here: Anthropic allows parallel tool use by
@@ -771,6 +786,64 @@ mod tests {
         i.cache_anchor = Some(1);
         let body = build_body(&model("anthropic"), &i, false).unwrap();
         assert_eq!(marked(&body), 1, "anchor and tip coincide: {body}");
+    }
+
+    /// `agent.cache_ttl` reaches every breakpoint the request carries, so the
+    /// whole prompt — tools and system included — lives for the hour it asks
+    /// for instead of the default five minutes; naming the default leaves the
+    /// wire exactly as it was.
+    #[test]
+    fn the_long_cache_ttl_rides_every_breakpoint() {
+        let history = vec![Msg::user("hi"), Msg::assistant("ok")];
+        let tools = [crate::providers::testutil::tool_def()];
+        let mut i = input(&history, &tools);
+        i.system = Some("you are llm");
+        i.cache_anchor = Some(2);
+        i.cache_ttl = Some("1h");
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            "{body}"
+        );
+        assert!(
+            body["tools"][0].get("cache_control").is_none(),
+            "the system block already covers the tools: {body}"
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            "the anchor: {body}"
+        );
+        assert_eq!(
+            msgs[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            "the tip: {body}"
+        );
+
+        // the fallback breakpoint (no system prompt, so the last tool)
+        // carries the lifetime too
+        let mut i = input(&history, &tools);
+        i.cache_anchor = Some(2);
+        i.cache_ttl = Some("1h");
+        let body = build_body(&model("anthropic"), &i, false).unwrap();
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            "{body}"
+        );
+
+        // `5m` is the API's own default: naming it adds no field, so the
+        // request stays byte-identical to one that named no lifetime
+        let mut five = input(&history, &tools);
+        five.cache_anchor = Some(2);
+        five.cache_ttl = Some("5m");
+        let plain = build_body(&model("anthropic"), &five, false).unwrap();
+        assert!(
+            !serde_json::to_string(&plain).unwrap().contains("\"ttl\""),
+            "naming the default must not add a field: {plain}"
+        );
     }
 
     #[test]
