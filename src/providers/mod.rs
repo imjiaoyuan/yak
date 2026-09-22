@@ -115,6 +115,7 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
         .or_else(|| saved.get(&model_id))
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
+    model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
     Ok(model)
 }
 
@@ -180,6 +181,7 @@ pub fn resolve_run_model(
         options.push((k, v));
     }
     model.options = options;
+    model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
     Ok(model)
 }
 
@@ -540,6 +542,12 @@ pub struct ResolvedModel {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model_id: String,
+    /// the model's context window in tokens, when the user has recorded one
+    /// (per-model option `context_window`). The agent loop anchors compaction
+    /// to it (`compact::effective_trigger`); a gateway that never publishes
+    /// its window stays None and the loop falls back to the ladder plus the
+    /// provider's own overflow refusal.
+    pub context_window: Option<u64>,
     /// -o key=value options (temperature, max_tokens, top_p, ...)
     pub options: Vec<(String, String)>,
 }
@@ -630,8 +638,31 @@ impl ResolvedModel {
             base_url: p.base_url.clone(),
             api_key,
             model_id: model_id.to_string(),
+            context_window: None,
             options: Vec::new(),
         }
+    }
+
+    /// Pull `context_window` out of the merged option list and into the model.
+    /// It is metadata, not a wire option: sending it would be a request body
+    /// the provider did not document. An unparseable value fails loudly — the
+    /// window is the one number the compaction gate trusts, so a typo must not
+    /// silently switch the gate off.
+    pub(crate) fn take_context_window(
+        options: &mut Vec<(String, String)>,
+    ) -> Result<Option<u64>, String> {
+        let Some(index) = options.iter().position(|(k, _)| k == "context_window") else {
+            return Ok(None);
+        };
+        let (_, raw) = options.remove(index);
+        let raw = raw.trim();
+        let n = raw
+            .parse::<u64>()
+            .map_err(|_| format!("invalid context_window '{raw}' (a token count)"))?;
+        if n == 0 {
+            return Err("context_window must be a positive token count".to_string());
+        }
+        Ok(Some(n))
     }
 
     /// Model display id: provider/model.
@@ -724,6 +755,7 @@ pub(crate) mod testutil {
             base_url: "http://localhost".into(),
             api_key: None,
             model_id: "m1".into(),
+            context_window: None,
             options: Vec::new(),
         }
     }

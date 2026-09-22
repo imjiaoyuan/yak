@@ -81,7 +81,13 @@ impl Session {
             return;
         }
         let estimate = crate::agent::compact::estimate_tokens(&self.seed, None);
-        if crate::agent::compact::should_compact(estimate, self.compact.trigger_tokens) {
+        // a resumed thread is priced against the model's real window when one
+        // is recorded, else the configured ladder rung
+        let trigger = crate::agent::compact::effective_trigger(
+            self.compact.trigger_tokens,
+            self.model.context_window,
+        );
+        if crate::agent::compact::should_compact(estimate, trigger) {
             crate::agent::compact::prune_tool_results(&mut self.seed, archive_dir);
         }
     }
@@ -910,6 +916,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
+                context_window: None,
                 options: vec![],
             },
             tools: Vec::new(),
@@ -1030,6 +1037,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
+                context_window: None,
                 options: vec![],
             },
             tools: Vec::new(),
@@ -1106,6 +1114,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
+                context_window: None,
                 options: vec![],
             },
             tools: Vec::new(),

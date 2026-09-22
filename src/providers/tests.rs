@@ -71,6 +71,7 @@ fn rm(provider: &str, model_id: &str) -> ResolvedModel {
         base_url: "http://localhost".into(),
         api_key: None,
         model_id: model_id.into(),
+        context_window: None,
         options: Vec::new(),
     }
 }

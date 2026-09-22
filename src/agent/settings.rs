@@ -11,8 +11,10 @@ use crate::providers::CacheTtl;
 #[derive(Default)]
 pub struct AgentSettings {
     pub approval_mode: Option<String>,
-    /// the first occupancy that triggers auto-compaction, in tokens; it doubles
-    /// after each compaction the session runs
+    /// the first occupancy that triggers auto-compaction, in tokens; the ladder
+    /// climbs from here (doubling after each compaction) and is capped by the
+    /// model's known window minus the reserve (see
+    /// `compact::effective_trigger`)
     pub compact_at_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     /// ceiling on one serialized request body, in bytes; a gateway in front of
@@ -38,11 +40,11 @@ impl AgentSettings {
     }
 
     /// Compaction limits for a run. The trigger is `compact_at_tokens` (64k by
-    /// default): one number, the same whatever model serves the run, picked
-    /// without knowing anything about the model behind the gateway — and the
-    /// loop doubles it after each compaction, so the ladder climbs as the
-    /// session is summarized. `keep_recent_tokens` is the tail each compaction
-    /// keeps, clamped to half the trigger by `effective_keep_recent`.
+    /// default): the first rung of a ladder that doubles after each compaction.
+    /// When the resolved model records a `context_window`, the loop anchors the
+    /// rung to `window - reserve` (the reference's ceiling) — see
+    /// `compact::effective_trigger`. `keep_recent_tokens` is the tail each
+    /// compaction keeps, clamped to half the trigger by `effective_keep_recent`.
     pub fn compact_config(&self) -> CompactConfig {
         CompactConfig {
             trigger_tokens: self.compact_at_tokens.unwrap_or(64_000),

@@ -251,6 +251,7 @@ fn mock_model(port: u16) -> crate::providers::ResolvedModel {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         api_key: Some("sk-x".into()),
         model_id: "m".into(),
+        context_window: None,
         options: vec![],
     }
 }
