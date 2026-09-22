@@ -165,7 +165,9 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
 - `threads/<ulid>.jsonl` — one file per conversation, one `StoredTurn` JSON object per line (a
   `v` format stamp first — `THREAD_FORMAT_VERSION`, absent on pre-versioning lines — then id,
   ts, mode, model, cwd, system, prompt, response, reasoning, usage, options, and the round's wire
-  `messages` as the same `providers::Msg` values the request carries). `append_turn` appends a
+  `messages` as the same `providers::Msg` values the request carries). `usage` keeps the round's
+  cache split (`[input, output, cached, cached_write]`; the `[input, output]` pair older lines hold
+  still reads), and a resume seeds the session's totals from it. `append_turn` appends a
   line (a None thread id starts a fresh thread); `read_thread` returns turns oldest-first under
   two disciplines — a corrupt line mid-file fails loudly (refusing a damaged
   thread beats silently resuming without a turn) while a torn final line (a crash mid-append) is

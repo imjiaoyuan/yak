@@ -281,6 +281,38 @@ pub fn humanize_tokens(n: u64) -> String {
     }
 }
 
+/// `cache 96% read · 3% write` — what a usage total's prompt tokens cost. Every
+/// one of them counts toward `input`, cached reads included, so the absolute
+/// figure is never the bill; these shares are. The write share rides along only
+/// when the wire reported writes (Anthropic bills them, the OpenAI-compatible
+/// ones cache server-side and report none), and the rest of the input is the
+/// uncached share, billed at full price. None when nothing cached at all.
+pub fn cache_label(u: Usage) -> Option<String> {
+    (u.cached > 0 || u.cached_write > 0).then(|| {
+        let mut label = format!("cache {}% read", u.cache_percent());
+        if u.cached_write > 0 {
+            label.push_str(&format!(" · {}% write", u.write_percent()));
+        }
+        label
+    })
+}
+
+/// The `/status` cache note: the session's cache shares, plus the last round's
+/// read share whenever it differs. A round that read nothing back reports 0%
+/// here, which is the figure worth seeing the moment it happens — a compaction
+/// or a prefix change invalidates the whole cached prefix — while the session
+/// average lags behind it.
+pub fn cache_note(total: Usage, last: Option<Usage>) -> String {
+    let Some(label) = cache_label(total) else {
+        return String::new();
+    };
+    let last = last.filter(|u| u.input > 0).map(|u| u.cache_percent());
+    match last.filter(|l| *l != total.cache_percent()) {
+        Some(l) => format!(" · {label} (last round {l}%)"),
+        None => format!(" · {label}"),
+    }
+}
+
 // TaskView: the agent-style task presentation shared by every mode
 
 /// Spinner with phase relabel, a single dim `thinking ... end` trace line,
@@ -549,8 +581,9 @@ impl TaskView {
     /// re-sends the whole prompt, so the input is what the run summed across
     /// its rounds, never a context size. Session-lifetime counters and the
     /// window's occupancy live in `/status`, so the two are never read as the
-    /// same number. When the provider reports cache hits, the cached share of
-    /// the input rides along so prefix-cache health is visible at a glance.
+    /// same number. When the provider reported cache traffic, the read and
+    /// write shares of that input ride along (`cache_label`), which is what
+    /// prefix-cache health and the bill are made of.
     pub fn footer(&mut self, secs: f64) {
         self.stop_ticker();
         self.stop_pacer();
@@ -561,10 +594,9 @@ impl TaskView {
         let pad = " ".repeat(self.indent);
         let total = self.total;
         if total.input > 0 || total.output > 0 {
-            let cache = if total.cached > 0 {
-                format!(" · cache {}%", total.cached * 100 / total.input.max(1))
-            } else {
-                String::new()
+            let cache = match cache_label(total) {
+                Some(label) => format!(" · {label}"),
+                None => String::new(),
             };
             eprintln!(
                 "{}{pad}{secs:.1}s · this task: input {} · output {}{cache}{}",
@@ -582,6 +614,86 @@ impl TaskView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two cache shares the footer and `/status` show. Every prompt token
+    /// counts toward `input`, cached reads included, so these percentages are
+    /// what the round actually cost — and the write share rides only when the
+    /// wire reported writes at all (the OpenAI-compatible ones keep none).
+    #[test]
+    fn cache_shares_name_the_read_and_the_write() {
+        let mixed = Usage {
+            input: 100,
+            output: 5,
+            cached: 96,
+            cached_write: 3,
+        };
+        assert_eq!(
+            cache_label(mixed).as_deref(),
+            Some("cache 96% read · 3% write")
+        );
+        // a wire that reports no writes never shows a write share
+        let reads_only = Usage {
+            cached_write: 0,
+            ..mixed
+        };
+        assert_eq!(cache_label(reads_only).as_deref(), Some("cache 96% read"));
+        // a cold round that only filled the cache is all write
+        let writes_only = Usage {
+            input: 40,
+            output: 1,
+            cached: 0,
+            cached_write: 40,
+        };
+        assert_eq!(
+            cache_label(writes_only).as_deref(),
+            Some("cache 0% read · 100% write")
+        );
+        // no cache traffic at all, nothing to say
+        assert_eq!(cache_label(Usage::default()), None);
+        assert_eq!(
+            cache_label(Usage {
+                input: 10,
+                output: 1,
+                cached: 0,
+                cached_write: 0
+            }),
+            None
+        );
+    }
+
+    /// `/status` adds the last round's read share only when it differs from
+    /// the session's: it is where a compaction or a prefix change shows up
+    /// first, while the average lags behind it.
+    #[test]
+    fn the_status_note_adds_the_last_round_only_when_it_differs() {
+        let session = Usage {
+            input: 1000,
+            output: 20,
+            cached: 960,
+            cached_write: 30,
+        };
+        let note = " · cache 96% read · 3% write";
+        let same = Usage {
+            input: 100,
+            output: 2,
+            cached: 96,
+            cached_write: 3,
+        };
+        assert_eq!(cache_note(session, Some(same)), note);
+        assert_eq!(cache_note(session, None), note);
+        // a round that read nothing back says so, even under a healthy average
+        let missed = Usage {
+            input: 100,
+            output: 2,
+            cached: 0,
+            cached_write: 100,
+        };
+        assert_eq!(
+            cache_note(session, Some(missed)),
+            format!("{note} (last round 0%)")
+        );
+        assert_eq!(cache_note(Usage::default(), Some(missed)), "");
+    }
 
     /// A burst paces: the first tick drains exactly one installment
     /// (base rate plus backlog acceleration) and the rest waits in the

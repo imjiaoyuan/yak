@@ -24,6 +24,71 @@ fn v_is_zero(v: &u32) -> bool {
     *v == 0
 }
 
+/// One round's token usage as the transcript keeps it, positional because a
+/// thread file is one long line per turn: `[input, output]` on lines written
+/// before the cache counts were kept, `[input, output, cached, cached_write]`
+/// since. The short form still reads — a transcript must not fail loudly over
+/// a field it predates — and the split is what a resumed session's cache
+/// figure needs, `input` folding the cached reads in as the wire reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TurnUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cached: u64,
+    pub cached_write: u64,
+}
+
+impl From<crate::core::http::Usage> for TurnUsage {
+    fn from(u: crate::core::http::Usage) -> TurnUsage {
+        TurnUsage {
+            input: u.input,
+            output: u.output,
+            cached: u.cached,
+            cached_write: u.cached_write,
+        }
+    }
+}
+
+impl From<TurnUsage> for crate::core::http::Usage {
+    fn from(u: TurnUsage) -> crate::core::http::Usage {
+        crate::core::http::Usage {
+            input: u.input,
+            output: u.output,
+            cached: u.cached,
+            cached_write: u.cached_write,
+        }
+    }
+}
+
+impl Serialize for TurnUsage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        [self.input, self.output, self.cached, self.cached_write].serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<TurnUsage, D::Error> {
+        let fields = Vec::<u64>::deserialize(d)?;
+        match fields[..] {
+            [input, output] => Ok(TurnUsage {
+                input,
+                output,
+                ..TurnUsage::default()
+            }),
+            [input, output, cached, cached_write] => Ok(TurnUsage {
+                input,
+                output,
+                cached,
+                cached_write,
+            }),
+            _ => Err(serde::de::Error::invalid_length(
+                fields.len(),
+                &"[input, output] or [input, output, cached, cached_write]",
+            )),
+        }
+    }
+}
+
 /// One completed turn, appended as a single JSON line.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StoredTurn {
@@ -52,7 +117,7 @@ pub struct StoredTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<(u64, u64)>,
+    pub usage: Option<TurnUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     #[serde(default)]
@@ -388,6 +453,42 @@ mod tests {
         let mut t = turn(id, prompt, "ans", "agent");
         t.cwd = Some(cwd.to_string());
         t
+    }
+
+    /// What this binary writes round-trips whole, and the pair older files
+    /// carry still reads — a transcript must not fail loudly over a field it
+    /// predates. A length nothing wrote is refused rather than guessed at.
+    #[test]
+    fn a_usage_line_survives_both_its_shapes() {
+        let mut t = turn("1", "p", "r", "agent");
+        t.usage = Some(TurnUsage {
+            input: 10,
+            output: 2,
+            cached: 8,
+            cached_write: 3,
+        });
+        let line = serde_json::to_string(&t).unwrap();
+        assert!(line.contains(r#""usage":[10,2,8,3]"#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<StoredTurn>(&line).unwrap().usage,
+            t.usage
+        );
+
+        // what a file written before the cache split holds
+        let legacy = line.replace(r#""usage":[10,2,8,3]"#, r#""usage":[10,2]"#);
+        assert_eq!(
+            serde_json::from_str::<StoredTurn>(&legacy).unwrap().usage,
+            Some(TurnUsage {
+                input: 10,
+                output: 2,
+                cached: 0,
+                cached_write: 0,
+            })
+        );
+
+        // and a shape no version of this wrote is an error, not zeros
+        let broken = line.replace(r#""usage":[10,2,8,3]"#, r#""usage":[10,2,3]"#);
+        assert!(serde_json::from_str::<StoredTurn>(&broken).is_err());
     }
 
     /// Append `turns` and pin the thread file's mtime `age_secs` into the

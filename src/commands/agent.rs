@@ -164,6 +164,9 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let mut resumed = false;
     let mut conv_system: Option<String> = None;
     let mut conv_model: Option<String> = None;
+    // what the continued thread already spent, so the session's usage totals
+    // (and `/status`) describe the conversation, not this process
+    let mut conv_usage = crate::core::http::Usage::default();
     let store = open_store(args)?;
     if let Some(raw) = args.opt(&["session", "cid"]) {
         let store = store
@@ -175,9 +178,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             ));
         };
         let turns = store.read_thread(&cid)?;
-        let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
-        seed = msgs;
-        conv_system = system;
+        let rebuilt = crate::agent::session::rebuild_turns(&turns);
+        seed = rebuilt.messages;
+        conv_system = rebuilt.system;
+        conv_usage = rebuilt.usage;
         conv_model = turns.last().map(|t| t.model.clone());
         conversation_id = Some(cid);
         resumed = true;
@@ -203,9 +207,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
                     p.reset
                 );
             }
-            let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
-            seed = msgs;
-            conv_system = system;
+            let rebuilt = crate::agent::session::rebuild_turns(&turns);
+            seed = rebuilt.messages;
+            conv_system = rebuilt.system;
+            conv_usage = rebuilt.usage;
             conv_model = turns.last().map(|t| t.model.clone());
             conversation_id = Some(cid);
             resumed = true;
@@ -366,8 +371,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         thinking,
         steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         extensions,
-        tokens: (0, 0),
-        tokens_cached: 0,
+        usage: conv_usage,
         last_usage: None,
         json: args.flag(&["json"]),
         persist_error: None,

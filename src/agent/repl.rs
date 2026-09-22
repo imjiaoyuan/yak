@@ -5,7 +5,7 @@ use crate::agent::approval;
 use crate::agent::session::Session;
 use std::io::{IsTerminal, Write};
 
-use crate::term::render::humanize_tokens;
+use crate::term::render::{cache_note, humanize_tokens};
 
 pub fn repl(
     mut session: crate::agent::session::Session,
@@ -414,9 +414,10 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     };
     let store = crate::core::threads::Store::open()?;
     let turns = store.read_thread(&cid)?;
-    let (msgs, system) = crate::agent::session::rebuild_turns(&turns);
-    session.seed = msgs;
-    session.system = system;
+    let rebuilt = crate::agent::session::rebuild_turns(&turns);
+    session.seed = rebuilt.messages;
+    session.system = rebuilt.system;
+    session.usage = rebuilt.usage;
     session.conversation_id = Some(cid);
     render_history(&session.seed);
     // the replay above shows the thread as stored; the projection happens
@@ -958,31 +959,9 @@ fn repl_command(
             );
             eprintln!(
                 "  {d}tokens  {r}cumulative input {} · output {}{} · approval {} · tools {} · thinking {}",
-                humanize_tokens(session.tokens.0),
-                humanize_tokens(session.tokens.1),
-                if session.tokens_cached > 0 {
-                    let cumulative = crate::core::http::Usage {
-                        input: session.tokens.0,
-                        output: 0,
-                        cached: session.tokens_cached,
-                        cached_write: 0,
-                    }
-                    .cache_percent();
-                    // the per-round figure is what a compaction or prefix
-                    // change actually costs; the session average lags behind it
-                    match session
-                        .last_usage
-                        .filter(|u| u.input > 0 && u.cached > 0)
-                        .map(|u| u.cache_percent())
-                    {
-                        Some(last) if last != cumulative => {
-                            format!(" · cache {cumulative}% (last round {last}%)")
-                        }
-                        _ => format!(" · cache {cumulative}%"),
-                    }
-                } else {
-                    String::new()
-                },
+                humanize_tokens(session.usage.input),
+                humanize_tokens(session.usage.output),
+                cache_note(session.usage, session.last_usage),
                 session.approval.mode.label(),
                 session.tools.len(),
                 session.thinking.as_deref().unwrap_or("(model default)"),

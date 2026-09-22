@@ -100,8 +100,8 @@ pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
         if let Some(ms) = turn.duration_ms {
             out.push_str(&format!(" · {:.1}s", ms as f64 / 1000.0));
         }
-        if let Some((input, output)) = turn.usage {
-            out.push_str(&format!(" · ↑{input} ↓{output}"));
+        if let Some(usage) = turn.usage {
+            out.push_str(&format!(" · ↑{} ↓{}", usage.input, usage.output));
         }
         out.push_str("\n\n");
 
@@ -291,7 +291,11 @@ mod tests {
             prompt: "hello  world".into(),
             response: String::new(),
             reasoning: None,
-            usage: Some((1200, 345)),
+            usage: Some(crate::core::threads::TurnUsage {
+                input: 1200,
+                output: 345,
+                ..Default::default()
+            }),
             duration_ms: Some(4210),
             options: Vec::new(),
             messages,

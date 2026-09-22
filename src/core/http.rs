@@ -73,7 +73,19 @@ pub struct Usage {
 impl Usage {
     /// Cached share of the input in whole percent (0 when unknown).
     pub fn cache_percent(self) -> u64 {
-        (self.cached * 100).checked_div(self.input).unwrap_or(0)
+        self.share(self.cached)
+    }
+
+    /// Share of the input the provider charged a cache-write price for, in
+    /// whole percent. 0 both when nothing was written and when the wire keeps
+    /// no write count of its own — only Anthropic splits the two apart.
+    pub fn write_percent(self) -> u64 {
+        self.share(self.cached_write)
+    }
+
+    /// `n` as a whole percent of this round's input.
+    fn share(self, n: u64) -> u64 {
+        (n * 100).checked_div(self.input).unwrap_or(0)
     }
 
     /// Fold one round's counts into a running session total. Every consumer
@@ -843,8 +855,12 @@ mod tests {
         assert_eq!(total.output, 25);
         assert_eq!(total.cached, 60, "a zero stays a zero, not a reset");
         assert_eq!(total.cached_write, 30);
-        // and the cached share reads off the totals as before
+        // and the two cache shares read off the totals
         assert_eq!(total.cache_percent(), 40);
+        assert_eq!(total.write_percent(), 20);
+        // a round that reported nothing cannot divide by zero
+        assert_eq!(Usage::default().cache_percent(), 0);
+        assert_eq!(Usage::default().write_percent(), 0);
         // adding nothing is a no-op
         let before = total;
         total.add(Usage::default());

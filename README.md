@@ -158,8 +158,10 @@ llm --json "..."                           # line-delimited events instead of th
 `tool_log`, `tool_end`, `turn_end` and a closing `result` — for a supervising process: an editor, a
 CI lane, or another agent driving a child `llm`. The task is the same task (pass one as an
 argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. Sessions,
-usage accounting and persistence are identical to a normal run; the interactive session is what
-`--json` is *not* — it wants a task and exits.
+usage accounting and persistence are identical to a normal run — a round's `turn_end` carries its
+`usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two
+cache numbers are what a supervisor prices); the interactive session is what `--json` is *not* — it
+wants a task and exits.
 
 `--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on
 Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the

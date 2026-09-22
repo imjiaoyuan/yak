@@ -47,10 +47,10 @@ pub struct Session {
     /// the extension host: user executables registering tools (and, later,
     /// commands and event hooks); re-mounted by [`Session::rebuild_tools`]
     pub extensions: crate::agent::ext::Extensions,
-    /// cumulative input/output tokens across the session (for the status line)
-    pub tokens: (u64, u64),
-    /// cumulative input tokens served from the provider prompt cache
-    pub tokens_cached: u64,
+    /// cumulative usage across the session, for `/status`: every field a round
+    /// reports, folded through `Usage::add` so the cache split survives to the
+    /// end of the run instead of counting as one undifferentiated input total
+    pub usage: crate::core::http::Usage,
     /// the latest model round's usage: a per-turn cache view the cumulative
     /// totals cannot show (a compaction or prefix change makes one round a
     /// full miss while the session average stays high)
@@ -96,12 +96,12 @@ impl Session {
     }
 
     /// Reset the in-memory session: drop history, forget the conversation id
-    /// and token counters. The stored log is untouched.
+    /// and token counters (picked up again from a thread on the next resume).
+    /// The stored log is untouched.
     pub fn clear(&mut self) {
         self.seed.clear();
         self.conversation_id = None;
-        self.tokens = (0, 0);
-        self.tokens_cached = 0;
+        self.usage = crate::core::http::Usage::default();
         self.last_usage = None;
     }
 
@@ -366,9 +366,7 @@ impl Session {
         view.borrow_mut().abort();
         // the interrupt flag must not leak into the next prompt or task
         crate::core::http::clear_interrupt();
-        self.tokens.0 += total.input;
-        self.tokens.1 += total.output;
-        self.tokens_cached += total.cached;
+        self.usage.add(total);
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
@@ -498,9 +496,7 @@ impl Session {
             },
         );
         crate::core::http::clear_interrupt();
-        self.tokens.0 += total.input;
-        self.tokens.1 += total.output;
-        self.tokens_cached += total.cached;
+        self.usage.add(total);
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
@@ -628,7 +624,7 @@ impl Session {
             } else {
                 Some(reasoning.to_string())
             },
-            usage: usage.map(|u| (u.input, u.output)),
+            usage: usage.map(crate::core::threads::TurnUsage::from),
             duration_ms: Some(start.elapsed().as_millis() as i64),
             options: turn_options,
             messages: stored_messages(&new_messages),
@@ -691,11 +687,21 @@ fn event_json(u: &AgentUpdate) -> serde_json::Value {
     }
 }
 
-/// Token usage in the stream's shape; `null` when the provider reported none
-/// (the field stays present so consumers never branch on its absence).
+/// One round's usage in the stream's shape; `null` when the provider reported
+/// none (the field stays present so consumers never branch on its absence).
+/// `input` is every prompt token the round sent, cached reads included, so the
+/// two cache numbers are what a consumer prices: `cached` was read back,
+/// `cached_write` was written into the provider's cache (Anthropic bills it;
+/// the OpenAI-compatible wires keep no such count and report 0), and the rest
+/// was billed at full price.
 fn usage_json(usage: Option<&crate::core::http::Usage>) -> serde_json::Value {
     match usage {
-        Some(u) => serde_json::json!({"input": u.input, "output": u.output, "cached": u.cached}),
+        Some(u) => serde_json::json!({
+            "input": u.input,
+            "output": u.output,
+            "cached": u.cached,
+            "cached_write": u.cached_write,
+        }),
         None => serde_json::Value::Null,
     }
 }
@@ -771,18 +777,34 @@ fn rehydrated(m: &Msg) -> Msg {
     }
 }
 
+/// A thread read back for a resume.
+pub struct Rebuilt {
+    /// the wire-level history, ready to be a seed
+    pub messages: Vec<Msg>,
+    /// the original system prompt, from the first turn
+    pub system: Option<String>,
+    /// what the conversation has spent so far, per the transcript: a resumed
+    /// session starts its totals here, so `/status` describes the conversation
+    /// rather than the process that happened to reopen it
+    pub usage: crate::core::http::Usage,
+}
+
 /// Rebuild a wire-level history (plus the original system prompt) from a
 /// thread's stored turns. The messages *are* `Msg` — the thread stores the
 /// same struct the request carries — so the walk only filters empty user
 /// turns and restores the final assistant answer, which the store pops out
 /// of `messages` and keeps as the turn's `response` field. The first turn's
 /// system is the prompt; later `Summary` messages are compaction summaries.
-pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
+pub fn rebuild_turns(turns: &[StoredTurn]) -> Rebuilt {
     let mut msgs: Vec<Msg> = Vec::new();
     let mut system: Option<String> = None;
+    let mut usage = crate::core::http::Usage::default();
     for turn in turns {
         if system.is_none() {
             system = turn.system.clone();
+        }
+        if let Some(u) = turn.usage {
+            usage.add(u.into());
         }
         for m in &turn.messages {
             // a user turn with neither text nor attachments carries nothing
@@ -808,7 +830,11 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> (Vec<Msg>, Option<String>) {
         let restored = rehydrated(m);
         *m = restored;
     }
-    (msgs, system)
+    Rebuilt {
+        messages: msgs,
+        system,
+        usage,
+    }
 }
 
 /// How many of the newest image-carrying user turns keep their pixels on a
@@ -897,8 +923,7 @@ mod tests {
             extensions: crate::agent::ext::Extensions::connect(std::path::Path::new(
                 "/nonexistent",
             )),
-            tokens: (0, 0),
-            tokens_cached: 0,
+            usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
             persist_error: None,
@@ -1016,8 +1041,7 @@ mod tests {
             thinking: None,
             steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(&cwd),
-            tokens: (0, 0),
-            tokens_cached: 0,
+            usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
             persist_error: None,
@@ -1093,8 +1117,7 @@ mod tests {
             thinking: None,
             steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(&cwd),
-            tokens: (0, 0),
-            tokens_cached: 0,
+            usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
             persist_error: None,
@@ -1305,7 +1328,7 @@ mod tests {
                 )],
             }
         };
-        let (msgs, _) = rebuild_turns(&[turn(0), turn(1), turn(2)]);
+        let msgs = rebuild_turns(&[turn(0), turn(1), turn(2)]).messages;
         let payload = |i: usize| match &msgs[i] {
             Msg::User { attachments, .. } => attachments[0].base64_data.clone(),
             _ => panic!("expected the stored user message"),
@@ -1317,6 +1340,63 @@ mod tests {
         assert_eq!(payload(1), crate::b64::encode(b"bytes1"));
         assert_eq!(payload(2), crate::b64::encode(b"bytes2"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resume starts the session's totals where the transcript left off, so
+    /// the next `/status` describes the conversation rather than the process
+    /// that happened to reopen it. Turns written before the cache split was
+    /// kept contribute what they have and leave the cache at zero.
+    #[test]
+    fn a_replayed_thread_sums_the_usage_it_holds() {
+        let turn = |id: &str, usage: Option<crate::core::threads::TurnUsage>| StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: id.into(),
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: Some("sys".into()),
+            prompt: "p".into(),
+            response: String::new(),
+            reasoning: None,
+            usage,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::user("p")],
+        };
+        let rebuilt = rebuild_turns(&[
+            turn(
+                "t1",
+                Some(crate::core::threads::TurnUsage {
+                    input: 100,
+                    output: 10,
+                    cached: 80,
+                    cached_write: 20,
+                }),
+            ),
+            turn(
+                "t2",
+                Some(crate::core::threads::TurnUsage {
+                    input: 50,
+                    output: 5,
+                    cached: 45,
+                    cached_write: 0,
+                }),
+            ),
+            // a turn with no usage report adds nothing at all
+            turn("t3", None),
+        ]);
+        assert_eq!(
+            rebuilt.usage,
+            crate::core::http::Usage {
+                input: 150,
+                output: 15,
+                cached: 125,
+                cached_write: 20,
+            }
+        );
+        assert_eq!(rebuilt.usage.cache_percent(), 83);
+        assert_eq!(rebuilt.usage.write_percent(), 13);
     }
 
     #[test]
@@ -1354,7 +1434,7 @@ mod tests {
                 ],
             )],
         };
-        let (msgs, _) = rebuild_turns(&[turn]);
+        let msgs = rebuild_turns(&[turn]).messages;
         let Msg::User { attachments, .. } = &msgs[0] else {
             panic!("expected the stored user message")
         };
@@ -1423,7 +1503,8 @@ mod tests {
         store.append_turn(Some("th1"), &turn).unwrap();
 
         let turns = store.read_thread("th1").unwrap();
-        let (msgs, system) = rebuild_turns(&turns);
+        let rebuilt = rebuild_turns(&turns);
+        let (msgs, system) = (rebuilt.messages, rebuilt.system);
         assert_eq!(system.as_deref(), Some("sys"));
         assert_eq!(msgs.len(), 4);
         match &msgs[0] {
@@ -1542,10 +1623,11 @@ mod tests {
                         input: 10,
                         output: 2,
                         cached: 8,
-                        cached_write: 0,
+                        cached_write: 1,
                     }),
                 },
-                json!({"type": "turn_end", "usage": {"input": 10, "output": 2, "cached": 8}}),
+                json!({"type": "turn_end", "usage":
+                    {"input": 10, "output": 2, "cached": 8, "cached_write": 1}}),
             ),
             // a round without a usage report keeps the key, as null
             (

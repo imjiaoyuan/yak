@@ -59,10 +59,17 @@ bursts read as fast typing that decelerates into the base rate, a keeping-up str
 everything stays write-once (no erase, no redraw — pacing only decides when bytes are written); any
 non-interrupt keystroke sets `screen().flush_now` and the next tick prints the whole backlog at once
 (the user is watching), a single dim `thinking ... end` trace line (reasoning is never streamed
-anywhere), and the dim `secs · this task: input N · output N · cache N%` footer (the cache
-share only when the provider reports prompt-cache hits; all three are the task's own
-rounds summed — a re-sent prompt per round, so never a context size — while the session's
-cumulative counters and the context occupancy live in `/status`); answers stream character-immediately and styled the reference-like in a left-indent-2 block
+anywhere), and the dim `secs · this task: input N · output N · cache N% read · N% write` footer.
+Every field is the task's own rounds summed — a re-sent prompt per round, so never a context size,
+and `input` counts the cached reads in, which makes the absolute number meaningless as a bill: the
+shares are what it cost, the read half billed at a tenth of the input price and the written half at
+a premium. `Usage::write_percent` rides along only on wires that report a write count (Anthropic;
+the automatic-caching openai-compat ones keep none), and `cache_label` is the one formatter behind
+both this footer and `/status`. `/status` shows the pair for the whole session — seeded from a
+resumed thread's stored turns, so it describes the conversation rather than the process — plus the
+last round's read share whenever it differs: one round reading nothing back is what a compaction or
+a prefix change looks like from the outside, and the session average lags behind it. The context
+occupancy lives there too; answers stream character-immediately and styled the reference-like in a left-indent-2 block
 on a TTY through `StyleStream` (`core/render_md/`), write-once — no erase, no redraw: each line
 classifies from its first chars (heading, quote, list, fence, table, rule) and the settled prefix
 streams, while an unclosed inline marker (`**`, `` ` ``, `~~`, `[`) holds only its own span until it
@@ -354,7 +361,11 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   `user_dir/threads/<ulid>.jsonl`, one `StoredTurn` object per line (a `v` format stamp first —
   `THREAD_FORMAT_VERSION`, absent on pre-versioning lines — then id, ts, mode, model, cwd, system,
   prompt, response, reasoning, usage, options, and the round's wire `messages` as the same
-  `providers::Msg` values the request carries), `append_turn` appends a line (a None thread id
+  `providers::Msg` values the request carries). `usage` is `[input, output, cached, cached_write]`
+  (`threads::TurnUsage`, the fields the wire reported, cache split and all); the `[input, output]`
+  pair older lines hold still reads, and any other length is refused rather than filled with zeros.
+  `rebuild_turns` returns that usage summed along with the replay, so a resumed session starts its
+  `/status` totals from what the transcript already spent. `append_turn` appends a line (a None thread id
   starts a fresh thread), `read_thread` returns turns oldest-first under two strict
   disciplines — a corrupt line mid-file fails loudly (refusing a damaged thread beats silently
   resuming without a turn) while a torn final line (a crash mid-append) is the one bounded repair:
