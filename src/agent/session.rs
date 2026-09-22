@@ -133,6 +133,10 @@ impl Session {
         if self.json {
             return self.run_task_json(prompt, attachments);
         }
+        // the same set `run_task_json` builds below, by hand because a `&self`
+        // method would borrow the whole session and lock out the
+        // `&mut self.seed` and `&mut self.approval` this same call needs:
+        // a field added here has to be added there too
         let opts = AgentOptions {
             max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
@@ -436,6 +440,8 @@ impl Session {
         prompt: &str,
         attachments: Vec<crate::providers::Attachment>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        // the same set `run_task` builds above, by hand for the same borrow
+        // reason: keep the two in step
         let opts = AgentOptions {
             max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
