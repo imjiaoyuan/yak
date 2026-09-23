@@ -339,13 +339,16 @@ pub(crate) fn wizard() -> Result<(), String> {
 fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
     let (url, _) = crate::providers::catalog::fetch_models_url(kind, base_url, api_key);
     eprintln!("Fetching models from {url} ...");
-    let models =
-        crate::providers::catalog::fetch_models(kind, base_url, api_key).unwrap_or_else(|e| {
+    let mut models = crate::providers::catalog::fetch_models(kind, base_url, api_key)
+        .unwrap_or_else(|e| {
             eprintln!("could not fetch models ({e}) — falling back to the built-in list");
             Vec::new()
         });
     if models.is_empty() {
         eprintln!("the provider listed no models — falling back to the built-in list");
     }
+    // the wizard's list is alphabetical regardless of the endpoint's order
+    models.sort();
+    models.dedup();
     models
 }
