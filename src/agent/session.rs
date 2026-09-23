@@ -19,9 +19,6 @@ pub struct Session {
     pub tools: Vec<Box<dyn crate::agent::tools::Tool>>,
     pub system: Option<String>,
     pub cwd: PathBuf,
-    pub max_turns: usize,
-    /// cumulative input-token budget per task; 0 = unlimited
-    pub token_budget: u64,
     /// ceiling on one serialized request body; a gateway in front of the
     /// model may refuse far less than the provider documents
     pub max_request_bytes: usize,
@@ -30,7 +27,8 @@ pub struct Session {
     /// how long to ask the provider to hold this conversation's prompt-cache
     /// entries (`agent.cache_ttl`); None uses the provider's own default
     pub cache_ttl: Option<crate::providers::CacheTtl>,
-    pub no_session: bool,
+    /// None when --no-session was asked: the flag's whole effect is that no
+    /// store exists to write to
     pub store: Option<threads::Store>,
     pub approval: ApprovalConfig,
     pub conversation_id: Option<String>,
@@ -142,8 +140,6 @@ impl Session {
             max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
-            max_turns: self.max_turns,
-            token_budget: self.token_budget,
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
@@ -171,13 +167,37 @@ impl Session {
         const LOG_HEAD: usize = 5;
         let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
+        // the round in flight: its reasoning deltas and its clock, flushed at
+        // each `RoundEnd` and reset for the next round
+        let mut round_reasoning = String::new();
+        let mut round_started = std::time::Instant::now();
+        let identity = TaskIdentity {
+            model: &self.model,
+            cwd: &self.cwd,
+            system: self.system.as_deref(),
+        };
         let mut on_update = |u: AgentUpdate| {
             match u {
                 AgentUpdate::Delta(text) => {
                     view.borrow_mut().delta(&text);
                 }
                 AgentUpdate::ReasoningDelta(text) => {
+                    round_reasoning.push_str(&text);
                     view.borrow_mut().reasoning_delta(&text);
+                }
+                AgentUpdate::RoundEnd { messages, usage } => {
+                    persist_round(
+                        self.store.as_ref(),
+                        &mut self.conversation_id,
+                        &mut self.persist_error,
+                        &identity,
+                        &messages,
+                        usage,
+                        &round_reasoning,
+                        round_started,
+                    );
+                    round_reasoning.clear();
+                    round_started = std::time::Instant::now();
                 }
                 AgentUpdate::ToolStart {
                     name,
@@ -380,47 +400,32 @@ impl Session {
                 if !outcome.interrupted {
                     view.borrow_mut().footer(task_start.elapsed().as_secs_f64());
                 }
-                // a budget stop is deliberate and quiet otherwise; name it
-                // so "why did it stop" never needs archeology
-                if outcome.budget_exhausted {
-                    let p = crate::theme::err();
-                    eprintln!(
-                        "{}{}token budget reached — follow up to continue{}",
-                        p.gray,
-                        crate::theme::NOTICE,
-                        p.reset
-                    );
-                }
                 // the history moves into the seed (no clone of the whole
-                // conversation per task); persistence reads it first
+                // conversation per task); every round is already on disk
                 let history = std::mem::take(&mut outcome.history);
                 let reasoning = view.into_inner().into_renderer().reasoning;
-                self.persist_turn(
-                    outcome.seed_boundary,
-                    &history,
-                    &outcome.final_text,
-                    outcome.usage,
-                    &reasoning,
-                    task_start,
-                );
                 self.seed = history;
                 Ok((outcome, reasoning))
             }
             // the failure carries what was already sent: the session
-            // survives without a defensive clone taken up front. A failed
-            // round still saw real work — completed tool rounds, maybe a
-            // partial answer — so it persists too; without this a dropped
-            // connection late in a long task would erase the transcript
-            // from /resume while the in-memory seed kept it.
+            // survives without a defensive clone taken up front. The round
+            // in flight is the only thing not yet on disk — completed
+            // rounds wrote themselves at their round boundaries — so only
+            // the failed round's slice persists here.
             Err(failure) => {
-                let reasoning = view.into_inner().into_renderer().reasoning;
-                self.persist_turn(
-                    failure.seed_boundary,
-                    &failure.history,
-                    &failure.final_text,
+                persist_round(
+                    self.store.as_ref(),
+                    &mut self.conversation_id,
+                    &mut self.persist_error,
+                    &TaskIdentity {
+                        model: &self.model,
+                        cwd: &self.cwd,
+                        system: self.system.as_deref(),
+                    },
+                    &failure.history[failure.round_start.min(failure.history.len())..],
                     None,
-                    &reasoning,
-                    task_start,
+                    &round_reasoning,
+                    round_started,
                 );
                 self.seed = failure.history;
                 Err(failure.message)
@@ -445,8 +450,6 @@ impl Session {
             max_request_bytes: self.max_request_bytes,
             system: self.system.as_deref(),
             cwd: self.cwd.clone(),
-            max_turns: self.max_turns,
-            token_budget: self.token_budget,
             stream: self.stream,
             compact: Some(self.compact.clone()),
             reasoning: self.thinking.clone(),
@@ -455,20 +458,47 @@ impl Session {
             cache_anchor: self.cache_anchor(),
             cache_ttl: self.cache_ttl,
         };
-        let task_start = std::time::Instant::now();
         // the terminal path renders the reasoning trace through TaskView;
         // here it is only carried into the stored turn
         let mut reasoning = String::new();
+        let mut round_reasoning = String::new();
+        let mut round_started = std::time::Instant::now();
         let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
+        let identity = TaskIdentity {
+            model: &self.model,
+            cwd: &self.cwd,
+            system: self.system.as_deref(),
+        };
         let mut on_update = |u: AgentUpdate| {
             match &u {
-                AgentUpdate::ReasoningDelta(text) => reasoning.push_str(text),
+                AgentUpdate::ReasoningDelta(text) => {
+                    reasoning.push_str(text);
+                    round_reasoning.push_str(text);
+                }
                 // same accounting as the terminal path, so the session totals
                 // and /status agree in both modes
                 AgentUpdate::TurnEnd { usage: Some(usage) } => {
                     total.add(*usage);
                     last_usage = Some(*usage);
+                }
+                // the round lands in the thread file here and is not emitted:
+                // the event stream stays the UI surface, persistence is not
+                // part of the contract
+                AgentUpdate::RoundEnd { messages, usage } => {
+                    persist_round(
+                        self.store.as_ref(),
+                        &mut self.conversation_id,
+                        &mut self.persist_error,
+                        &identity,
+                        messages,
+                        *usage,
+                        &round_reasoning,
+                        round_started,
+                    );
+                    round_reasoning.clear();
+                    round_started = std::time::Instant::now();
+                    return;
                 }
                 _ => {}
             }
@@ -510,37 +540,34 @@ impl Session {
                     "text": &outcome.final_text,
                     "usage": usage_json(outcome.usage.as_ref()),
                     "interrupted": outcome.interrupted,
-                    "budget_exhausted": outcome.budget_exhausted,
                 }));
                 // the history moves into the seed (no clone of the whole
-                // conversation per task); persistence reads it first
+                // conversation per task); every round is already on disk
                 let history = std::mem::take(&mut outcome.history);
-                self.persist_turn(
-                    outcome.seed_boundary,
-                    &history,
-                    &outcome.final_text,
-                    outcome.usage,
-                    &reasoning,
-                    task_start,
-                );
                 self.seed = history;
                 Ok((outcome, reasoning))
             }
             // a failed round still saw real work: the stream reports it and
-            // the turn is persisted, exactly as in the terminal path
+            // the round in flight persists, exactly as in the terminal path
             Err(failure) => {
                 emit_event(&serde_json::json!({
                     "type": "error",
                     "message": &failure.message,
                     "text": &failure.final_text,
                 }));
-                self.persist_turn(
-                    failure.seed_boundary,
-                    &failure.history,
-                    &failure.final_text,
+                persist_round(
+                    self.store.as_ref(),
+                    &mut self.conversation_id,
+                    &mut self.persist_error,
+                    &TaskIdentity {
+                        model: &self.model,
+                        cwd: &self.cwd,
+                        system: self.system.as_deref(),
+                    },
+                    &failure.history[failure.round_start.min(failure.history.len())..],
                     None,
-                    &reasoning,
-                    task_start,
+                    &round_reasoning,
+                    round_started,
                 );
                 self.seed = failure.history;
                 Err(failure.message)
@@ -556,97 +583,118 @@ impl Session {
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default()
     }
+}
 
-    /// Persist the turn: the wire-level messages so `-c` can replay it.
-    /// Runs inside `run_task` (the callers never see the history). Skipped
-    /// with --no-session, or when nothing was added to the history — a
-    /// completed round and a failed/interrupted one persist alike, so
-    /// `/resume` sees the work either way.
-    fn persist_turn(
-        &mut self,
-        boundary: usize,
-        history: &[Msg],
-        response: &str,
-        usage: Option<crate::core::http::Usage>,
-        reasoning: &str,
-        start: std::time::Instant,
-    ) {
-        if self.no_session || history.len() <= boundary.min(history.len()) {
-            return;
+/// The per-task facts every round line carries.
+struct TaskIdentity<'a> {
+    model: &'a crate::providers::ResolvedModel,
+    cwd: &'a std::path::Path,
+    /// the assembled system prompt — stamped on the thread's first line only
+    system: Option<&'a str>,
+}
+
+/// Append one agent round to the thread file. A round is the slice of
+/// history one model call produced: the pending prompt, the assistant
+/// message, its tool results. The trailing no-tool assistant doubles as the
+/// line's `response`, exactly as the task-level turn did — a thread file is
+/// still one `StoredTurn` JSON object per line, just at round granularity.
+#[allow(clippy::too_many_arguments)]
+fn persist_round(
+    store: Option<&crate::core::threads::Store>,
+    conversation_id: &mut Option<String>,
+    persist_error: &mut Option<String>,
+    identity: &TaskIdentity<'_>,
+    messages: &[Msg],
+    usage: Option<crate::core::http::Usage>,
+    reasoning: &str,
+    started: std::time::Instant,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    if messages.is_empty() {
+        return;
+    }
+    let mut new_messages: Vec<Msg> = messages.to_vec();
+    // a trailing no-tool assistant message doubles as the round response
+    let ends_plain =
+        matches!(messages.last(), Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty());
+    let response = if ends_plain {
+        match new_messages.pop() {
+            Some(Msg::Assistant { text, .. }) => text,
+            _ => String::new(),
         }
-        let Some(store) = self.store.as_ref() else {
-            return;
-        };
-        let mut new_messages: Vec<Msg> = history[boundary.min(history.len())..].to_vec();
-        // the final no-tool assistant message doubles as the turn response
-        let ends_plain = matches!(
-            history.last(),
-            Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty()
-        );
-        if ends_plain {
-            new_messages.pop();
+    } else {
+        String::new()
+    };
+    // cwd rides in turn options as provenance so `llm logs` can show
+    // and filter conversations by project directory
+    let mut turn_options = identity.model.options.clone();
+    turn_options.push(("cwd".to_string(), identity.cwd.display().to_string()));
+    let attached: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Msg::User { attachments, .. } if !attachments.is_empty() => Some(
+                attachments
+                    .iter()
+                    .map(|a| a.filename.clone().unwrap_or_else(|| a.mime_type.clone()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            _ => None,
+        })
+        .collect();
+    if !attached.is_empty() {
+        turn_options.push(("attachments".to_string(), attached.join("; ")));
+    }
+    // the system prompt is the thread's head: stamp it on the first line
+    // only, or every round line carries several KB of cached-prefix copy
+    let system = conversation_id
+        .is_none()
+        .then_some(identity.system)
+        .flatten()
+        .map(str::to_string);
+    // the round's user text is the line's prompt preview (empty on pure
+    // tool rounds; the thread list scans back for the newest non-empty one)
+    let prompt = messages
+        .iter()
+        .find_map(|m| match m {
+            Msg::User { text, .. } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let turn = StoredTurn {
+        v: crate::core::threads::THREAD_FORMAT_VERSION,
+        id: crate::core::db::ulid(),
+        ts: crate::core::db::now_turn_datetime(),
+        mode: "agent".to_string(),
+        model: identity.model.qualified_id(),
+        cwd: Some(identity.cwd.display().to_string()),
+        system,
+        prompt,
+        response,
+        reasoning: if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning.to_string())
+        },
+        usage: usage.map(crate::core::threads::TurnUsage::from),
+        duration_ms: Some(started.elapsed().as_millis() as i64),
+        options: turn_options,
+        messages: stored_messages(&new_messages),
+    };
+    let thread_id = match store.append_turn(conversation_id.as_deref(), &turn) {
+        Ok(id) => id,
+        Err(e) => {
+            // sticky: the run continues in memory, but the banner and
+            // /status keep saying the transcript is not being written
+            eprintln!("Warning: {e}");
+            *persist_error = Some(e);
+            String::new()
         }
-        // cwd rides in turn options as provenance so `llm logs` can show
-        // and filter conversations by project directory
-        let mut turn_options = self.model.options.clone();
-        turn_options.push(("cwd".to_string(), self.cwd.display().to_string()));
-        let attached: Vec<String> = history[boundary.min(history.len())..]
-            .iter()
-            .filter_map(|m| match m {
-                Msg::User { attachments, .. } if !attachments.is_empty() => Some(
-                    attachments
-                        .iter()
-                        .map(|a| a.filename.clone().unwrap_or_else(|| a.mime_type.clone()))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ),
-                _ => None,
-            })
-            .collect();
-        if !attached.is_empty() {
-            turn_options.push(("attachments".to_string(), attached.join("; ")));
-        }
-        // the first user text of the round is the prompt preview
-        let prompt = history[boundary.min(history.len())..]
-            .iter()
-            .find_map(|m| match m {
-                Msg::User { text, .. } if !text.is_empty() => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let turn = StoredTurn {
-            v: crate::core::threads::THREAD_FORMAT_VERSION,
-            id: crate::core::db::ulid(),
-            ts: crate::core::db::now_turn_datetime(),
-            mode: "agent".to_string(),
-            model: self.model.qualified_id(),
-            cwd: Some(self.cwd.display().to_string()),
-            system: self.system.clone(),
-            prompt,
-            response: response.to_string(),
-            reasoning: if reasoning.is_empty() {
-                None
-            } else {
-                Some(reasoning.to_string())
-            },
-            usage: usage.map(crate::core::threads::TurnUsage::from),
-            duration_ms: Some(start.elapsed().as_millis() as i64),
-            options: turn_options,
-            messages: stored_messages(&new_messages),
-        };
-        let thread_id = match store.append_turn(self.conversation_id.as_deref(), &turn) {
-            Ok(id) => id,
-            Err(e) => {
-                // sticky: the run continues in memory, but the banner and
-                // /status keep saying the transcript is not being written
-                eprintln!("Warning: {e}");
-                self.persist_error = Some(e);
-                String::new()
-            }
-        };
-        if self.conversation_id.is_none() && !thread_id.is_empty() {
-            self.conversation_id = Some(thread_id);
-        }
+    };
+    if conversation_id.is_none() && !thread_id.is_empty() {
+        *conversation_id = Some(thread_id);
     }
 }
 /// One event as the `--json` stream writes it. The mapping is a contract:
@@ -655,6 +703,10 @@ impl Session {
 fn event_json(u: &AgentUpdate) -> serde_json::Value {
     match u {
         AgentUpdate::Delta(text) => serde_json::json!({"type": "text", "text": text}),
+        // internal persistence marker: run_task_json intercepts it before
+        // this map (it drives the thread file, not the event stream), so it
+        // never reaches a consumer; the arm keeps the mapping total
+        AgentUpdate::RoundEnd { .. } => serde_json::json!({"type": "round"}),
         AgentUpdate::ReasoningDelta(text) => {
             serde_json::json!({"type": "reasoning", "text": text})
         }
@@ -894,6 +946,50 @@ fn drop_images(m: &mut Msg) {
 mod tests {
     use super::*;
 
+    /// Drive `persist_round` the way the loop's `RoundEnd` arm does.
+    fn persist_test_round(session: &mut Session, messages: &[Msg]) {
+        persist_round(
+            session.store.as_ref(),
+            &mut session.conversation_id,
+            &mut session.persist_error,
+            &TaskIdentity {
+                model: &session.model,
+                cwd: &session.cwd,
+                system: session.system.as_deref(),
+            },
+            messages,
+            None,
+            "",
+            std::time::Instant::now(),
+        );
+    }
+
+    /// Read one mock-server request: past the request head plus its
+    /// content-length body (the same reader `agent::tests` uses).
+    fn read_request(c: &mut std::net::TcpStream) {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            use std::io::Read;
+            if c.read(&mut byte).unwrap_or(0) == 0 {
+                break;
+            }
+            buf.push(byte[0]);
+            let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
+            if let Some(i) = head_end {
+                let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if buf.len() - i - 4 >= len {
+                    break;
+                }
+            }
+        }
+    }
+
     /// A session with a tiny window, so a single stored result is over.
     fn tight_session(seed: Vec<Msg>) -> Session {
         Session {
@@ -915,10 +1011,7 @@ mod tests {
             tools: Vec::new(),
             system: None,
             cwd: std::env::temp_dir(),
-            max_turns: 4,
-            token_budget: 0,
             stream: true,
-            no_session: true,
             store: None,
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
@@ -994,6 +1087,123 @@ mod tests {
         assert_eq!(session.seed, seed);
     }
 
+    /// A tool round followed by a plain answer writes one thread line per
+    /// round, and the rebuilt history is the exact wire conversation — the
+    /// crash-safety property: every completed round is on disk the moment it
+    /// ends, so a kill mid-task loses only the round in flight.
+    #[test]
+    fn a_multi_round_task_persists_one_line_per_round_and_resumes_whole() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let server = std::thread::spawn(move || {
+            use std::io::Write as _;
+            for conn in listener.incoming().flatten() {
+                let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut c = conn;
+                read_request(&mut c);
+                let sse = if n == 0 {
+                    // round 1: a tool call
+                    let call = serde_json::json!({
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"tool_calls": [{
+                                "index": 0,
+                                "id": "c1",
+                                "function": {"name": "ls", "arguments": "{\"path\": \".\"}"}
+                            }]},
+                            "finish_reason": null
+                        }]
+                    });
+                    let done = serde_json::json!({
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+                    });
+                    format!("data: {call}\n\ndata: {done}\n\ndata: [DONE]\n\n")
+                } else {
+                    // round 2: the plain answer ends the task
+                    let done = serde_json::json!({
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": "all done"},
+                            "finish_reason": "stop"
+                        }]
+                    });
+                    format!("data: {done}\n\ndata: [DONE]\n\n")
+                };
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                        sse.len()
+                    )
+                    .as_bytes(),
+                );
+                if n >= 1 {
+                    break;
+                }
+            }
+        });
+        let dir = crate::core::testutil::scratch_path("round-persist");
+        let store = threads::Store::open_path(&dir).unwrap();
+        let mut session = Session {
+            max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
+            compact: CompactConfig::default(),
+            cache_ttl: None,
+            model: crate::providers::ResolvedModel {
+                provider_name: "mock".into(),
+                kind: "openai-compat".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                api_key: None,
+                model_id: "m".into(),
+                context_window: None,
+                options: vec![],
+            },
+            tools: vec![],
+            system: None,
+            cwd: dir.clone(),
+            stream: true,
+            store: Some(store),
+            approval: crate::agent::approval::ApprovalConfig::default(),
+            conversation_id: None,
+            cache_key: "round-persist".to_string(),
+            seed: Vec::new(),
+            thinking: None,
+            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            extensions: crate::agent::ext::Extensions::connect(&dir),
+            usage: crate::core::http::Usage::default(),
+            last_usage: None,
+            // the --json driver: identical loop and persistence, without the
+            // KeyWatcher (whose blocking stdin read has no terminal here)
+            json: true,
+            persist_error: None,
+        };
+        let (_outcome, _) = session
+            .run_task("list the files", vec![])
+            .expect("the task completes");
+        server.join().unwrap();
+
+        // one line per round: the tool round and the answer round
+        let cid = session.conversation_id.clone().expect("thread created");
+        let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
+        assert_eq!(turns.len(), 2, "one StoredTurn line per agent round");
+        assert_eq!(turns[0].messages.len(), 3, "prompt, tool call, result");
+        assert_eq!(turns[0].response, "", "the tool round has no answer");
+        assert_eq!(
+            turns[1].response, "all done",
+            "the answer is the last line's response"
+        );
+        assert_eq!(
+            turns[1].messages.len(),
+            0,
+            "the plain answer rides the response field"
+        );
+
+        // the rebuilt history is the exact wire conversation the seed now holds
+        let rebuilt = rebuild_turns(&turns);
+        assert_eq!(rebuilt.messages, session.seed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A round that failed late (stream drop after tool rounds) must still
     /// reach the thread file: `/resume` sees the work either way.
     #[test]
@@ -1018,10 +1228,7 @@ mod tests {
             tools: Vec::new(),
             system: None,
             cwd: cwd.clone(),
-            max_turns: 4,
-            token_budget: 0,
             stream: true,
-            no_session: false,
             store: Some(store),
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
@@ -1056,17 +1263,17 @@ mod tests {
             },
         ];
         // the round died here: no final answer, no usage — still persisted
-        session.persist_turn(0, &history, "", None, "", std::time::Instant::now());
+        persist_test_round(&mut session, &history);
         let cid = session.conversation_id.clone().expect("thread created");
         let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].messages.len(), 3, "prompt, tool call, result");
         assert_eq!(turns[0].response, "");
 
-        // nothing new since the seed: no second turn
-        session.persist_turn(3, &history, "", None, "", std::time::Instant::now());
+        // an empty round records nothing
+        persist_test_round(&mut session, &[]);
         let turns = session.store.as_ref().unwrap().read_thread(&cid).unwrap();
-        assert_eq!(turns.len(), 1, "an unchanged history persists nothing");
+        assert_eq!(turns.len(), 1, "an empty round persists nothing");
         assert!(session.persist_error.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1095,10 +1302,7 @@ mod tests {
             tools: Vec::new(),
             system: None,
             cwd: cwd.clone(),
-            max_turns: 4,
-            token_budget: 0,
             stream: true,
-            no_session: false,
             store: Some(store),
             approval: crate::agent::approval::ApprovalConfig::default(),
             conversation_id: None,
@@ -1119,7 +1323,7 @@ mod tests {
         std::fs::remove_dir(cwd.join("blocked")).unwrap();
         session.store = Some(bad);
         let history = vec![Msg::user("task")];
-        session.persist_turn(0, &history, "answer", None, "", std::time::Instant::now());
+        persist_test_round(&mut session, &history);
         let e = session.persist_error.clone().expect("failure recorded");
         assert!(e.contains("cannot write"), "{e}");
         assert!(session.conversation_id.is_none(), "no thread was created");

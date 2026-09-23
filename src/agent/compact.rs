@@ -278,7 +278,6 @@ pub fn summarize(
         attachments: &[],
         tools: &[],
         reasoning: None,
-        note: None,
         cache_anchor: None,
         cache_key: None,
         cache_ttl: None,

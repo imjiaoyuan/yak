@@ -45,6 +45,16 @@ pub enum AgentUpdate {
     Compacted {
         removed: usize,
     },
+    /// one agent round is complete: everything it added to the history is in
+    /// place (the pending prompt, the assistant message, the tool results).
+    /// The session persists the slice here — at each round boundary, not at
+    /// task end — so a crash loses only the round in flight. Internal:
+    /// the terminal UI renders nothing for it and the `--json` stream does
+    /// not emit it.
+    RoundEnd {
+        messages: Vec<Msg>,
+        usage: Option<Usage>,
+    },
     /// compaction was due and could not be applied: the session keeps growing
     /// over the window, and that must not happen silently
     CompactStalled {
@@ -86,13 +96,6 @@ pub struct ApprovalRequest<'a> {
 pub struct AgentOptions<'a> {
     pub system: Option<&'a str>,
     pub cwd: std::path::PathBuf,
-    /// maximum agent turns per task; 0 = unlimited (compaction and the
-    /// token budget are the guardrails, not a turn cap)
-    pub max_turns: usize,
-    /// cumulative input-token budget for one task: past the soft share a
-    /// wrap-up note is injected, at the cap the run stops with a visible
-    /// line. 0 disables (the reference style rollout budget over turns alone)
-    pub token_budget: u64,
     /// ceiling on one serialized request body, in bytes
     /// (`agent.max_request_bytes`); a gateway in front of the model may
     /// refuse far less than the provider itself documents
@@ -133,12 +136,6 @@ pub struct AgentOutcome {
     pub usage: Option<Usage>,
     /// the user interrupted the run (ctrl-c); partial history is kept
     pub interrupted: bool,
-    /// the token budget stopped the run; a follow-up continues seamlessly
-    pub budget_exhausted: bool,
-    /// index in `history` where this run's own messages start. Not the
-    /// caller's seed length: compaction rewrites the prefix mid-run and
-    /// shifts every index after the cut (see [`advance_seed_boundary`]).
-    pub seed_boundary: usize,
 }
 
 /// A provider-level failure: the error plus everything already sent, so the
@@ -150,94 +147,10 @@ pub struct AgentFailure {
     pub message: String,
     pub history: Vec<Msg>,
     pub final_text: String,
-    /// see [`AgentOutcome::seed_boundary`]
-    pub seed_boundary: usize,
-}
-
-/// Where a run's own messages start after compaction replaced `cut` prefix
-/// messages with one summary: everything after the cut shifts down by
-/// `cut - 1`, and a boundary inside the dropped prefix lands right after
-/// the summary — every remaining message is then this run's own.
-pub(crate) fn advance_seed_boundary(boundary: usize, cut: usize) -> usize {
-    if boundary > cut {
-        boundary - cut + 1
-    } else {
-        1
-    }
-}
-
-const WRAP_UP_NOTE: &str = "[System] The turn budget is almost exhausted. Finish your current \
-                            work and produce a final answer now; do not start new tool calls.";
-
-const BUDGET_NOTE: &str = "[System] The token budget for this task is almost exhausted. Finish your \
-                            current work and produce a final answer now; do not start new tool calls.";
-
-/// Consecutive identical-call counts that trigger an advisory reminder.
-const REMIND_AT: [u32; 3] = [3, 5, 8];
-
-/// A key-order-insensitive copy of `v`: object keys sorted recursively, so
-/// two spellings of one arguments object compare equal.
-fn canon_json(v: &serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::Object(map) => {
-            let mut entries: Vec<(String, serde_json::Value)> = map
-                .iter()
-                .map(|(k, x)| (k.clone(), canon_json(x)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            serde_json::Value::Object(entries.into_iter().collect())
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(canon_json).collect())
-        }
-        other => other.clone(),
-    }
-}
-
-/// Loop hygiene (a repeat-tool-reminder, in-tree): a model repeating
-/// the exact same tool call cannot make progress, so at escalating repeat
-/// counts an advisory note rides the tool result, asking it to analyze what
-/// it has and change approach or finish. The count covers consecutive
-/// identical calls (same tool, arguments compared modulo key order) and
-/// clears when a new user message lands — a fresh instruction is never a
-/// loop. The reminder is advisory: it never blocks a legitimate repeat. A
-/// deny-flavored plugin twin lives at `examples/extensions/repeat_guard.py`
-/// (load either one, not both — a denial there means this guard never sees
-/// a third identical call).
-struct RepeatGuard {
-    last: Option<(String, serde_json::Value)>,
-    count: u32,
-}
-
-impl RepeatGuard {
-    fn observe(&mut self, tool: &str, args: &serde_json::Value) -> Option<String> {
-        let key = (tool.to_string(), canon_json(args));
-        let same = self.last.as_ref() == Some(&key);
-        self.last = Some(key);
-        self.count = if same { self.count + 1 } else { 1 };
-        let n = self.count;
-        if n == REMIND_AT[0] {
-            return Some(format!(
-                "\n\n[System] This is the {n}rd identical {tool} call in a row. The result will \
-                 not change: analyze what you already have and either change approach or finish."
-            ));
-        }
-        if REMIND_AT[1..].contains(&n) {
-            let mut preview = args.to_string();
-            crate::core::text::truncate_ellipsis(&mut preview, 500);
-            return Some(format!(
-                "\n\n[System] This is the {n}th identical {tool} call in a row. Repeating it \
-                 verbatim cannot make progress: decide from the results already in hand — \
-                 change approach, gather different evidence, or finish. Repeated arguments: {preview}"
-            ));
-        }
-        None
-    }
-
-    fn reset(&mut self) {
-        self.last = None;
-        self.count = 0;
-    }
+    /// where the failed round's own messages start: every earlier round was
+    /// already persisted at its [`AgentUpdate::RoundEnd`], so this is the
+    /// only slice a failure still has to write
+    pub round_start: usize,
 }
 
 /// Fold steering lines into the pending user message: multiple queued lines
@@ -320,40 +233,19 @@ pub fn run_agent(
         })
         .collect();
 
-    // turn cap: 0 = unlimited. other agents run unbounded loops guarded by
-    // compaction and a token budget instead — a turn cap kills legitimate
-    // large refactors whose context is nowhere near the window. kept as an
-    // explicit escape hatch (--max-turns N).
-    let max_turns = opts.max_turns;
-    let soft_limit = if max_turns > 0 { max_turns * 4 / 5 } else { 0 };
-    // token budget: cumulative input tokens across the task's model rounds.
-    // Each round resends the full context, so the sum grows quadratically —
-    // a runaway loop becomes visible long before the context window does.
-    let token_budget = opts.token_budget;
-    let soft_budget = if token_budget > 0 {
-        token_budget * 4 / 5
-    } else {
-        0
-    };
     let mut history: Vec<Msg> = seed;
-    // persistence slices the turn out of `history`; compaction moves the goal
-    // posts underneath that slice, so track the boundary as history changes
-    let mut seed_boundary = history.len();
+    // where the round in flight starts: everything from here on is the round
+    // the next `RoundEnd` reports. Assigned fresh after the loop-top
+    // compaction check (a rebuild shifts every index); the recovery and
+    // overflow paths keep their pushes inside the round they belong to.
+    let mut round_start;
     let mut pending: Option<Msg> = Some(Msg::user_with(prompt, attachments));
-    let mut repeats = RepeatGuard {
-        last: None,
-        count: 0,
-    };
-    let mut warned = false;
-    let mut budget_warned = false;
-    let mut spent_input = 0u64;
-    let mut budget_exhausted = false;
     let mut last_usage = None;
     // the usage marker carried across turns: the provider's reported count
-    // covers `history[..covered]`, so per-round estimates (the context note
-    // and the compaction gate) only price the tail instead of rescanning
-    // the whole history each round (O(n²) over a long task). Reset to None
-    // wherever history is rebuilt (a compaction) so indices stay honest.
+    // covers `history[..covered]`, so per-round estimates (the compaction
+    // gate) only price the tail instead of rescanning the whole history each
+    // round (O(n²) over a long task). Reset to None wherever history is
+    // rebuilt (a compaction) so indices stay honest.
     let mut usage_marker: Option<(usize, Usage)> = None;
     // one compaction-stalled notice per run (see `maybe_compact`)
     let mut compact_stalled = false;
@@ -394,43 +286,9 @@ pub fn run_agent(
     let mut turn = 0;
     loop {
         turn += 1;
-        if max_turns > 0 && turn > max_turns {
-            break;
-        }
-        if max_turns > 0 && turn == soft_limit && !warned {
-            warned = true;
-            let note = match pending.take() {
-                Some(Msg::User { text, attachments }) => Msg::User {
-                    text: format!("{text}\n\n{WRAP_UP_NOTE}"),
-                    attachments,
-                },
-                _ => Msg::user(WRAP_UP_NOTE),
-            };
-            pending = Some(note);
-        }
-        if token_budget > 0 && spent_input >= token_budget {
-            budget_exhausted = true;
-            break;
-        }
-        if token_budget > 0 && !budget_warned && spent_input >= soft_budget {
-            budget_warned = true;
-            let note = match pending.take() {
-                Some(Msg::User { text, attachments }) => Msg::User {
-                    text: format!("{text}\n\n{BUDGET_NOTE}"),
-                    attachments,
-                },
-                _ => Msg::user(BUDGET_NOTE),
-            };
-            pending = Some(note);
-        }
 
         // steering: queued mid-run input lands before the next model call
         pending = merge_steering(pending.take(), steer());
-        // a fresh user message clears the repeat tracker: a new instruction
-        // resets what counts as "the same call again"
-        if pending.is_some() {
-            repeats.reset();
-        }
         opts.hooks.fire("turn_start", &json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
             opts.hooks.fire(
@@ -450,8 +308,8 @@ pub fn run_agent(
                 _ => ("", &[]),
             };
         let has_pending = pending.is_some();
-        // Context pressure, priced once per round to serve the note and the
-        // compaction check below; under real pressure the stale prefix is
+        // Context pressure, priced once per round to serve the compaction
+        // check below; under real pressure the stale prefix is
         // rewritten here too (see `price_and_rewrite`).
         // Every image in the request is billed every round, so only the newest
         // image turns keep their pixels — including anything a tool result or
@@ -475,24 +333,20 @@ pub fn run_agent(
                 &mut history,
                 usage_marker,
                 cfg_now.as_ref(),
-                seed_boundary,
                 cache_stable,
                 &mut sink,
             );
-            seed_boundary = after.seed_boundary;
             usage_marker = after.usage_marker;
             cache_stable = after.cache_stable;
             compact_trigger = after.trigger;
         }
+        // the round boundary: a compaction above may have rebuilt the
+        // history, so the slice the next `RoundEnd` reports starts here
+        round_start = history.len();
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
         // context caching, Anthropic prompt caching), so any per-turn suffix
         // here re-bills the whole history at cache-miss price
-        // the reference style budget awareness: a terse note on how much room is
-        // left rides the end of every request, so the model can decide to
-        // wrap up instead of exploring indefinitely. Request-only: it never
-        // enters the history or the prompt-cache prefix.
-        let note = context_note(opts, spent_input);
         let input = PromptInput {
             max_request_bytes: opts.max_request_bytes,
             system: opts.system,
@@ -501,7 +355,6 @@ pub fn run_agent(
             attachments: pending_attachments,
             tools: &tool_defs,
             reasoning: opts.reasoning.as_deref(),
-            note: note.as_deref(),
             cache_anchor: cache_stable,
             cache_key: opts.cache_key,
             cache_ttl: opts.cache_ttl,
@@ -528,6 +381,10 @@ pub fn run_agent(
                         reasoning_meta: None,
                     });
                 }
+                on_update(AgentUpdate::RoundEnd {
+                    messages: history[round_start..].to_vec(),
+                    usage: None,
+                });
                 break;
             }
             // The provider refusing a prompt that does not fit its window is
@@ -545,7 +402,6 @@ pub fn run_agent(
                     model,
                     &mut history,
                     cfg,
-                    &mut seed_boundary,
                     &mut usage_marker,
                     &mut cache_stable,
                     &mut sink,
@@ -578,6 +434,13 @@ pub fn run_agent(
                         chars: round.text.chars().count(),
                         error: e,
                     });
+                    // the partial answer is a real round record: the retry
+                    // continues from it, but the transcript keeps what the
+                    // model actually said first
+                    on_update(AgentUpdate::RoundEnd {
+                        messages: history[round_start..].to_vec(),
+                        usage: None,
+                    });
                     continue;
                 }
             } else if round.text.is_empty()
@@ -598,7 +461,7 @@ pub fn run_agent(
                 message: e,
                 history,
                 final_text: final_text.clone(),
-                seed_boundary,
+                round_start,
             });
         }
 
@@ -617,9 +480,6 @@ pub fn run_agent(
         });
         final_text = text;
         last_usage = usage;
-        if let Some(u) = usage {
-            spent_input += u.input;
-        }
         // the assistant just pushed is the only message the report does not
         // name as input: mark everything up to and including it as covered
         // by u.input + u.output (the tail estimate prices it again at
@@ -649,12 +509,18 @@ pub fn run_agent(
             let silent = u.input > w;
             let truncated = stop == StopReason::Length && u.output == 0 && u.input >= w * 99 / 100;
             if silent || truncated {
+                // the round's own record is on disk before the rewrite: the
+                // transcript keeps what actually happened, compaction only
+                // reshapes the in-memory context
+                on_update(AgentUpdate::RoundEnd {
+                    messages: history[round_start..].to_vec(),
+                    usage,
+                });
                 let mut sink = StallSink::new(&mut compact_stalled, on_update);
                 if force_compact(
                     model,
                     &mut history,
                     cfg,
-                    &mut seed_boundary,
                     &mut usage_marker,
                     &mut cache_stable,
                     &mut sink,
@@ -667,21 +533,34 @@ pub fn run_agent(
 
         if stop == StopReason::Length {
             // truncated output: don't act on possibly-mangled calls, let the
-            // model re-issue them
+            // model re-issue them. the whole batch fails: streamed
+            // arguments are finalized with a salvage parser, so any call in
+            // the message may carry silently incomplete arguments.
             for call in &tool_calls {
                 history.push(Msg::ToolResult {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    content: "The response was truncated before this tool call could run. \
-                              Re-issue it with a shorter response."
-                        .to_string(),
+                    content: format!(
+                        "Tool call \"{}\" was not executed: the response hit the output token \
+                         limit, so its arguments may be truncated. Re-issue the tool call with \
+                         complete arguments.",
+                        call.name
+                    ),
                     error: Some(crate::providers::ToolError::Failed),
                     attachments: Vec::new(),
                 });
             }
+            on_update(AgentUpdate::RoundEnd {
+                messages: history[round_start..].to_vec(),
+                usage,
+            });
             continue;
         }
         if stop != StopReason::ToolUse || tool_calls.is_empty() {
+            on_update(AgentUpdate::RoundEnd {
+                messages: history[round_start..].to_vec(),
+                usage,
+            });
             break;
         }
         // Read-only calls from one assistant message have no ordering
@@ -695,10 +574,13 @@ pub fn run_agent(
                 approval: &mut *approval,
                 on_approval: &mut *on_approval,
                 on_update: &mut *on_update,
-                repeats: &mut repeats,
             },
             &mut history,
         );
+        on_update(AgentUpdate::RoundEnd {
+            messages: history[round_start..].to_vec(),
+            usage,
+        });
         if interrupted {
             break;
         }
@@ -713,8 +595,6 @@ pub fn run_agent(
         final_text,
         usage: last_usage,
         interrupted,
-        budget_exhausted,
-        seed_boundary,
     })
 }
 
@@ -795,7 +675,7 @@ fn stream_round(
 /// run only past the rewrite gate — below it the tokens they would save cost
 /// less than the cache they would break — and stay unconditional when
 /// compaction is off, since then nothing else guards the window. Returns the
-/// estimate the budget note and the compaction gate price, or None when no
+/// estimate the compaction gate price, or None when no
 /// compaction is configured.
 fn price_and_rewrite(
     history: &mut [Msg],
@@ -816,7 +696,7 @@ fn price_and_rewrite(
             on_update(AgentUpdate::ToolResultsPruned { count: stale.count });
         }
         // the passes edited the prefix: re-price rather than hand the pre-trim
-        // number to the note and the compaction gate
+        // number to the compaction gate
         used_tokens = cfg.map(|_| compact::estimate_tokens(history, usage_marker));
     }
     used_tokens
@@ -825,7 +705,6 @@ fn price_and_rewrite(
 /// What a compaction check reports back: a rebuild moves every index, so the
 /// two bookkeeping markers either follow it or are dropped.
 struct AfterTurn {
-    seed_boundary: usize,
     /// covered prefix of the history, or None after a rebuild
     usage_marker: Option<(usize, Usage)>,
     /// stable cache prefix, or None once the rebuild rewrote below the summary
@@ -845,12 +724,10 @@ fn maybe_compact(
     history: &mut Vec<Msg>,
     usage_marker: Option<(usize, Usage)>,
     cfg: Option<&compact::CompactConfig>,
-    seed_boundary: usize,
     cache_stable: Option<usize>,
     sink: &mut StallSink<'_>,
 ) -> AfterTurn {
     let mut after = AfterTurn {
-        seed_boundary,
         usage_marker,
         cache_stable,
         trigger: cfg.map_or(0, |c| c.trigger_tokens),
@@ -937,7 +814,6 @@ fn compact_now(
     history.clear();
     history.push(Msg::Summary { text: summary });
     history.extend(tail);
-    after.seed_boundary = advance_seed_boundary(after.seed_boundary, cut);
     on_update(AgentUpdate::Compacted { removed: cut });
     // the rebuild moved every index: the marker's covered length no longer
     // names anything real, so drop it until the next usage report
@@ -956,20 +832,17 @@ fn force_compact(
     model: &crate::providers::ResolvedModel,
     history: &mut Vec<Msg>,
     cfg: &compact::CompactConfig,
-    seed_boundary: &mut usize,
     usage_marker: &mut Option<(usize, Usage)>,
     cache_stable: &mut Option<usize>,
     sink: &mut StallSink<'_>,
 ) -> bool {
     let mut after = AfterTurn {
-        seed_boundary: *seed_boundary,
         usage_marker: *usage_marker,
         cache_stable: *cache_stable,
         trigger: cfg.trigger_tokens,
     };
     match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
         Ok(()) => {
-            *seed_boundary = after.seed_boundary;
             *usage_marker = after.usage_marker;
             *cache_stable = after.cache_stable;
             true
@@ -987,7 +860,6 @@ struct CallSinks<'a> {
     approval: &'a mut approval::ApprovalConfig,
     on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     on_update: &'a mut dyn FnMut(AgentUpdate),
-    repeats: &'a mut RepeatGuard,
 }
 
 /// Execute one assistant message's tool calls: gate them first (extension
@@ -1008,7 +880,6 @@ fn run_tool_calls(
         approval,
         on_approval,
         on_update,
-        repeats,
     } = sinks;
     let mut interrupted = false;
     // other agents run a batch of read-only calls together; anything that
@@ -1068,9 +939,9 @@ fn run_tool_calls(
             for line in &logs {
                 on_update(AgentUpdate::ToolLog(line.clone()));
             }
-            let (out, repeat_note) = match cleared {
-                Err(denied) => (denied.into(), None),
-                Ok(_) => (out, repeats.observe(&call.name, &call.arguments)),
+            let out = match cleared {
+                Err(denied) => denied.into(),
+                Ok(_) => out,
             };
             let mut ctx = call_ctx(
                 tools,
@@ -1080,7 +951,7 @@ fn run_tool_calls(
                 on_update,
                 opts.hooks,
             );
-            finish_call(&call, out, &mut ctx, repeat_note, history);
+            finish_call(&call, out, &mut ctx, history);
         }
     } else {
         for mut call in tool_calls {
@@ -1103,14 +974,11 @@ fn run_tool_calls(
                 on_update,
                 opts.hooks,
             );
-            let (out, repeat_note) = match prepare_call(&mut call, &mut ctx) {
-                Err(denied) => (denied.into(), None),
+            let out = match prepare_call(&mut call, &mut ctx) {
+                Err(denied) => denied.into(),
                 Ok(cleared) => {
                     let mut log = |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
-                    let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);
-                    // tool_result fires once, in finish_call, so denied and
-                    // executed calls notify hooks identically
-                    (out, repeats.observe(&call.name, &call.arguments))
+                    cleared.tool.execute_call(&call, &opts.cwd, &mut log)
                 }
             };
             let mut ctx = call_ctx(
@@ -1121,7 +989,7 @@ fn run_tool_calls(
                 on_update,
                 opts.hooks,
             );
-            finish_call(&call, out, &mut ctx, repeat_note, history);
+            finish_call(&call, out, &mut ctx, history);
         }
     }
     interrupted
@@ -1129,21 +997,6 @@ fn run_tool_calls(
 
 /// Terminal preview of a tool result: the first ten non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
-/// Budget awareness: a terse note reporting how much room the
-/// task has left, in input tokens. `None` when no task budget is set: how much
-/// longer the conversation can run is auto-compaction's business, not something
-/// the model is asked to steer by, and this side cannot report a
-/// context size it does not know anyway. Kept short and factual — the note
-/// exists so the model can choose to wrap up, not to make it narrate.
-fn context_note(opts: &AgentOptions, spent_input: u64) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if opts.token_budget > 0 {
-        let left = opts.token_budget.saturating_sub(spent_input);
-        parts.push(format!("{left} of this task's input-token budget left"));
-    }
-    (!parts.is_empty()).then(|| format!("<context>{}</context>", parts.join("; ")))
-}
-
 fn summarize(content: &str) -> String {
     /// lines shown in the user-facing tool-result preview (matches the reference's
     /// collapsed default); the model still receives the full output
@@ -1395,7 +1248,6 @@ fn finish_call(
     call: &ToolCall,
     out: tools::ToolOutput,
     ctx: &mut CallCtx<'_, '_>,
-    repeat_note: Option<String>,
     history: &mut Vec<Msg>,
 ) {
     let hooks = ctx.hooks;
@@ -1409,16 +1261,10 @@ fn finish_call(
         summary: summarize(&out.content),
         is_error: out.is_error(),
     });
-    // the repeat reminder rides the result the model is about to read; the
-    // terminal summary above stays the tool's own output
-    let mut content = out.content;
-    if let Some(note) = repeat_note {
-        content.push_str(&note);
-    }
     history.push(Msg::ToolResult {
         call_id: call.id.clone(),
         name: call.name.clone(),
-        content,
+        content: out.content,
         error: out.error,
         attachments: out.attachments,
     });

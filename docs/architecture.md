@@ -243,22 +243,14 @@ across processes with `LLM_SESSION_ID`.
   forced-compact-and-retry; a round the provider reported no usage for is priced from the text
   instead, so a gateway that omits the counts cannot switch the gate off; ctrl-c keeps the round's
   own messages — the pending prompt and any partial answer already streamed — so /resume starts from
-  what was actually said, not a gap), Every
-  request closes with a request-only `<context>… tokens left</context>` user
-  turn only when `--token-budget` is set (`context_note` in `mod.rs`: the task's input-token room) —
-  the reference style budget awareness so the model can choose to wrap up; it is
-  never persisted and rides after the Anthropic cache tip, so the prompt-cache prefix is untouched.
+  what was actually said, not a gap).
   Read-only calls from one assistant message (every tool at `Tier::Read`) run concurrently on scope
   threads after a serial gating pass — approvals, extension `tool_call` hooks and the ToolStart
   chrome stay ordered, and results, tool logs and history are replayed in call order — while
   mutating and exec calls stay strictly serial; `prepare_call`/`finish_call` in `mod.rs` are shared
   by both paths so they gate and finish identically, and the provider adapters ask for
-  `parallel_tool_calls` so the model may batch independent reads into that one message, a
-  loop-hygiene guard in the loop (`RepeatGuard`: the model repeating the exact same tool call — same
-  tool, arguments compared modulo key order — gets an advisory `[System]` note riding the result at
-  its 3rd/5th/8th consecutive repeat, naming the arguments on the detailed ones; a fresh user
-  message clears the streak; a deny-flavored plugin twin lives at
-`examples/extensions/repeat_guard.py`), and a tool-result pruner at compaction pressure
+  `parallel_tool_calls` so the model may batch independent reads into that one message, and a
+  tool-result pruner at compaction pressure
 (`prune_tool_results`: once `should_compact` fires, results over 8192 chars become head 4096 + a
 middle marker + tail 1024 before the summarizer runs, and the pass reports `freed_tokens` — the loop
 subtracts them from the usage-derived estimate, because re-estimating over the same usage marker
@@ -266,8 +258,9 @@ reports the identical number and would let the summarizer run anyway; a resumed 
 longer fits is projected down the same way before its first request, silently
 (`Session::prune_seed_to_fit`), so the notice cannot repeat turn after turn); the cut middle is
 dropped, the reference's lossy shape, char-indexed cuts keep CJK on codepoint boundaries, `skills.rs`
-(SKILL.md discovery, `skills_block()` caps at 2000 chars with per-entry trigger lines capped at 160
-— the list rides every request, the full file is one `read` away), `settings.rs`, `system_prompt.rs`
+(SKILL.md discovery with the reference's spec validation — description required, name rules warned — and
+`skills_block()` rendering the reference's `<available_skills>` block verbatim, uncapped; the full file is
+one `read` away), `settings.rs`, `system_prompt.rs`
 (the reference's shape: persona, an available-tools list, guidelines, AGENTS.override.md/AGENTS.md/CLAUDE.md
 project-instruction discovery, skills, and a self-extension block naming the extensions/skills dirs
 and the manifest-header form; a continuation from a stored prompt keeps it verbatim and refreshes
@@ -337,7 +330,9 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   bam/cram→samtools, parquet/hdf5→duckdb, office→libreoffice). Memory stays bounded by the window;
   nothing but text is ever parsed.
 - `src/core/threads.rs` is the conversation store: one JSONL file per thread under
-  `user_dir/threads/<ulid>.jsonl`, one `StoredTurn` object per line (a `v` format stamp first —
+  `user_dir/threads/<ulid>.jsonl`, one `StoredTurn` object per line — one line per agent **round**,
+  appended at the round boundary (`AgentUpdate::RoundEnd`), so a crash loses only the round in
+  flight and a compaction can never retract work the transcript already wrote (a `v` format stamp first —
   `THREAD_FORMAT_VERSION`, absent on pre-versioning lines — then id, ts, mode, model, cwd, system,
   prompt, response, reasoning, usage, options, and the round's wire `messages` as the same
   `providers::Msg` values the request carries). `usage` is `[input, output, cached, cached_write]`

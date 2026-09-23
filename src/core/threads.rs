@@ -361,11 +361,23 @@ impl Store {
             }
         }
         let last = last?;
+        // the preview prompt: the newest line that carries one — later rounds
+        // of a task are tool rounds with no user text of their own
+        let last_prompt = text
+            .lines()
+            .rev()
+            .find_map(|line| {
+                serde_json::from_str::<StoredTurn>(line)
+                    .ok()
+                    .filter(|t| !t.prompt.is_empty())
+                    .map(|t| t.prompt)
+            })
+            .unwrap_or_default();
         Some(ThreadSummary {
             id: id.to_string(),
             turns,
             last: last.ts,
-            last_prompt: last.prompt,
+            last_prompt,
             cwd: last.cwd,
         })
     }

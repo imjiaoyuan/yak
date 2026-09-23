@@ -161,7 +161,8 @@ host and the rendering contract — is in `docs/architecture.md`.
 
 All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platform.
 
-- `threads/<ulid>.jsonl` — one file per conversation, one `StoredTurn` JSON object per line (a
+- `threads/<ulid>.jsonl` — one file per conversation, one `StoredTurn` JSON object per line, one
+  line per agent round appended at the round boundary (a
   `v` format stamp first — `THREAD_FORMAT_VERSION`, absent on pre-versioning lines — then id,
   ts, mode, model, cwd, system, prompt, response, reasoning, usage, options, and the round's wire
   `messages` as the same `providers::Msg` values the request carries). `usage` keeps the round's

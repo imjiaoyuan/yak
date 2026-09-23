@@ -12,12 +12,10 @@ keeps a stuck loop alive:
                the call is denied and the reason (the reminder) reaches the
                model as the tool's error result
 
-This is the deny-flavored twin of the in-core advisory RepeatGuard (which
-lets the call run and rides a [System] note on its result). Load either one,
-not both: a denial here means the core guard never sees a third identical
-call, so together they are redundant rather than harmful. What the event
-protocol cannot express is the advisory middle ground — a deny gate can only
-refuse — which is why the core keeps its own copy.
+The core loop runs unbounded (the reference's shape) and ships no repeat guard of its
+own: a stuck loop is compaction's business, and a model that genuinely needs
+a hard stop gets one here — as an extension, where the threshold and the
+remedy are yours to edit.
 
 One honest limitation: the protocol has no config channel for resident
 extensions, so the threshold lives in this file. Edit REMIND_AT and /reload.

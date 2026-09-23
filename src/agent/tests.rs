@@ -1,4 +1,4 @@
-use super::{RunCallbacks, RunRequest, advance_seed_boundary, usable_anchor};
+use super::{RunCallbacks, RunRequest, usable_anchor};
 use serde_json::json;
 
 /// A continuation names the anchor for its first request; an anchor the
@@ -23,16 +23,6 @@ fn a_cache_anchor_is_only_used_when_the_history_has_it() {
     assert_eq!(usable_anchor(Some(1), 0), None);
 }
 
-/// Compaction drops `cut` messages and inserts one summary, so the run's
-/// own region moves; a boundary consumed by the cut lands on the summary.
-#[test]
-fn compaction_shifts_the_seed_boundary() {
-    assert_eq!(advance_seed_boundary(10, 4), 7); // 6 seed messages survive
-    assert_eq!(advance_seed_boundary(4, 4), 1); // the whole seed was cut
-    assert_eq!(advance_seed_boundary(2, 9), 1);
-    assert_eq!(advance_seed_boundary(0, 3), 1);
-}
-
 #[test]
 fn summarize_shows_ten_lines_plus_count() {
     assert_eq!(summarize("a\nb\nc\nd\ne\n"), "a\nb\nc\nd\ne");
@@ -55,56 +45,6 @@ fn steering_joins_into_one_user_message() {
     assert!(merge_steering(None, vec![]).is_none());
 }
 
-#[test]
-fn identical_repeats_remind_at_escalating_counts() {
-    let mut g = RepeatGuard {
-        last: None,
-        count: 0,
-    };
-    let args = json!({"command": "ls -la", "path": "."});
-    assert!(
-        g.observe("bash", &args).is_none(),
-        "the first call is not a repeat"
-    );
-    assert!(
-        g.observe("bash", &args).is_none(),
-        "the second is still quiet"
-    );
-    let note = g.observe("bash", &args).expect("the third repeat reminds");
-    assert!(note.contains("3rd identical bash call"), "{note}");
-    assert!(
-        g.observe("bash", &args).is_none(),
-        "quiet between thresholds"
-    );
-    let note = g.observe("bash", &args).expect("the fifth repeat reminds");
-    assert!(note.contains("5th identical bash call"), "{note}");
-    assert!(
-        note.contains("ls -la"),
-        "the detailed note names the repeated arguments: {note}"
-    );
-}
-
-#[test]
-fn repeat_tracking_ignores_key_order_and_resets_on_change() {
-    let mut g = RepeatGuard {
-        last: None,
-        count: 0,
-    };
-    assert!(g.observe("bash", &json!({"a": 1, "b": 2})).is_none());
-    assert!(
-        g.observe("bash", &json!({"b": 2, "a": 1})).is_none(),
-        "same arguments in a different key order are the same call"
-    );
-    let note = g
-        .observe("bash", &json!({"a": 1, "b": 2}))
-        .expect("third identical call");
-    assert!(note.contains("3rd"));
-    // a different call restarts the streak from one
-    assert!(g.observe("bash", &json!({"a": 9})).is_none());
-    // a new user message clears the tracker entirely
-    g.reset();
-    assert!(g.observe("bash", &json!({"a": 9})).is_none());
-}
 use super::*;
 
 #[test]
@@ -190,7 +130,7 @@ fn a_stalled_compaction_is_reported_once() {
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), None, &mut sink);
     }
     assert_eq!(
         history.len(),
@@ -208,7 +148,7 @@ fn a_stalled_compaction_is_reported_once() {
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), 0, None, &mut sink);
+        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), None, &mut sink);
     }
     assert_eq!(stalled(&updates), 1);
 }
@@ -220,16 +160,14 @@ fn empty_extensions() -> &'static crate::agent::ext::Extensions {
     E.get_or_init(crate::agent::ext::Extensions::empty)
 }
 
-/// The options every inline-server test runs with; `max_turns` and
-/// `token_budget` are the two dials a test actually turns, so the rest
-/// starts here and is overridden in place.
+/// The options every inline-server test runs with. The loop runs unbounded
+/// (the reference's shape, guarded by compaction); every mock server here terminates
+/// its own run by answering a plain, tool-free round last.
 fn test_opts() -> AgentOptions<'static> {
     AgentOptions {
         max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: None,
         cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 0,
         stream: true,
         compact: None,
         reasoning: None,
@@ -320,8 +258,7 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
 
     let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
-    let mut opts = test_opts();
-    opts.max_turns = 4;
+    let opts = test_opts();
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -343,12 +280,86 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
         "exactly one recovery request"
     );
     assert!(!outcome.interrupted);
-    assert!(!outcome.budget_exhausted);
     assert_eq!(outcome.final_text, "ued cleanly");
     assert_eq!(outcome.history.len(), 3, "prompt, partial, continuation");
     assert!(
         matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, .. } if text == "partial ans" && tool_calls.is_empty()),
         "the partial answer rides the history as a real assistant message"
+    );
+}
+
+/// A length-stopped response never runs its tool calls: streamed arguments
+/// are salvaged JSON that may be silently incomplete, so every call in the
+/// message fails with the reference's re-issue message and the model goes another round.
+#[test]
+fn a_length_stopped_round_fails_its_tool_calls_with_the_reissue_message() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            read_request(&mut c);
+            if n == 0 {
+                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"ls\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}]}\n\n\
+                            data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
+                            data: [DONE]\n\n";
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            } else {
+                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
+                            data: [DONE]\n\n";
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                break;
+            }
+        }
+    });
+    let model = mock_model(port);
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let opts = test_opts();
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the run continues past the truncated round");
+    server.join().unwrap();
+    assert_eq!(outcome.final_text, "done");
+    let (name, content) = outcome
+        .history
+        .iter()
+        .find_map(|m| match m {
+            Msg::ToolResult { name, content, .. } => Some((name, content)),
+            _ => None,
+        })
+        .expect("the truncated round must leave an error tool result");
+    assert_eq!(name, "ls");
+    assert!(content.contains("arguments may be truncated"), "{content}");
+    assert!(
+        content.contains("Re-issue the tool call with complete arguments"),
+        "{content}"
     );
 }
 
@@ -394,7 +405,6 @@ fn a_refused_prompt_forces_a_compaction_and_the_round_is_retried() {
     let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
     let mut opts = test_opts();
-    opts.max_turns = 4;
     // the window is exactly what is not known here: nothing is configured
     opts.compact = Some(compact::CompactConfig {
         trigger_tokens: 0,
@@ -617,8 +627,7 @@ fn a_stream_cut_before_any_output_is_resent() {
 
     let model = mock_model(port);
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
-    let mut opts = test_opts();
-    opts.max_turns = 4;
+    let opts = test_opts();
     let mut approval = approval::ApprovalConfig::default();
     let outcome = run_agent(
         RunRequest {
@@ -641,190 +650,6 @@ fn a_stream_cut_before_any_output_is_resent() {
     );
     assert_eq!(outcome.final_text, "fresh answer");
     assert_eq!(outcome.history.len(), 2, "prompt, answer — no ghost turns");
-}
-
-/// The token budget stops a task like a turn cap would, but on the
-/// metric that actually prices a runaway loop: cumulative input tokens.
-/// Past 80% a wrap-up note rides the pending prompt; at 100% the loop
-/// breaks and the outcome says so. A plain answer (no tool calls) ends
-/// the run normally, so the server needs one tool call per round to
-/// keep the loop alive until the budget bites.
-#[test]
-fn token_budget_warns_then_stops_the_run() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let hits2 = hits.clone();
-    let server = std::thread::spawn(move || {
-        let mut n = 0usize;
-        for conn in listener.incoming().flatten() {
-            if n >= 10 {
-                break;
-            }
-            let mut c = conn;
-            read_request(&mut c);
-            let _ = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            n += 1;
-            // each round reports 1000 input tokens and asks for a tool;
-            // budget 2500: warn after round 2 (2000 ≥ 80%), stop before 4
-            let body = format!(
-                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c{n}\",\"function\":{{\"name\":\"echo\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\n\
-                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
-                 data: {{\"usage\":{{\"prompt_tokens\":1000,\"completion_tokens\":5}}}}\n\n\
-                 data: [DONE]\n\n"
-            );
-            let _ = c.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-        }
-    });
-    use std::io::Write as _;
-
-    let model = mock_model(port);
-    let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
-    let mut opts = test_opts();
-    opts.token_budget = 2500;
-    let mut approval = approval::ApprovalConfig::default();
-    let outcome = run_agent(
-        RunRequest {
-            model: &model,
-            tools: &tools,
-            prompt: "go",
-            attachments: vec![],
-            seed: vec![],
-            opts: &opts,
-        },
-        &mut approval,
-        deny_callbacks(),
-    )
-    .expect("a budget stop is a normal outcome, not a failure");
-    // let a hypothetical erroneous 4th request land before counting
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    drop(server);
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        3,
-        "round 4 never starts: 3000 spent ≥ 2500 budget"
-    );
-    assert!(outcome.budget_exhausted);
-    // the wrap-up note rode the round-3 prompt (2400 ≥ 2400 soft line)
-    let warned = outcome
-        .history
-        .iter()
-        .any(|m| matches!(m, Msg::User { text, .. } if text.contains("token budget")));
-    assert!(warned, "the soft-line note must be in the history");
-}
-
-struct EchoTool;
-impl tools::Tool for EchoTool {
-    fn name(&self) -> &str {
-        "echo"
-    }
-    fn tier(&self) -> super::approval::Tier {
-        super::approval::Tier::Read
-    }
-    fn description(&self) -> &str {
-        "echo"
-    }
-    fn parameters(&self) -> serde_json::Value {
-        json!({"type": "object", "properties": {}})
-    }
-    fn preview(&self, _args: &serde_json::Value) -> String {
-        "echo".into()
-    }
-    fn execute(
-        &self,
-        _args: &serde_json::Value,
-        _cwd: &std::path::Path,
-        _log: &mut dyn FnMut(&str),
-    ) -> tools::ToolOutput {
-        tools::ToolOutput::ok("echoed")
-    }
-}
-
-/// Loop hygiene end to end: three identical echo calls in a row, and
-/// the third result carries the advisory reminder; a plain answer then
-/// ends the run normally.
-#[test]
-fn a_third_identical_tool_call_reminds_the_model_to_change_approach() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let hits2 = hits.clone();
-    let server = std::thread::spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut c = conn;
-            read_request(&mut c);
-            let body = if n < 3 {
-                format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c{n}\",\"function\":{{\"name\":\"echo\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\n\
-                     data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
-                     data: [DONE]\n\n"
-                )
-            } else {
-                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
-                 data: [DONE]\n\n"
-                    .to_string()
-            };
-            let _ = c.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-            if n >= 3 {
-                break;
-            }
-        }
-    });
-    use std::io::Write as _;
-
-    let model = mock_model(port);
-    let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(EchoTool)];
-    let opts = test_opts();
-    let mut approval = approval::ApprovalConfig::default();
-    let outcome = run_agent(
-        RunRequest {
-            model: &model,
-            tools: &tools,
-            prompt: "go",
-            attachments: vec![],
-            seed: vec![],
-            opts: &opts,
-        },
-        &mut approval,
-        deny_callbacks(),
-    )
-    .expect("identical echoes are not a failure");
-    server.join().unwrap();
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        4,
-        "three tool rounds plus the plain answer"
-    );
-    assert_eq!(outcome.final_text, "done");
-    let results: Vec<&str> = outcome
-        .history
-        .iter()
-        .filter_map(|m| match m {
-            Msg::ToolResult { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(results.len(), 3);
-    assert!(!results[0].contains("[System]"));
-    assert!(!results[1].contains("[System]"));
-    assert!(
-        results[2].contains("3rd identical echo call"),
-        "the reminder rides the third result: {}",
-        results[2]
-    );
 }
 
 /// A read-tier probe that records the thread it ran on, so a batched
@@ -938,39 +763,6 @@ fn batched_readonly_calls_run_off_the_calling_thread_in_order() {
         })
         .collect();
     assert_eq!(results, [("c1", "probed"), ("c2", "probed")]);
-}
-
-/// Budget awareness: the note reports the task's input-token room,
-/// wrapped so the model reads it as a system note rather than a user turn.
-#[test]
-fn context_note_reports_the_room_left() {
-    let mut opts = AgentOptions {
-        max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
-        system: None,
-        cwd: std::env::temp_dir(),
-        max_turns: 0,
-        token_budget: 10_000,
-        stream: false,
-        compact: None,
-        reasoning: None,
-        hooks: &crate::agent::ext::Extensions::empty(),
-        cache_key: None,
-        cache_anchor: None,
-        cache_ttl: None,
-    };
-    let note = context_note(&opts, 3_000).unwrap();
-    assert!(
-        note.starts_with("<context>") && note.ends_with("</context>"),
-        "{note}"
-    );
-    assert!(
-        note.contains("7000 of this task's input-token budget left"),
-        "{note}"
-    );
-    // no task budget: no note at all — how long the conversation may run is
-    // auto-compaction's business, not a number handed to the model
-    opts.token_budget = 0;
-    assert!(context_note(&opts, 0).is_none());
 }
 
 /// The marker prices the covered prefix at the provider's reported count and

@@ -564,11 +564,6 @@ pub struct PromptInput<'a> {
     pub tools: &'a [ToolDef],
     /// reasoning effort level (minimal..xhigh); None sends no parameter
     pub reasoning: Option<&'a str>,
-    /// an optional trailing context note (the reference style budget awareness); the
-    /// adapters append it as a final user turn. It is request-only, never
-    /// persisted, and sits at the very end so it does not disturb the
-    /// prompt-cache prefix.
-    pub note: Option<&'a str>,
     /// how much of `history` the previous request in this conversation
     /// already carried, as a prefix length (None on the first request).
     /// Cache breakpoints are placed from it: the prefix is stable, the tail
@@ -769,7 +764,6 @@ pub(crate) mod testutil {
             attachments: &[],
             tools,
             reasoning: None,
-            note: None,
             cache_anchor: None,
             cache_key: None,
             cache_ttl: None,

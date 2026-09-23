@@ -45,12 +45,6 @@ const SPECS: &[OptSpec] = &[
         "LEVEL"
     ),
     value_spec!(
-        "token-budget",
-        None,
-        "Cumulative input-token budget per task (0 = unlimited, the default)",
-        "N"
-    ),
-    value_spec!(
         "max-request-bytes",
         None,
         "Largest request body to send, in bytes (32MB by default)",
@@ -257,11 +251,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     blacklist::Blacklist::ensure_default();
     approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
 
-    // no turn cap: other agents run unbounded agent loops guarded by
-    // compaction and the token budget, and a turn cap cut legitimate long
-    // tasks short more often than it saved one
-    let max_turns: usize = 0;
-
     // one request body's ceiling: a gateway in front of the model may refuse
     // far less than the provider documents, so the local pre-flight can be
     // tightened per run (the flag beats the config key)
@@ -278,15 +267,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     if let Some(warning) = crate::providers::attachment_weight(&attachments, max_request_bytes) {
         eprintln!("Warning: {warning}");
     }
-
-    // cumulative input-token budget per task (each round resends the full
-    // context, so the sum is what a runaway loop costs); 0 = unlimited
-    let token_budget: u64 = args
-        .opt(&(["token-budget"]))
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| format!("invalid --token-budget: {e}"))?
-        .unwrap_or(0);
 
     // reasoning effort: CLI > the stored global; invalid values are a hard
     // error on the CLI and a warning from config
@@ -344,10 +324,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         tools: Vec::new(),
         system,
         cwd,
-        max_turns,
-        token_budget,
         stream: !args.flag(&["no-stream"]),
-        no_session: args.flag(&["no-session"]),
         store,
         approval: approval_cfg,
         cache_key: conversation_id
