@@ -139,10 +139,11 @@ impl Loaded {
     }
 
     /// Last path segment of the reference, query string stripped: the
-    /// display name for file-typed wire blocks.
+    /// display name for file-typed wire blocks. Both separators split, so a
+    /// native Windows path names its basename on any host.
     fn file_name(&self) -> Option<String> {
         let r = self.path.as_deref().or(self.url.as_deref())?;
-        let name = r.rsplit('/').next().unwrap_or(r);
+        let name = r.rsplit(['/', '\\']).next().unwrap_or(r);
         let name = name.split('?').next().unwrap_or(name);
         (!name.is_empty()).then(|| name.to_string())
     }
@@ -467,6 +468,17 @@ mod tests {
         let l = Loaded {
             path: None,
             url: Some("https://example.com/a/shot.png?token=1".into()),
+            mime_type: None,
+            content: Vec::new(),
+        };
+        assert_eq!(l.file_name().as_deref(), Some("shot.png"));
+    }
+
+    #[test]
+    fn file_name_of_a_windows_path_is_its_basename() {
+        let l = Loaded {
+            path: Some(r"C:\Users\me\AppData\Local\Temp\shot.png".into()),
+            url: None,
             mime_type: None,
             content: Vec::new(),
         };
