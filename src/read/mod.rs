@@ -57,6 +57,10 @@ pub struct Window {
     pub start: usize,
     /// the scan reached end-of-input inside the window.
     pub eof: bool,
+    /// true byte length of `lines[0]` before the per-line char cap.
+    pub first_line_bytes: usize,
+    /// whether `lines[0]` was char-capped.
+    pub first_line_capped: bool,
 }
 
 /// Windowed read for the agent's read tool: one open, one stat; the NUL
@@ -84,6 +88,8 @@ pub fn window(path: &Path, offset: usize, limit: usize) -> Result<Window, Error>
         total: w.total,
         start: w.start,
         eof: w.eof,
+        first_line_bytes: w.first_line_bytes,
+        first_line_capped: w.first_line_capped,
     })
 }
 

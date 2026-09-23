@@ -1223,7 +1223,7 @@ impl From<CallRefusal> for tools::ToolOutput {
 /// cleared for execution; Err carries the refusal that is fed back to the
 /// model as an error result.
 fn gate_call<'a>(
-    call: &ToolCall,
+    call: &mut ToolCall,
     tools: &'a [Box<dyn tools::Tool>],
     cwd: &std::path::Path,
     approval: &mut approval::ApprovalConfig,
@@ -1240,7 +1240,7 @@ fn gate_call<'a>(
             message: format!("tool '{}' not found", call.name),
         });
     };
-    if let Err(e) = tools::validate(&tool.parameters(), &call.arguments) {
+    if let Err(e) = tools::validate(&tool.parameters(), &mut call.arguments) {
         return Err(denial(format!("invalid arguments: {e}")));
     }
 
@@ -1372,6 +1372,12 @@ fn prepare_call<'a>(
         .map_err(denied)?;
     if let Some(rewritten) = rewritten {
         call.arguments = rewritten;
+    }
+    // the tool may salvage the shape it was sent (the reference's prepareArguments,
+    // which runs ahead of validation): the edit tool parses a stringified
+    // `edits` array and the legacy flat single-edit shape
+    if let Some(tool) = tools.iter().find(|t| t.name() == call.name) {
+        call.arguments = tool.prepare_arguments(&call.arguments);
     }
     let cleared = gate_call(call, tools, cwd, approval, on_approval, extension_allowed)?;
     on_update(AgentUpdate::ToolStart {

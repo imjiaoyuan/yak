@@ -110,6 +110,12 @@ pub trait Tool: Send + Sync {
     fn escapes_cwd(&self, args: &Value, cwd: &Path) -> bool {
         approval::args_escape_cwd(cwd, args)
     }
+    /// Salvage malformed argument shapes before validation (the reference's
+    /// `prepareArguments`, which the loop runs ahead of the schema check): a
+    /// tool may normalize what the model sent. Must be idempotent.
+    fn prepare_arguments(&self, args: &Value) -> Value {
+        args.clone()
+    }
     /// `log` receives live progress lines while the tool runs (bash streams
     /// its stdout); tools without progress simply ignore it
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
@@ -143,14 +149,34 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Minimal schema validation: required properties present with the declared
-/// primitive type. Enough to bounce malformed calls back to the model.
-pub fn validate(schema: &Value, args: &Value) -> Result<(), String> {
-    let Some(obj) = args.as_object() else {
+/// Validate tool arguments against the schema, coercing in place first
+/// (the reference's `Value.Convert` + `normalizeOptionalNulls`): numeric/boolean strings
+/// become their declared types, and `null` on an optional property is
+/// dropped — models routinely send `"offset": "50"` or null optional fields,
+/// and a wasted round over a type spelling is the worst outcome. Unknown
+/// properties pass through untouched; enough to bounce malformed calls back
+/// to the model.
+pub fn validate(schema: &Value, args: &mut Value) -> Result<(), String> {
+    let Some(obj) = args.as_object_mut() else {
         return Err("arguments must be a JSON object".to_string());
     };
     let props = schema["properties"].as_object();
     let required = schema["required"].as_array().cloned().unwrap_or_default();
+    if let Some(props) = props {
+        let keys: Vec<String> = obj.keys().cloned().collect();
+        for key in keys {
+            let Some(spec) = props.get(&key) else {
+                continue;
+            };
+            let is_required = required.iter().any(|r| r.as_str() == Some(key.as_str()));
+            let value = obj.get_mut(&key).expect("key from own keys");
+            if value.is_null() && !is_required {
+                obj.shift_remove(&key);
+                continue;
+            }
+            coerce_value(value, spec);
+        }
+    }
     for name in &required {
         let missing = name.as_str().map(|n| !obj.contains_key(n)).unwrap_or(true);
         if missing {
@@ -177,6 +203,73 @@ pub fn validate(schema: &Value, args: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Coerce one value toward its schema type, recursing into arrays and
+/// objects. A value that cannot coerce is left alone — the type check below
+/// reports it with the argument name.
+fn coerce_value(value: &mut Value, spec: &Value) {
+    match spec["type"].as_str() {
+        Some("number") | Some("integer") => {
+            if let Some(text) = value.as_str()
+                && let Ok(n) = text.parse::<f64>()
+                && n.is_finite()
+            {
+                if spec["type"] == "integer" && n.fract() == 0.0 && n.abs() <= 9.0e15 {
+                    *value = json!(n as i64);
+                } else {
+                    *value = json!(n);
+                }
+            }
+        }
+        Some("boolean") => {
+            if let Some(text) = value.as_str() {
+                match text {
+                    "true" => *value = json!(true),
+                    "false" => *value = json!(false),
+                    _ => {}
+                }
+            }
+        }
+        Some("array") => {
+            if let (Some(items), Some(arr)) = (spec.get("items"), value.as_array_mut()) {
+                for item in arr {
+                    coerce_value(item, items);
+                }
+            }
+        }
+        Some("object") if spec.get("properties").is_some() => {
+            coerce_object(spec, value);
+        }
+        _ => {}
+    }
+}
+
+/// Coerce an object's declared properties in place (the recursion
+/// `coerce_value` and `validate` share).
+fn coerce_object(schema: &Value, args: &mut Value) {
+    let Some(props) = schema["properties"].as_object() else {
+        return;
+    };
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|r| r.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    for key in obj.keys().cloned().collect::<Vec<_>>() {
+        let Some(spec) = props.get(&key) else {
+            continue;
+        };
+        let is_required = required.contains(&key.as_str());
+        let value = obj.get_mut(&key).expect("key from own keys");
+        if value.is_null() && !is_required {
+            obj.shift_remove(&key);
+            continue;
+        }
+        coerce_value(value, spec);
+    }
 }
 
 /// Keep the last `max_lines` lines / `max_bytes` bytes.
@@ -313,6 +406,51 @@ fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
     out
 }
 
+/// Tail-truncate process output and, when anything was cut, spill the full
+/// text to the user tmp dir and name the file in the note (the reference's shape:
+/// `[Showing lines X-Y of N. Full output: path]`). The model can read the
+/// rest on demand instead of re-running the command.
+pub(crate) fn truncate_with_spill(text: &str) -> String {
+    truncate_with_spill_in(&crate::core::config::user_dir().join("tmp"), text)
+}
+
+/// [`truncate_with_spill`] against an explicit scratch dir (the test seam).
+pub(crate) fn truncate_with_spill_in(dir: &Path, text: &str) -> String {
+    let (out, truncated) = truncate_tail(text, MAX_LINES, MAX_BYTES);
+    if !truncated {
+        return out;
+    }
+    match spill_full_output(dir, text) {
+        Some(path) => {
+            let total = text.lines().count();
+            let kept = out.lines().count().max(1);
+            let start = total.saturating_sub(kept) + 1;
+            let mut out = out;
+            out.push_str(&format!(
+                "\n\n[Showing lines {start}-{total} of {total}. Full output: {path}]"
+            ));
+            out
+        }
+        None => {
+            let mut out = out;
+            out.push_str("\n[output truncated]\n");
+            out
+        }
+    }
+}
+
+/// Save the full output of a truncated command to the scratch dir (the
+/// weekly sweep ages it out like every other scratch file there); the
+/// truncation note names the file, the reference's spill. `None` when the write fails —
+/// the caller falls back to the plain truncation mark rather than losing the
+/// output twice.
+fn spill_full_output(dir: &Path, text: &str) -> Option<String> {
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("bash-{}.log", crate::core::db::ulid()));
+    std::fs::write(&path, text).ok()?;
+    Some(path.display().to_string())
+}
+
 /// Finish a spawned-command result: merge stderr under stdout, note the
 /// exit code, truncate and mark. Shared by the bash and script tools.
 pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32) -> ToolOutput {
@@ -320,7 +458,7 @@ pub(crate) fn finish_process_output(stdout: Vec<u8>, stderr: Vec<u8>, code: i32)
     if code != 0 {
         out.push_str(&format!("\nCommand exited with code {code}"));
     }
-    let out = truncate_marked(&out, MAX_LINES, MAX_BYTES);
+    let out = truncate_with_spill(&out);
     if code == 0 {
         ToolOutput::ok(out)
     } else {

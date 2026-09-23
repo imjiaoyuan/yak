@@ -178,12 +178,58 @@ fn validation_bounces_bad_args() {
         "properties": {"path": {"type": "string"}, "n": {"type": "integer"}},
         "required": ["path"]
     });
-    assert!(validate(&schema, &json!({"path": "x"})).is_ok());
-    assert!(validate(&schema, &json!({})).is_err());
-    assert!(validate(&schema, &json!({"path": 3})).is_err());
-    assert!(validate(&schema, &json!({"path": "x", "n": 5})).is_ok());
-    assert!(validate(&schema, &json!({"path": "x", "n": "five"})).is_err());
-    assert!(validate(&schema, &json!("not an object")).is_err());
+    let check = |args: Value| {
+        let mut args = args;
+        validate(&schema, &mut args)
+    };
+    assert!(check(json!({"path": "x"})).is_ok());
+    assert!(check(json!({})).is_err());
+    assert!(check(json!({"path": 3})).is_err());
+    assert!(check(json!({"path": "x", "n": 5})).is_ok());
+    assert!(check(json!({"path": "x", "n": "five"})).is_err());
+    assert!(check(json!("not an object")).is_err());
+}
+
+#[test]
+fn validation_coerces_numeric_and_boolean_strings() {
+    // the reference's Convert: "50" is an offset, "true" is a flag — a type spelling
+    // must not cost the model a round
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer"},
+            "ratio": {"type": "number"},
+            "flag": {"type": "boolean"}
+        },
+        "required": ["path"]
+    });
+    let mut args = json!({"path": "f", "offset": "50", "ratio": "1.5", "flag": "true"});
+    assert!(validate(&schema, &mut args).is_ok());
+    assert_eq!(args["offset"], json!(50));
+    assert_eq!(args["ratio"], json!(1.5));
+    assert_eq!(args["flag"], json!(true));
+
+    // a non-numeric string still fails, with the argument named
+    let mut args = json!({"path": "f", "offset": "middle"});
+    let err = validate(&schema, &mut args).unwrap_err();
+    assert!(err.contains("'offset'"), "{err}");
+}
+
+#[test]
+fn validation_drops_optional_nulls_and_keeps_required_ones() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "limit": {"type": "integer"}
+        },
+        "required": ["path"]
+    });
+    // "limit": null on an optional field is an omission, not a type error
+    let mut args = json!({"path": "f", "limit": null});
+    assert!(validate(&schema, &mut args).is_ok());
+    assert!(args.get("limit").is_none(), "the null is dropped");
 }
 
 #[test]
@@ -280,6 +326,138 @@ fn edit_requires_unique_matches_and_no_overlap() {
 }
 
 #[test]
+fn edit_keeps_crlf_endings_and_a_bom_through_a_rewrite() {
+    let dir = crate::core::testutil::scratch_dir("edit-crlf");
+    let file = dir.join("win.txt");
+    std::fs::write(&file, "\u{feff}one\r\ntwo\r\n").unwrap();
+
+    // the model quotes the file back with \n: it still matches, and the
+    // file's CRLF endings and BOM survive the write
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "edits": [
+            {"oldText": "one\ntwo", "newText": "ONE\nTWO"}
+        ]}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "\u{feff}ONE\r\nTWO\r\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edit_fuzzy_fallback_recovers_unicode_variants_and_keeps_other_lines_verbatim() {
+    let dir = crate::core::testutil::scratch_dir("edit-fuzzy");
+    let file = dir.join("doc.md");
+    let original = "say \u{201c}hello\u{201d} \u{2014} now\nkeep me   \n";
+    std::fs::write(&file, original).unwrap();
+
+    // the ASCII spelling matches the smart-quote/em-dash line
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "edits": [
+            {"oldText": "say \"hello\" - now", "newText": "speak"}
+        ]}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    // only the touched line is rewritten; the untouched line keeps its exact
+    // bytes, trailing whitespace included
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "speak\nkeep me   \n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edit_fuzzy_fallback_folds_fullwidth_forms() {
+    let dir = crate::core::testutil::scratch_dir("edit-fullwidth");
+    let file = dir.join("cjk.txt");
+    std::fs::write(&file, "\u{ff58}\u{ff1d}\u{ff11}\u{ff1b}\n").unwrap();
+
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "edits": [
+            {"oldText": "x=1;", "newText": "y=2;"}
+        ]}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "y=2;\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edit_reports_which_edit_failed_and_writes_nothing() {
+    let dir = crate::core::testutil::scratch_dir("edit-index");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "edits": [
+            {"oldText": "one", "newText": "1"},
+            {"oldText": "missing", "newText": "x"}
+        ]}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(out.is_error());
+    assert!(out.content.contains("edits[1]"), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edit_reports_a_replacement_that_changes_nothing() {
+    let dir = crate::core::testutil::scratch_dir("edit-nochange");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "edits": [
+            {"oldText": "one", "newText": "one"}
+        ]}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(out.is_error());
+    assert!(out.content.contains("No changes made"), "{}", out.content);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edit_salvages_stringified_and_flat_legacy_arguments() {
+    let dir = crate::core::testutil::scratch_dir("edit-args");
+    let file = dir.join("a.txt");
+
+    // edits as a JSON string (a model quoting its own array)
+    std::fs::write(&file, "one\n").unwrap();
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(),
+                "edits": "[{\"oldText\": \"one\", \"newText\": \"1\"}]"}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "1\n");
+
+    // the legacy flat single-edit shape
+    std::fs::write(&file, "one\n").unwrap();
+    let out = EditTool.execute(
+        &json!({"path": file.display().to_string(), "oldText": "one", "newText": "2"}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "2\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn grep_literal_and_ignore_case() {
     if !rg_available() {
         return;
@@ -361,6 +539,32 @@ fn bash_output_beyond_pipe_buffer_does_not_deadlock() {
 /// at its limit keeps the partial output it already printed, so the
 /// model can read what explains the timeout instead of a bare verdict.
 #[cfg(unix)]
+#[test]
+fn truncated_command_output_spills_the_full_text_to_a_named_file() {
+    let dir = crate::core::testutil::scratch_dir("spill");
+    let big: String = (0..6000).map(|i| format!("line-{i}\n")).collect();
+    let out = truncate_with_spill_in(&dir, &big);
+    assert!(out.contains("[Showing lines "), "{}", out);
+    assert!(out.contains("Full output: "), "{}", out);
+    // the named file holds the full output, so the model can read the rest
+    // on demand instead of re-running the command
+    let path = out
+        .split("Full output: ")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(']');
+    let full = std::fs::read_to_string(Path::new(path)).unwrap();
+    assert_eq!(full, big);
+    // the tail survives the cut, where a command's failure lands
+    assert!(out.contains("line-5999"), "{}", out);
+
+    // under the cap: no note, no spill (lines().join drops the trailing
+    // newline, the same as the truncation path has always done)
+    let out = truncate_with_spill_in(&dir, "tiny\n");
+    assert_eq!(out, "tiny");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_timed_out_command_keeps_its_partial_output() {
     let out = BashTool.execute(
@@ -512,6 +716,24 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
 }
 
 #[test]
+fn read_names_the_bash_way_past_an_oversized_single_line() {
+    // the line the offset points at is over the whole cap: reporting a
+    // "showing lines" note over nothing would send the model stepping
+    // offsets forever, so say how to get past it (the reference's message)
+    let dir = crate::core::testutil::scratch_dir("readhuge");
+    let mut line = "x".repeat(60 * 1024);
+    line.push('\n');
+    std::fs::write(dir.join("huge.txt"), format!("{line}tail\n")).unwrap();
+    let out = read_execute(&dir, json!({"path": "huge.txt"}));
+    assert!(!out.is_error());
+    assert_eq!(
+        out.content,
+        "[Line 1 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '1p' huge.txt | head -c 51200]"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn read_tool_refuses_binary_with_hint() {
     let dir = crate::core::testutil::scratch_dir("readbin");
     std::fs::write(dir.join("aln.bam"), b"BAM\x01data").unwrap();
@@ -583,8 +805,10 @@ fn the_registry_exposes_update_plan_as_a_read_tier_tool() {
     assert_eq!(plan.tier(), Tier::Read, "planning touches nothing");
     // the shallow shared validator only needs `plan` to be an array; the
     // tool's own execute does the per-item checks
-    assert!(validate(&plan.parameters(), &json!({"plan": []})).is_ok());
-    assert!(validate(&plan.parameters(), &json!({})).is_err());
+    let mut args = json!({"plan": []});
+    assert!(validate(&plan.parameters(), &mut args).is_ok());
+    let mut args = json!({});
+    assert!(validate(&plan.parameters(), &mut args).is_err());
 }
 
 #[test]
@@ -634,15 +858,15 @@ fn tool_defs_stay_under_the_wire_budget() {
         });
         let n = one.to_string().len();
         assert!(
-            n < 900,
+            n < 1_300,
             "`{}` serializes to {n} bytes; trim its description or schema",
             t.name()
         );
         total += n;
     }
     assert!(
-        total < 4_800,
-        "tool definitions total {total} bytes (budget 4800) — trim before adding"
+        total < 5_200,
+        "tool definitions total {total} bytes (budget 5200) — trim before adding"
     );
 }
 

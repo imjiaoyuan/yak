@@ -50,12 +50,10 @@ impl Tool for BashTool {
             // the deadline and the output are independent facts: a command
             // killed at the limit usually printed what explains it already,
             // so the partial output rides the error instead of dying with
-            // the process
-            let mut out = truncate_marked(
-                &merge_process_output(&outcome.stdout, &outcome.stderr),
-                MAX_LINES,
-                MAX_BYTES,
-            );
+            // the process (and the full text spills to a file the model can
+            // read on demand)
+            let mut out =
+                truncate_with_spill(&merge_process_output(&outcome.stdout, &outcome.stderr));
             if !out.is_empty() {
                 out.push('\n');
             }

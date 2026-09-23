@@ -34,8 +34,38 @@ impl Tool for ReadTool {
         args["path"].as_str().unwrap_or("?").to_string()
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
-        let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
-        if let Some(mime) = image_mime(&path) {
+        let raw_path = args["path"].as_str().unwrap_or("");
+        let path = resolve_path(cwd, raw_path);
+        // the mime type comes from the file's magic bytes, not its extension:
+        // a renamed or extension-less image still rides as vision input, and
+        // a text file with an image extension still reads as text (the reference's
+        // `detectSupportedImageMimeType`). Only a prefix is read for the
+        // sniff — the text path streams through the window, never loading
+        // the file whole.
+        let mut head = [0u8; 32];
+        let head_len = {
+            let mut file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => return ToolOutput::err(format!("cannot read {} ({e})", path.display())),
+            };
+            match std::io::Read::read(&mut file, &mut head) {
+                Ok(n) => n,
+                Err(e) => return ToolOutput::err(format!("cannot read {} ({e})", path.display())),
+            }
+        };
+        if let Some(mime) = image_mime(&head[..head_len]) {
+            if mime == "image/bmp" {
+                // model APIs take png/jpeg/webp/gif; BMP arrives only through
+                // a processor we do not have (the reference's refusal, with the local
+                // way past it)
+                return ToolOutput::ok(format!(
+                    "Read image file [image/bmp]\n[Image omitted: BMP is not accepted by model \
+                     APIs; convert it first, e.g. `python -c \"from PIL import Image; \
+                     im=Image.open('{}'); im.save('{}.png')\"`]",
+                    path.display(),
+                    path.display(),
+                ));
+            }
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => return ToolOutput::err(format!("cannot read {} ({e})", path.display())),
@@ -45,7 +75,9 @@ impl Tool for ReadTool {
             // to downscale without adding a dependency)
             if bytes.len() > IMAGE_MAX_BYTES {
                 return ToolOutput::err(format!(
-                    "{}: image is {} (over the {} limit); downscale it first with e.g. `python -c \"from PIL import Image; im=Image.open('{}'); im.thumbnail((2000,2000)); im.save('{}')\"`",
+                    "{}: image is {} (over the {} limit); downscale it first with e.g. \
+                     `python -c \"from PIL import Image; im=Image.open('{}'); \
+                     im.thumbnail((2000,2000)); im.save('{}')\"`",
                     path.display(),
                     crate::core::text::human_bytes(bytes.len() as u64),
                     crate::core::text::human_bytes(IMAGE_MAX_BYTES as u64),
@@ -59,7 +91,7 @@ impl Tool for ReadTool {
                 crate::core::text::human_bytes(bytes.len() as u64)
             ));
             out.attachments.push(crate::providers::Attachment {
-                mime_type: mime,
+                mime_type: mime.to_string(),
                 base64_data: crate::b64::encode(&bytes),
                 filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
                 path: Some(path.display().to_string()),
@@ -108,12 +140,30 @@ impl Tool for ReadTool {
                 }
             };
         }
+        // the line an offset lands on can dwarf the whole cap (a minified
+        // bundle): stepping offsets would keep landing on lines like it, so
+        // name the bash way past it — the reference's message, carrying the line's true
+        // size (the stored head is char-capped long before this)
+        if w.first_line_capped && w.first_line_bytes > MAX_BYTES {
+            return ToolOutput::ok(format!(
+                "[Line {} is {}, exceeds {} limit. Use bash: sed -n '{}p' {} | head -c {}]",
+                w.start,
+                format_size(w.first_line_bytes),
+                format_size(MAX_BYTES),
+                w.start,
+                raw_path,
+                MAX_BYTES
+            ));
+        }
         // assemble under the byte cap at line boundaries, so the note can
-        // point at the first line the model has not actually seen
+        // point at the first line the model has not actually seen. The first
+        // line rides without its newline (the reference's accounting), so a line of
+        // exactly the cap fits.
         let mut out = String::new();
         let mut kept = 0usize;
         for line in &w.lines {
-            if out.len() + line.len() + 1 > MAX_BYTES {
+            let line_bytes = line.len() + if kept > 0 { 1 } else { 0 };
+            if out.len() + line_bytes > MAX_BYTES {
                 break;
             }
             if kept > 0 {
@@ -149,23 +199,58 @@ impl Tool for ReadTool {
     }
 }
 
-/// The mime type for a file extension that the read tool can send to a
-/// vision-capable model; `None` for anything else.
-pub(super) fn image_mime(path: &Path) -> Option<String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    Some(
-        match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            _ => return None,
-        }
-        .to_string(),
-    )
+/// the reference's `formatSize`: `51200` → `50.0KB` (no space, one decimal past 1KB).
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// The mime type the file's magic bytes declare, for the formats the read
+/// tool can send to a vision-capable model; `None` for anything else (text
+/// falls through to the windowed read, other binaries fail there with a
+/// hint). the reference's signature table — a renamed or extension-less image is still
+/// detected, a text file with an image extension still reads as text.
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    let starts = |offset: usize, sig: &[u8]| {
+        bytes.len() >= offset + sig.len() && &bytes[offset..offset + sig.len()] == sig
+    };
+    if starts(0, &[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if starts(0, &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if starts(0, b"GIF") {
+        return Some("image/gif");
+    }
+    if starts(0, b"RIFF") && starts(8, b"WEBP") {
+        return Some("image/webp");
+    }
+    if starts(0, b"BM") {
+        return Some("image/bmp");
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magic_bytes_name_the_format_not_the_extension() {
+        assert_eq!(image_mime(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(image_mime(b"\xff\xd8\xff\xe0data"), Some("image/jpeg"));
+        assert_eq!(image_mime(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(image_mime(b"RIFF....WEBPVP8 "), Some("image/webp"));
+        assert_eq!(image_mime(b"BM\x36\x00\x00\x00"), Some("image/bmp"));
+        // a text file that merely ends in .png is not an image
+        assert_eq!(image_mime(b"# notes\n"), None);
+        // a text file whose name lies is caught by nothing here — the tool
+        // sniffs, so it reads as text regardless of extension
+    }
 }

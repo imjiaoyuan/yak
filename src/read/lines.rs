@@ -19,6 +19,14 @@ pub(super) struct WindowResult {
     pub start: usize,
     /// the scan reached end-of-input inside the window
     pub eof: bool,
+    /// true byte length of `lines[0]` before the char cap: the tool uses it
+    /// to name a line that dwarfs the whole read cap (the reference's first-line
+    /// message), so the model can go past it with bash instead of stepping
+    /// offsets into it forever.
+    pub first_line_bytes: usize,
+    /// whether `lines[0]` was char-capped (its true length only known via
+    /// `first_line_bytes`)
+    pub first_line_capped: bool,
 }
 
 /// Read-side errors: transport, and content the tool refuses to hand the
@@ -41,6 +49,8 @@ pub(super) fn window_reader(
 ) -> Result<WindowResult, WindowError> {
     let mut lines: Vec<String> = Vec::new();
     let mut count = 0usize;
+    let mut first_line_bytes = 0usize;
+    let mut first_line_capped = false;
     loop {
         // honor ctrl-c mid-read: a huge windowed file must not keep chewing
         // lines after the user asked to stop (see ReadTool interrupt path)
@@ -56,6 +66,8 @@ pub(super) fn window_reader(
                 start: if lines.is_empty() { 0 } else { offset },
                 eof: true,
                 lines,
+                first_line_bytes,
+                first_line_capped,
             });
         };
         count += 1;
@@ -69,10 +81,20 @@ pub(super) fn window_reader(
                 start: offset,
                 eof: false,
                 lines,
+                first_line_bytes,
+                first_line_capped,
             });
         }
+        let first = lines.is_empty();
         let mut line = decode_line(&raw, count == 1)?;
-        cap_line(&mut line);
+        if first {
+            // the newline is not part of it: this is the size the tool names
+            // when the line dwarfs the cap
+            first_line_bytes = raw.len();
+            first_line_capped = cap_line(&mut line);
+        } else {
+            cap_line(&mut line);
+        }
         lines.push(line);
     }
 }
@@ -125,11 +147,16 @@ fn decode_line(raw: &[u8], first: bool) -> Result<String, WindowError> {
     }
 }
 
-/// Cap one line at LINE_CHAR_CAP chars with an ellipsis.
-fn cap_line(line: &mut String) {
-    if let Some((idx, _)) = line.char_indices().nth(super::LINE_CHAR_CAP) {
-        line.truncate(idx);
-        line.push('…');
+/// Cap one line at LINE_CHAR_CAP chars with an ellipsis; returns whether it
+/// was cut.
+fn cap_line(line: &mut String) -> bool {
+    match line.char_indices().nth(super::LINE_CHAR_CAP) {
+        Some((idx, _)) => {
+            line.truncate(idx);
+            line.push('…');
+            true
+        }
+        None => false,
     }
 }
 
