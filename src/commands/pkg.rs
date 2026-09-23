@@ -79,8 +79,8 @@ fn parse_install_args(argv: &[String]) -> (Option<ParsedArgs>, i32) {
 /// https URL, with an optional `@ref` pinned on the end.
 fn parse_source(raw: &str) -> Option<(String, Option<String>)> {
     let (url_part, ref_) = match raw.rsplit_once('@') {
-        // only a trailing `@ref` after a real path splits (the `@` in
-        // `git@github.com:` stays part of the URL)
+        // the last `@` is the ref separator (the `@` in `git@github.com:`
+        // stays part of the URL because the part before it holds no `/`)
         Some((u, r)) if !r.is_empty() && u.contains('/') => (u.to_string(), Some(r.to_string())),
         _ => (raw.to_string(), None),
     };
@@ -177,6 +177,17 @@ fn install(argv: &[String]) -> i32 {
             eprintln!("Error: refresh failed: {e}");
             return 1;
         } else {
+            // an explicit @ref re-pins: without this the marker goes stale
+            // on a move (or stays empty on a first pin) and the next plain
+            // `install NAME` would move a clone the user pinned
+            if let Some(ref_) = &ref_
+                && let Err(e) = git(&["config", "llm.pinned", ref_], &target)
+            {
+                eprintln!(
+                    "{}Warning: updated {name} but could not record the new pin ({e}){}",
+                    p.dim, p.reset
+                );
+            }
             eprintln!("{}updated {name}{}", p.dim, p.reset);
         }
     } else {
@@ -320,20 +331,32 @@ fn remove(argv: &[String]) -> i32 {
         return 2;
     };
     let mut removed = false;
+    let mut failed = false;
     for local in [true, false] {
         let target = pkg_root(local).join(name);
-        if target.exists() {
-            std::fs::remove_dir_all(&target)
-                .map_err(|e| eprintln!("Error: cannot remove {}: {e}", target.display()))
-                .unwrap_or(());
-            eprintln!(
-                "{}removed {name} ({}){}",
-                crate::theme::err().dim,
-                pkg_root(local).display(),
-                crate::theme::err().reset
-            );
-            removed = true;
+        if !target.exists() {
+            continue;
         }
+        // a failed removal must not report success: the package is still
+        // there, and a silent 0 would say otherwise
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => {
+                eprintln!(
+                    "{}removed {name} ({}){}",
+                    crate::theme::err().dim,
+                    pkg_root(local).display(),
+                    crate::theme::err().reset
+                );
+                removed = true;
+            }
+            Err(e) => {
+                eprintln!("Error: cannot remove {}: {e}", target.display());
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        return 1;
     }
     if !removed {
         eprintln!("Error: no package '{name}' installed");
@@ -500,7 +523,7 @@ mod tests {
 
     #[test]
     fn ref_split_takes_the_last_at() {
-        // an @ inside the path (rare) stays in the URL
+        // the last `@` wins even when one also sits inside the path
         let (url, ref_) = parse_source("git:github.com/us@er/repo").unwrap();
         assert_eq!(url, "https://github.com/us");
         assert_eq!(ref_.as_deref(), Some("er/repo"));
