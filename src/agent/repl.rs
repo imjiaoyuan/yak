@@ -286,11 +286,17 @@ fn restore_default_sigint() {
 
 /// Home-directory abbreviation for the status line.
 fn abbrev_home(path: &str) -> String {
-    if let Some(home) = crate::core::paths::home_dir() {
-        let home = home.to_string_lossy();
-        if let Some(rest) = path.strip_prefix(home.as_ref()) {
-            return format!("~{rest}");
-        }
+    if let Some(home) = crate::core::paths::home_dir()
+        && let Ok(rest) = std::path::Path::new(path).strip_prefix(&home)
+    {
+        // component-based, so `/home/ann` is not a prefix of
+        // `/home/anna/proj` (string-stripping that would print `~a/proj`)
+        let rest = rest.to_string_lossy();
+        return if rest.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~{}{rest}", std::path::MAIN_SEPARATOR)
+        };
     }
     path.to_string()
 }
@@ -1122,6 +1128,25 @@ mod tests {
             name_row("skills ", " ", &many),
             "skills  s0, s1, s2, s3, s4, s5 +3 more\n"
         );
+    }
+
+    #[test]
+    fn home_abbreviation_respects_path_boundaries() {
+        let Some(home) = crate::core::paths::home_dir() else {
+            return;
+        };
+        let inside = home.join("proj");
+        assert!(
+            abbrev_home(&inside.display().to_string()).starts_with('~'),
+            "a path under home abbreviates"
+        );
+        // a sibling sharing only the string prefix of home is left alone
+        let sibling = format!(
+            "{home_s}x{sep}proj",
+            home_s = home.display(),
+            sep = std::path::MAIN_SEPARATOR
+        );
+        assert_eq!(abbrev_home(&sibling), sibling);
     }
 
     #[test]
