@@ -231,8 +231,29 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conversation_id = Some(forked);
     }
 
-    // model resolution: -m > LLM_MODEL > session's model > the default
-    let model = crate::providers::resolve_run_model(args, conv_model.clone())?;
+    // model resolution: -m > LLM_MODEL > session's model > the default. A
+    // bare interactive start with none of those still opens the REPL: /login
+    // and /model live there, and failing here would dead-end a fresh install
+    // before it could configure a provider.
+    let model = match crate::providers::resolve_run_model(args, conv_model.clone()) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            let bare_interactive = prompt.trim().is_empty()
+                && std::io::stdin().is_terminal()
+                && args.opt(&["model"]).is_none()
+                && std::env::var_os("LLM_MODEL").is_none()
+                && conv_model.is_none();
+            if !bare_interactive {
+                return Err(e);
+            }
+            eprintln!(
+                "{}no model configured — use /login to add a provider, then /model{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            );
+            None
+        }
+    };
 
     // approval config: per-tool policies from [agent] settings, plus the
     // command blacklist. There is no ask mode — calls run unless a policy or

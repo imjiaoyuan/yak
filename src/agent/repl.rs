@@ -110,7 +110,14 @@ pub fn repl(
             continue;
         }
 
-        attach_local_files(text, &mut attachments, session.model.kind == "anthropic");
+        attach_local_files(
+            text,
+            &mut attachments,
+            session
+                .model
+                .as_ref()
+                .is_some_and(|m| m.kind == "anthropic"),
+        );
         run_task_logged(&mut session, text, &mut attachments);
 
         // steering lines typed after the final model call become new tasks
@@ -299,8 +306,8 @@ fn repl_help(session: &Session, skills: &[crate::agent::skills::SkillDef]) -> St
     h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, skills, "    "));
     let model = match &session.thinking {
-        Some(level) => format!("{} {level}", session.model.qualified_id()),
-        None => session.model.qualified_id(),
+        Some(level) => format!("{} {level}", model_label(session)),
+        None => model_label(session),
     };
     h.push_str(&format!("model      {model}\n"));
     h.push_str(p.reset.as_str());
@@ -341,6 +348,15 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
         rows.push_str(&format!("persist{pad}NOT SAVED — {e}\n"));
     }
     rows
+}
+
+/// The model shown in the banner and /status: its qualified id, or a
+/// pointer to the setup commands when the session has none yet.
+fn model_label(session: &Session) -> String {
+    match &session.model {
+        Some(m) => m.qualified_id(),
+        None => "(no model — /login or /model)".to_string(),
+    }
 }
 
 /// One `names` row, or nothing at all when the list is empty (a bare banner
@@ -497,7 +513,7 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
         d = p.dim,
         b = p.bold,
         v = crate::VERSION,
-        m = session.model.qualified_id(),
+        m = model_label(session),
         t = thinking,
     );
     eprint!("{}{}{}", p.dim, info_rows(session, skills, " "), p.reset);
@@ -795,7 +811,11 @@ fn repl_command(
             }
         }
         "/model" => {
-            let current = session.model.qualified_id();
+            let current = session
+                .model
+                .as_ref()
+                .map(|m| m.qualified_id())
+                .unwrap_or_default();
             let Some(choice) = crate::commands::models::cascade_model_picker(
                 &current,
                 session.thinking.as_deref(),
@@ -807,7 +827,7 @@ fn repl_command(
                     eprintln!(
                         "{}model → {}{}",
                         crate::theme::err().dim,
-                        session.model.qualified_id(),
+                        model_label(session),
                         crate::theme::err().reset
                     );
                 }
@@ -876,8 +896,9 @@ fn repl_command(
             }
             // the default may have been cleared with it: re-resolve lazily on
             // the next task, but warn now if the session model is orphaned
-            let qualified = session.model.qualified_id();
-            if crate::providers::resolve_model_by_id(&qualified).is_err() {
+            if let Some(qualified) = session.model.as_ref().map(|m| m.qualified_id())
+                && crate::providers::resolve_model_by_id(&qualified).is_err()
+            {
                 eprintln!(
                     "{}current model {qualified} no longer resolves — run /model{}",
                     crate::theme::err().dim,
@@ -908,7 +929,7 @@ fn repl_command(
             );
             eprintln!(
                 "  {d}model   {r}{b}{}{r}",
-                session.model.qualified_id(),
+                model_label(session),
                 d = p.dim,
                 r = p.reset,
                 b = p.bold

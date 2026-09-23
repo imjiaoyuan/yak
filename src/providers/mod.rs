@@ -140,7 +140,7 @@ pub fn resolve_run_model(
         .or(stored_default);
     let Some(query) = query else {
         return Err(
-            "No default model configured. Run `llm login` in the REPL (or edit config.json), or use -m."
+            "No default model configured. Run `llm` and use /login (or edit config.json), or pass -m."
                 .to_string(),
         );
     };

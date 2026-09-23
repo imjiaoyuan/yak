@@ -320,8 +320,10 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   reference), `/logout` the removal picker (clearing the default when it pointed at the removed
   provider). Pickers build from `providers/catalog.rs` (the reference's provider registry, 38 entries incl.
   opencode-go in both wire kinds and four local runtimes: ollama, lm-studio, llama.cpp, vllm;
-  OAuth-only and cloud-signature providers deliberately absent). A fresh session still starts on the
-  stored default.
+  OAuth-only and cloud-signature providers deliberately absent). `Session.model` is an `Option`:
+  a bare interactive `llm` with no stored default opens the REPL anyway (the banner and `/status`
+  show `(no model — /login or /model)`, a task fails loudly until one is picked) so a fresh install
+  can reach `/login`; a resumed session still starts on the thread's model, else the stored default.
 - `src/read/` is the text-file reading module behind the agent's read tool: streaming line windows
   (`window()`: BufReader, offsets skip without keeping, the agent tool clamps to a 2000-line window
   under the shared 50KB cap — the reference's values, so one read covers a typical source file), per-line

@@ -15,7 +15,10 @@ use crate::providers::{Msg, ResolvedModel};
 /// Everything one agent task needs; the interactive REPL reuses this across
 /// tasks, evolving `seed`/`conversation_id`/`approval` as it goes.
 pub struct Session {
-    pub model: ResolvedModel,
+    /// The active model. None until `/login` or `/model` sets one: a fresh
+    /// install has no stored default, and the REPL still has to open so those
+    /// commands are reachable. `run_task` fails loudly while it is None.
+    pub model: Option<ResolvedModel>,
     pub tools: Vec<Box<dyn crate::agent::tools::Tool>>,
     pub system: Option<String>,
     pub cwd: PathBuf,
@@ -78,7 +81,7 @@ impl Session {
         // is recorded, else the configured fallback
         let trigger = crate::agent::compact::effective_trigger(
             self.compact.trigger_tokens,
-            self.model.context_window,
+            self.model.as_ref().and_then(|m| m.context_window),
         );
         if crate::agent::compact::should_compact(estimate, trigger) {
             crate::agent::compact::prune_tool_results(&mut self.seed);
@@ -108,7 +111,7 @@ impl Session {
     /// keep history, rebuild the tool registry.
     pub fn switch_model(&mut self, qualified: &str) -> Result<(), String> {
         let model = crate::providers::resolve_model_by_id(qualified)?;
-        self.model = model;
+        self.model = Some(model);
         self.rebuild_tools();
         Ok(())
     }
@@ -132,6 +135,14 @@ impl Session {
         if self.json {
             return self.run_task_json(prompt, attachments);
         }
+        // no model yet: /login and /model configure one, but a task cannot
+        // run without it
+        let Some(model) = self.model.as_ref() else {
+            return Err(
+                "No model configured. Run /login to add a provider, then /model to pick one."
+                    .to_string(),
+            );
+        };
         // the same set `run_task_json` builds below, by hand because a `&self`
         // method would borrow the whole session and lock out the
         // `&mut self.seed` and `&mut self.approval` this same call needs:
@@ -148,7 +159,7 @@ impl Session {
             cache_anchor: self.cache_anchor(),
             cache_ttl: self.cache_ttl,
         };
-        let model_id = self.model.model_id.clone();
+        let model_id = model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
         // trace and footer (indent 2); tool chrome stays local
         // shared behind a RefCell so the approval callback can pause the
@@ -172,7 +183,7 @@ impl Session {
         let mut round_reasoning = String::new();
         let mut round_started = std::time::Instant::now();
         let identity = TaskIdentity {
-            model: &self.model,
+            model,
             cwd: &self.cwd,
             system: self.system.as_deref(),
         };
@@ -369,7 +380,7 @@ impl Session {
         };
         let result = run_agent(
             RunRequest {
-                model: &self.model,
+                model,
                 tools: &self.tools,
                 prompt,
                 attachments,
@@ -418,7 +429,7 @@ impl Session {
                     &mut self.conversation_id,
                     &mut self.persist_error,
                     &TaskIdentity {
-                        model: &self.model,
+                        model,
                         cwd: &self.cwd,
                         system: self.system.as_deref(),
                     },
@@ -444,6 +455,12 @@ impl Session {
         prompt: &str,
         attachments: Vec<crate::providers::Attachment>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        let Some(model) = self.model.as_ref() else {
+            return Err(
+                "No model configured. Run /login to add a provider, then /model to pick one."
+                    .to_string(),
+            );
+        };
         // the same set `run_task` builds above, by hand for the same borrow
         // reason: keep the two in step
         let opts = AgentOptions {
@@ -466,7 +483,7 @@ impl Session {
         let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
         let identity = TaskIdentity {
-            model: &self.model,
+            model,
             cwd: &self.cwd,
             system: self.system.as_deref(),
         };
@@ -516,7 +533,7 @@ impl Session {
         };
         let result = run_agent(
             RunRequest {
-                model: &self.model,
+                model,
                 tools: &self.tools,
                 prompt,
                 attachments,
@@ -560,7 +577,7 @@ impl Session {
                     &mut self.conversation_id,
                     &mut self.persist_error,
                     &TaskIdentity {
-                        model: &self.model,
+                        model,
                         cwd: &self.cwd,
                         system: self.system.as_deref(),
                     },
@@ -953,7 +970,7 @@ mod tests {
             &mut session.conversation_id,
             &mut session.persist_error,
             &TaskIdentity {
-                model: &session.model,
+                model: session.model.as_ref().expect("test session has a model"),
                 cwd: &session.cwd,
                 system: session.system.as_deref(),
             },
@@ -999,7 +1016,7 @@ mod tests {
                 keep_recent_tokens: 100,
             },
             cache_ttl: None,
-            model: crate::providers::ResolvedModel {
+            model: Some(crate::providers::ResolvedModel {
                 provider_name: "mock".into(),
                 kind: "openai-compat".into(),
                 base_url: "http://127.0.0.1:9/v1".into(),
@@ -1007,7 +1024,7 @@ mod tests {
                 model_id: "m".into(),
                 context_window: None,
                 options: vec![],
-            },
+            }),
             tools: Vec::new(),
             system: None,
             cwd: std::env::temp_dir(),
@@ -1027,6 +1044,20 @@ mod tests {
             json: false,
             persist_error: None,
         }
+    }
+
+    /// A session with no model — a bare interactive start on a fresh install —
+    /// opens the REPL but cannot run a task: the failure names the commands
+    /// that configure one instead of silently doing nothing.
+    #[test]
+    fn a_task_without_a_model_fails_loudly() {
+        let mut session = tight_session(Vec::new());
+        session.model = None;
+        let err = match session.run_task("hello", Vec::new()) {
+            Ok(_) => panic!("no model must refuse the task"),
+            Err(e) => e,
+        };
+        assert!(err.contains("/login"), "the error points at /login: {err}");
     }
 
     /// A conversation carried into the next task names the cache anchor for
@@ -1149,7 +1180,7 @@ mod tests {
             max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig::default(),
             cache_ttl: None,
-            model: crate::providers::ResolvedModel {
+            model: Some(crate::providers::ResolvedModel {
                 provider_name: "mock".into(),
                 kind: "openai-compat".into(),
                 base_url: format!("http://127.0.0.1:{port}/v1"),
@@ -1157,7 +1188,7 @@ mod tests {
                 model_id: "m".into(),
                 context_window: None,
                 options: vec![],
-            },
+            }),
             tools: vec![],
             system: None,
             cwd: dir.clone(),
@@ -1216,7 +1247,7 @@ mod tests {
             max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig::default(),
             cache_ttl: None,
-            model: crate::providers::ResolvedModel {
+            model: Some(crate::providers::ResolvedModel {
                 provider_name: "mock".into(),
                 kind: "openai-compat".into(),
                 base_url: "http://127.0.0.1:9/v1".into(),
@@ -1224,7 +1255,7 @@ mod tests {
                 model_id: "m".into(),
                 context_window: None,
                 options: vec![],
-            },
+            }),
             tools: Vec::new(),
             system: None,
             cwd: cwd.clone(),
@@ -1290,7 +1321,7 @@ mod tests {
             max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig::default(),
             cache_ttl: None,
-            model: crate::providers::ResolvedModel {
+            model: Some(crate::providers::ResolvedModel {
                 provider_name: "mock".into(),
                 kind: "openai-compat".into(),
                 base_url: "http://127.0.0.1:9/v1".into(),
@@ -1298,7 +1329,7 @@ mod tests {
                 model_id: "m".into(),
                 context_window: None,
                 options: vec![],
-            },
+            }),
             tools: Vec::new(),
             system: None,
             cwd: cwd.clone(),
