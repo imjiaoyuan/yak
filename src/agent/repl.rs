@@ -142,9 +142,12 @@ pub fn repl(
 }
 
 /// Local file paths mentioned in a prompt ride the message automatically:
-/// every whitespace token naming an existing image (always) or PDF
-/// (anthropic models support document blocks) loads as an attachment with
-/// a dim notice; ctrl+v pastes an image as exactly such a path.
+/// a whitespace token naming an existing image (always) or PDF (anthropic
+/// models support document blocks) loads as an attachment with a dim notice;
+/// ctrl+v pastes an image as exactly such a path. A pasted path is often
+/// glued to the words typed right after it with no space between (`…png这个
+/// 框要一样大`), so the longest existing-file prefix of the token is what
+/// counts, not the whole token.
 fn attach_local_files(
     text: &str,
     queue: &mut Vec<crate::providers::Attachment>,
@@ -152,10 +155,10 @@ fn attach_local_files(
 ) {
     use std::io::Read;
     for token in text.split_whitespace() {
-        let path = std::path::Path::new(token);
-        if !path.is_file() {
+        let Some(path_str) = existing_file_prefix(token) else {
             continue;
-        }
+        };
+        let path = std::path::Path::new(path_str);
         let Ok(mut file) = std::fs::File::open(path) else {
             continue;
         };
@@ -175,18 +178,28 @@ fn attach_local_files(
             Some("application/pdf") if supports_pdf => "application/pdf",
             _ => continue,
         };
-        if let Ok(loaded) = crate::core::attachments::load(token, Some(mime)) {
+        if let Ok(loaded) = crate::core::attachments::load(path_str, Some(mime)) {
             let req = loaded.request();
             eprintln!(
                 "{}→ attached {} ({}){}",
                 crate::theme::err().dim,
-                token,
+                path_str,
                 req.mime_type,
                 crate::theme::err().reset
             );
             queue.push(req);
         }
     }
+}
+
+/// The longest prefix of `token` at a char boundary that names an existing
+/// file, so a path glued to trailing text still resolves. `None` when no
+/// prefix is a file (the common case: a plain word).
+fn existing_file_prefix(token: &str) -> Option<&str> {
+    (1..=token.len())
+        .rev()
+        .find(|&end| token.is_char_boundary(end) && std::path::Path::new(&token[..end]).is_file())
+        .map(|end| &token[..end])
 }
 
 /// One agent task with interrupt chrome — the shared path for typed input,
@@ -1247,6 +1260,24 @@ mod tests {
         assert_eq!(path_files("alpha.txt", &cwd), vec!["alpha.txt".to_string()]);
         // empty base lists every visible entry (gamma is empty here)
         assert_eq!(path_files("gamma/", &cwd), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pasted_path_glued_to_text_still_attaches() {
+        let dir = crate::core::testutil::scratch_dir("autoattach");
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, [0x89, b'P', b'N', b'G', 0, 0]).unwrap();
+        // ctrl+v drops the path in, then the user keeps typing with no space
+        let text = format!("{}这个框要一样大", shot.display());
+        let mut queue = Vec::new();
+        attach_local_files(&text, &mut queue, false);
+        assert_eq!(queue.len(), 1, "the glued path attaches");
+        assert_eq!(queue[0].filename.as_deref(), Some("shot.png"));
+        // a plain word names no file and attaches nothing
+        let mut none = Vec::new();
+        attach_local_files("no file here 这个框", &mut none, false);
+        assert!(none.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
