@@ -307,7 +307,9 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   spelling variants included via `Path` comparison), falling back to every directory when this one
   has no history, each row then tagging its directory; selecting shows the transcript, then one
   Y-key question continues that conversation in the agent session via `run`. `/resume` in the REPL
-  shares `threads::pick_thread`. `--session`/`--cid` accept unambiguous id prefixes via
+  shares `threads::pick_thread`. Rows quote the newest prompt in the scanned tail (else the newest
+  answer's first line) and a turn count that is a marked lower bound (`N+`) when the thread outran
+  the tail window. `--session`/`--cid` accept unambiguous id prefixes via
   `threads::Store::resolve_thread(prefix, Some(cwd))` — a prefix matching several threads resolves
   to the local one — and `-c` takes `latest_thread(Some(cwd))` before the global newest. The `llm
   logs` CLI (list/full/on/off/status) is gone.

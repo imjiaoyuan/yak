@@ -174,7 +174,8 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   the one bounded repair: dropped with a warning. A turn stamped with a future format is refused
   with the upgrade path named. `latest_thread`/`resolve_thread`/`fork_thread`/`recent_threads`
   serve the resume and list surfaces (the list falls back to the last parseable line, so a torn
-  tail never hides a thread). Attachments persist as provenance, not pixels (path/url/mime —
+  tail never hides a thread; each row is summarized from a bounded tail read — a count past the
+  window is a shown lower bound, never a full-file read). Attachments persist as provenance, not pixels (path/url/mime —
   `stored_messages` strips the payload so a thread file stays small, however many screenshots ride
   it); `rebuild_turns` reloads local files on resume, and a record whose bytes are gone rides as a
   text note in place of its block. An attachment rides as the bytes the file holds — nothing is

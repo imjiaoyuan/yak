@@ -45,10 +45,10 @@ pub fn pick_thread(cwd: &Path, title: &str) -> Result<Option<String>, String> {
     Ok(Some(threads[i].id.clone()))
 }
 
-/// One picker row: id, turn count, last prompt, age, and — when the list
+/// One picker row: id, turn count, preview, age, and — when the list
 /// spans directories — the directory it ran in.
 fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
-    let preview: String = t.last_prompt.chars().take(40).collect::<String>();
+    let preview: String = t.preview.chars().take(40).collect();
     let preview = preview.replace('\n', " ");
     let dir = match t.cwd.as_deref() {
         Some(cwd) => Path::new(cwd)
@@ -58,9 +58,12 @@ fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
         None => "--",
     };
     format!(
-        "{} · {} turn{} · \"{}\" · {}{}",
+        "{} · {}{} turn{} · \"{}\" · {}{}",
         &t.id[..t.id.len().min(6)],
         t.turns,
+        // the summary scans a thread's tail, so a huge conversation's count
+        // is the bound it saw, not the file's whole line count
+        if t.turns_exact { "" } else { "+" },
         if t.turns == 1 { "" } else { "s" },
         preview,
         crate::core::db::short_time(now, &t.last),

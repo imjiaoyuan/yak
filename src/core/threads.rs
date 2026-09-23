@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -130,9 +130,15 @@ pub struct StoredTurn {
 #[derive(Clone)]
 pub struct ThreadSummary {
     pub id: String,
+    /// turn lines seen by the summary scan. Exact when [`Self::turns_exact`];
+    /// a lower bound otherwise, because the scan reads only a thread's tail.
     pub turns: usize,
+    /// the count covers the whole file — it was small enough to read entire
+    pub turns_exact: bool,
     pub last: String,
-    pub last_prompt: String,
+    /// what the list row quotes: the newest prompt in the scanned tail, else
+    /// the newest answer's first line
+    pub preview: String,
     /// working directory of the thread's last turn, when recorded
     pub cwd: Option<String>,
 }
@@ -140,6 +146,45 @@ pub struct ThreadSummary {
 /// True when two recorded working directories name the same place.
 fn same_dir(a: &str, b: &str) -> bool {
     Path::new(a) == Path::new(b)
+}
+
+/// The tail one summary reads. A thread's rows all come off the end — the
+/// newest timestamp, the last turn's cwd, the preview — so only the turn
+/// count needs the whole file; past this window it becomes a lower bound
+/// (the list shows `N+`) rather than a full read per row. No window growth
+/// hunts an older prompt: a task buried under megabytes of tool rounds is
+/// beyond any bounded tail, and the last answer identifies the conversation
+/// just as well.
+const SUMMARY_TAIL: u64 = 256 * 1024;
+
+/// Scan summary bytes: the turn lines they hold, the newest turn that
+/// parses, and the newest prompt-bearing turn. Pieces are split on the
+/// newline byte, which UTF-8 never carries inside a character, so every
+/// complete piece is valid JSON-carrying text; the first piece of a window
+/// that starts mid-line is a fragment — counted (it is the tail of a real
+/// turn) but never parseable. A torn final line fails to parse and the
+/// scan falls back to the line before it, as `read_thread` does.
+fn summary_from_tail(bytes: &[u8]) -> (usize, Option<StoredTurn>, Option<String>) {
+    let mut turns = 0usize;
+    let mut last: Option<StoredTurn> = None;
+    let mut prompt: Option<String> = None;
+    for line in bytes.split(|&b| b == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        turns += 1;
+        if let Ok(text) = std::str::from_utf8(line)
+            && let Ok(turn) = serde_json::from_str::<StoredTurn>(text)
+        {
+            // the newest prompt wins; a tool round's empty prompt keeps the
+            // older task text standing
+            if !turn.prompt.is_empty() {
+                prompt = Some(turn.prompt.clone());
+            }
+            last = Some(turn);
+        }
+    }
+    (turns, last, prompt)
 }
 
 /// The thread-file store. A thin handle over a directory; every method
@@ -328,9 +373,9 @@ impl Store {
         all
     }
 
-    /// Every thread, unsorted. Reads each file once and parses only its
-    /// last line (the only turn the summary needs), so `llm logs` stays
-    /// cheap however long the conversations grow.
+    /// Every thread, unsorted. Reads each file's tail only — the newest
+    /// turn, its cwd and the preview prompt all sit at the end — so the
+    /// lists stay cheap however long the conversations grow.
     pub fn summaries(&self) -> Vec<ThreadSummary> {
         let Ok(entries) = self.entries() else {
             return Vec::new();
@@ -346,38 +391,38 @@ impl Store {
     }
 
     fn summarize(&self, id: &str) -> Option<ThreadSummary> {
-        let text = fs::read_to_string(self.thread_path(id)).ok()?;
-        let mut turns = 0usize;
-        // the last line that parses: a torn tail must not make the whole
-        // thread vanish from the lists
-        let mut last: Option<StoredTurn> = None;
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            turns += 1;
-            if let Ok(t) = serde_json::from_str::<StoredTurn>(line) {
-                last = Some(t);
-            }
-        }
+        self.summarize_tail(id, SUMMARY_TAIL)
+    }
+
+    /// Summarize from the file's tail: seek to `cap` bytes before the end
+    /// and read forward. A file smaller than the window is read entire and
+    /// its turn count is exact; a larger one gives a bound.
+    fn summarize_tail(&self, id: &str, cap: u64) -> Option<ThreadSummary> {
+        let path = self.thread_path(id);
+        let mut file = fs::File::open(&path).ok()?;
+        let total = file.metadata().ok()?.len();
+        let cap = cap.min(total);
+        let start = total - cap;
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::with_capacity(cap as usize);
+        file.read_to_end(&mut bytes).ok()?;
+        let (turns, last, prompt) = summary_from_tail(&bytes);
         let last = last?;
-        // the preview prompt: the newest line that carries one — later rounds
-        // of a task are tool rounds with no user text of their own
-        let last_prompt = text
-            .lines()
-            .rev()
-            .find_map(|line| {
-                serde_json::from_str::<StoredTurn>(line)
-                    .ok()
-                    .filter(|t| !t.prompt.is_empty())
-                    .map(|t| t.prompt)
-            })
-            .unwrap_or_default();
+        // the preview the lists show: the newest prompt in the window, else
+        // the newest answer's first line
+        let preview = prompt.or_else(|| {
+            last.response
+                .trim()
+                .lines()
+                .next()
+                .map(|line| line.trim().to_string())
+        });
         Some(ThreadSummary {
             id: id.to_string(),
             turns,
+            turns_exact: start == 0,
             last: last.ts,
-            last_prompt,
+            preview: preview.unwrap_or_default(),
             cwd: last.cwd,
         })
     }
@@ -654,7 +699,9 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, id);
         assert_eq!(summaries[0].turns, 2);
-        assert_eq!(summaries[0].last_prompt, "moved");
+        // a fixture this small is read entire, so the count is the file's
+        assert!(summaries[0].turns_exact);
+        assert_eq!(summaries[0].preview, "moved");
         assert_eq!(summaries[0].cwd.as_deref(), Some("/p/b"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -806,7 +853,89 @@ mod tests {
         fs::write(&path, text).unwrap();
         let summaries = store.summaries();
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].last_prompt, "a");
+        assert_eq!(summaries[0].preview, "a");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The summary reads only a thread's tail: the newest turn, its cwd and
+    /// preview prompt still come off the end, while the turn count — which
+    /// only a whole-file read can know exactly — degrades to a marked bound.
+    #[test]
+    fn a_tail_window_reports_a_bound_count_with_exact_fields() {
+        let dir = scratch("tailbound");
+        let store = Store::open_path(&dir).unwrap();
+        let id = "tailbound";
+        let mut text = String::new();
+        for n in 1..=4 {
+            text.push_str(
+                &serde_json::to_string(&turn_in(
+                    &n.to_string(),
+                    &format!("/p/{n}"),
+                    &format!("task {n}"),
+                ))
+                .unwrap(),
+            );
+            text.push('\n');
+        }
+        fs::write(store.thread_path(id), &text).unwrap();
+        // a window that starts exactly at line 3: two whole lines in, two
+        // turns of the file never read
+        let lines: Vec<&str> = text.lines().collect();
+        let cap = (lines[2].len() + lines[3].len() + 2) as u64;
+        let s = store.summarize_tail(id, cap).unwrap();
+        assert_eq!(s.turns, 2, "only the windowed turns are counted");
+        assert!(!s.turns_exact, "the window never reached the file start");
+        assert_eq!(s.preview, "task 4");
+        assert_eq!(s.cwd.as_deref(), Some("/p/4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A prompt buried under big prompt-less tool rounds is beyond any
+    /// bounded tail: the preview falls back to the newest answer's first
+    /// line instead of growing the read without bound.
+    #[test]
+    fn a_prompt_beyond_the_tail_falls_back_to_the_last_answer() {
+        let dir = scratch("tailgrow");
+        let store = Store::open_path(&dir).unwrap();
+        let id = "tailgrow";
+        let big = "x".repeat(200);
+        let mut text = serde_json::to_string(&turn_in("1", "/p/one", "the real task")).unwrap();
+        text.push('\n');
+        for n in 2..=4 {
+            let mut t = turn(&n.to_string(), "", "the counted answer", "agent");
+            t.cwd = Some("/p/four".to_string());
+            t.messages = vec![Msg::user(big.clone())];
+            text.push_str(&serde_json::to_string(&t).unwrap());
+            text.push('\n');
+        }
+        fs::write(store.thread_path(id), &text).unwrap();
+        let total = text.len() as u64;
+        // a window over the last third cannot reach turn 1's prompt
+        let s = store.summarize_tail(id, total - total / 3).unwrap();
+        assert_eq!(s.preview, "the counted answer");
+        assert!(!s.turns_exact, "the window never reached the file start");
+        assert_eq!(s.cwd.as_deref(), Some("/p/four"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `read_to_string` refused a file whose torn tail cut a character in
+    /// half; the byte tail scan only needs the newline positions, so the
+    /// thread stays listed.
+    #[test]
+    fn a_torn_multibyte_tail_still_lists_the_thread() {
+        let dir = scratch("tailutf");
+        let store = Store::open_path(&dir).unwrap();
+        let id = "tailutf";
+        let mut bytes = serde_json::to_string(&turn("1", "中文任务", "", "agent"))
+            .unwrap()
+            .into_bytes();
+        bytes.push(b'\n');
+        // the torn second line ends mid-character (the first two bytes of 中)
+        bytes.extend_from_slice(b"{\"v\":1,\"prompt\":\"\xe4\xb8");
+        fs::write(store.thread_path(id), &bytes).unwrap();
+        let summaries = store.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].preview, "中文任务");
         let _ = fs::remove_dir_all(&dir);
     }
 }
