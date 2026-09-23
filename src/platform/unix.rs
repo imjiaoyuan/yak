@@ -209,12 +209,53 @@ pub fn read_hidden(prompt: &str) -> std::io::Result<String> {
         let mut quiet = _guard.saved;
         echo_off(&mut quiet);
         let _ = unsafe { ffi::tcsetattr(0, 0, ptr(&mut quiet)) };
+        // Raw bytes so a lone ESC (cancel) is distinguishable from the escape
+        // sequences an interactive keypad sends — cooked mode would swallow it
+        // into a failed \x1b[… read. ISIG stays on (only echo is cleared), so
+        // ctrl+c still interrupts the process the usual way. Backspace edits,
+        // UTF-8 accumulates byte by byte; a lone ESC returns an empty line,
+        // which callers treat as "keep the default / cancel".
         let mut line = String::new();
-        let n = std::io::stdin().lock().read_line(&mut line)?;
-        eprintln!();
-        if n == 0 {
-            return Ok(String::new());
+        match RawTerm::acquire(1, 0) {
+            Some(mut term) => {
+                let mut esc = false;
+                loop {
+                    let b = match term.next_byte() {
+                        RawByte::Key(b) => b,
+                        RawByte::Timeout => continue,
+                    };
+                    match b {
+                        b'\r' | b'\n' => break,
+                        // a keypad sequence (ESC [ … / ESC O …) arrives as
+                        // ordinary bytes; keep line empty for its duration so
+                        // the lone-ESC rule below stays a prefix test
+                        0x1b if line.is_empty() => esc = true,
+                        b'[' | b'O' if esc && line.is_empty() => {}
+                        0x08 | 0x7f => {
+                            let mut bytes: Vec<u8> = line.clone().into_bytes();
+                            crate::core::text::pop_utf8_char(&mut bytes);
+                            line = String::from_utf8(bytes).unwrap_or_default();
+                        }
+                        b if b >= 0x20 => line.push(b as char),
+                        _ => {}
+                    }
+                }
+                // an empty line whose last keystroke was ESC: cancel
+                if line.is_empty() && esc {
+                    eprintln!();
+                    return Ok(String::new());
+                }
+            }
+            None => {
+                // no raw terminal: read a line the cooked way
+                let n = std::io::stdin().lock().read_line(&mut line)?;
+                if n == 0 {
+                    eprintln!();
+                    return Ok(String::new());
+                }
+            }
         }
+        eprintln!();
         return Ok(line.trim_end_matches(['\r', '\n']).to_string());
     }
 

@@ -338,12 +338,15 @@ impl Session {
                 }
                 AgentUpdate::ToolResultsPruned { count } => {
                     // settle the row, then say why the next request got
-                    // smaller; dim like the other automatic maintenance
+                    // smaller; dim like the other automatic maintenance.
+                    // The stale-prefix pass keeps the head and tail, so
+                    // "full text stays in the session log" was never the
+                    // story — the middle was cut.
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
                     let s = if count == 1 { "" } else { "s" };
                     eprintln!(
-                        "{}{}pruned {count} oversized tool result{s} from context (full text stays in the session log){}",
+                        "{}{}pruned {count} oversized tool result{s} from context (kept the head and tail; re-run the command for the middle){}",
                         p.dim,
                         crate::theme::NOTICE,
                         p.reset

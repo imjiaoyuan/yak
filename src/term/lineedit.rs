@@ -673,6 +673,12 @@ impl LineEditor {
                             }
                         }
                     }
+                    Some(Esc::Alone) => {
+                        // a lone escape in the line editor keeps the reference's
+                        // meaning: the same cooperative interrupt as ctrl+c
+                        line.settle(&mut out, prompt, "", is_command);
+                        return LineResult::Interrupt;
+                    }
                     None => {}
                 },
                 _ if b < 0x20 => {
@@ -722,6 +728,8 @@ enum Esc {
     End,
     Delete,
     AltEnter,
+    /// a bare escape key (the parser timed out with nothing after ESC)
+    Alone,
     /// bracketed-paste start marker (`ESC[200~`)
     PasteStart,
     /// bracketed-paste end marker (`ESC[201~`)
@@ -1250,7 +1258,8 @@ pub enum ApprovalKey {
 /// editor while the raw terminal backend lives in `platform`.
 trait RawTermExt {
     /// After ESC: parse `[ X` / `[ N ~` sequences, CSI-u keys and
-    /// alt-prefixed keys; alt+enter is a newline.
+    /// alt-prefixed keys; alt+enter is a newline. A lone escape key
+    /// (nothing followed within VTIME) is `Esc::Alone`.
     fn escape_seq(&mut self) -> Option<Esc>;
     /// Same parse, but the caller already consumed the byte after ESC
     /// (letting it tell a lone ESC — timeout — from a sequence).
@@ -1259,8 +1268,11 @@ trait RawTermExt {
 
 impl RawTermExt for RawTerm {
     fn escape_seq(&mut self) -> Option<Esc> {
-        let b = self.next_byte().key()?;
-        self.escape_from(b)
+        match self.next_byte() {
+            RawByte::Key(b) => self.escape_from(b),
+            // nothing followed the ESC within VTIME: the escape key itself
+            RawByte::Timeout => Some(Esc::Alone),
+        }
     }
 
     fn escape_from(&mut self, b: u8) -> Option<Esc> {
@@ -1271,7 +1283,6 @@ impl RawTermExt for RawTerm {
             // ESC + printable/backspace: a legacy alt+key report
             return ((0x20..=0x7f).contains(&b)).then_some(Esc::Key(u32::from(b), 3));
         }
-        // CSI: [ n1 [ ; n2 ] final — 0 means absent (never a real param here)
         let mut params = [0u32; 2];
         let mut cur = 0;
         let final_byte;
