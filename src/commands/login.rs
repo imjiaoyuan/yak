@@ -122,6 +122,19 @@ pub(crate) fn logout_picker() -> Result<(), String> {
     remove_provider(&mut cfg, &name)
 }
 
+/// The name to prefill for a catalog preset: `base` when free, else the
+/// first free `base-2`, `base-3`, … — the second subscription to one
+/// provider needs its own name, and `taken` is the configured provider set.
+fn next_free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..10_000)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or_else(|| base.to_string())
+}
+
 fn prompt(label: &str) -> Option<String> {
     eprint!("{label}: ");
     let _ = std::io::stderr().flush();
@@ -165,6 +178,16 @@ pub(crate) fn wizard() -> Result<(), String> {
         (None, String::new())
     } else {
         (Some(&list[idx]), list[idx].name.clone())
+    };
+    // a second subscription to the same provider (two OpenCode Go keys) is a
+    // second provider entry: prefill the next free name so pressing enter
+    // lands on `opencode-go-2` instead of running the whole wizard into an
+    // overwrite question
+    let preset_name = if preset.is_some() {
+        let cfg = config::load();
+        next_free_name(&preset_name, |n| cfg.providers.contains_key(n))
+    } else {
+        preset_name
     };
 
     let name = match &preset {
@@ -351,4 +374,37 @@ fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
     models.sort();
     models.dedup();
     models
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_free_name;
+    use std::collections::BTreeSet;
+
+    fn taken(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_second_subscription_gets_the_next_free_name() {
+        let set = taken(&["opencode-go"]);
+        assert_eq!(
+            next_free_name("opencode-go", |n| set.contains(n)),
+            "opencode-go-2"
+        );
+
+        // the suffix walks past every name already in use
+        let set = taken(&["opencode-go", "opencode-go-2", "opencode-go-3"]);
+        assert_eq!(
+            next_free_name("opencode-go", |n| set.contains(n)),
+            "opencode-go-4"
+        );
+
+        // a free name is left as the caller typed it
+        let empty = taken(&[]);
+        assert_eq!(
+            next_free_name("deepseek", |n| empty.contains(n)),
+            "deepseek"
+        );
+    }
 }

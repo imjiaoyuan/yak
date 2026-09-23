@@ -339,6 +339,11 @@ catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq,
 OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider
 and clears the default if it pointed there.
 
+Two accounts on the same provider (say two OpenCode Go subscriptions) are two provider entries: run
+`/login` for the second one and accept the suggested `NAME-2`, then give it its own key. Models are
+then picked by the qualified `provider/model` id, and a bare model name served by both accounts is
+refused as ambiguous rather than guessed.
+
 If you prefer to edit config by hand, add a block like this to `config.json`:
 
 ```json
