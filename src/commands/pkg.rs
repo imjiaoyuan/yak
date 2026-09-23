@@ -444,8 +444,16 @@ mod tests {
     fn carried_recognizes_every_layout() {
         let dir = crate::core::testutil::scratch_dir("carried");
         std::fs::create_dir_all(dir.join("skills/demo")).unwrap();
-        std::fs::write(dir.join("skills/demo/SKILL.md"), "---\nname: demo\n---\nb").unwrap();
-        std::fs::write(dir.join("skills/flat.md"), "---\nname: flat\n---\nb").unwrap();
+        std::fs::write(
+            dir.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: d\n---\nb",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/flat.md"),
+            "---\nname: flat\ndescription: d\n---\nb",
+        )
+        .unwrap();
         std::fs::create_dir_all(dir.join("extensions")).unwrap();
         std::fs::write(dir.join("extensions/wordcount.py"), "x").unwrap();
         std::fs::create_dir_all(dir.join("commands")).unwrap();
@@ -463,7 +471,11 @@ mod tests {
         );
 
         // the repo itself becomes one skill once SKILL.md sits at the root
-        std::fs::write(dir.join("SKILL.md"), "---\nname: wholegit\n---\nb").unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: wholegit\ndescription: d\n---\nb",
+        )
+        .unwrap();
         let found = carried(&dir);
         assert_eq!(found.root_skill.as_deref(), Some("wholegit"));
         let lines = notes(&found);

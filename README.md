@@ -132,7 +132,6 @@ llm --thinking high "..."                  # off | minimal | low | medium | high
 llm -s "you are a Rust reviewer" "..."     # replace the system prompt
 llm --append-system-prompt "be terse" "..."
 llm --tools read,grep "..."                # limit the toolbox
-llm --token-budget 500000 "..."            # stop after this many input tokens
 llm --json "..."                           # line-delimited events instead of the UI
 ```
 
@@ -146,9 +145,7 @@ cache numbers are what a supervisor prices); the interactive session is what `--
 wants a task and exits.
 
 `--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on
-Anthropic ones. `--token-budget` counts input tokens across the whole run — every round resends the
-context, so the total is what a runaway task actually costs. It warns at 80% and stops cleanly at
-100%.
+Anthropic ones.
 `--max-request-bytes` caps one request body in bytes (32MB by default): lower it when a gateway in
 front of the model refuses less than the provider documents.
 
@@ -194,7 +191,8 @@ working directory by default (the same renderer backs `llm export`).
 Both live in your user directory.
 
 **Skills** are `SKILL.md` folders, discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest
-`.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). The agent lists
+`.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). A skill needs a
+`description` — that is what the model matches a task against. The agent lists
 them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system
 prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill
 points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or

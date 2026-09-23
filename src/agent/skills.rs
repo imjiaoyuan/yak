@@ -1,21 +1,22 @@
 //! Skills: SKILL.md packs discovered from the user dir and the project,
-//! surfaced to the model as a name+description list (progressive disclosure
-//! — the model reads the full file with the read tool when it decides to
-//! use one). Interop: the agentskills-standard `.agents/skills` locations
-//! are read too, at lower priority than our own `.llm/skills`, so skills
-//! installed by other tools (npx skills, editors) work unmodified.
+//! surfaced to the model as the reference's `<available_skills>` block (name +
+//! description + location; progressive disclosure — the model reads the full
+//! file with the read tool when it decides to use one). Interop: the
+//! agentskills-standard `.agents/skills` locations are read too, at lower
+//! priority than our own `.llm/skills`, so skills installed by other tools
+//! (npx skills, editors) work unmodified.
 
 use std::path::{Path, PathBuf};
 
 use crate::yaml;
 
-/// Cap on the skill list injected into the system prompt; overflow drops
-/// whole entries with a count note. 2000 chars ≈ 500 tokens — the list rides
-/// every request, and the model reads the full SKILL.md on use anyway, so
-/// only the trigger line earns its tokens here.
-const LIST_CHAR_CAP: usize = 2000;
+/// Name rules per the Agent Skills spec, enforced as they are enforced: a
+/// violation is a warning, not a rejection.
+const MAX_NAME_LENGTH: usize = 64;
+/// Description length cap per the spec, also warning-only.
+const MAX_DESCRIPTION_LENGTH: usize = 1024;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SkillDef {
     pub name: String,
     pub description: String,
@@ -24,31 +25,63 @@ pub struct SkillDef {
     pub model_invocation: bool,
 }
 
-/// Parse a SKILL.md: `---` yaml frontmatter `---` then the instruction
-/// body (read on demand, never stored here). A missing/never-closed
-/// frontmatter means "not a skill" (None), but a frontmatter the YAML
-/// subset cannot parse still loads with the fallback name — metadata must
-/// never lose a usable skill.
-pub fn parse_skill_md(text: &str, fallback_name: &str, path: PathBuf) -> Option<SkillDef> {
-    let (fm, _) = crate::yaml::split_frontmatter(text)?;
-    let map = yaml::parse(fm).ok().unwrap_or_default();
+/// Parse a SKILL.md: `---` yaml frontmatter `---` then the instruction body
+/// (read on demand, never stored here). Rules follow the reference's
+/// `loadSkillFromFile`: frontmatter that cannot be parsed or a missing/
+/// empty description skips the skill with a warning; an invalid name or an
+/// over-long description only warns and the skill still loads.
+pub fn parse_skill_md(text: &str, fallback_name: &str, path: &Path) -> Result<SkillDef, String> {
+    let warn = |msg: &str| eprintln!("Warning: skill {}: {msg}", path.display());
+    let Some((fm, _)) = crate::yaml::split_frontmatter(text) else {
+        return Err("no frontmatter".to_string());
+    };
+    let map = match yaml::parse(fm) {
+        Ok(map) => map,
+        Err(e) => {
+            return Err(format!("unparseable frontmatter ({e})"));
+        }
+    };
+    let description = map.get("description").cloned().unwrap_or_default();
+    if description.trim().is_empty() {
+        warn("description is required");
+        return Err("description is required".to_string());
+    }
+    if description.chars().count() > MAX_DESCRIPTION_LENGTH {
+        warn(&format!(
+            "description exceeds {MAX_DESCRIPTION_LENGTH} characters"
+        ));
+    }
     let name = map
         .get("name")
         .cloned()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| fallback_name.to_string());
-    if name.is_empty() {
-        return None;
+    if name.chars().count() > MAX_NAME_LENGTH {
+        warn(&format!(
+            "name exceeds {MAX_NAME_LENGTH} characters ({})",
+            name.chars().count()
+        ));
     }
-    let description = map.get("description").cloned().unwrap_or_default();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        warn("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)");
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        warn("name must not start or end with a hyphen");
+    }
+    if name.contains("--") {
+        warn("name must not contain consecutive hyphens");
+    }
     let model_invocation = map
         .get("disable-model-invocation")
         .map(|v| v != "true")
         .unwrap_or(true);
-    Some(SkillDef {
+    Ok(SkillDef {
         name,
         description,
-        path,
+        path: path.to_path_buf(),
         model_invocation,
     })
 }
@@ -73,7 +106,7 @@ pub(crate) fn pack_root_skill(pkg: &Path) -> Option<SkillDef> {
     let path = pkg.join("SKILL.md");
     let text = std::fs::read_to_string(&path).ok()?;
     let fallback = pkg.file_name()?.to_str()?;
-    parse_skill_md(&text, fallback, path)
+    parse_skill_md(&text, fallback, &path).ok()
 }
 
 pub(crate) fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
@@ -89,7 +122,7 @@ pub(crate) fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
                 continue;
             };
             if let Ok(text) = std::fs::read_to_string(&skill)
-                && let Some(def) = parse_skill_md(&text, fallback, skill)
+                && let Ok(def) = parse_skill_md(&text, fallback, &skill)
             {
                 out.push(def);
             }
@@ -98,7 +131,7 @@ pub(crate) fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
                 continue;
             };
             if let Ok(text) = std::fs::read_to_string(&path)
-                && let Some(def) = parse_skill_md(&text, fallback, path.clone())
+                && let Ok(def) = parse_skill_md(&text, fallback, &path)
             {
                 out.push(def);
             }
@@ -144,51 +177,48 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
     merged
 }
 
-/// The system-prompt section: one line per skill that the model may pick up
-/// on its own. Capped at LIST_CHAR_CAP; entries that no longer fit are
-/// dropped with a count note. Each line carries the skill's whole trigger
-/// (the description is what the model matches a task against, so it is not
-/// cut to the first line), whitespace collapsed and capped.
+/// The system-prompt section, the reference's `formatSkillsForPrompt`: one XML entry
+/// per skill the model may pick up on its own, with the file location for
+/// progressive disclosure.
 pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     let visible: Vec<&SkillDef> = skills.iter().filter(|s| s.model_invocation).collect();
     if visible.is_empty() {
         return None;
     }
     let mut out = String::from(
-        "Available skills (read a skill's file before following it; resolve any relative path it \
-         mentions against the skill's directory):\n",
+        "The following skills provide specialized instructions for specific tasks.\n\
+         Use the read tool to load a skill's file when the task matches its description.\n\
+         When a skill file references a relative path, resolve it against the skill directory \
+         (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
+         \n\
+         <available_skills>\n",
     );
-    let mut added = 0usize;
     for s in &visible {
-        let summary = trigger(&s.description);
-        let line = if summary.is_empty() {
-            format!("- {} ({})\n", s.name, s.path.display())
-        } else {
-            format!("- {}: {} ({})\n", s.name, summary, s.path.display())
-        };
-        if out.len() + line.len() > LIST_CHAR_CAP {
-            break;
-        }
-        out.push_str(&line);
-        added += 1;
-    }
-    let dropped = visible.len() - added;
-    if dropped > 0 {
+        out.push_str("  <skill>\n");
+        out.push_str(&format!("    <name>{}</name>\n", escape_xml(&s.name)));
         out.push_str(&format!(
-            "- … and {dropped} more (omitted to save context)\n"
+            "    <description>{}</description>\n",
+            escape_xml(&s.description)
         ));
+        out.push_str(&format!(
+            "    <location>{}</location>\n",
+            escape_xml(&s.path.display().to_string())
+        ));
+        out.push_str("  </skill>\n");
     }
+    out.push_str("</available_skills>");
     Some(out)
 }
 
-/// The skill's trigger text for the list. The description is what the model
-/// matches a task against, so the whole thing is kept (whitespace collapsed
-/// onto one line) — but the list rides every request, so a generous cap
-/// trims it; the full text is one `read` away when the skill is picked up.
-fn trigger(description: &str) -> String {
-    const MAX_CHARS: usize = 160;
-    let collapsed: String = description.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::core::text::truncate_chars(&collapsed, MAX_CHARS)
+/// the reference's `escapeXml`, so a description containing angle brackets or quotes
+/// cannot break the block's structure.
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
@@ -206,7 +236,7 @@ mod tests {
         let def = parse_skill_md(
             "---\nname: pdf\ndescription: extract tables\n---\nbody",
             "fallback",
-            PathBuf::from("/s/pdf/SKILL.md"),
+            Path::new("/s/pdf/SKILL.md"),
         )
         .unwrap();
         assert_eq!(def.name, "pdf");
@@ -219,40 +249,56 @@ mod tests {
         let def = parse_skill_md(
             "---\ndescription: x\ndisable-model-invocation: true\n---\nbody",
             "dirskill",
-            PathBuf::from("/s/dirskill/SKILL.md"),
+            Path::new("/s/dirskill/SKILL.md"),
         )
         .unwrap();
         assert_eq!(def.name, "dirskill");
         assert!(!def.model_invocation);
     }
 
+    /// a SKILL is dropped.md without a usable description: the description is
+    /// what the model matches a task against, so without one it can never
+    /// fire.
     #[test]
-    fn unparseable_frontmatter_still_loads_with_fallback_name() {
-        // the YAML subset chokes on the bare text line; the skill must
-        // survive with the directory name instead of being dropped
-        let def = parse_skill_md(
-            "---\nname: x\njust some text without a colon\n---\nbody",
-            "dirskill",
-            PathBuf::from("/s/dirskill/SKILL.md"),
-        )
-        .unwrap();
-        assert_eq!(def.name, "dirskill");
-        assert!(def.description.is_empty());
-        assert!(def.model_invocation);
-        // truly absent frontmatter is still not a skill
+    fn a_skill_without_a_description_is_skipped() {
         assert!(
-            parse_skill_md("# plain notes\nbody", "notes", PathBuf::from("/s/notes.md")).is_none()
+            parse_skill_md(
+                "---\nname: pdf\n---\nbody",
+                "pdf",
+                Path::new("/s/pdf/SKILL.md"),
+            )
+            .is_err()
         );
     }
 
-    /// A package installed by `llm install`: the repo root carries SKILL.md
+    /// Frontmatter the YAML subset cannot parse means the metadata is not
+    /// understood — a skill fired on guessed metadata is worse than a loud
+    /// skip (skipped too).
+    #[test]
+    fn unparseable_frontmatter_is_skipped_loudly() {
+        let err = parse_skill_md(
+            "---\nname: x\njust some text without a colon\n---\nbody",
+            "dirskill",
+            Path::new("/s/dirskill/SKILL.md"),
+        )
+        .unwrap_err();
+        assert!(err.contains("frontmatter"), "{err}");
+        // truly absent frontmatter is still not a skill
+        assert!(parse_skill_md("# plain notes\nbody", "notes", Path::new("/s/notes.md")).is_err());
+    }
+
+    /// Package installed by `llm install`: the repo root carries SKILL.md
     /// (a standalone skill repo) and `skills/` holds more of them.
     #[test]
     fn package_mounts_a_root_skill_and_its_skills_dir() {
         let pkg = crate::core::testutil::scratch_dir("pkgskill");
-        skill_dir(&pkg, "a", "name: a");
-        skill_dir(&pkg.join("skills"), "b", "name: b");
-        std::fs::write(pkg.join("SKILL.md"), "---\nname: wholegit\n---\nbody").unwrap();
+        skill_dir(&pkg, "a", "name: a\ndescription: d");
+        skill_dir(&pkg.join("skills"), "b", "name: b\ndescription: d");
+        std::fs::write(
+            pkg.join("SKILL.md"),
+            "---\nname: wholegit\ndescription: d\n---\nbody",
+        )
+        .unwrap();
         // a stray repo without SKILL.md at the root mounts nothing
         let empty = pkg.join("not-a-skill");
         std::fs::create_dir_all(&empty).unwrap();
@@ -310,41 +356,44 @@ mod tests {
     }
 
     #[test]
-    fn block_caps_and_counts() {
-        let mk = |i: usize| SkillDef {
-            name: format!("skill{i}"),
-            description: "d".repeat(900),
-            path: PathBuf::from("/s"),
-            model_invocation: true,
-        };
-        let skills: Vec<SkillDef> = (0..40).map(mk).collect();
-        let block = skills_block(&skills).unwrap();
-        assert!(block.len() <= LIST_CHAR_CAP + 200);
-        assert!(block.contains("more (omitted"));
-        // hidden skills never appear
-        let mut hidden = mk(0);
-        hidden.model_invocation = false;
-        assert!(skills_block(&[hidden]).is_none());
-    }
-
-    #[test]
-    fn skill_line_keeps_the_whole_trigger_and_teaches_path_resolution() {
-        // a multi-line description keeps every line in one collapsed run:
-        // the first line alone may not name what the skill does
+    fn the_skills_block_is_shaped_and_escapes_xml() {
         let def = SkillDef {
             name: "pdf".into(),
-            description: "Extract tables\nfrom scanned PDFs and CSV exports".into(),
+            description: "Extract <tables> & \"quotes\" from PDFs".into(),
             path: PathBuf::from("/s/pdf/SKILL.md"),
             model_invocation: true,
         };
         let block = skills_block(&[def]).unwrap();
         assert!(
-            block.contains("Extract tables from scanned PDFs and CSV exports"),
+            block.starts_with(
+                "The following skills provide specialized instructions for specific tasks."
+            ),
             "{block}"
         );
         assert!(
-            block.contains("resolve any relative path"),
-            "a skill that references its own files must be told where to resolve them: {block}"
+            block.contains("resolve it against the skill directory"),
+            "{block}"
         );
+        assert!(block.contains("<available_skills>"), "{block}");
+        assert!(block.contains("<name>pdf</name>"), "{block}");
+        assert!(
+            block.contains(
+                "<description>Extract &lt;tables&gt; &amp; &quot;quotes&quot; from PDFs</description>"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("<location>/s/pdf/SKILL.md</location>"),
+            "{block}"
+        );
+        // hidden skills never appear
+        let mut hidden = SkillDef {
+            name: "hidden".into(),
+            description: "d".into(),
+            path: PathBuf::from("/s/h"),
+            model_invocation: false,
+        };
+        hidden.model_invocation = false;
+        assert!(skills_block(&[hidden]).is_none());
     }
 }
