@@ -203,15 +203,57 @@ impl Class {
     }
 }
 
-/// Bodies across providers that all mean "the prompt does not fit": OpenAI
-/// "maximum context length", Anthropic "prompt is too long", Google "input
-/// length and `max_tokens` exceed context limit".
+/// Bodies across providers that all mean "the prompt does not fit". The list
+/// is the reference's (`packages/ai/src/utils/the overflow module`) — every entry is provider or
+/// gateway wording seen in the wild, translated to the substring tests a
+/// regex-free build can run (the reference's `\\d` shaping only narrowed matches the
+/// words already name). Second element: a needle that must also appear, for
+/// the patterns anchoring on both sides.
+const OVERFLOW_NEEDLES: &[(&str, Option<&str>)] = &[
+    ("prompt is too long", None),                       // Anthropic
+    ("request_too_large", None),                        // Anthropic 413
+    ("input is too long for requested model", None),    // Amazon Bedrock
+    ("exceeds the context window", None),               // OpenAI
+    ("exceeds", Some("maximum context length")),        // LiteLLM & OpenAI-compatible proxies
+    ("input token count", Some("exceeds the maximum")), // Google
+    ("maximum prompt length is", None),                 // xAI
+    ("reduce the length of the messages", None),        // Groq
+    ("maximum context length is", None),                // OpenRouter
+    ("maximum allowed input length", None),             // OpenRouter/Poolside
+    ("is longer than the model", None),                 // Together AI
+    ("exceeds the limit of", None),                     // GitHub Copilot
+    ("exceeds the available context size", None),       // llama.cpp server
+    ("greater than the context length", None),          // LM Studio
+    ("context window exceeds limit", None),             // MiniMax
+    ("exceeded model token limit", None),               // Kimi For Coding
+    ("too large for model with", None),                 // Mistral
+    ("the configured context size is", None),           // DS4
+    ("model_context_window_exceeded", None),            // z.ai finish reason
+    ("prompt too long", None),                          // Ollama
+    ("range of input length should be", None),          // DashScope/Qwen
+    ("context_length_exceeded", None),                  // generic
+    ("context length exceeded", None), // generic (the reference: context[_ ]length[_ ]exceeded)
+    ("exceed context limit", None),    // generic
+    ("too many tokens", None),         // generic (the exclusions keep throttling out)
+    ("token limit exceeded", None),    // generic
+];
+
 fn context_too_large(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("context_length_exceeded")
-        || m.contains("maximum context length")
-        || m.contains("prompt is too long")
-        || m.contains("exceed context limit")
+    // the reference's non-overflow exclusions run first: throttling and rate-limit texts
+    // also speak of token counts (Bedrock wraps "too many tokens" in a
+    // ThrottlingException), and a throttle must retry, not compact
+    if m.contains("rate limit")
+        || m.contains("too many requests")
+        || m.contains("throttling error")
+        || m.contains("throttlingexception")
+        || m.contains("service unavailable")
+    {
+        return false;
+    }
+    OVERFLOW_NEEDLES
+        .iter()
+        .any(|(a, b)| m.contains(a) && b.is_none_or(|b| m.contains(b)))
 }
 
 /// Does this text name a prompt that does not fit the model's window? A
@@ -939,6 +981,38 @@ mod tests {
             HttpError::new(400, "invalid model").class(),
             Class::InvalidRequest
         );
+    }
+
+    #[test]
+    fn context_overflow_matches_provider_wordings_and_skips_throttling() {
+        // the reference's the overflow module corpus, one entry per provider family
+        for body in [
+            "This endpoint's maximum context length is 64000 tokens. However, you requested about 100000 tokens",
+            "Requested token count exceeds the model's maximum context length of 131072 tokens",
+            "Input length 265330 exceeds the maximum allowed input length of 262144 tokens.",
+            "Please reduce the length of the messages or completion",
+            "This model's maximum prompt length is 131072 but the request contains 537812 tokens",
+            "The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)",
+            "The input (70000 tokens) is longer than the model's context length (32000 tokens)",
+            "the request exceeds the available context size, try increasing it",
+            "tokens to keep from the initial prompt is greater than the context length",
+            "invalid params, context window exceeds limit",
+            "Your request exceeded model token limit: 8192 (requested: 9000)",
+            "Prompt contains 70000 tokens ... too large for model with 32000 maximum context length",
+            "Prompt has 8000 tokens, but the configured context size is 4096 tokens",
+            "prompt too long; exceeded max context length by 8000 tokens",
+            "Range of input length should be [1, 6144]",
+        ] {
+            assert!(super::context_overflow(body), "should be overflow: {body}");
+        }
+        // throttling that mentions token counts is NOT overflow: it must
+        // retry, not compact (Bedrock's ThrottlingException wording)
+        assert!(!super::context_overflow(
+            "ThrottlingException: Too many tokens, please wait before trying again."
+        ));
+        assert!(!super::context_overflow(
+            "Rate limit: too many tokens in prompt, slow down"
+        ));
     }
 
     #[test]
