@@ -1223,11 +1223,11 @@ pub fn read_approval_key(pre: Vec<u8>) -> Option<ApprovalKey> {
                 // sequences are swallowed whole so their tail bytes can
                 // never land on the y/n/a answers
                 match term.escape_seq() {
-                    Some(_) => continue,
-                    None => {
+                    Some(Esc::Alone) | None => {
                         crate::core::http::request_interrupt();
                         break ApprovalKey::Deny;
                     }
+                    Some(_) => continue,
                 }
             }
             0x04 => break ApprovalKey::Deny,
@@ -1462,14 +1462,15 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 let delta = match term.escape_seq() {
                     Some(Esc::Up) => -1i64,
                     Some(Esc::Down) => 1,
+                    Some(Esc::Alone) | None => {
+                        // esc (or a lone escape key) closes the menu
+                        erase(&mut out, printed, true);
+                        return None;
+                    }
                     // edit keys (home/end/delete/arrows) and F-keys are not
                     // bound in the menu: ignore them instead of cancelling
                     // and throwing the selection away
                     Some(_) => continue,
-                    None => {
-                        erase(&mut out, printed, true);
-                        return None;
-                    }
                 };
                 if matched.is_empty() {
                     continue;
@@ -1578,7 +1579,7 @@ impl KeyWatcher {
                             // edit keys also start with ESC — swallow whole
                             // sequences so their tails cannot raise the flag
                             0x1b => {
-                                if term.escape_seq().is_none() {
+                                if matches!(term.escape_seq(), None | Some(Esc::Alone)) {
                                     buf.clear();
                                     crate::core::http::request_interrupt();
                                 }
