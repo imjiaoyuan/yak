@@ -20,21 +20,11 @@
 //! - a pattern with whitespace matches the **whole segment** from its first
 //!   word: `rm -rf /` denies `rm -rf /` but not `rm notes.txt`
 //! - globs `*`, `?`, `[...]` work within a word: `mkfs*`, `git push --force*`
-//! - one directive, not a pattern: `outside-cwd` makes any tool call that
-//!   reaches outside the working directory ask for approval in either mode
-//!   (a file tool's `path`/`paths` argument, or a shell command line naming
-//!   a path outside — see `approval::command_escapes_cwd`); `!outside-cwd`
-//!   switches it back off (last line wins). The seeded file turns it on.
 //!
 //! A hit asks for approval — even in yolo; the command runs only after
 //! the user allows it (`a` spares the pattern for the session).
 
 use std::path::Path;
-
-/// The directive line, and the pseudo-pattern reported at the approval
-/// prompt when it fires: answering `a` spares the directive, not the whole
-/// tool, for the session.
-pub const OUTSIDE_CWD: &str = "outside-cwd";
 
 /// One blacklist entry, already lowered for case-insensitive matching.
 #[derive(Debug, Clone)]
@@ -61,15 +51,12 @@ pub enum Match {
 #[derive(Debug, Default, Clone)]
 pub struct Blacklist {
     entries: Vec<Entry>,
-    /// the `outside-cwd` directive is on (last line wins)
-    ask_outside_cwd: bool,
 }
 
 impl Blacklist {
     /// Parse the text of one blacklist file.
     pub fn parse(text: &str) -> Blacklist {
         let mut entries = Vec::new();
-        let mut ask_outside_cwd = false;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -82,24 +69,12 @@ impl Blacklist {
             if body.is_empty() {
                 continue;
             }
-            if body.eq_ignore_ascii_case(OUTSIDE_CWD) {
-                ask_outside_cwd = !allow;
-                continue;
-            }
             entries.push(Entry {
                 pattern: body.to_lowercase(),
                 allow,
             });
         }
-        Blacklist {
-            entries,
-            ask_outside_cwd,
-        }
-    }
-
-    /// Whether the `outside-cwd` directive is on.
-    pub fn asks_outside_cwd(&self) -> bool {
-        self.ask_outside_cwd
+        Blacklist { entries }
     }
 
     /// Load both homes (user, then project). Missing files contribute
@@ -134,26 +109,15 @@ impl Blacklist {
             };
             let one = Blacklist::parse(&text);
             merged.entries.extend(one.entries);
-            // a directive is a whole-file switch: the last file that
-            // mentions it wins, so the project copy overrides the user's
-            if one.ask_outside_cwd
-                || text.lines().any(|l| {
-                    l.trim()
-                        .eq_ignore_ascii_case(format!("!{OUTSIDE_CWD}").as_str())
-                })
-            {
-                merged.ask_outside_cwd = one.ask_outside_cwd;
-            }
         }
         merged
     }
 
     /// The default file content written on first start: the two rules every
     /// install should confirm interactively (`rm`, force-pushes) plus the
-    /// `outside-cwd` directive, fully active, and the syntax, written out so
-    /// the mechanism is discoverable. The commands that must never run live
-    /// in `approval.rs` and cannot be turned off from here, which is why they
-    /// are not seeded here.
+    /// syntax, written out so the mechanism is discoverable. The commands
+    /// that must never run live in `approval.rs` and cannot be turned off
+    /// from here, which is why they are not seeded here.
     pub fn default_file() -> String {
         String::from(
             "# llm command ask-list — one pattern per line\n\
@@ -170,13 +134,8 @@ impl Blacklist {
              # answer a at the prompt to spare a pattern for this session\n\
              # deleting this file resets it to these rules\n\
              #\n\
-             # a path that leaves the working directory also confirms: a file\n\
-             # tool's path/paths argument, or a shell command line naming one\n\
-             # outside the directory (commands run from the directory itself\n\
-             # are unaffected)\n\
              rm\n\
-             git push --force*\n\
-             outside-cwd\n",
+             git push --force*\n",
         )
     }
 
@@ -402,18 +361,6 @@ mod tests {
         assert!(word_matches("[a-c].txt", "c.txt"));
         assert!(word_matches("rm", "rm"));
         assert!(!word_matches("rm", "rmdir"));
-    }
-
-    #[test]
-    fn the_outside_cwd_directive_parses_and_the_last_line_wins() {
-        assert!(bl("rm\noutside-cwd").asks_outside_cwd());
-        assert!(bl("OUTSIDE-CWD").asks_outside_cwd());
-        assert!(!bl("outside-cwd\n!outside-cwd").asks_outside_cwd());
-        assert!(!Blacklist::default().asks_outside_cwd());
-        // the seeded file ships the directive on, with a way out
-        assert!(Blacklist::parse(&Blacklist::default_file()).asks_outside_cwd());
-        // the directive is not an entry: pattern matching is untouched
-        assert_eq!(bl("outside-cwd").entries.len(), 0);
     }
 
     #[test]

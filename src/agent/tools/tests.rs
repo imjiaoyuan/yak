@@ -871,7 +871,7 @@ fn tool_defs_stay_under_the_wire_budget() {
 }
 
 #[test]
-fn webfetch_is_exec_tier_and_the_path_gate_sees_a_missing_file() {
+fn webfetch_is_exec_tier() {
     let tools = builtin_tools();
     let fetch = tools
         .iter()
@@ -879,32 +879,4 @@ fn webfetch_is_exec_tier_and_the_path_gate_sees_a_missing_file() {
         .expect("mounted");
     // the one way off the machine is exec-tier like any other shell-out
     assert_eq!(fetch.tier(), Tier::Exec);
-    // a path that does not exist yet still counts as reaching outside
-    let read = tools.iter().find(|t| t.name() == "read").expect("mounted");
-    assert!(read.escapes_cwd(
-        &json!({"path": "/etc/does-not-exist-here/x"}),
-        std::path::Path::new("/home/user/proj")
-    ));
-}
-
-#[test]
-fn every_file_tool_reports_the_paths_it_would_reach_outside_the_cwd() {
-    let cwd = std::path::Path::new("/home/user/proj");
-    let tools = builtin_tools();
-    let tool = |name: &str| -> &dyn Tool {
-        tools
-            .iter()
-            .find(|t| t.name() == name)
-            .expect("mounted")
-            .as_ref()
-    };
-    let read = tool("read");
-    assert!(!read.escapes_cwd(&json!({"path": "src/a.rs"}), cwd));
-    assert!(read.escapes_cwd(&json!({"path": "/etc/passwd"}), cwd));
-    assert!(!tool("write").escapes_cwd(&json!({"path": "src/a.rs"}), cwd));
-    assert!(tool("edit").escapes_cwd(&json!({"path": "../elsewhere/a.rs"}), cwd));
-    // a shell command's paths are in the command line, not in an argument
-    let bash = tool("bash");
-    assert!(!bash.escapes_cwd(&json!({"command": "cargo test"}), cwd));
-    assert!(bash.escapes_cwd(&json!({"command": "cat /etc/passwd"}), cwd));
 }

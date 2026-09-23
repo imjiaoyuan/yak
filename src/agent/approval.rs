@@ -92,14 +92,12 @@ pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
 /// explicit policy (deny/prompt/allow) > auto. Everything not caught by one
 /// of those runs: there is no ask mode — a call either passes the blacklist
 /// and policies, or it does not. `bash_command` is the raw command line for
-/// exec-tier tools, and `escapes_cwd` is the tool's own answer
-/// (`Tool::escapes_cwd`). `resolve_with_hit` is the entry the loop uses: it
+/// exec-tier tools. `resolve_with_hit` is the entry the loop uses: it
 /// has the ask-list pattern in hand already (it carries it down to the prompt
 /// and to `a`), so a command line is lexed once per call rather than twice.
 pub fn resolve_with_hit(
     name: &str,
     tier: Tier,
-    escapes_cwd: bool,
     cfg: &ApprovalConfig,
     bash_command: Option<&str>,
     hit: Option<String>,
@@ -117,18 +115,6 @@ pub fn resolve_with_hit(
         blacklist_ask = Some(format!(
             "command matches blacklist pattern '{pattern}' — approval required"
         ));
-    }
-    // the `outside-cwd` directive gives a path leaving the working directory
-    // the same standing a matched pattern has
-    if escapes_cwd
-        && cfg.blacklist.asks_outside_cwd()
-        && !cfg
-            .blacklist_session_allows
-            .iter()
-            .any(|a| a == crate::agent::blacklist::OUTSIDE_CWD)
-    {
-        blacklist_ask =
-            Some("path outside the working directory (blacklist outside-cwd)".to_string());
     }
     if let (Tier::Exec, Some(cmd)) = (tier, bash_command)
         && let Some(reason) = forbidden_command(cmd)
@@ -151,144 +137,6 @@ pub fn resolve_with_hit(
         return Decision::Ask(reason);
     }
     Decision::Auto
-}
-
-/// True when a call's `path` argument leaves the working directory.
-pub fn args_escape_cwd(cwd: &std::path::Path, args: &serde_json::Value) -> bool {
-    args.get("path")
-        .and_then(|p| p.as_str())
-        .is_some_and(|p| escapes_cwd(cwd, p))
-}
-
-/// True when a shell command line names a path outside the working
-/// directory. Best-effort by nature — a shell can build a path no lexer
-/// sees — so this gates, it does not sandbox. Every token that names a path
-/// is resolved (with `$VAR`/`${VAR}` expanded from the environment); a
-/// path-naming token whose expansion cannot be resolved statically counts
-/// as escaping rather than as harmless.
-pub fn command_escapes_cwd(cwd: &std::path::Path, command: &str) -> bool {
-    split_compound(command).iter().any(|seg| {
-        tokens(seg)
-            .iter()
-            .filter_map(|tok| token_path(tok))
-            .any(|p| p.contains('$') || p.contains('`') || escapes_cwd(cwd, &p))
-    })
-}
-
-/// The path one command token names, if it names one: a literal path (it
-/// carries a separator or starts at `~`), the value half of `--flag=path`
-/// or `VAR=path`. Flags and ordinary words are not paths. Both separators
-/// count: PowerShell on Windows takes `\` as well as `/`.
-fn token_path(tok: &str) -> Option<String> {
-    if let Some((_, value)) = tok.split_once('=') {
-        return token_path(value);
-    }
-    if tok.starts_with('-') {
-        return None;
-    }
-    let path = expand_env(tok);
-    (path.contains('/') || path.contains('\\') || path.starts_with('~')).then_some(path)
-}
-
-/// `$VAR`/`${VAR}` replaced from the environment, so `cat $HOME/x` is
-/// checked against the real home. Anything else (`$1`, `$(...)`, an unknown
-/// variable) is left exactly as written, which marks the token unresolvable.
-fn expand_env(tok: &str) -> String {
-    if !tok.contains('$') {
-        return tok.to_string();
-    }
-    let mut out = String::new();
-    let mut chars = tok.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-        let braced = chars.peek() == Some(&'{');
-        if braced {
-            chars.next();
-        }
-        let mut name = String::new();
-        while let Some(&n) = chars.peek() {
-            if n.is_ascii_alphanumeric() || n == '_' {
-                name.push(n);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        let closed = !braced || chars.peek() == Some(&'}');
-        match (closed, name.is_empty(), std::env::var(&name)) {
-            (true, false, Ok(value)) => {
-                if braced {
-                    chars.next();
-                }
-                out.push_str(&value);
-            }
-            // not a plain variable reference: keep the text as it was
-            _ => {
-                out.push('$');
-                if braced {
-                    out.push('{');
-                }
-                out.push_str(&name);
-            }
-        }
-    }
-    out
-}
-
-/// True when a path argument leaves the working directory. Both sides are
-/// canonicalized so a symlink cannot smuggle a path out — for a target that
-/// does not exist yet (`write`, `edit`), the deepest existing ancestor is
-/// the part that gets followed. The cwd rides the same helper on purpose: a
-/// working directory can itself be reached through a symlink (`/tmp` is
-/// `/private/tmp` on macOS) or not exist yet, and resolving only one side
-/// compares a symlink-free path against a lexical one — every path inside
-/// then looks like it left.
-pub fn escapes_cwd(cwd: &std::path::Path, arg: &str) -> bool {
-    let target = canonical_with_missing(&normalize(&crate::agent::tools::resolve_path(cwd, arg)));
-    !target.starts_with(canonical_with_missing(cwd))
-}
-
-/// [`Path::canonicalize`] for a path that may not exist yet: the existing
-/// prefix is resolved through symlinks and the missing tail is rejoined
-/// verbatim, so `link-to-elsewhere/new-file.txt` lands where the write would.
-fn canonical_with_missing(target: &std::path::Path) -> std::path::PathBuf {
-    let mut probe = target.to_path_buf();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if let Ok(real) = probe.canonicalize() {
-            let mut out = real;
-            for name in tail.iter().rev() {
-                out.push(name);
-            }
-            return out;
-        }
-        match (probe.file_name(), probe.parent()) {
-            (Some(name), Some(parent)) if parent != probe => {
-                tail.push(name.to_os_string());
-                probe = parent.to_path_buf();
-            }
-            // nothing of the path is left to resolve: keep it lexical
-            _ => return target.to_path_buf(),
-        }
-    }
-}
-
-/// Lexically drop `.` and resolve `..` without touching the filesystem.
-fn normalize(p: &std::path::Path) -> std::path::PathBuf {
-    let mut out = std::path::PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            c => out.push(c.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Split a command line into segments on `&&`, `||`, `;`, `|`, `&` and
@@ -563,7 +411,6 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn cfg(policies: &[(&str, Policy)]) -> ApprovalConfig {
         ApprovalConfig {
@@ -578,45 +425,11 @@ mod tests {
     fn resolve(
         name: &str,
         tier: Tier,
-        escapes_cwd: bool,
         cfg: &ApprovalConfig,
         bash_command: Option<&str>,
     ) -> Decision {
         let hit = bash_command.and_then(|cmd| blacklist_hit(cfg, cmd));
-        resolve_with_hit(name, tier, escapes_cwd, cfg, bash_command, hit)
-    }
-
-    #[test]
-    fn the_outside_cwd_directive_asks() {
-        let mut config = cfg(&[]);
-        config.blacklist = crate::agent::blacklist::Blacklist::parse("outside-cwd");
-        // the directive asks for a path that leaves the working directory
-        assert!(matches!(
-            resolve("read", Tier::Read, true, &config, None),
-            Decision::Ask(_)
-        ));
-        assert!(matches!(
-            resolve("write", Tier::Write, true, &config, None),
-            Decision::Ask(_)
-        ));
-        assert_eq!(
-            resolve("read", Tier::Read, false, &config, None),
-            Decision::Auto,
-            "a path inside stays free"
-        );
-        // an `a` answer spared the directive for the session
-        config
-            .blacklist_session_allows
-            .push(crate::agent::blacklist::OUTSIDE_CWD.to_string());
-        assert_eq!(
-            resolve("read", Tier::Read, true, &config, None),
-            Decision::Auto
-        );
-        // and without the directive, nothing asks
-        assert_eq!(
-            resolve("read", Tier::Read, true, &cfg(&[]), None),
-            Decision::Auto
-        );
+        resolve_with_hit(name, tier, cfg, bash_command, hit)
     }
 
     #[test]
@@ -639,14 +452,14 @@ mod tests {
             "rm -rf ~",
             "rm -rf /*",
         ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
             assert!(
                 matches!(d, Decision::Deny(_)),
                 "{cmd} must be denied, got {d:?}"
             );
         }
         // the reason names the offending command, so the model can adapt
-        let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some("sudo -i"));
+        let d = resolve("bash", Tier::Exec, &cfg(&[]), Some("sudo -i"));
         assert_eq!(d, Decision::Deny("'sudo' is never allowed".into()));
     }
 
@@ -665,7 +478,7 @@ mod tests {
             "rm notes.txt",
             "rm -rf /home/me/proj/target",
         ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
             assert_eq!(d, Decision::Auto, "{cmd} should run free");
         }
     }
@@ -675,11 +488,11 @@ mod tests {
         let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("!sudo\n!rm -rf /");
         assert!(matches!(
-            resolve("bash", Tier::Exec, false, &c, Some("sudo -i")),
+            resolve("bash", Tier::Exec, &c, Some("sudo -i")),
             Decision::Deny(_)
         ));
         assert!(matches!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm -rf /")),
+            resolve("bash", Tier::Exec, &c, Some("rm -rf /")),
             Decision::Deny(_)
         ));
     }
@@ -689,7 +502,7 @@ mod tests {
         let mut c = cfg(&[]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\n!rm -rf ./build");
         // the hit is a prompt now, not a refusal
-        match resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")) {
+        match resolve("bash", Tier::Exec, &c, Some("rm notes.txt")) {
             Decision::Ask(reason) => {
                 assert!(reason.contains("'rm'"), "{reason}");
             }
@@ -697,14 +510,14 @@ mod tests {
         }
         // and the `!` line punches the hole the user asked for
         assert_eq!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm -rf ./build")),
+            resolve("bash", Tier::Exec, &c, Some("rm -rf ./build")),
             Decision::Auto
         );
         // the ask survives an allow policy: gating every run is the point
         let mut c = cfg(&[("bash", Policy::Allow)]);
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm");
         assert!(matches!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
+            resolve("bash", Tier::Exec, &c, Some("rm notes.txt")),
             Decision::Ask(_)
         ));
     }
@@ -715,18 +528,12 @@ mod tests {
         c.blacklist = crate::agent::blacklist::Blacklist::parse("rm\ngit push --force*");
         c.blacklist_session_allows.push("rm".into());
         assert_eq!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm notes.txt")),
+            resolve("bash", Tier::Exec, &c, Some("rm notes.txt")),
             Decision::Auto
         );
         // a pattern not yet approved still asks
         assert!(matches!(
-            resolve(
-                "bash",
-                Tier::Exec,
-                false,
-                &c,
-                Some("git push --force origin")
-            ),
+            resolve("bash", Tier::Exec, &c, Some("git push --force origin")),
             Decision::Ask(_)
         ));
     }
@@ -738,22 +545,16 @@ mod tests {
             &crate::agent::blacklist::Blacklist::default_file(),
         );
         assert!(matches!(
-            resolve("bash", Tier::Exec, false, &c, Some("rm -rf ./build")),
+            resolve("bash", Tier::Exec, &c, Some("rm -rf ./build")),
             Decision::Ask(_)
         ));
         assert!(matches!(
-            resolve(
-                "bash",
-                Tier::Exec,
-                false,
-                &c,
-                Some("git push --force origin main")
-            ),
+            resolve("bash", Tier::Exec, &c, Some("git push --force origin main")),
             Decision::Ask(_)
         ));
         // ordinary work runs free
         assert_eq!(
-            resolve("bash", Tier::Exec, false, &c, Some("cargo test")),
+            resolve("bash", Tier::Exec, &c, Some("cargo test")),
             Decision::Auto
         );
     }
@@ -772,7 +573,7 @@ mod tests {
             "wc -l <file >>/dev/null",
             "python x.py &>/dev/null",
         ] {
-            let d = resolve("bash", Tier::Exec, false, &cfg(&[]), Some(cmd));
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
             assert_eq!(d, Decision::Auto, "{cmd} must run free");
         }
         // a real device target is refused by the shape check; `dd of=` paths
@@ -785,125 +586,12 @@ mod tests {
     }
 
     #[test]
-    fn escapes_detection() {
-        let cwd = std::path::Path::new("/home/user/proj");
-        assert!(!escapes_cwd(cwd, "src/main.rs"));
-        assert!(!escapes_cwd(cwd, "./src/../src/main.rs"));
-        assert!(!escapes_cwd(cwd, "/home/user/proj/a/b.txt"));
-        assert!(!escapes_cwd(cwd, "."));
-        assert!(escapes_cwd(cwd, "../outside.txt"));
-        assert!(escapes_cwd(cwd, "/etc/passwd"));
-        assert!(escapes_cwd(cwd, "~/notes.txt"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_cwd_that_does_not_exist_is_resolved_like_the_paths_under_it() {
-        // the bug this pins: resolving only the target left a lexical cwd on
-        // one side and a symlink-free path on the other, so a path *inside*
-        // the working directory looked like it had left it — which is how a
-        // `/var/folders/...` cwd on macOS failed every relative path
-        let real = crate::core::testutil::scratch_dir("escapes-real");
-        let root = crate::core::testutil::scratch_dir("escapes-root");
-        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
-        let cwd = root.join("link").join("absent");
-        assert!(!escapes_cwd(&cwd, "src/main.rs"));
-        assert!(escapes_cwd(&cwd, "../outside.txt"));
-        let _ = std::fs::remove_dir_all(&real);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_symlinked_directory_does_not_smuggle_a_new_file_out_of_the_cwd() {
-        let outside = crate::core::testutil::scratch_dir("escapes-outside");
-        let cwd = crate::core::testutil::scratch_dir("escapes-cwd");
-        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
-        // the file does not exist yet — exactly what a write targets
-        assert!(!outside.exists() || outside.is_dir());
-        assert!(escapes_cwd(&cwd, "link/new.txt"));
-        assert!(escapes_cwd(&cwd, "link/deep/new.txt"));
-        // and the cwd's own symlinked prefix is not a false positive: a
-        // path inside the directory stays inside however it is reached
-        std::fs::create_dir_all(cwd.join("real")).unwrap();
-        assert!(!escapes_cwd(&cwd, "real/new.txt"));
-        let _ = std::fs::remove_dir_all(&outside);
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn a_path_argument_is_checked() {
-        let cwd = std::path::Path::new("/home/user/proj");
-        assert!(!args_escape_cwd(cwd, &json!({"path": "src/a.rs"})));
-        assert!(args_escape_cwd(cwd, &json!({"path": "/etc/passwd"})));
-        assert!(args_escape_cwd(cwd, &json!({"path": "../secrets"})));
-        assert!(!args_escape_cwd(cwd, &json!({"pattern": "x"})));
-    }
-
-    #[test]
-    fn a_command_line_is_scanned_for_paths_outside_the_cwd() {
-        let cwd = std::path::Path::new("/home/user/proj");
-        let escapes = |cmd: &str| command_escapes_cwd(cwd, cmd);
-        // the project's own workflow is untouched
-        assert!(!escapes("cargo test --all-targets"));
-        assert!(!escapes("rg foo src/agent && cat src/main.rs"));
-        assert!(!escapes("git commit -m 'fix src/x'"));
-        // a read-only whitelisted word is no longer a way around the gate
-        assert!(escapes("cat /etc/passwd"));
-        assert!(escapes("ls ~/.ssh"));
-        assert!(escapes("cd /tmp && ls"));
-        assert!(escapes("rg --files ../other"));
-        assert!(escapes("cat --file=/etc/hosts"));
-        // `$HOME` is expanded, so the real target is what gets checked
-        assert!(escapes("cat $HOME/.ssh/id_rsa"));
-        // an expansion that cannot be resolved is not assumed harmless
-        assert!(escapes("cat $SECRET_DIR/x"));
-        assert!(escapes("cat `pwd`/x"));
-        // a bare word, a flag, or a value the `=` half of a flag: not paths
-        assert!(!escapes("awk '{print $1}' src/main.rs"));
-        assert!(!escapes("cargo test --features=serde"));
-    }
-
-    #[test]
-    fn a_token_naming_a_path_is_recognized_on_every_platform() {
-        // Windows takes `\` as a separator; on unix the token is just a
-        // relative name, so the resolution stays the platform's business
-        assert!(token_path(r"..\other\secrets.txt").is_some());
-        assert!(token_path(r"C:\Windows\win.ini").is_some());
-        assert!(token_path("src/main.rs").is_some());
-        assert!(token_path("--file=/etc/hosts").is_some());
-        assert!(token_path("~/notes.txt").is_some());
-        // flags and ordinary words are not paths
-        assert!(token_path("--verbose").is_none());
-        assert!(token_path("main.rs").is_none());
-        assert!(token_path("--features=serde").is_none());
-    }
-
-    #[test]
     fn per_tool_policies_win() {
-        let deny = resolve(
-            "bash",
-            Tier::Exec,
-            false,
-            &cfg(&[("bash", Policy::Deny)]),
-            None,
-        );
+        let deny = resolve("bash", Tier::Exec, &cfg(&[("bash", Policy::Deny)]), None);
         assert!(matches!(deny, Decision::Deny(_)));
-        let allow = resolve(
-            "bash",
-            Tier::Exec,
-            false,
-            &cfg(&[("bash", Policy::Allow)]),
-            None,
-        );
+        let allow = resolve("bash", Tier::Exec, &cfg(&[("bash", Policy::Allow)]), None);
         assert_eq!(allow, Decision::Auto);
-        let prompt = resolve(
-            "read",
-            Tier::Read,
-            false,
-            &cfg(&[("read", Policy::Prompt)]),
-            None,
-        );
+        let prompt = resolve("read", Tier::Read, &cfg(&[("read", Policy::Prompt)]), None);
         assert!(matches!(prompt, Decision::Ask(_)));
     }
 }

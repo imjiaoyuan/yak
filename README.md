@@ -78,13 +78,10 @@ outright, and no config or file edit can re-enable them.
 `.llm/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the
 hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line
 is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment
-(`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. One line is a
-directive, not a pattern: `outside-cwd` makes any file access that leaves the working directory ask
-for approval — a file tool's `path` argument, or a shell command line naming one (`!outside-cwd`
-switches it off). The file is seeded with the syntax as comments and `outside-cwd` active; deleting
-it just resets it to those rules. It is a prompt, not a fence: the check is lexical, so a path a
-shell builds at runtime (`p=/etc/passwd; cat $p`) is not seen, and neither is an argument an
-extension tool names for itself.
+(`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded
+with `rm` and `git push --force*` plus the syntax as comments; deleting it just resets it to those
+rules. It is a prompt, not a fence: the check is lexical, so a command a shell builds at runtime is
+not seen, and neither is a command an extension tool runs for itself.
 
 A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to spare that pattern
 for the rest of the session.

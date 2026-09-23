@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::approval::{self, Tier};
+use super::approval::Tier;
 use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
@@ -102,13 +102,6 @@ pub trait Tool: Send + Sync {
     /// action line before the approval prompt; file-mutating tools override.
     fn diff(&self, _args: &Value, _cwd: &Path) -> Option<String> {
         None
-    }
-    /// Whether the call reaches outside the working directory: the gate's
-    /// input for the `outside-cwd` blacklist directive. The default reads
-    /// the tool's `path` argument; `bash` overrides it with a scan of its
-    /// command line.
-    fn escapes_cwd(&self, args: &Value, cwd: &Path) -> bool {
-        approval::args_escape_cwd(cwd, args)
     }
     /// Salvage malformed argument shapes before validation (the reference's
     /// `prepareArguments`, which the loop runs ahead of the schema check): a

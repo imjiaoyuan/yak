@@ -164,8 +164,8 @@ across processes with `LLM_SESSION_ID`.
   cleanup) are outright `Deny`, none of which any file, flag or `!` line can switch off; then the
   user-editable ask-list (`blacklist.rs`: `~/.llm/blacklist` plus the nearest `.llm/blacklist`,
   project lines winning by last match; word patterns hit a command position anywhere in the line,
-  segment patterns match the whole segment, globs work, `!` re-allows), seeded with `rm`,
-  `git push --force*` and the active `outside-cwd` directive: a hit is an `Ask` — immune to allow
+  segment patterns match the whole segment, globs work, `!` re-allows), seeded with `rm` and
+  `git push --force*`: a hit is an `Ask` — immune to allow
   policies — with the matched pattern highlighted in the prompt, and `a` spares the pattern for the
   session (`blacklist_session_allows`, never persisted), `session.rs` (the Session: one
   model + tools + accumulated history, thinking level, steer queue shared with the KeyWatcher, turn
