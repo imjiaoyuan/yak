@@ -1,5 +1,5 @@
 //! User commands: `~/.llm/commands/*.md` (plus the nearest project
-//! `.llm/commands/`, which wins) turning `llm <name> [args...]` into a
+//! `.llm/commands/`, which wins) expanding a REPL `/name [args...]` into a
 //! prompt-template invocation — a declarative subcommand with no code.
 //! Markdown frontmatter carries `system` (the body is the prompt, and
 //! `$input` receives the trailing args).

@@ -318,7 +318,7 @@ fn models_map_mut(
     models.as_object_mut().expect("just ensured an object")
 }
 
-/// The mutable `models.<mode>` object, created (parents included) when absent.
+/// The mutable `models` object, created when absent.
 fn options_from(value: &serde_json::Value) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
     serde_json::from_value(value.get("models")?.get("options")?.clone()).ok()
 }
