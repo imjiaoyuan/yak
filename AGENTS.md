@@ -181,8 +181,9 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
   text note in place of its block. An attachment rides as the bytes the file holds — nothing is
   re-encoded, so an oversized screenshot costs what its pixels cost. Every image in a replayed
   history is re-billed on every request, so `session::budget_images` — run on
-  every round, before pricing — drops the pixels from images older than the newest two
-  image-carrying user turns, tool results included (provenance stays, so the adapters render the
+  every round, before pricing — drops the pixels from images outside the newest two
+  user turns, tool results included (a screenshot can enter as a `read` result; provenance stays, so the
+  adapters render the
   dropped payload as a note), and a resume rehydrates only from that window's start: an image out
   of the window is never decoded and never read off disk.
   Every agent session persists unless `--no-session`; there is no global

@@ -228,8 +228,11 @@ across processes with `LLM_SESSION_ID`.
   loaded session onto a new thread id sharing its turns so far via `threads::Store::fork_thread`),
   `compact.rs` (cut at a turn boundary keeping a 20k-token recent window, the reference's default; the stored
   summary is the summarizer's own text — re-compaction updates it incrementally through
-  `<previous-summary>` tags — and `trim_old_attachments` swaps attachments older than the last two
-  attachment-bearing messages for a name+mime note every round, before the request is built; a
+  `<previous-summary>` tags — a `session::budget_images` pass runs every round before the request
+  is built and drops the pixels of images outside the newest two user turns (tool results included:
+  a screenshot can enter as a `read` result), keeping provenance; `trim_old_attachments` then
+  rewrites attachments older than the last two attachment-bearing messages into a name+mime note
+  whenever the rewrite gate is open — every round with compaction off, past the gate otherwise; a
   compaction that cannot run — summarizer error, empty summary, no cut point — is reported as a
   `compact_stalled` notice naming why, once per run, because a window quietly left over its limit is
   the one failure compaction exists to prevent; the check runs *before* each model request, not

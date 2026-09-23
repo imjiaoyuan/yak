@@ -914,15 +914,15 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> Rebuilt {
     }
 }
 
-/// How many of the newest image-carrying user turns keep their pixels on a
-/// replay. Every image in the request is billed on every request, so a thread
-/// that once carried screenshots would keep paying for them; older turns keep
-/// their provenance and the adapters render the dropped payload as a note.
+/// How many of the newest user turns keep their pixels on a replay. Every
+/// image in the request is billed on every request, so a thread that once
+/// carried screenshots would keep paying for them; older turns keep their
+/// provenance and the adapters render the dropped payload as a note.
 const IMAGE_TURNS_KEPT: usize = 2;
 
 /// Drop the pixels from images older than the newest `IMAGE_TURNS_KEPT` user
-/// turns that carry any — from tool results too, since they belong to the turn
-/// they ran in.
+/// turns — from tool results too, since a screenshot can enter as a `read`
+/// result and belongs to the turn it ran in.
 pub(crate) fn budget_images(msgs: &mut [Msg]) {
     let Some(start) = image_window_start(msgs) else {
         return;
@@ -933,16 +933,18 @@ pub(crate) fn budget_images(msgs: &mut [Msg]) {
 }
 
 /// Where the kept image window starts: the index of the `IMAGE_TURNS_KEPT`-th
-/// newest image-carrying user turn. `None` when the history holds fewer image
-/// turns than the cap, so nothing is taken away.
+/// newest user turn. The window is anchored to turns, not to image-carrying
+/// turns — a lone screenshot must age out as the conversation moves on, or a
+/// thread that ever carried one pays for it forever. `None` when the history
+/// holds fewer user turns than the cap, so nothing is taken away.
 fn image_window_start(msgs: &[Msg]) -> Option<usize> {
-    let mut seen = 0;
+    // walk from the end; the cap-th newest user turn is where the window
+    // opens, and fewer than `IMAGE_TURNS_KEPT` user turns keeps everything
+    let mut left = IMAGE_TURNS_KEPT;
     for (i, m) in msgs.iter().enumerate().rev() {
-        if let Msg::User { attachments, .. } = m
-            && attachments.iter().any(|a| a.is_image())
-        {
-            seen += 1;
-            if seen == IMAGE_TURNS_KEPT {
+        if matches!(m, Msg::User { .. }) {
+            left -= 1;
+            if left == 0 {
                 return Some(i);
             }
         }
@@ -1522,6 +1524,50 @@ mod tests {
         assert!(dropped(&msgs[1]), "and the tool result that ran in it");
         assert!(!dropped(&msgs[2]), "the newest two keep their pixels");
         assert!(!dropped(&msgs[3]));
+    }
+
+    /// A screenshot that entered as a `read` result (auto-attach missed the
+    /// path) must still age out; the window is anchored to user turns, not to
+    /// turns that happen to carry an image.
+    #[test]
+    fn a_lone_tool_result_image_ages_out_with_the_turns() {
+        let shot = || {
+            vec![crate::core::attachments::from_bytes(
+                Some("image/png"),
+                vec![1, 2, 3],
+            )]
+        };
+        let mut msgs = vec![
+            Msg::User {
+                text: "look at this".into(),
+                attachments: Vec::new(),
+            },
+            Msg::assistant("reading".to_string()),
+            Msg::ToolResult {
+                call_id: "1".into(),
+                name: "read".into(),
+                content: "shot".into(),
+                error: None,
+                attachments: shot(),
+            },
+            Msg::assistant("there".to_string()),
+            Msg::User {
+                text: "first later turn".into(),
+                attachments: Vec::new(),
+            },
+            Msg::User {
+                text: "second later turn".into(),
+                attachments: Vec::new(),
+            },
+        ];
+        budget_images(&mut msgs);
+        match &msgs[2] {
+            Msg::ToolResult { attachments, .. } => assert!(
+                attachments[0].base64_data.is_empty(),
+                "the old tool-result screenshot goes"
+            ),
+            _ => panic!("not a tool result"),
+        }
     }
 
     #[test]
