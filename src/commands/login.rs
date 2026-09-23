@@ -1,7 +1,7 @@
 //! The provider lifecycle behind the REPL's `/login` and `/logout`: the
-//! wizard (catalog of common presets, hidden-input key capture, live model
-//! list) and the removal picker. The `llm login`/`llm logout` CLI is gone —
-//! this is library code only.
+//! wizard (the reference-shaped: pick a provider, paste the key, pick the default model
+//! — esc cancels at every step) and the removal picker. The
+//! `llm login`/`llm logout` CLI is gone — this is library code only.
 
 use std::io::{BufRead, Write};
 
@@ -39,15 +39,14 @@ struct Preset {
     name: String,
     kind: String,
     base_url: String,
-    env_key: Option<&'static str>,
-    needs_key: bool,
     /// interactive URL building: cloudflare-gateway | cloudflare-workers | azure
     template: Option<&'static str>,
 }
 
 /// The preset catalog: every catalogued provider plus the interactive
 /// URL-template providers (Cloudflare gateways, Azure) that need an account
-/// id prompted at login time.
+/// id prompted at login time. Alphabetical — the picker is a menu, not a
+/// registry dump.
 fn presets() -> Vec<Preset> {
     let mut v: Vec<Preset> = crate::providers::catalog::ALL
         .iter()
@@ -55,8 +54,6 @@ fn presets() -> Vec<Preset> {
             name: e.id.to_string(),
             kind: e.kind.to_string(),
             base_url: e.base_url.to_string(),
-            env_key: (!e.env.is_empty()).then_some(e.env),
-            needs_key: !e.env.is_empty(),
             template: None,
         })
         .collect();
@@ -64,26 +61,21 @@ fn presets() -> Vec<Preset> {
         name: "cloudflare-ai-gateway".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_key: Some("CLOUDFLARE_API_KEY"),
-        needs_key: true,
         template: Some("cloudflare-gateway"),
     });
     v.push(Preset {
         name: "cloudflare-workers-ai".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_key: Some("CLOUDFLARE_API_KEY"),
-        needs_key: true,
         template: Some("cloudflare-workers"),
     });
     v.push(Preset {
         name: "azure-openai".into(),
         kind: "openai-compat".into(),
         base_url: String::new(),
-        env_key: Some("AZURE_OPENAI_API_KEY"),
-        needs_key: true,
         template: Some("azure"),
     });
+    v.sort_by(|a, b| a.name.cmp(&b.name));
     v
 }
 
@@ -151,18 +143,26 @@ fn prompt(label: &str) -> Option<String> {
     }
 }
 
+/// `prompt` with a shown default: enter (empty answer) takes it, esc/EOF
+/// cancels.
+fn prompt_with_default(label: &str, default: &str) -> Option<String> {
+    prompt(&format!("{label} (default {default})")).or_else(|| Some(default.to_string()))
+}
+
 pub(crate) fn wizard() -> Result<(), String> {
+    // step 1 — provider. Alphabetical, plus `custom` for a base URL we do
+    // not know. esc here (or at any later step) aborts the whole thing: no
+    // partial config is written.
     let list = presets();
     let mut items: Vec<String> = list
         .iter()
         .map(|p| {
-            let env = p.env_key.map(|k| format!(" (${k})")).unwrap_or_default();
             let base = if p.base_url.is_empty() {
                 "(URL prompted)".to_string()
             } else {
                 p.base_url.clone()
             };
-            format!("{:<22} {}{}", p.name, base, env)
+            format!("{:<26} {}", p.name, base)
         })
         .collect();
     items.push("custom".to_string());
@@ -180,9 +180,8 @@ pub(crate) fn wizard() -> Result<(), String> {
         (Some(&list[idx]), list[idx].name.clone())
     };
     // a second subscription to the same provider (two OpenCode Go keys) is a
-    // second provider entry: prefill the next free name so pressing enter
-    // lands on `opencode-go-2` instead of running the whole wizard into an
-    // overwrite question
+    // second provider entry: prefill the next free name so the new one never
+    // silently overwrites the first
     let preset_name = if preset.is_some() {
         let cfg = config::load();
         next_free_name(&preset_name, |n| cfg.providers.contains_key(n))
@@ -190,10 +189,11 @@ pub(crate) fn wizard() -> Result<(), String> {
         preset_name
     };
 
+    // name and URL are decided before the key so esc during the key step
+    // still has nothing to undo — nothing is written until the key is in
     let name = match &preset {
-        Some(_) => prompt(&format!("Provider name (default {preset_name})"))
-            .unwrap_or_else(|| preset_name.clone()),
-        None => prompt("Provider name (e.g. my-proxy)").ok_or("a provider name is required")?,
+        Some(_) => prompt_with_default("Provider name", &preset_name).ok_or("cancelled")?,
+        None => prompt("Provider name (e.g. my-proxy)").ok_or("cancelled")?,
     };
     if name.is_empty()
         || !name
@@ -202,12 +202,17 @@ pub(crate) fn wizard() -> Result<(), String> {
     {
         return Err(format!("invalid provider name: {name}"));
     }
-
     let kind = match &preset {
-        Some(p) => p.kind.to_string(),
+        Some(p) => p.kind.clone(),
         None => loop {
-            let k = prompt("Kind [openai-compat/anthropic] (default openai-compat)")
-                .unwrap_or_else(|| "openai-compat".to_string());
+            let Some(k) = prompt("Kind [openai-compat/anthropic] (default openai-compat)") else {
+                return cancelled();
+            };
+            let k = if k.is_empty() {
+                "openai-compat".to_string()
+            } else {
+                k
+            };
             if k == "openai-compat" || k == "anthropic" {
                 break k;
             }
@@ -216,147 +221,136 @@ pub(crate) fn wizard() -> Result<(), String> {
     };
     let base_url = match preset.and_then(|p| p.template) {
         Some("cloudflare-gateway") => {
-            let acct = prompt("Cloudflare account id").ok_or("account id required")?;
-            let gw = prompt("Gateway id").ok_or("gateway id required")?;
+            let Some(acct) = prompt("Cloudflare account id") else {
+                return cancelled();
+            };
+            let Some(gw) = prompt("Gateway id") else {
+                return cancelled();
+            };
             format!("https://gateway.ai.cloudflare.com/v1/{acct}/{gw}")
         }
         Some("cloudflare-workers") => {
-            let acct = prompt("Cloudflare account id").ok_or("account id required")?;
+            let Some(acct) = prompt("Cloudflare account id") else {
+                return cancelled();
+            };
             format!("https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1")
         }
         Some("azure") => {
-            let res = prompt("Azure resource name").ok_or("resource name required")?;
+            let Some(res) = prompt("Azure resource name") else {
+                return cancelled();
+            };
             format!("https://{res}.openai.azure.com/openai/v1")
         }
         _ => match &preset {
-            Some(p) => prompt(&format!("Base URL (default {})", p.base_url))
-                .unwrap_or_else(|| p.base_url.clone()),
-            None => prompt("Base URL (e.g. https://api.deepseek.com/v1)")
-                .ok_or("a base URL is required")?,
+            Some(p) => prompt_with_default("Base URL", &p.base_url).ok_or("cancelled")?,
+            None => prompt("Base URL (e.g. https://api.deepseek.com/v1)").ok_or("cancelled")?,
         },
     };
 
-    // api key: hidden input. Empty answer takes the detected env var as a
-    // ${VAR} reference; a pasted literal is stored inline in config.json.
-    // Returns (stored api_key, key to use for the /models fetch).
-    let (api_key, fetch_key): (Option<String>, String) = if preset.is_some_and(|p| !p.needs_key) {
-        (None, String::new())
-    } else {
-        let detected = preset
-            .and_then(|p| p.env_key.filter(|k| std::env::var_os(k).is_some()))
-            .or_else(|| {
-                // custom flow: check the obvious names for the chosen kind
-                let vars: &[&str] = if kind == "anthropic" {
-                    &["ANTHROPIC_API_KEY"]
-                } else {
-                    &["OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"]
-                };
-                vars.iter().find(|k| std::env::var_os(k).is_some()).copied()
-            });
-        let hint = match detected {
-            Some(var) => format!("API key (empty = use ${{{var}}}): "),
-            None => "API key: ".to_string(),
-        };
-        let typed = crate::term::read_hidden(&hint)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if typed.is_empty() {
-            match detected {
-                Some(var) => (
-                    Some(format!("${{{var}}}")),
-                    std::env::var(var).unwrap_or_default(),
-                ),
-                None => (None, String::new()),
-            }
-        } else if let Some(var) = typed.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
-            (Some(typed.clone()), std::env::var(var).unwrap_or_default())
-        } else {
-            (Some(typed.clone()), typed)
-        }
+    // step 2 — the key, hidden. Empty answer takes the detected env var as a
+    // ${VAR} reference. esc aborts without writing anything.
+    let detected = preset
+        .and_then(|p| env_for(&p.name))
+        .filter(|k| std::env::var_os(k).is_some())
+        .or_else(|| {
+            // custom flow: check the obvious names for the chosen kind
+            let vars: &[&str] = if kind == "anthropic" {
+                &["ANTHROPIC_API_KEY"]
+            } else {
+                &["OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"]
+            };
+            vars.iter().find(|k| std::env::var_os(k).is_some()).copied()
+        });
+    let hint = match detected {
+        Some(var) => format!("API key (empty = use ${{{var}}}, esc cancels): "),
+        None => "API key (esc cancels): ".to_string(),
     };
-
-    // fetch the model list (best effort); unreachable endpoints leave the
-    // provider model-less until models are added by hand
-    let models = fetch_models(&kind, &base_url, &fetch_key);
-
-    let selected: Vec<String> = if models.is_empty() {
-        match prompt("Model ids (comma-separated)") {
-            Some(list) => list
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            None => Vec::new(),
-        }
-    } else {
-        let mut items = vec![format!("all ({} models)", models.len())];
-        items.extend(models.iter().cloned());
-        match crate::term::lineedit::pick("models:", &items, true) {
-            Some(0) => models.clone(),
-            Some(i) => vec![models[i - 1].clone()],
-            None => Vec::new(),
-        }
-    };
-    if selected.is_empty() {
-        eprintln!("no models selected — provider saved without models");
+    let typed = crate::term::read_hidden(&hint)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if typed.is_empty() && detected.is_none() {
+        return Err("no API key entered".into());
     }
+    let api_key: Option<String> = if typed.is_empty() {
+        Some(format!("${{{}}}", detected.expect("checked above")))
+    } else {
+        Some(typed)
+    };
+    let fetch_key = match api_key.as_deref() {
+        Some(k) if k.starts_with("${") && k.ends_with('}') => {
+            std::env::var(&k[2..k.len() - 1]).unwrap_or_default()
+        }
+        Some(k) => k.to_string(),
+        None => String::new(),
+    };
+
+    // step 3 — the default model, fetched live. Nothing has been written
+    // yet; the single save below lands provider + default together.
+    let models = fetch_models(&kind, &base_url, &fetch_key);
+    let default = if models.is_empty() {
+        let Some(m) = prompt("Model id (the default; e.g. deepseek-chat)") else {
+            return cancelled();
+        };
+        Some(m)
+    } else {
+        let items: Vec<String> = models.clone();
+        crate::term::lineedit::pick("default model:", &items, true).map(|i| models[i].clone())
+    };
+    let Some(default_model_id) = default else {
+        return cancelled();
+    };
 
     let mut cfg = config::load();
-    if cfg.providers.contains_key(&name) {
-        let overwrite = prompt(format!("Provider '{name}' exists — overwrite? [y/N]").as_str())
-            .map(|a| a.eq_ignore_ascii_case("y"))
-            .unwrap_or(false);
-        if !overwrite {
-            eprintln!("aborted");
-            return Ok(());
-        }
-    }
     cfg.providers.insert(
         name.clone(),
         Provider {
             kind,
             base_url,
             api_key,
-            models: selected.clone(),
+            models: vec![default_model_id.clone()],
         },
     );
     config::save(&cfg).map_err(|e| e.to_string())?;
+    match config::try_set_default_model(&format!("{name}/{default_model_id}")) {
+        Ok(()) => {}
+        Err(e) => eprintln!("Warning: failed to save the default model: {e}"),
+    }
+    eprintln!(
+        "{}default model: {name}/{default_model_id}{}",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
     println!(
         "Provider '{name}' written to {}",
         config::config_path().display()
     );
-
-    // default model: menu over the selected models plus a skip entry; a
-    // skip (or cancel) still auto-defaults when nothing is set, so the
-    // first provider's model makes a fresh install ready to run
-    if !selected.is_empty() {
-        let mut items: Vec<String> = selected.iter().map(|m| format!("{name}/{m}")).collect();
-        items.push("skip (keep current default)".to_string());
-        let picked = crate::term::lineedit::pick("default model:", &items, false);
-        let chosen = match picked {
-            Some(i) if i < selected.len() => Some(selected[i].clone()),
-            _ => {
-                if config::default_model().is_none() {
-                    Some(selected[0].clone())
-                } else {
-                    None
-                }
-            }
-        };
-        if let Some(m) = chosen {
-            match config::try_set_default_model(&format!("{name}/{m}")) {
-                Ok(()) => eprintln!(
-                    "{}default model: {name}/{m}{}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                ),
-                Err(e) => eprintln!("Warning: failed to save default model: {e}"),
-            }
-        }
-    }
     eprintln!("\nTry it:  llm -m {name} \"hello\"   |   llm  (bare = interactive session)");
     Ok(())
+}
+
+fn cancelled() -> Result<(), String> {
+    eprintln!(
+        "{}aborted — nothing written{}",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
+    Ok(())
+}
+
+/// The catalog entry's env var, the reference's registry (AZURE_OPENAI_API_KEY
+/// for the azure preset, CLOUDFLARE_API_KEY for both cloudflare ones).
+fn env_for(preset_name: &str) -> Option<&'static str> {
+    crate::providers::catalog::ALL
+        .iter()
+        .find(|e| e.id == preset_name)
+        .map(|e| e.env)
+        .filter(|e| !e.is_empty())
+        .or(match preset_name {
+            "azure-openai" => Some("AZURE_OPENAI_API_KEY"),
+            "cloudflare-ai-gateway" | "cloudflare-workers-ai" => Some("CLOUDFLARE_API_KEY"),
+            _ => None,
+        })
 }
 
 fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {

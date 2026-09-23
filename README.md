@@ -330,11 +330,13 @@ Options:
 
 ## Providers and models
 
-The easy path: run `llm`, type `/login`, pick a provider, paste your API key (hidden). That's it —
-the first provider's first model becomes your default, so a fresh install is ready to run. The
-catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI,
-OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider
-and clears the default if it pointed there.
+The easy path: run `llm`, type `/login`, pick a provider, paste your API key (hidden), pick the
+default model from the provider's live model list. That's it — only the model you picked is stored
+(the provider's full list is fetched live whenever `/model` runs), and the first provider's first
+model becomes your default, so a fresh install is ready to run. esc cancels at any step without
+writing anything. The catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google,
+Groq, Mistral, xAI, OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM.
+`/logout` removes a provider and clears the default if it pointed there.
 
 Two accounts on the same provider (say two OpenCode Go subscriptions) are two provider entries: run
 `/login` for the second one and accept the suggested `NAME-2`, then give it its own key. Models are
@@ -370,7 +372,8 @@ Everything lives under `~/.llm`:
 | `commands/` | prompt templates |
 | `blacklist` | extra commands to refuse (yours; the core is built in) |
 
-`/model` picks the model and its thinking depth, saved for future sessions; `/thinking` changes the
+`/model` picks the model (live list, with your saved ones pinned on top of it) and its thinking
+depth, saved for future sessions; `/thinking` changes the
 depth alone. Both live in the `models` object of config.json. `-m` and `LLM_MODEL` override per run,
 and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning
 and a fallback.
