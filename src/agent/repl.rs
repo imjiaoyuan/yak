@@ -120,13 +120,9 @@ pub fn repl(
         );
         run_task_logged(&mut session, text, &mut attachments);
 
-        // steering lines typed after the final model call become new tasks
-        while !session
-            .steer_queue
-            .lock()
-            .map(|q| q.is_empty())
-            .unwrap_or(true)
-        {
+        // steering lines typed after the final model call become new tasks;
+        // a task can itself draw steering, so drain until the queue is empty
+        loop {
             let leftover = session.take_steer_leftover();
             if leftover.is_empty() {
                 break;
