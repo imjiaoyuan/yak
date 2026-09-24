@@ -31,7 +31,21 @@ impl Tool for ReadTool {
         })
     }
     fn preview(&self, args: &Value) -> String {
-        args["path"].as_str().unwrap_or("?").to_string()
+        let path = args["path"].as_str().unwrap_or("?").to_string();
+        // the requested line window, the reference's `:start-end`: two reads of the same
+        // file at different offsets stay distinguishable on the `$` action
+        // line. Shown only when offset/limit were given, and clamped the same
+        // way `execute` reads them (offset >= 1, limit >= 1).
+        let offset = args["offset"].as_u64();
+        let limit = args["limit"].as_u64();
+        if offset.is_none() && limit.is_none() {
+            return path;
+        }
+        let start = offset.unwrap_or(1).max(1);
+        match limit {
+            Some(l) => format!("{path}:{start}-{}", start + l.max(1) - 1),
+            None => format!("{path}:{start}"),
+        }
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
         let raw_path = args["path"].as_str().unwrap_or("");
@@ -240,6 +254,26 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_names_the_requested_line_window() {
+        let tool = ReadTool;
+        let p = |args: Value| tool.preview(&args);
+        // no window: the bare path, unchanged
+        assert_eq!(p(json!({"path": "R/x.R"})), "R/x.R");
+        // offset only, limit only, both — the reference's `:start-end`
+        assert_eq!(p(json!({"path": "R/x.R", "offset": 2455})), "R/x.R:2455");
+        assert_eq!(p(json!({"path": "R/x.R", "limit": 100})), "R/x.R:1-100");
+        assert_eq!(
+            p(json!({"path": "R/x.R", "offset": 2455, "limit": 20})),
+            "R/x.R:2455-2474"
+        );
+        // offset 0 clamps to 1, matching what execute reads
+        assert_eq!(
+            p(json!({"path": "R/x.R", "offset": 0, "limit": 5})),
+            "R/x.R:1-5"
+        );
+    }
 
     #[test]
     fn magic_bytes_name_the_format_not_the_extension() {
