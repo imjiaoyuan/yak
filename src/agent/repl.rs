@@ -455,8 +455,52 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     Ok(())
 }
 
+/// The action(s) a round ran, read off its assistant message's `tool_calls` —
+/// the same `$ <verb> <preview>` the terminal printed. Empty for a round that
+/// called no tool.
+fn round_actions(messages: &[crate::providers::Msg]) -> Vec<String> {
+    use crate::providers::Msg;
+    let tools = crate::agent::tools::builtin_tools();
+    let mut actions = Vec::new();
+    for msg in messages {
+        if let Msg::Assistant { tool_calls, .. } = msg {
+            for call in tool_calls {
+                let verb = crate::agent::tools::display_verb(&call.name);
+                let preview = tools
+                    .iter()
+                    .find(|t| t.name() == call.name)
+                    .map(|t| t.preview(&call.arguments))
+                    .unwrap_or_else(|| call.name.clone());
+                actions.push(format!("{verb} {preview}"));
+            }
+        }
+    }
+    actions
+}
+
+/// One `/tree` row label: the user's text when the round carried one,
+/// otherwise the action(s) it ran, otherwise its answer's first line. A tool
+/// round used to render as `--`, which made a long task's rounds
+/// indistinguishable.
+fn turn_label(t: &crate::core::threads::StoredTurn) -> String {
+    let clip = |s: &str| -> String { s.replace('\n', " ").chars().take(50).collect() };
+    if !t.prompt.trim().is_empty() {
+        return clip(&t.prompt);
+    }
+    let actions = round_actions(&t.messages);
+    if !actions.is_empty() {
+        return clip(&actions.join(" · "));
+    }
+    let text = clip(&t.response);
+    if text.trim().is_empty() {
+        "--".to_string()
+    } else {
+        text
+    }
+}
+
 /// `/tree`: jump to any past turn of this session — the seed and the thread
-/// file are truncated to just before the picked turn, and the next task
+/// file are truncated to just after the picked turn, and the next task
 /// continues from there.
 fn tree_jump(session: &mut Session) -> Result<(), String> {
     let Some(cid) = session.conversation_id.clone() else {
@@ -479,19 +523,7 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     }
     let items: Vec<String> = turns
         .iter()
-        .map(|t| {
-            let preview: String = t.prompt.chars().take(50).collect::<String>();
-            let preview = preview.replace('\n', " ");
-            format!(
-                "{} · \"{}\"",
-                &t.ts[..t.ts.len().min(19)],
-                if preview.trim().is_empty() {
-                    "--"
-                } else {
-                    &preview
-                }
-            )
-        })
+        .map(|t| format!("{} · \"{}\"", &t.ts[..t.ts.len().min(19)], turn_label(t)))
         .collect();
     let Some(i) = crate::term::lineedit::pick(
         "jump to turn (everything after it is dropped):",
@@ -500,10 +532,11 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     ) else {
         return Ok(());
     };
-    // the wire messages of the kept turns are the new seed
-    let cut: usize = turns[..i].iter().map(|t| t.messages.len()).sum();
+    // the wire messages of the kept turns are the new seed; the picked turn
+    // itself stays — "everything after it is dropped"
+    let cut: usize = turns[..=i].iter().map(|t| t.messages.len()).sum();
     session.seed.truncate(cut);
-    store.truncate_thread(&cid, i)?;
+    store.truncate_thread(&cid, i + 1)?;
     eprintln!(
         "{}rewound to turn {} — type the next task{}",
         crate::theme::err().dim,
@@ -1320,5 +1353,55 @@ mod tests {
         assert!(!slash_command_line("/no-such-cmd", &names));
         assert!(!slash_command_line("/x /", &names));
         assert!(!slash_command_line("task", &names));
+    }
+
+    #[test]
+    fn tree_rows_name_a_rounds_action_not_a_blank() {
+        use crate::core::threads::StoredTurn;
+        use crate::providers::{Msg, ToolCall};
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments,
+        };
+        let stored = |prompt: &str, response: &str, messages: Vec<Msg>| StoredTurn {
+            v: 0,
+            id: "t".into(),
+            ts: "2026-09-24T11:14:07".into(),
+            mode: "agent".into(),
+            model: "m".into(),
+            cwd: None,
+            system: None,
+            prompt: prompt.into(),
+            response: response.into(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages,
+        };
+        // a tool round reads as the actions it ran, joined
+        let tool_round = stored(
+            "",
+            "",
+            vec![Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![
+                    call("read", serde_json::json!({"path": "R/cli.R"})),
+                    call("grep", serde_json::json!({"pattern": "theme"})),
+                ],
+                reasoning: None,
+                reasoning_meta: None,
+            }],
+        );
+        assert_eq!(turn_label(&tool_round), "read R/cli.R · grep \"theme\"");
+        // a user round shows the text, a plain answer its first line
+        assert_eq!(
+            turn_label(&stored("读一下 cli.R", "", Vec::new())),
+            "读一下 cli.R"
+        );
+        assert_eq!(turn_label(&stored("", "all done", Vec::new())), "all done");
+        // nothing to say stays the placeholder, not an empty quote
+        assert_eq!(turn_label(&stored("", "", Vec::new())), "--");
     }
 }
