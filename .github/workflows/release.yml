@@ -46,7 +46,7 @@ jobs:
         with:
           bin: llm
           target: ${{ matrix.target }}
-          tool: ${{ matrix.tool }}
+          build-tool: ${{ matrix.tool }}
           tar: unix
           zip: windows
           checksum: sha256
