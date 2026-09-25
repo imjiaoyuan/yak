@@ -1477,12 +1477,7 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
                 }
                 let n = matched.len();
                 sel = ((sel as i64 + delta).rem_euclid(n as i64)) as usize;
-                let visible = matched.len().min(budget);
-                if sel < top {
-                    top = sel;
-                } else if sel >= top + visible {
-                    top = sel + 1 - visible;
-                }
+                top = clamp_top(sel, matched.len(), budget, top);
                 erase(&mut out, printed, false);
                 printed = draw(
                     &mut out,
@@ -1500,7 +1495,10 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
         let query = String::from_utf8_lossy(&query_bytes).into_owned();
         apply_filter(&query, &mut matched);
         sel = sel.min(matched.len().saturating_sub(1));
-        top = top.min(sel);
+        // the shrunken list may no longer hold the old window: clamp it
+        // fully (a top past the end would panic the row slice), not just
+        // under the selection
+        top = clamp_top(sel, matched.len(), budget, top);
         erase(&mut out, printed, false);
         printed = draw(&mut out, &matched, sel, top, &query);
     }
@@ -1522,6 +1520,21 @@ fn row_body(item: &str, selected: bool) -> String {
         let p = crate::theme::err();
         format!("{}  {shown}{}", p.dim, p.reset)
     }
+}
+
+/// Keep the scroll window honest: the selection stays visible, the window
+/// never starts past the list's end, and it never spans past the last item
+/// when the list fits the budget — both the arrow path and the filter path
+/// shrink lists, and a stale `top` would panic the row slice.
+fn clamp_top(sel: usize, len: usize, budget: usize, top: usize) -> usize {
+    let visible = len.min(budget);
+    let mut top = top.min(len.saturating_sub(visible));
+    if sel < top {
+        top = sel;
+    } else if visible > 0 && sel >= top + visible {
+        top = sel + 1 - visible;
+    }
+    top
 }
 
 /// Watches stdin during a running task: a bare ESC (0x1b) requests the same
@@ -1695,6 +1708,24 @@ mod tests {
         assert!(!recall_on_up("abc", 1, false));
         assert!(!recall_on_up("ab\ncd", 2, false)); // start of the second line
         assert!(recall_on_up("ab\ncd", 3, true)); // already browsing
+    }
+
+    #[test]
+    fn a_shrunken_filter_result_never_leaves_the_window_past_the_end() {
+        // scrolled to top=2 in a 30-item window of 12, then the filter
+        // leaves 5 matches: the window must start at 0 — the old code kept
+        // top=2 and the row slice panicked on matched[2..7]
+        assert_eq!(clamp_top(4, 5, 12, 2), 0);
+        // a selection beyond the shrunken window's end pulls it down
+        assert_eq!(clamp_top(9, 10, 5, 8), 5);
+        // the window itself never opens past the list's end
+        assert_eq!(clamp_top(0, 3, 12, 2), 0);
+        assert_eq!(clamp_top(0, 0, 12, 2), 0);
+        // unchanged cases: a selection inside the window stays put
+        assert_eq!(clamp_top(3, 30, 12, 2), 2);
+        assert_eq!(clamp_top(2, 30, 12, 8), 2);
+        assert_eq!(clamp_top(11, 30, 12, 0), 0);
+        assert_eq!(clamp_top(12, 30, 12, 0), 1);
     }
 
     #[test]
