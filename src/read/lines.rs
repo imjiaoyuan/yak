@@ -60,7 +60,7 @@ pub(super) fn window_reader(
                 "interrupted by user",
             )));
         }
-        let Some(raw) = read_line(r).map_err(WindowError::Io)? else {
+        let Some((raw, raw_len)) = read_line(r).map_err(WindowError::Io)? else {
             return Ok(WindowResult {
                 total: LineCount::Exact(count),
                 start: if lines.is_empty() { 0 } else { offset },
@@ -90,7 +90,7 @@ pub(super) fn window_reader(
         if first {
             // the newline is not part of it: this is the size the tool names
             // when the line dwarfs the cap
-            first_line_bytes = raw.len();
+            first_line_bytes = raw_len;
             first_line_capped = cap_line(&mut line);
         } else {
             cap_line(&mut line);
@@ -99,27 +99,34 @@ pub(super) fn window_reader(
     }
 }
 
-/// One raw line without its newline; `None` at end of input. Bytes past
-/// LINE_SCAN_CAP are dropped, so a pathological single line costs at most
-/// this much memory.
-fn read_line(r: &mut dyn BufRead) -> std::io::Result<Option<Vec<u8>>> {
+/// One raw line without its newline, paired with its true byte length:
+/// bytes past LINE_SCAN_CAP are dropped from the stored head but still
+/// counted, so a pathological single line costs at most this much memory
+/// while its real size stays reportable (the tool names it when the line
+/// dwarfs the whole read cap). `None` at end of input.
+fn read_line(r: &mut dyn BufRead) -> std::io::Result<Option<(Vec<u8>, usize)>> {
     let mut out: Vec<u8> = Vec::new();
+    let mut true_len = 0usize;
     loop {
         let buf = r.fill_buf()?;
         if buf.is_empty() {
-            return Ok((!out.is_empty()).then_some(out));
+            return Ok((!out.is_empty()).then_some((out, true_len)));
         }
         match buf.iter().position(|&b| b == b'\n') {
             Some(i) => {
-                out.extend_from_slice(&buf[..i]);
-                let n = i + 1;
-                r.consume(n);
-                return Ok(Some(out));
+                // the cap binds this branch too: a newline at the end of a
+                // long run would otherwise append the whole prefix
+                let keep = i.min(LINE_SCAN_CAP.saturating_sub(out.len()));
+                out.extend_from_slice(&buf[..keep]);
+                true_len += i;
+                r.consume(i + 1);
+                return Ok(Some((out, true_len)));
             }
             None => {
                 let n = buf.len();
                 let keep = n.min(LINE_SCAN_CAP.saturating_sub(out.len()));
                 out.extend_from_slice(&buf[..keep]);
+                true_len += n;
                 r.consume(n);
             }
         }
@@ -235,6 +242,31 @@ mod tests {
         assert!(w.lines[0].ends_with('…'));
         assert_eq!(w.lines[1], "after");
         assert!(matches!(w.total, LineCount::Exact(2)));
+        // the true size is reported, not the stored head's: the tool's
+        // "line dwarfs the read cap, use bash" message keys on it
+        assert_eq!(w.first_line_bytes, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn newline_at_end_of_one_buffer_still_respects_the_scan_cap() {
+        // a line ending just inside the second 64 KiB chunk used to append
+        // the whole prefix, blowing past LINE_SCAN_CAP
+        let mut text = vec![b'x'; 64 * 1024 + 100];
+        text.push(b'\n');
+        text.extend_from_slice(b"after\n");
+        let w = result(&text, 1, 10);
+        assert_eq!(w.lines[0].chars().count(), super::super::LINE_CHAR_CAP + 1);
+        assert_eq!(w.first_line_bytes, 64 * 1024 + 100);
+        assert_eq!(w.lines[1], "after");
+    }
+
+    #[test]
+    fn true_length_counts_the_newlineless_tail() {
+        // no \n at all: the None branch accumulates the same true length
+        let text = vec![b'y'; 100 * 1024];
+        let w = result(&text, 1, 10);
+        assert_eq!(w.first_line_bytes, 100 * 1024);
+        assert!(w.eof);
     }
 
     #[test]
