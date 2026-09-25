@@ -309,7 +309,7 @@ impl Store {
             if best.as_ref().is_some_and(|(t, _)| m <= *t) {
                 continue;
             }
-            let id = entry_id(&entry)?;
+            let Ok(id) = entry_id(&entry) else { continue };
             if local.as_ref().is_some_and(|local| !local.contains(&id)) {
                 continue;
             }
@@ -328,7 +328,7 @@ impl Store {
     ) -> Result<Option<String>, String> {
         let mut hits: Vec<String> = Vec::new();
         for entry in self.entries()? {
-            let id = entry_id(&entry)?;
+            let Ok(id) = entry_id(&entry) else { continue };
             if id == prefix {
                 return Ok(Some(id));
             }
@@ -568,6 +568,27 @@ mod tests {
         let dir = crate::core::testutil::scratch_dir(&format!("threads-{name}"));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// A stray non-thread file in the store (a `.DS_Store` the desktop
+    /// drops in, a `desktop.ini`) must not take the resume and export
+    /// surfaces down with it — the listing walks skip it, same as
+    /// `summaries` always has.
+    #[test]
+    fn a_stray_file_in_the_store_does_not_break_resume() {
+        let dir = scratch("stray");
+        let store = Store::open_path(&dir).unwrap();
+        let id = seed(&store, &[turn("1", "task", "ans", "agent")], 0);
+        fs::write(dir.join(".DS_Store"), b"junk").unwrap();
+        assert_eq!(
+            store.latest_thread(None).unwrap().as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            store.resolve_thread(&id[..8], None).unwrap().as_deref(),
+            Some(id.as_str())
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
