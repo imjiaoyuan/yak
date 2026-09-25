@@ -386,10 +386,15 @@ pub(crate) fn truncate_head_marked(text: &str) -> String {
 }
 
 /// Merge captured process output into one stream: stderr rides under
-/// stdout. Shared by the bash tool's normal and timed-out endings.
+/// stdout, and ANSI escape sequences are stripped (the reference's bash executor does
+/// the same at capture): the result is model context first — escape bytes
+/// are tokens about terminal state, not the command's answer — and the
+/// live head renders through wrap paths that count them as zero cells, so
+/// a `--color=always` row would both cost tokens and mis-wrap. Shared by
+/// the bash tool's normal and timed-out endings.
 fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut out = String::from_utf8_lossy(stdout).into_owned();
-    let err_text = String::from_utf8_lossy(stderr);
+    let mut out = crate::core::text::strip_ansi(&String::from_utf8_lossy(stdout));
+    let err_text = crate::core::text::strip_ansi(&String::from_utf8_lossy(stderr));
     if !err_text.is_empty() {
         if !out.is_empty() {
             out.push('\n');

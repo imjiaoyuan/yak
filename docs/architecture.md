@@ -150,7 +150,11 @@ across processes with `LLM_SESSION_ID`.
   carried over; the reference's exact, unique-match rule), bash streaming live through
   `platform::run_shell_stream` in a new session/process group (a timed-out kill keeps the partial
   output it already printed — the deadline and the output are independent facts — and reports
-  `Command timed out after Ns (process killed)`; no default timeout), grep and glob
+  `Command timed out after Ns (process killed)`; no default timeout; the merged result
+  and every live `ToolLog` line are stripped of ANSI escape sequences on the way through —
+  `core::text::strip_ansi`, the ansi-regex shape the reference's bash executor strips with: escape bytes are
+  tokens about terminal state, not the command's answer, and the wrap paths count them as zero
+  cells), grep and glob
   both delegate to ripgrep (`rg --fixed-strings` when `literal: true`, `.gitignore` respected,
   hidden files included), ls, webfetch (the one way off the machine); bash previews show as `run`
   via `display_verb`), `approval.rs` (read/write/exec tiers used for the parallel read batch and the

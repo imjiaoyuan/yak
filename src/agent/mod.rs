@@ -937,7 +937,7 @@ fn run_tool_calls(
         });
         for ((call, cleared), (out, logs)) in prepared.into_iter().zip(outs) {
             for line in &logs {
-                on_update(AgentUpdate::ToolLog(line.clone()));
+                on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(line)));
             }
             let out = match cleared {
                 Err(denied) => denied.into(),
@@ -977,7 +977,9 @@ fn run_tool_calls(
             let out = match prepare_call(&mut call, &mut ctx) {
                 Err(denied) => denied.into(),
                 Ok(cleared) => {
-                    let mut log = |line: &str| on_update(AgentUpdate::ToolLog(line.to_string()));
+                    let mut log = |line: &str| {
+                        on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(line)))
+                    };
                     cleared.tool.execute_call(&call, &opts.cwd, &mut log)
                 }
             };

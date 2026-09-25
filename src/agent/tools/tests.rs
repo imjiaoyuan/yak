@@ -585,6 +585,25 @@ fn a_timed_out_command_keeps_its_partial_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn tool_output_strips_ansi_before_it_reaches_the_model() {
+    // a --color=always row would otherwise ride into the context as escape
+    // bytes and render through wrap paths that count them as zero cells
+    let out = BashTool.execute(
+        &json!({"command": "printf 'a\\033[31mred\\033[0mb\\n'"}),
+        Path::new("."),
+        &mut |_| {},
+    );
+    assert!(!out.is_error(), "{}", out.content);
+    assert!(
+        !out.content.contains('\x1b'),
+        "{}",
+        out.content.escape_debug()
+    );
+    assert_eq!(out.content, "aredb");
+}
+
 #[test]
 fn glob_finds_matching_files() {
     if !rg_available() {

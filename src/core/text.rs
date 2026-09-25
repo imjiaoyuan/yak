@@ -58,6 +58,82 @@ pub fn pop_utf8_char(buf: &mut Vec<u8>) {
     buf.pop();
 }
 
+/// Remove ANSI escape sequences from process output before it becomes a
+/// tool result: OSC (`ESC ]` … BEL/ST) and CSI-style sequences (an ESC or
+/// C1 U+009B introducer, optional intermediates and params, one final
+/// byte) go, the text between them stays. The pattern shape is the one
+/// ansi-regex uses (the reference's strip-ansi derives from it); an unterminated
+/// sequence at the very end is dropped — the process was cut mid-escape,
+/// and passing the bare introducer on would hand the terminal an unbound
+/// sequence.
+pub fn strip_ansi(text: &str) -> String {
+    if !text.as_bytes().contains(&0x1b) && !text.as_bytes().contains(&0xc2) {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let introducer = b == 0x1b || (b == 0xc2 && bytes.get(i + 1) == Some(&0x9b));
+        if introducer {
+            let Some(end) = escape_len(bytes, i) else {
+                break; // unterminated: drop the tail
+            };
+            i = end;
+            continue;
+        }
+        // copy the full UTF-8 character, never a lone byte
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Byte offset just past the escape sequence starting at `i`, or None when
+/// the input ends before a terminator arrives. CSI/C1: parameter and
+/// intermediate bytes then the one final byte; OSC: everything up to BEL
+/// or `ESC \`; the two-byte forms close at the byte after the introducer.
+fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
+    let n = bytes.len();
+    match bytes[i] {
+        // the C1 CSI introducer arrives as U+009B: two bytes in UTF-8
+        0xc2 if bytes.get(i + 1) == Some(&0x9b) => csi_end(bytes, i + 2),
+        0x1b => match bytes.get(i + 1) {
+            Some(b']') => {
+                let mut j = i + 2;
+                while j < n {
+                    match bytes[j] {
+                        0x07 => return Some(j + 1),
+                        0x1b if bytes.get(j + 1) == Some(&b'\\') => return Some(j + 2),
+                        _ => j += 1,
+                    }
+                }
+                None
+            }
+            Some(b'[') => csi_end(bytes, i + 2),
+            Some(_) => Some(i + 2),
+            None => None,
+        },
+        _ => Some(i + 1),
+    }
+}
+
+/// End of a CSI body starting at `j` (the first byte after `ESC [` or the
+/// C1 introducer): parameter digits and separators, intermediate bytes
+/// (0x20..=0x2f), then the one final byte (0x40..=0x7e).
+fn csi_end(bytes: &[u8], mut j: usize) -> Option<usize> {
+    let n = bytes.len();
+    while j < n && (bytes[j].is_ascii_digit() || matches!(bytes[j], b';' | b':')) {
+        j += 1;
+    }
+    while j < n && (0x20..=0x2f).contains(&bytes[j]) {
+        j += 1;
+    }
+    (j < n && (0x40..=0x7e).contains(&bytes[j])).then_some(j + 1)
+}
+
 /// Parse KEY=VALUE items, rejecting entries without `=`.
 pub fn parse_kv(items: &[String]) -> Result<Vec<(String, String)>, String> {
     items
@@ -113,5 +189,29 @@ mod tests {
     fn truncate_appends_ellipsis() {
         assert_eq!(truncate_chars("abcd", 3), "abc…");
         assert_eq!(truncate_chars("ab", 3), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_removes_sequences_and_keeps_the_text_between() {
+        // the common case: SGR color around plain words
+        assert_eq!(
+            strip_ansi("\x1b[31mred\x1b[0m and \x1b[1;32mgreen\x1b[0m"),
+            "red and green"
+        );
+        // no introducer: an untouched fast path
+        assert_eq!(strip_ansi("plain 中文 text"), "plain 中文 text");
+        // cursor movement and window-title OSC both go whole
+        assert_eq!(strip_ansi("a\x1b[2Kbc\x1b]0;title\x07d"), "abcd");
+        assert_eq!(
+            strip_ansi("a\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\b"),
+            "alinkb"
+        );
+        // multibyte characters on both sides of a sequence survive whole
+        assert_eq!(strip_ansi("中\x1b[K文"), "中文");
+        // an unterminated tail is dropped, not passed on
+        assert_eq!(strip_ansi("done\x1b[12"), "done");
+        assert_eq!(strip_ansi("done\x1b"), "done");
+        // C1 CSI (0x9b) is an introducer too
+        assert_eq!(strip_ansi("a\u{9b}31mb"), "ab");
     }
 }
