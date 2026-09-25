@@ -41,11 +41,17 @@ impl Tool for ScriptTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         // argv mode: the single declared argument rides as plain argv[1],
-        // so shell scripts never need to parse JSON
+        // so shell scripts never need to parse JSON. Picked by the declared
+        // name — the model's key order (or a stray extra key) must not
+        // decide what the script receives
         let stdin_payload = if self.spec.arg_mode_argv {
-            let value = args
-                .as_object()
-                .and_then(|o| o.values().next())
+            let value = self
+                .spec
+                .schema
+                .pointer("/properties")
+                .and_then(Value::as_object)
+                .and_then(|props| props.keys().next())
+                .and_then(|name| args.get(name))
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     other => crate::jsonfmt::dumps_indent(other, 0),

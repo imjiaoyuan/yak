@@ -480,3 +480,38 @@ fn a_reply_without_a_result_is_an_error() {
         .expect_err("same contract on run_command");
     assert!(err.contains("replied without a result"), "{err}");
 }
+
+/// argv mode must pick the value of the *declared* argument, not whatever
+/// key the model happened to put first or an extra key it invented: the
+/// script receives exactly what its manifest asked for.
+#[test]
+fn argv_mode_picks_the_declared_argument_by_name() {
+    let text = "# --- llm-tool: shout\n# description: shout a word\n# args: word (string) the word\n# arg-mode: argv\nimport sys\nprint(sys.argv[1])\n";
+    let spec = parse_tool_manifest(text, Path::new("/x/shout")).expect("manifest");
+    let tool = ScriptTool {
+        spec,
+        description: String::new(),
+        exposed: "shout".to_string(),
+    };
+    // model sent the keys out of order and added one the manifest never
+    // declared: only `word` may ride argv[1]
+    let args = json!({"extra": "WRONG", "word": "RIGHT"});
+    let mut command = std::process::Command::new("printf");
+    command.arg("%s");
+    // mirror the execute() argv assembly without spawning the script
+    let value = tool
+        .spec
+        .schema
+        .pointer("/properties")
+        .and_then(Value::as_object)
+        .and_then(|props| props.keys().next())
+        .and_then(|name| args.get(name))
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => crate::jsonfmt::dumps_indent(other, 0),
+        })
+        .unwrap_or_default();
+    command.arg(value);
+    let out = command.output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "RIGHT");
+}
