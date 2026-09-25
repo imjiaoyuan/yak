@@ -365,8 +365,11 @@ fn next_delay(retry: &mut Retry, e: &HttpError) -> Option<Duration> {
     if delay >= Duration::from_secs(2) {
         // clear the row first: the spinner redraws this row without a
         // newline, and an append would glue the notice onto its frame
+        // (theme::cursor() empties out when stderr is not a terminal, so a
+        // piped stream never sees the escape)
         eprintln!(
-            "{}\r\x1b[2K{}retrying in {}s ({}){}",
+            "{}{}{}retrying in {}s ({}){}",
+            crate::theme::cursor().clear_line,
             crate::theme::err().dim,
             crate::theme::NOTICE,
             delay.as_secs_f32().ceil() as u64,
