@@ -192,14 +192,10 @@ fn tool_result_images_flush_at_the_run_end_never_the_tail() {
     };
     let mut later = vec![Msg::user("next question")];
     later.push(Msg::assistant("answer"));
-    let history = vec![
-        Msg::user("look"),
-        Msg::assistant(""),
-        img,
-    ]
-    .into_iter()
-    .chain(later)
-    .collect::<Vec<_>>();
+    let history = vec![Msg::user("look"), Msg::assistant(""), img]
+        .into_iter()
+        .chain(later)
+        .collect::<Vec<_>>();
     let input = testutil::input(&history, &[]);
     let body = openai_compat::build_body(&testutil::model("openai-compat"), &input, false).unwrap();
     let msgs = body["messages"].as_array().unwrap();
@@ -209,12 +205,17 @@ fn tool_result_images_flush_at_the_run_end_never_the_tail() {
         .iter()
         .position(|m| {
             m["content"].is_array()
-                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+                && m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["type"] == "image_url")
         })
         .expect("image rides a user message");
     let tail = &msgs[img_pos + 1..];
     assert!(
-        tail.iter().all(|m| m["role"] != "user" || m["content"].is_string()),
+        tail.iter()
+            .all(|m| m["role"] != "user" || m["content"].is_string()),
         "no image-bearing user message after the run: {tail:?}"
     );
     // the image message lands between its tool result and the next user
@@ -235,12 +236,7 @@ fn consecutive_tool_result_images_share_one_user_message() {
         error: None,
         attachments: vec![att("image/png", Some("p.png"))],
     };
-    let history = vec![
-        Msg::user("look"),
-        Msg::assistant(""),
-        two("a"),
-        two("b"),
-    ];
+    let history = vec![Msg::user("look"), Msg::assistant(""), two("a"), two("b")];
     let input = testutil::input(&history, &[]);
     let body = openai_compat::build_body(&testutil::model("openai-compat"), &input, false).unwrap();
     let msgs = body["messages"].as_array().unwrap();
@@ -249,7 +245,11 @@ fn consecutive_tool_result_images_share_one_user_message() {
         .filter(|m| {
             m["role"] == "user"
                 && m["content"].is_array()
-                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+                && m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["type"] == "image_url")
         })
         .count();
     assert_eq!(img_msgs, 1, "one user message carries both images");
@@ -259,7 +259,11 @@ fn consecutive_tool_result_images_share_one_user_message() {
         .position(|m| {
             m["role"] == "user"
                 && m["content"].is_array()
-                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+                && m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["type"] == "image_url")
         })
         .unwrap();
     assert_eq!(msgs[pos - 1]["role"], "tool");

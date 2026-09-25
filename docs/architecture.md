@@ -164,7 +164,9 @@ across processes with `LLM_SESSION_ID`.
   `init`) plus `forbidden_command`'s shape checks (fork bomb, redirects into real device nodes —
   `/dev/null` and other sinks are exempt, `2>/dev/null` is stream hygiene — and `rm` whose target
   word is `/`, `/*`, `~` or `$HOME`, matched on the whole word so `rm -rf /tmp/build` stays ordinary
-  cleanup) are outright `Deny`, none of which any file, flag or `!` line can switch off; then the
+  cleanup) are outright `Deny`, none of which any file, flag or `!` line can switch off — every
+  check reads command positions, so a wrapper (`nohup`/`xargs`/`env`/`timeout`, assignments
+  skipped), or a `shell -c` payload in front cannot hide the word; then the
   user-editable ask-list (`blacklist.rs`: `~/.llm/blacklist` plus the nearest `.llm/blacklist`,
   project lines winning by last match; word patterns hit a command position anywhere in the line,
   segment patterns match the whole segment, globs work, `!` re-allows), seeded with `rm` and

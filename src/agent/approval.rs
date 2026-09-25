@@ -204,12 +204,14 @@ const WRAPPERS: &[&str] = &[
 /// Shells whose `-c` argument is a full command line of its own.
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
 
-/// Every token of a segment that starts a command: the first word (past any
-/// leading env assignments), whatever a wrapper runs next, and `shell -c`
-/// payloads recursed one level. `xargs rm`, `env git push` and
-/// `bash -c 'git status'` all surface their inner command; a bare argument
-/// like the `rm` in `grep rm notes.txt` never does.
-fn command_positions(seg: &str, depth: usize) -> Vec<String> {
+/// Every command start in a segment as the tokens from that word on: the
+/// first word (past any leading env assignments), whatever a wrapper runs
+/// next, and `shell -c` payloads recursed. Each tail's first word is a
+/// command position; the rest are that command's own flags and arguments,
+/// which is what ties an `rm` to the words it targets. `xargs rm`,
+/// `env git push` and `bash -c 'git status'` all surface their inner
+/// command; a bare argument like the `rm` in `grep rm notes.txt` never does.
+fn command_tails(seg: &str, depth: usize) -> Vec<Vec<String>> {
     let toks = tokens(seg);
     let mut out = Vec::new();
     let mut i = 0;
@@ -226,14 +228,19 @@ fn command_positions(seg: &str, depth: usize) -> Vec<String> {
             && i + 2 < toks.len()
         {
             if depth < 2 {
-                out.extend(command_positions(&toks[i + 2..].join(" "), depth + 1));
+                out.extend(command_tails(&toks[i + 2..].join(" "), depth + 1));
             }
             return out;
         }
-        out.push(t.to_string());
+        out.push(toks[i..].to_vec());
         if WRAPPERS.contains(&t) {
             i += 1;
-            while i < toks.len() && toks[i].starts_with('-') {
+            while i < toks.len()
+                && (toks[i].starts_with('-')
+                    // `env NAME=VALUE cmd`: the assignments are env's own
+                    // arguments, not the command it runs
+                    || (t == "env" && toks[i].contains('=')))
+            {
                 i += 1;
             }
             if t == "timeout" && i < toks.len() && !toks[i].contains('=') {
@@ -244,6 +251,14 @@ fn command_positions(seg: &str, depth: usize) -> Vec<String> {
         return out;
     }
     out
+}
+
+/// The command words of a segment, in order — every tail's first word.
+fn command_positions(seg: &str, depth: usize) -> Vec<String> {
+    command_tails(seg, depth)
+        .into_iter()
+        .map(|tail| tail[0].clone())
+        .collect()
 }
 
 /// The commands that must never run, in either mode, whatever any config key
@@ -290,10 +305,15 @@ fn forbidden_command(command: &str) -> Option<String> {
         return Some("command writes into a device node".to_string());
     }
     for seg in split_compound(command) {
-        if let Some(first) = command_positions(&seg, 0).first()
-            && FORBIDDEN_COMMANDS.contains(&first.as_str())
-        {
-            return Some(format!("'{first}' is never allowed"));
+        // every command position, not just the first: a wrapper (`nohup`,
+        // `xargs`, `env`, `timeout`) or a `shell -c` payload would otherwise
+        // hide the very word this list exists to catch
+        for tail in command_tails(&seg, 0) {
+            if let Some(word) = tail.first()
+                && FORBIDDEN_COMMANDS.contains(&word.as_str())
+            {
+                return Some(format!("'{word}' is never allowed"));
+            }
         }
         if deletes_the_root(&seg) {
             return Some("command deletes the whole filesystem".to_string());
@@ -302,22 +322,28 @@ fn forbidden_command(command: &str) -> Option<String> {
     None
 }
 
-/// `rm -rf /` and friends: an `rm` whose target word *is* the root or a home
-/// shorthand. Matched on the whole word, so `rm -rf /tmp/build` stays the
-/// ordinary cleanup it is and only the whole-filesystem case is refused.
+/// `rm -rf /` and friends: an `rm` command start whose target word *is* the
+/// root or a home shorthand. Keyed on command positions, so a leading
+/// assignment (`FOO=1 rm -rf /`), a wrapper (`nohup rm -rf ~`) or a
+/// `shell -c` payload cannot move the `rm` out of view — and an `rm` that is
+/// merely an argument (`grep rm notes.txt`) never counts. Matched on the
+/// whole word, so `rm -rf /tmp/build` stays the ordinary cleanup it is and
+/// only the whole-filesystem case is refused.
 fn deletes_the_root(segment: &str) -> bool {
-    let toks = tokens(segment);
-    let words: Vec<&str> = toks
-        .iter()
-        .map(String::as_str)
-        .filter(|t| !t.starts_with('-'))
-        .collect();
-    if words.first() != Some(&"rm") {
-        return false;
+    for tail in command_tails(segment, 0) {
+        if tail.first().map(String::as_str) != Some("rm") {
+            continue;
+        }
+        let refuses_root = tail[1..]
+            .iter()
+            .map(String::as_str)
+            .filter(|w| !w.starts_with('-'))
+            .any(|w| matches!(w, "/" | "/*" | "~" | "~/" | "$HOME" | "${HOME}"));
+        if refuses_root {
+            return true;
+        }
     }
-    words[1..]
-        .iter()
-        .any(|w| matches!(*w, "/" | "/*" | "~" | "~/" | "$HOME" | "${HOME}"))
+    false
 }
 
 /// Redirect targets that only ever discard or pass bytes through: writing
@@ -461,6 +487,79 @@ mod tests {
         // the reason names the offending command, so the model can adapt
         let d = resolve("bash", Tier::Exec, &cfg(&[]), Some("sudo -i"));
         assert_eq!(d, Decision::Deny("'sudo' is never allowed".into()));
+    }
+
+    #[test]
+    fn wrappers_cannot_hide_a_forbidden_command() {
+        // a wrapper in front (nohup, xargs, env, timeout) puts the forbidden
+        // word in the command positions `command_tails` surfaces, and the
+        // refusal list checks every one of them
+        for cmd in [
+            "nohup sudo id",
+            "env sudo id",
+            "timeout 30 sudo id",
+            "time sudo id",
+            "xargs shred /dev/sda",
+            "nohup dd if=img of=/dev/sdb",
+            "bash -c 'sudo -i'",
+            "sh -lc 'mkfs.ext4 /dev/sda1'",
+            "bash -c \"bash -c 'shutdown now'\"",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert!(
+                matches!(d, Decision::Deny(_)),
+                "{cmd} must be denied, got {d:?}"
+            );
+        }
+        // `env`'s own assignments are skipped, so `env NAME=VALUE rm` still
+        // surfaces `rm`; the wrapper itself and its flags never refuse
+        let d = resolve("bash", Tier::Exec, &cfg(&[]), Some("env FOO=1 sudo id"));
+        assert_eq!(d, Decision::Deny("'sudo' is never allowed".into()));
+        assert_eq!(
+            resolve("bash", Tier::Exec, &cfg(&[]), Some("env FOO=1 ls")),
+            Decision::Auto
+        );
+        assert_eq!(
+            resolve(
+                "bash",
+                Tier::Exec,
+                &cfg(&[]),
+                Some("timeout --preserve-status 5 ls")
+            ),
+            Decision::Auto
+        );
+    }
+
+    #[test]
+    fn whole_filesystem_deletes_refuse_from_any_command_position() {
+        // a leading assignment, a wrapper or a `shell -c` payload in front of
+        // an `rm -rf /` must not hide the `rm` from `deletes_the_root`
+        for cmd in [
+            "FOO=1 rm -rf /",
+            "nohup rm -rf ~",
+            "env FOO=1 rm -rf /*",
+            "xargs rm -rf $HOME",
+            "bash -c 'rm -rf /'",
+            "git status && rm -rf ~",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert!(
+                matches!(d, Decision::Deny(_)),
+                "{cmd} must be denied, got {d:?}"
+            );
+        }
+        // the same shapes without the root target stay ordinary cleanup —
+        // `rm` as a bare argument still never counts
+        for cmd in [
+            "FOO=1 rm -rf /tmp/build",
+            "nohup rm notes.txt",
+            "bash -c 'rm -rf ./build'",
+            "grep rm notes.txt",
+            "echo rm -rf /",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} should run free");
+        }
     }
 
     #[test]
