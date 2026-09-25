@@ -956,7 +956,7 @@ fn repl_command(
         }
         "/clear" => {
             session.clear();
-            eprint!("\x1b[2J\x1b[H");
+            eprint!("{}", crate::theme::cursor().clear_screen);
             let _ = std::io::stderr().flush();
             *skills = crate::agent::skills::discover(
                 &crate::core::config::user_dir(),

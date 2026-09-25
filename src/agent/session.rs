@@ -251,12 +251,17 @@ impl Session {
                             if n == 1 {
                                 view.borrow_mut().spin_pause();
                             }
-                            eprint!("\r\x1b[2K");
+                            eprint!("{}", crate::theme::cursor().clear_line);
                             crate::agent::tools::print_output_block(&line);
                         } else {
                             // beyond the head: one line, rewritten in place
                             let p = crate::theme::err();
-                            eprint!("\r\x1b[2K{}  … +{n} lines{}      ", p.gray, p.reset);
+                            eprint!(
+                                "{}{}  … +{n} lines{}      ",
+                                crate::theme::cursor().clear_line,
+                                p.gray,
+                                p.reset
+                            );
                             use std::io::Write;
                             let _ = std::io::stderr().flush();
                         }

@@ -180,6 +180,38 @@ static OUT: LazyLock<&'static Palette> = LazyLock::new(|| {
 static ERR: LazyLock<&'static Palette> =
     LazyLock::new(|| detect(std::io::stderr().is_terminal(), legacy));
 
+/// Cursor-control chrome for stderr: sequences that move or erase (not
+/// color) live here too, so no other module hand-writes an escape. Gated
+/// on stderr being a real terminal (and not `TERM=dumb`); `NO_COLOR` does
+/// not apply — it turns color off, not cursor movement — and empty strings
+/// when off, so printing them is a no-op, which is the point.
+pub struct Cursor {
+    /// erase the line the cursor is on and return to its start (`\r\x1b[2K`)
+    pub clear_line: &'static str,
+    /// erase the whole screen and home the cursor (`\x1b[2J\x1b[H`)
+    pub clear_screen: &'static str,
+}
+
+static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
+    let dumb = std::env::var("TERM").as_deref() == Ok("dumb");
+    if std::io::stderr().is_terminal() && !dumb {
+        Cursor {
+            clear_line: "\r\x1b[2K",
+            clear_screen: "\x1b[2J\x1b[H",
+        }
+    } else {
+        Cursor {
+            clear_line: "",
+            clear_screen: "",
+        }
+    }
+});
+
+/// The cursor-control sequences for stderr chrome (see [`Cursor`]).
+pub fn cursor() -> &'static Cursor {
+    &CURSOR
+}
+
 /// The stdout palette (answer streams, `llm -r` transcript).
 pub fn out() -> &'static Palette {
     *OUT
