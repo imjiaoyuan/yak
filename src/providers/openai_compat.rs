@@ -69,6 +69,11 @@ pub fn build_body(
     // message after the run: interleaving a user message between parallel
     // tool results would break the OpenAI protocol shape
     let mut pending_images: Vec<Value> = Vec::new();
+    // flush at the end of a run of tool results — before the next user or
+    // assistant message — never at the tail of the whole conversation: an
+    // image user-message appended after the last tool result reads to the
+    // model as a fresh screenshot every round, and it re-acknowledges it
+    // forever (the "图收到" loop)
     let flush_images = |messages: &mut Vec<Value>, pending: &mut Vec<Value>| {
         if pending.is_empty() {
             return;
@@ -86,6 +91,7 @@ pub fn build_body(
     for (i, msg) in input.history.iter().enumerate() {
         match msg {
             Msg::User { text, attachments } => {
+                flush_images(&mut messages, &mut pending_images);
                 messages.push(json!({"role": "user", "content": super::user_content(m.supports_images(), text, attachments, attachment_block)?}));
             }
             Msg::Assistant {
@@ -94,6 +100,7 @@ pub fn build_body(
                 reasoning,
                 reasoning_meta: _,
             } => {
+                flush_images(&mut messages, &mut pending_images);
                 if tool_calls.is_empty() {
                     let mut msg = json!({"role": "assistant", "content": text});
                     if let Some(r) = reasoning

@@ -177,3 +177,91 @@ fn a_body_over_budget_without_attachments_says_so() {
     let err = check_request_body(&body, &input).unwrap_err();
     assert!(err.contains("no attachment explains it"), "{err}");
 }
+
+#[test]
+fn tool_result_images_flush_at_the_run_end_never_the_tail() {
+    use testutil::att;
+    // the "图收到" loop: a screenshot rode a read result, the conversation
+    // moved on — later rounds must not re-meet the image as fresh input
+    let img = Msg::ToolResult {
+        call_id: "r".into(),
+        name: "read".into(),
+        content: "screenshot".into(),
+        error: None,
+        attachments: vec![att("image/png", Some("paste.png"))],
+    };
+    let mut later = vec![Msg::user("next question")];
+    later.push(Msg::assistant("answer"));
+    let history = vec![
+        Msg::user("look"),
+        Msg::assistant(""),
+        img,
+    ]
+    .into_iter()
+    .chain(later)
+    .collect::<Vec<_>>();
+    let input = testutil::input(&history, &[]);
+    let body = openai_compat::build_body(&testutil::model("openai-compat"), &input, false).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    // the image user-message sits right after its tool result, before the
+    // next user turn — not appended at the tail as the newest input
+    let img_pos = msgs
+        .iter()
+        .position(|m| {
+            m["content"].is_array()
+                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+        })
+        .expect("image rides a user message");
+    let tail = &msgs[img_pos + 1..];
+    assert!(
+        tail.iter().all(|m| m["role"] != "user" || m["content"].is_string()),
+        "no image-bearing user message after the run: {tail:?}"
+    );
+    // the image message lands between its tool result and the next user
+    // turn, and the array ends on the round's own prompt, not on the image
+    assert_eq!(msgs[img_pos - 1]["role"], "tool");
+    assert_eq!(msgs[img_pos + 1]["content"], json!("next question"));
+    assert_eq!(msgs.last().unwrap()["role"], "user");
+    assert_eq!(msgs.last().unwrap()["content"], json!("go"));
+}
+
+#[test]
+fn consecutive_tool_result_images_share_one_user_message() {
+    use testutil::att;
+    let two = |id: &str| Msg::ToolResult {
+        call_id: id.into(),
+        name: "read".into(),
+        content: "img".into(),
+        error: None,
+        attachments: vec![att("image/png", Some("p.png"))],
+    };
+    let history = vec![
+        Msg::user("look"),
+        Msg::assistant(""),
+        two("a"),
+        two("b"),
+    ];
+    let input = testutil::input(&history, &[]);
+    let body = openai_compat::build_body(&testutil::model("openai-compat"), &input, false).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    let img_msgs = msgs
+        .iter()
+        .filter(|m| {
+            m["role"] == "user"
+                && m["content"].is_array()
+                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+        })
+        .count();
+    assert_eq!(img_msgs, 1, "one user message carries both images");
+    // it lands after the run of tool results and before the prompt
+    let pos = msgs
+        .iter()
+        .position(|m| {
+            m["role"] == "user"
+                && m["content"].is_array()
+                && m["content"].as_array().unwrap().iter().any(|p| p["type"] == "image_url")
+        })
+        .unwrap();
+    assert_eq!(msgs[pos - 1]["role"], "tool");
+    assert_eq!(msgs[pos + 1]["role"], "user");
+}
