@@ -190,7 +190,7 @@ across processes with `LLM_SESSION_ID`.
   needed so Windows works too) and **resident extensions** (spawned once, speaking newline-delimited
   JSON — the `initialize` handshake (carries `"v": 1`) advertises tools/commands/events, `call_tool`
   runs a mounted tool, `run_command` answers a slash command, `event` fires
-  `agent_start/input/turn_start/turn_end/tool_call/tool_result/agent_end` (5s deadline; a
+  `agent_start/input/turn_start/turn_end/tool_call/tool_result/agent_end/session_before_tree` (5s deadline; a
   `tool_call` reply denies or rewrites args and gates before the approval matrix, a `tool_result`
   reply's `{"content": ..}` replaces the model-visible result — the event carries the full content,
   so subscribing is the opt-in; `Extensions::subscribes` skips building that payload when nobody
@@ -224,7 +224,9 @@ across processes with `LLM_SESSION_ID`.
   prints a did-you-mean and sends nothing; slash and `!` input echoes bold in the line editor;
   `/resume` loads a picked past conversation into the live session (rebuild_thread), `/tree` rewinds
   to a picked turn (seed and thread file truncate just before it —
-  `threads::Store::truncate_thread`), `/reload` re-discovers skills + extension tools + settings
+  `threads::Store::truncate_thread`; the `session_before_tree` event fires first, so an extension
+  can roll the workspace back — only the transcript rewinds by itself), `/reload` re-discovers
+  skills + extension tools + settings
   (plugin files are otherwise read at startup only; restart or `/reload` picks up a mid-session
   change — no fingerprint probe runs per task anymore); the resume replay clips every row to the
   terminal width (`history_rows`, one line per entry, `truncate_cells` charging the ellipsis and CJK

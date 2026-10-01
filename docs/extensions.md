@@ -5,7 +5,9 @@ dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a fi
 `/reload`. This page is the full reference; runnable examples live in
 [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `subagent.py` — a
 tool that runs another `llm` in its own context window, `repeat_guard.py` — a `tool_call` deny gate
-for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds repeated log lines, plus the
+for stuck loops, `fold_repeats.py` — a `tool_result` rewriter that folds repeated log lines,
+`workspace_checkpoint.py` — a `turn_start`/`session_before_tree` pair that snapshots the workspace
+and offers to roll it back on `/tree`, plus the
 `template.js`/`template.py` starter templates). `template.js` runs as-is under node >= 23.6
 (native type stripping); bun and deno work too.
 
@@ -193,6 +195,7 @@ call; `subagent.py` reads stdin on a second thread for exactly this reason.
 | `tool_call` | **before** each tool runs — see gate semantics | `{tool, args}` |
 | `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}` — reply `{"content": ..}` to replace it, see below |
 | `agent_end` | task finished or interrupted | `{final_text, interrupted}` |
+| `session_before_tree` | `/tree` picked a turn, before the transcript is cut | `{thread, kept_turns, dropped_turns, dropped_ids}` — snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
 
 ### The `tool_call` gate
 

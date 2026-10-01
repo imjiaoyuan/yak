@@ -2,6 +2,7 @@
 //! switching, session resume and shell passthrough.
 
 use crate::agent::session::Session;
+use crate::core::threads::StoredTurn;
 use std::io::{IsTerminal, Write};
 
 use crate::term::render::{cache_note, humanize_tokens};
@@ -532,6 +533,13 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     ) else {
         return Ok(());
     };
+    // before the transcript is cut, extensions get one chance to snapshot or
+    // restore the workspace (the reference's git-checkpoint shape): the event names the
+    // turns being dropped. Fail-open — a broken extension never blocks the
+    // jump; its error lands in the diagnostics tail.
+    session
+        .extensions
+        .fire("session_before_tree", &tree_event_params(&cid, &turns, i));
     // the wire messages of the kept turns are the new seed; the picked turn
     // itself stays — "everything after it is dropped"
     let cut: usize = turns[..=i].iter().map(|t| t.messages.len()).sum();
@@ -544,6 +552,20 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
         crate::theme::err().reset
     );
     Ok(())
+}
+
+/// The `session_before_tree` payload: which thread is about to lose which
+/// turns. `kept` is the picked index, so turns `kept + 1..` are the ones
+/// going away — ids, not labels, because the extension keys its snapshots on
+/// what the store persists.
+fn tree_event_params(thread: &str, turns: &[StoredTurn], kept: usize) -> serde_json::Value {
+    let dropped: &[StoredTurn] = &turns[kept + 1..];
+    serde_json::json!({
+        "thread": thread,
+        "kept_turns": kept + 1,
+        "dropped_turns": dropped.len(),
+        "dropped_ids": dropped.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+    })
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
@@ -1403,5 +1425,39 @@ mod tests {
         assert_eq!(turn_label(&stored("", "all done", Vec::new())), "all done");
         // nothing to say stays the placeholder, not an empty quote
         assert_eq!(turn_label(&stored("", "", Vec::new())), "--");
+    }
+
+    #[test]
+    fn tree_jump_event_names_what_is_dropped() {
+        use crate::providers::Msg;
+        let turn = |id: &str| StoredTurn {
+            v: 0,
+            id: id.into(),
+            ts: "2026-09-24T11:14:07".into(),
+            mode: "agent".into(),
+            model: "m".into(),
+            cwd: None,
+            system: None,
+            prompt: "p".into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::User {
+                text: "p".into(),
+                attachments: Vec::new(),
+            }],
+        };
+        let turns = vec![turn("a"), turn("b"), turn("c"), turn("d")];
+        let p = tree_event_params("thread-1", &turns, 1);
+        assert_eq!(p["thread"], "thread-1");
+        assert_eq!(p["kept_turns"], 2);
+        assert_eq!(p["dropped_turns"], 2);
+        assert_eq!(p["dropped_ids"], serde_json::json!(["c", "d"]));
+        // jumping to the last turn drops nothing, but the event still fires:
+        // the extension learns the jump happened and that no work is undone
+        let none = tree_event_params("thread-1", &turns, 3);
+        assert_eq!(none["dropped_ids"], serde_json::json!([]));
     }
 }

@@ -418,6 +418,47 @@ fn a_dead_extension_cannot_swallow_a_tool_result() {
     );
 }
 
+/// A `session_before_tree` subscriber receives the turn ids about to be cut
+/// and answers null; the reply is fire-and-forget, so the host just moves on.
+#[test]
+#[cfg(unix)]
+fn session_before_tree_reaches_a_subscriber_with_the_dropped_turns() {
+    // the stub appends every event name + params it receives to a scratch
+    // file, so the test asserts on what actually crossed the wire
+    let sink = crate::core::testutil::scratch_path("ext-tree-sink");
+    let observer = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{{"id":%s,"result":{{"events":["session_before_tree"]}}}}\n' "$id" ;;
+    *session_before_tree*) printf '%s\n' "$line" >> "{}" ;;
+    *) printf '{{"id":%s,"result":null}}\n' "$id" ;;
+  esac
+done
+"#,
+        sink.display(),
+    );
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension(
+            "tree_observer",
+            &observer,
+        ))],
+        script_tools: Vec::new(),
+    };
+    assert!(host.subscribes("session_before_tree"));
+
+    host.fire(
+        "session_before_tree",
+        &json!({"thread": "t1", "kept_turns": 2, "dropped_turns": 1, "dropped_ids": ["t3"]}),
+    );
+    let seen = std::fs::read_to_string(&sink).unwrap_or_default();
+    assert!(
+        seen.contains("session_before_tree") && seen.contains("\"dropped_ids\":[\"t3\"]"),
+        "the stub should have recorded the event; got: {seen:?}"
+    );
+}
+
 /// The model's tool_call_id rides the `call_tool` frame: a stateful
 /// extension keys per-call state on it, which the concurrent read-only
 /// batch makes necessary. The id is echoed back as the result here.
