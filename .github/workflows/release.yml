@@ -9,7 +9,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Build release notes from the commits on this tag
+        run: |
+          PREV=$(git describe --tags --abbrev=0 '${{ github.ref_name }}^' 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..${{ github.ref_name }}"
+            HEADER="Commits since $PREV:"
+          else
+            RANGE="${{ github.ref_name }}"
+            HEADER="Commits:"
+          fi
+          {
+            echo "$HEADER"
+            echo
+            git log --format='- %s' "$RANGE" | grep -vEi '^- (bump( the)? version( to)?|release) v?[0-9]' || true
+            echo
+            echo '**Install / update:**'
+            echo
+            echo '```bash'
+            echo 'curl -fsSL https://jiaoyuan.org/llm/install.sh | sh'
+            echo '```'
+          } > body.md
       - uses: taiki-e/create-gh-release-action@v1
+        with:
+          body_path: body.md
 
   build:
     needs: create-release

@@ -85,7 +85,11 @@ cargo clippy --all-targets   # keep at zero warnings
 
 Remote is `github.com/imjiaoyuan/llm` (branch `main`); tagged `v*` cuts releases
 (`.github/workflows/release.yml`, six targets: aarch64/x86_64 Apple, x86_64 Windows, and
-x86_64-gnu plus x86_64/aarch64-musl Linux; sha256 checksums). Repo-root `install.sh`/`install.ps1`
+x86_64-gnu plus x86_64/aarch64-musl Linux; sha256 checksums). The release body is generated,
+not written: the workflow lists every commit subject since the previous tag (version-bump
+commits filtered out) above the install one-liner — so commit subjects are the release
+notes; write each one as a user-facing sentence. There is no CHANGELOG file; the
+releases page is the changelog. Repo-root `install.sh`/`install.ps1`
 are the portable installer/updaters over those assets: re-running resolves the latest release and
 compares versions (`updating old -> new`; equal versions stay unless `LLM_FORCE=1`), with
 `LLM_VERSION`/`LLM_REPO`/`LLM_INSTALL_DIR` overrides and a user-level `~/.local/bin` everywhere.
