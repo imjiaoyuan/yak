@@ -32,9 +32,14 @@ jobs:
             echo 'curl -fsSL https://jiaoyuan.org/llm/install.sh | sh'
             echo '```'
           } > body.md
+      # the taiki-e action's `changelog` input expects a parse-changelog
+      # file (versioned sections), which free-form notes are not: create the
+      # release bare and write the generated notes with gh instead
       - uses: taiki-e/create-gh-release-action@v1
-        with:
-          body_path: body.md
+      - name: Publish the generated release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit '${{ github.ref_name }}' --notes-file body.md
 
   build:
     needs: create-release
