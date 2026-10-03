@@ -44,8 +44,9 @@ pin one id across several `llm` invocations of the same conversation.
 ### Platform notes
 
 Linux, macOS and Windows all use the native platform implementation for the same terminal
-experience: raw-mode line editing, arrow-key pickers, hidden key input, and steering while an agent
-task runs. Shell commands use `sh` on Linux/macOS and PowerShell on Windows by default; set
+experience: raw-mode line editing, arrow-key pickers, hidden key input, and esc/ctrl-c interrupt
+while an agent task runs. Shell commands use `sh` on Linux/macOS and PowerShell on Windows by
+default; set
 `LLM_SHELL` to override the program (for example `cmd`, `powershell`, `pwsh`, `bash`, `zsh`, or any
 other shell on `PATH`). The interactive features need a real terminal; with piped stdin the CLI
 reads plain input.
@@ -117,8 +118,9 @@ Slash commands cover the model and the session — `/model`, `/thinking`, `/logi
 `/clear`, `/resume`, `/tree`, `/status`, `/reload`, … `/help` lists every one, including your skills
 as `/skill:<name>`. `!cmd` runs a shell command directly, and tab completes command names and paths.
 
-Ctrl-c or esc interrupts a running task. Anything you type while it works is queued as steering and
-delivered at the next tool boundary; whatever is left over becomes your next message.
+Ctrl-c or esc interrupts a running task. There is no input surface while it works: keystrokes
+other than the interrupt are swallowed, and the next message is composed in the editor once the
+task ends.
 
 ### Per-run flags
 

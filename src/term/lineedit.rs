@@ -1176,24 +1176,15 @@ fn common_prefix(candidates: &[String]) -> String {
 /// Two-step approval input: type `y`/`n`/`a` to pick an option (echoed live),
 /// then press Enter to confirm; a bare Enter keeps the default yes.
 /// Esc/ctrl-c/ctrl-d cancels (Deny) immediately. The prompt banner has
-/// already been printed by the caller. `pre` carries keystrokes typed while
-/// the task still ran (parked by the KeyWatcher), so an eager `y` is not
-/// lost. Returns None when raw mode is unavailable (the caller fails
-/// closed).
-pub fn read_approval_key(pre: Vec<u8>) -> Option<ApprovalKey> {
+/// already been printed by the caller. Returns None when raw mode is
+/// unavailable (the caller fails closed).
+pub fn read_approval_key() -> Option<ApprovalKey> {
     let mut term = RawTerm::acquire_console(1, 0)?;
-    let mut pre = pre.into_iter();
-    // raw mode disables echo: echo each accepted letter as it is typed so the
-    // user sees their selection, but do not commit until Enter (or a cancel).
     let mut choice: Option<ApprovalKey> = None;
     let key = loop {
-        let b = if let Some(b) = pre.next() {
-            b
-        } else {
-            match term.next_byte() {
-                RawByte::Key(b) => b,
-                RawByte::Timeout => continue,
-            }
+        let b = match term.next_byte() {
+            RawByte::Key(b) => b,
+            RawByte::Timeout => continue,
         };
         match b {
             b'y' | b'Y' => {
@@ -1538,34 +1529,24 @@ fn clamp_top(sel: usize, len: usize, budget: usize, top: usize) -> usize {
 }
 
 /// Watches stdin during a running task: a bare ESC (0x1b) requests the same
-/// cooperative interrupt as ctrl-c, and any line typed and entered is pushed
-/// onto the steering queue shared with the session (the agent loop delivers
-/// it to the model at the next tool-round boundary). Polls with
-/// VMIN=0/VTIME=1 so stop() joins within ~100ms; restores cooked mode on the
-/// way out.
+/// cooperative interrupt as ctrl-c; every other keystroke is swallowed.
+/// There is no input surface while a task runs (no echo, no buffer, no
+/// queue): typing mid-run does nothing, and the next message is composed
+/// after the task ends in the full line editor. Polls with VMIN=0/VTIME=1
+/// so stop() joins within ~100ms; restores cooked mode on the way out.
 pub struct KeyWatcher {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// un-entered keystrokes the dying thread had buffered when the stop
-    /// flag landed mid-slice; handed to whoever reads the terminal next
-    leftover: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl KeyWatcher {
-    pub fn start_with(queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> KeyWatcher {
+    pub fn start() -> KeyWatcher {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let leftover = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let Some(mut term) = RawTerm::acquire(1, 0) else {
-            return KeyWatcher {
-                stop,
-                handle: None,
-                leftover,
-            };
+            return KeyWatcher { stop, handle: None };
         };
         let flag = stop.clone();
-        let parked = leftover.clone();
         let handle = std::thread::spawn(move || {
-            let mut buf: Vec<u8> = Vec::new();
             loop {
                 if flag.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -1582,90 +1563,37 @@ impl KeyWatcher {
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         match b {
-                            // raw mode disables ISIG, so ctrl-c arrives here as 0x03;
-                            // an interrupt also discards the half-typed line
-                            0x03 => {
-                                buf.clear();
-                                crate::core::http::request_interrupt();
-                            }
+                            // raw mode disables ISIG, so ctrl-c arrives here
+                            // as 0x03
+                            0x03 => crate::core::http::request_interrupt(),
                             // a lone ESC interrupts like ctrl-c, but arrow and
                             // edit keys also start with ESC — swallow whole
                             // sequences so their tails cannot raise the flag
                             0x1b => {
                                 if matches!(term.escape_seq(), None | Some(Esc::Alone)) {
-                                    buf.clear();
                                     crate::core::http::request_interrupt();
                                 }
                             }
-                            // enter: queue the line. No per-character echo — it would
-                            // interleave with the streaming answer and tear lines
-                            // apart; this dim notice is the confirmation instead.
-                            // (\n is ctrl+j mid-task: harmless to treat as enter,
-                            // the empty buffer queues nothing)
-                            b'\r' | b'\n' => {
-                                let line = String::from_utf8_lossy(&buf).trim().to_string();
-                                if !line.is_empty() {
-                                    if let Ok(mut q) = queue.lock() {
-                                        q.push(line.clone());
-                                    }
-                                    if super::screen()
-                                        .dangling
-                                        .load(std::sync::atomic::Ordering::Relaxed)
-                                    {
-                                        // the answer owns the current row: erasing it
-                                        // would tear the streamed text apart and the
-                                        // continuation would land at column 0 — defer
-                                        // the notice to the render thread, which
-                                        // prints it once the row is settled
-                                        if let Ok(mut n) = super::screen().notices.lock() {
-                                            n.push(format!("queued: {line}"));
-                                        }
-                                    } else {
-                                        // clear the spinner frame first so the
-                                        // notice lands on its own line
-                                        eprint!("\r\x1b[2K");
-                                        eprintln!(
-                                            "{}queued: {line}{}",
-                                            crate::theme::err().dim,
-                                            crate::theme::err().reset
-                                        );
-                                    }
-                                }
-                                buf.clear();
-                            }
-                            0x7f | 0x08 => {
-                                crate::core::text::pop_utf8_char(&mut buf);
-                            }
-                            c if c >= 0x20 => buf.push(c),
                             _ => {}
                         }
                     }
                 }
-            }
-            // the flag can land between bytes: un-entered input is parked
-            // for the next terminal reader (the approval prompt) instead of
-            // vanishing with this thread
-            if let Ok(mut parked) = parked.lock() {
-                *parked = buf;
             }
             drop(term); // restores cooked mode
         });
         KeyWatcher {
             stop,
             handle: Some(handle),
-            leftover,
         }
     }
 
-    /// Stop the watcher and return any un-entered keystrokes it had
-    /// buffered, so the answer typed at the moment the approval prompt
-    /// appeared is not silently swallowed.
-    pub fn stop(&mut self) -> Vec<u8> {
+    /// Stop the watcher and join its thread. Keystrokes typed mid-run were
+    /// swallowed by design, so there is nothing to hand back.
+    pub fn stop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        std::mem::take(&mut *self.leftover.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 

@@ -153,23 +153,6 @@ pub struct AgentFailure {
     pub round_start: usize,
 }
 
-/// Fold steering lines into the pending user message: multiple queued lines
-/// join into one message, and an existing pending message keeps its text
-/// first. Exposed for testing.
-pub(crate) fn merge_steering(pending: Option<Msg>, queued: Vec<String>) -> Option<Msg> {
-    if queued.is_empty() {
-        return pending;
-    }
-    let joined = queued.join("\n\n");
-    Some(match pending {
-        Some(Msg::User { text, attachments }) => Msg::User {
-            text: format!("{text}\n\n{joined}"),
-            attachments,
-        },
-        _ => Msg::user(joined),
-    })
-}
-
 /// One run's inputs: the model, the tool set, the prompt and the seed
 /// history. Grouped so a call site reads as what the run *is*, and the loop
 /// keeps a short signature.
@@ -182,14 +165,11 @@ pub struct RunRequest<'a> {
     pub opts: &'a AgentOptions<'a>,
 }
 
-/// The three callbacks the loop reports through: chrome updates, approval
-/// questions, and the steer poll (run at every tool-round boundary, where
-/// lines the user typed mid-run are delivered as a user message before the
-/// next model call).
+/// The two callbacks the loop reports through: chrome updates and approval
+/// questions.
 pub struct RunCallbacks<'a> {
     pub on_update: &'a mut dyn FnMut(AgentUpdate),
     pub on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
-    pub steer: &'a mut dyn FnMut() -> Vec<String>,
 }
 
 /// The cache anchor a run starts its first round from: the caller's, when it
@@ -222,7 +202,6 @@ pub fn run_agent(
     let RunCallbacks {
         on_update,
         on_approval,
-        steer,
     } = cb;
     let tool_defs: Vec<ToolDef> = tools
         .iter()
@@ -286,9 +265,6 @@ pub fn run_agent(
     let mut turn = 0;
     loop {
         turn += 1;
-
-        // steering: queued mid-run input lands before the next model call
-        pending = merge_steering(pending.take(), steer());
         opts.hooks.fire("turn_start", &json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
             opts.hooks.fire(
@@ -312,8 +288,8 @@ pub fn run_agent(
         // check below; under real pressure the stale prefix is
         // rewritten here too (see `price_and_rewrite`).
         // Every image in the request is billed every round, so only the newest
-        // image turns keep their pixels — including anything a tool result or
-        // a steering message added mid-run.
+        // image turns keep their pixels — including anything a tool result
+        // added mid-run.
         crate::agent::session::budget_images(&mut history);
         // the compaction this round runs under: the window-anchored trigger
         // (or the configured fallback), unchanged across the run

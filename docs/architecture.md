@@ -177,7 +177,7 @@ across processes with `LLM_SESSION_ID`.
   `git push --force*`: a hit is an `Ask` — immune to allow
   policies — with the matched pattern highlighted in the prompt, and `a` spares the pattern for the
   session (`blacklist_session_allows`, never persisted), `session.rs` (the Session: one
-  model + tools + accumulated history, thinking level, steer queue shared with the KeyWatcher, turn
+  model + tools + accumulated history, thinking level, turn
   persistence (failed and interrupted rounds too, so a late stream drop cannot erase the transcript
   from /resume), the wire messages the thread file stores verbatim; `rebuild_tools` is the single
   registry-build path — built-ins + extension tools — shared by the CLI entry, `switch_model` and
@@ -305,11 +305,12 @@ mid-conversation invalidates the cached prefix from the change point, so the two
 gated on `compact::rewrite_prefix` (half the trigger, well below the compaction gate) instead of
 running every round, and the typewriter's settle wait is bounded by `SETTLE_GRACE` because it runs
 on the agent thread — a long answer tail must not hold the next tool round hostage.
-`commands/agent.rs` is CLI glue only. While a task runs, KeyWatcher buffers typed lines into the
-steering queue and the loop drains them at the next tool boundary; leftovers become new tasks. When
-the answer owns the current row (`term::screen`'s dangling flag), the watcher defers its `queued:`
-notice to the render thread, which prints it at the next settle point (`TaskView::flush_notices`) —
-erasing the row in place tore the streamed text apart and dropped the continuation at column 0.
+`commands/agent.rs` is CLI glue only. While a task runs, the KeyWatcher polls stdin for the
+interrupt keys only — ctrl-c (0x03) and a bare esc — and swallows every other keystroke; there is
+no input surface mid-run (no echo, no buffer, no queue), so the next message is composed in the
+full line editor once the task ends. Any non-interrupt key still sets `term::screen`'s
+`flush_now` flag: the user is watching, so the render thread types out its pacing backlog
+instead of continuing to meter it.
 - Plugins ride one plumbing: extension tools run free like `bash` — there is no ask mode — and a
   per-tool policy or the blacklist still gates them; commands-dir
   prompts (`core/commands_md.rs`: `~/.llm/commands/*.md` plus the nearest `.llm/commands/`, project
@@ -366,7 +367,8 @@ erasing the row in place tore the streamed text apart and dropped the continuati
   surfaces (the list falls back to the last parseable line, so a torn tail never hides a thread).
   Resume is the reference shape: a thread id reopens its file — no SQL, no FTS, no b2 content addressing.
 - `term/lineedit.rs`: raw-mode line editor with completion (VMIN=0/VTIME=1 polled reads where
-  `read()==0` means timeout, never EOF — EOF is the 0x04 byte), the KeyWatcher steering buffer, and
+  `read()==0` means timeout, never EOF — EOF is the 0x04 byte), the KeyWatcher that watches for
+  interrupt keys mid-task, and
   the one picker `pick(title, items, echo)` used by every list in the tool — arrow-move +
   type-to-filter in the fuzzy-filter shape (UTF-8 accumulates across bytes so CJK filters work,
   space-separated terms AND-match case-insensitively, enter returns the original index);

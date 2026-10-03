@@ -42,9 +42,6 @@ pub struct Session {
     pub seed: Vec<Msg>,
     /// reasoning effort level; None sends no parameter
     pub thinking: Option<String>,
-    /// steering lines typed mid-run; shared with the KeyWatcher, drained by
-    /// the agent loop at tool-round boundaries and by the REPL afterwards
-    pub steer_queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// the extension host: user executables registering tools (and, later,
     /// commands and event hooks); re-mounted by [`Session::rebuild_tools`]
     pub extensions: crate::agent::ext::Extensions,
@@ -363,28 +360,20 @@ impl Session {
         // esc or ctrl-c during a running task requests a cooperative
         // interrupt; the watcher is paused around approval prompts, which
         // read the same stdin
-        let watcher_queue = self.steer_queue.clone();
-        let mut watcher = crate::term::lineedit::KeyWatcher::start_with(watcher_queue.clone());
+        let mut watcher = crate::term::lineedit::KeyWatcher::start();
         let mut on_approval = |req: ApprovalRequest| {
-            // keystrokes typed in the stop window ride along so an eager
-            // y/n answer is not swallowed by the dying watcher thread
-            let pre = watcher.stop();
+            // keystrokes have no meaning while the watcher runs, so stopping
+            // it just hands the terminal back to the approval prompt
+            watcher.stop();
             // silence the spinner and close the thinking trace so the
             // banner lands on a clean line
             view.borrow_mut().pause();
-            let answer = approval::prompt_approval(&req, pre);
+            let answer = approval::prompt_approval(&req);
             if !matches!(answer, ApprovalResponse::Deny) {
                 *approved_echo.borrow_mut() = Some((req.tool.to_string(), req.preview.to_string()));
             }
-            watcher = crate::term::lineedit::KeyWatcher::start_with(watcher_queue.clone());
+            watcher = crate::term::lineedit::KeyWatcher::start();
             answer
-        };
-        let steer_queue = self.steer_queue.clone();
-        let mut steer = move || {
-            steer_queue
-                .lock()
-                .map(|mut q| q.drain(..).collect())
-                .unwrap_or_default()
         };
         let result = run_agent(
             RunRequest {
@@ -399,7 +388,6 @@ impl Session {
             RunCallbacks {
                 on_update: &mut on_update,
                 on_approval: &mut on_approval,
-                steer: &mut steer,
             },
         );
         watcher.stop();
@@ -529,16 +517,9 @@ impl Session {
             }
             emit_event(&event_json(&u));
         };
-        let mut on_approval = |req: ApprovalRequest| approval::prompt_approval(&req, Vec::new());
+        let mut on_approval = |req: ApprovalRequest| approval::prompt_approval(&req);
         // no KeyWatcher here: stdin belongs to the caller (usually a pipe),
         // and ctrl-c kills this process like any other child
-        let steer_queue = self.steer_queue.clone();
-        let mut steer = move || {
-            steer_queue
-                .lock()
-                .map(|mut q| q.drain(..).collect())
-                .unwrap_or_default()
-        };
         let result = run_agent(
             RunRequest {
                 model,
@@ -552,7 +533,6 @@ impl Session {
             RunCallbacks {
                 on_update: &mut on_update,
                 on_approval: &mut on_approval,
-                steer: &mut steer,
             },
         );
         crate::core::http::clear_interrupt();
@@ -598,15 +578,6 @@ impl Session {
                 Err(failure.message)
             }
         }
-    }
-
-    /// Steering lines that outlived the last run (typed after the final
-    /// model call). The REPL submits each as the next task, the reference style.
-    pub fn take_steer_leftover(&self) -> Vec<String> {
-        self.steer_queue
-            .lock()
-            .map(|mut q| q.drain(..).collect())
-            .unwrap_or_default()
     }
 }
 
@@ -1045,7 +1016,6 @@ mod tests {
             cache_key: "cache-test".to_string(),
             seed,
             thinking: None,
-            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(std::path::Path::new(
                 "/nonexistent",
             )),
@@ -1209,7 +1179,6 @@ mod tests {
             cache_key: "round-persist".to_string(),
             seed: Vec::new(),
             thinking: None,
-            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(&dir),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
@@ -1276,7 +1245,6 @@ mod tests {
             cache_key: "cache-test".to_string(),
             seed: Vec::new(),
             thinking: None,
-            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(&cwd),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
@@ -1350,7 +1318,6 @@ mod tests {
             cache_key: "cache-test".to_string(),
             seed: Vec::new(),
             thinking: None,
-            steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             extensions: crate::agent::ext::Extensions::connect(&cwd),
             usage: crate::core::http::Usage::default(),
             last_usage: None,

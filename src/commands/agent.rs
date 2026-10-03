@@ -354,7 +354,6 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conversation_id,
         seed,
         thinking,
-        steer_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         extensions,
         usage: conv_usage,
         last_usage: None,

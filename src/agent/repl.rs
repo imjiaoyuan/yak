@@ -120,23 +120,6 @@ pub fn repl(
                 .is_some_and(|m| m.kind == "anthropic"),
         );
         run_task_logged(&mut session, text, &mut attachments);
-
-        // steering lines typed after the final model call become new tasks;
-        // a task can itself draw steering, so drain until the queue is empty
-        loop {
-            let leftover = session.take_steer_leftover();
-            if leftover.is_empty() {
-                break;
-            }
-            for line in leftover {
-                eprintln!(
-                    "{}→ {line}{}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                );
-                run_task_logged(&mut session, &line, &mut Vec::new());
-            }
-        }
     }
     restore_default_sigint();
     Ok(0)
@@ -203,8 +186,8 @@ fn existing_file_prefix(token: &str) -> Option<&str> {
         .map(|end| &token[..end])
 }
 
-/// One agent task with interrupt chrome — the shared path for typed input,
-/// /skill:name and steering leftovers. Persistence runs inside run_task.
+/// One agent task with interrupt chrome — the shared path for typed input
+/// and /skill:name. Persistence runs inside run_task.
 fn run_task_logged(
     session: &mut Session,
     text: &str,

@@ -99,7 +99,7 @@ pub fn browse() -> i32 {
         crate::theme::err().dim,
         crate::theme::err().reset
     );
-    match crate::term::lineedit::read_approval_key(Vec::new()) {
+    match crate::term::lineedit::read_approval_key() {
         Some(crate::term::lineedit::ApprovalKey::Yes)
         | Some(crate::term::lineedit::ApprovalKey::Always) => {
             let argv: Vec<String> = vec!["--session".into(), cid];

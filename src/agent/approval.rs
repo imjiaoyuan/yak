@@ -384,7 +384,7 @@ fn redirects_into_device(command: &str) -> bool {
 
 /// y/N/a prompt on the terminal. Fails closed (Deny) when no interactive
 /// terminal is available.
-pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse {
+pub fn prompt_approval(req: &ApprovalRequest) -> ApprovalResponse {
     let verb = crate::agent::tools::display_verb(req.tool);
     // the same activity line the tool log prints (bold $, command in green)
     crate::agent::tools::print_action_line(verb, req.preview, req.diff);
@@ -410,7 +410,7 @@ pub fn prompt_approval(req: &ApprovalRequest, pre: Vec<u8>) -> ApprovalResponse 
         crate::theme::err().reset
     );
     let _ = std::io::stderr().flush();
-    match read_approval_key(pre) {
+    match read_approval_key() {
         Some(ApprovalKey::Yes) => ApprovalResponse::Allow,
         Some(ApprovalKey::Always) => ApprovalResponse::AllowSession,
         // n, ctrl-c, ctrl-d, esc → deny; the tool result carries the reason

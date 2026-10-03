@@ -1,4 +1,4 @@
-use super::{RunCallbacks, RunRequest, usable_anchor};
+use super::*;
 use serde_json::json;
 
 /// A continuation names the anchor for its first request; an anchor the
@@ -34,18 +34,6 @@ fn summarize_shows_ten_lines_plus_count() {
     assert_eq!(summarize(""), "");
     assert_eq!(summarize("\n\n1\n2\n"), "1\n2");
 }
-
-#[test]
-fn steering_joins_into_one_user_message() {
-    let m = merge_steering(None, vec!["first".into(), "second".into()]).unwrap();
-    assert!(matches!(m, Msg::User { ref text, .. } if text == "first\n\nsecond"));
-    let m = merge_steering(Some(Msg::user("task")), vec!["steer".into()]).unwrap();
-    assert!(matches!(m, Msg::User { ref text, .. } if text == "task\n\nsteer"));
-    // nothing queued → pending untouched
-    assert!(merge_steering(None, vec![]).is_none());
-}
-
-use super::*;
 
 #[test]
 fn accumulator_falls_back_on_bad_json() {
@@ -185,7 +173,6 @@ fn deny_callbacks() -> RunCallbacks<'static> {
     RunCallbacks {
         on_update: Box::leak(Box::new(|_| {})),
         on_approval: Box::leak(Box::new(|_| ApprovalResponse::Deny)),
-        steer: Box::leak(Box::new(std::vec::Vec::new)),
     }
 }
 

@@ -457,24 +457,6 @@ impl TaskView {
         }
     }
 
-    /// Print the steer watcher's deferred `queued:` notices: the watcher
-    /// defers when the answer owns the current row; here the row can be
-    /// settled first, so the notice lands on its own line instead of
-    /// tearing the streamed text apart.
-    fn flush_notices(&mut self) {
-        let notices: Vec<String> = match crate::term::screen().notices.lock() {
-            Ok(mut n) => std::mem::take(&mut *n),
-            Err(_) => return,
-        };
-        if notices.is_empty() {
-            return;
-        }
-        self.pause();
-        for line in notices {
-            eprintln!("{}", crate::theme::edim(&line));
-        }
-    }
-
     pub fn delta(&mut self, text: &str) {
         // providers emit empty content deltas between thinking bursts;
         // treating one as "the answer started" killed the spinner and reset
@@ -482,7 +464,6 @@ impl TaskView {
         if text.is_empty() {
             return;
         }
-        self.flush_notices();
         self.stop_ticker();
         self.close_thinking();
         self.streamed_any = true;
@@ -550,7 +531,6 @@ impl TaskView {
     /// A model round ended: accumulate usage, close the trace, terminate a
     /// partial markdown line so the next chrome row starts on its own line.
     pub fn turn_end(&mut self, usage: Option<Usage>) {
-        self.flush_notices();
         if let Some(u) = usage {
             self.total.add(u);
         }

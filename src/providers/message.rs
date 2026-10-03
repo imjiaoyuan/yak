@@ -105,6 +105,8 @@ pub enum Msg {
 }
 
 impl Msg {
+    /// test shorthand: a plain user message with no attachments
+    #[cfg(test)]
     pub fn user(text: impl Into<String>) -> Msg {
         Msg::user_with(text, Vec::new())
     }

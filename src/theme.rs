@@ -222,17 +222,6 @@ pub fn err() -> &'static Palette {
     *ERR
 }
 
-fn wrap(p: &Palette, code: &str, s: &str) -> String {
-    format!("{code}{s}{}", p.reset)
-}
-
-// Single-style whole-string helpers, the shape most chrome lines use;
-// `e*` styles stderr chrome, `o*` stdout output.
-
-pub fn edim(s: &str) -> String {
-    wrap(err(), &err().dim, s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,12 +262,5 @@ mod tests {
         assert!(p.heading.is_empty());
         assert!(p.bold.is_empty());
         assert!(p.reset.is_empty());
-    }
-
-    #[test]
-    fn helpers_wrap_with_the_palette() {
-        // deterministic under the (plain, piped) test harness
-        let p = plain();
-        assert_eq!(wrap(p, &p.dim, "x"), "x");
     }
 }

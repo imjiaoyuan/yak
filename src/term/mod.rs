@@ -7,18 +7,12 @@ pub mod render;
 pub mod ticker;
 
 /// Shared screen state between the render thread (TaskView, the only writer)
-/// and the steer watcher reading input mid-task. The watcher may not erase or
-/// print over a partial answer row, and its `queued:` notice must be printed
-/// by the render thread once the row is settled — otherwise the notice's
-/// `\r\x1b[2K` tears the streamed text apart and the continuation lands at
-/// column 0 (the "text lost its indentation" bug).
+/// and the key watcher reading input mid-task: the watcher must not have the
+/// render thread erase a partial answer row while the user is reading it.
 pub struct Screen {
-    /// the answer left a partial row on screen; a spinner frame or a watche-r
-    /// erase would retract it
+    /// the answer left a partial row on screen; a spinner frame's erase
+    /// would retract it
     pub dangling: std::sync::atomic::AtomicBool,
-    /// `queued:` notice lines the watcher deferred; drained by the render
-    /// thread at the next settle point
-    pub notices: std::sync::Mutex<Vec<String>>,
     /// the user pressed a key mid-stream — they are watching, so the render
     /// thread flushes its pacing backlog on the next tick instead of typing
     /// it out (write-once holds; pacing only decides when bytes are written)
@@ -29,7 +23,6 @@ pub fn screen() -> &'static Screen {
     static SCREEN: std::sync::OnceLock<Screen> = std::sync::OnceLock::new();
     SCREEN.get_or_init(|| Screen {
         dangling: std::sync::atomic::AtomicBool::new(false),
-        notices: std::sync::Mutex::new(Vec::new()),
         flush_now: std::sync::atomic::AtomicBool::new(false),
     })
 }
