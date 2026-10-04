@@ -113,7 +113,13 @@ fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
                 None
             }
             Some(b'[') => csi_end(bytes, i + 2),
-            Some(_) => Some(i + 2),
+            // the two-byte forms close at the byte after the introducer, but
+            // only when the second byte really is the sequence's own ASCII
+            // payload: a lone ESC in front of a multibyte character (binary
+            // output, a mangled paste) would otherwise hand back an offset
+            // inside that character and panic the caller's slicing
+            Some(b) if b.is_ascii() => Some(i + 2),
+            Some(_) => Some(i + 1),
             None => None,
         },
         _ => Some(i + 1),
@@ -213,5 +219,9 @@ mod tests {
         assert_eq!(strip_ansi("done\x1b"), "done");
         // C1 CSI (0x9b) is an introducer too
         assert_eq!(strip_ansi("a\u{9b}31mb"), "ab");
+        // a lone ESC in front of a multibyte character must not panic nor
+        // eat it: the character survives whole
+        assert_eq!(strip_ansi("a\u{1b}中b"), "a中b");
+        assert_eq!(strip_ansi("中\u{1b}文"), "中文");
     }
 }
