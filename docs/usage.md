@@ -52,7 +52,7 @@ A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to
 
 ## Tools
 
-Eight built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`. The agent picks them itself; `--tools read,grep` narrows the set.
+Nine built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `remember`. The agent picks them itself; `--tools read,grep` narrows the set.
 
 `update_plan` is the agent's own checklist for multi-step work: a list of steps, each `pending`, `in_progress` or `completed`, with at most one in progress. Marking a step done as it finishes keeps a long task from losing track of what is left; it touches nothing, so it never asks for approval.
 
@@ -61,6 +61,8 @@ The `read` tool pages through large files instead of loading them whole: `offset
 `webfetch <url>` grabs a page and returns it as text (HTML stripped, http(s) only, proxies honoured) so the agent can read docs without a shell.
 
 `edit` applies one or more exact-match replacements in one call; `write` creates or overwrites a file. Under context pressure an oversized tool result is cut to its head and tail with a note naming what was dropped: the full text stays in the session log, and the model can re-run the command or re-read the file when it needs the middle back.
+
+`remember` saves one durable fact to `~/.llm/LLM.md` (`- [date] one line`): ask \"记住我喜欢简洁回复\" and the agent calls it. The line is deduped (a fact already noted, either way round, is not repeated) and injected into every future session's system prompt; a hand edit to the file works the same way. Project-scoped rules belong in an `AGENTS.md` in the repo, not here.
 
 ## Attachments
 

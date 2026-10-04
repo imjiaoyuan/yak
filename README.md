@@ -48,7 +48,7 @@ Piped output is plain text (no colours, no control codes) so it drops straight i
 
 The first run needs a model: type `/login`, pick a provider from the shipped catalog of 38 (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
 
-Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt.
+Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt. Ask \"把这个偏好记住：……\" and the `remember` tool files it in `~/.llm/LLM.md`, injected into every future session.
 
 ```bash
 llm -a shot.png "what is wrong here?"
@@ -61,7 +61,7 @@ The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.
 
 - [The interactive session](docs/usage.md#the-interactive-session): slash commands, `!cmd`, interrupting a running task
 - [Approvals and the blacklist](docs/usage.md#approvals-and-the-blacklist): what is hardcoded, what you configure
-- [Tools](docs/usage.md#tools): the eight built-ins and how they behave
+- [Tools](docs/usage.md#tools): the nine built-ins and how they behave
 - [Attachments](docs/usage.md#attachments): files, URLs, stdin, clipboard pastes
 - [Sessions](docs/usage.md#sessions): resume, fork, export, `--no-session`
 - [Skills](docs/usage.md#skills) and [prompt templates](docs/usage.md#prompt-templates)

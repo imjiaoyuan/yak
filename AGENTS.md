@@ -16,7 +16,7 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 
 ## What this is
 
-`llm` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (eight built-in tools, approvals, skills, compaction, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
+`llm` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (nine built-in tools, approvals, skills, compaction, memory, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
 
 
 
@@ -114,6 +114,8 @@ All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platf
 - `config.json` (the single settings file (0600, `jsonfmt::dumps_indent(2)`, merge-preserving hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion everywhere, the top-level `models` family (`default` + optional `thinking`) one shared model every mode starts on; the per-model `options` table, where `context_window` (an optional per-model token count) anchors auto-compaction to `window - 16384`, the reference's rule), the `agent` behavior section (approval/tools/skills, `compact_at_tokens` (the auto-compaction trigger used only when the window is unknown) `keep_recent_tokens` (the tail each compaction keeps, 20k by default), `tools` policies, `disabled_skills`, `cache_ttl`: how long a provider should hold this conversation's prompt-cache entry, `5m` (the API default) or `1h`, for the wires that take one), the `aliases` object (hand-edited; no CLI command edits it), and the two plugin tables (`extensions.disabled`/`tool_timeout`). This file deliberately deviates from the reference's config.toml + keys.json + default_model.txt + model_options.json split.
 - `history.jsonl`: the REPL input history: one `{"ts", "text"}` object per line, single-write appends (concurrent processes never interleave), 0600, adjacent submissions deduped at record time, rewritten down to a 1600-entry soft cap once past 2000; the in-memory window is the last 200.
 - `blacklist`: the command blacklist file (plus a project `.llm/blacklist`).
+- `LLM.md`: global user memory, hand-edited or appended by the `remember` tool when the user
+  asks to note something durable; injected into the agent system prompt (`agent/memory.rs`).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories.
 - `pkg/`: packages installed with `llm install`.
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers), swept of anything older than a week at every agent start (`core/tmp.rs`).
