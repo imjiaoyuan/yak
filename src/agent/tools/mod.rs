@@ -17,6 +17,7 @@ use fetch::FetchTool;
 use fs::LsTool;
 use plan::PlanTool;
 use read::ReadTool;
+use remember::RememberTool;
 use search::{GlobTool, GrepTool};
 use write::WriteTool;
 
@@ -127,7 +128,7 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// The built-in tool registry: ten handwritten tools.
+/// The built-in tool registry: nine handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(PlanTool),
@@ -139,6 +140,7 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(GlobTool),
         Box::new(LsTool),
         Box::new(FetchTool),
+        Box::new(RememberTool),
     ]
 }
 
@@ -510,6 +512,7 @@ mod fetch;
 mod fs;
 mod plan;
 mod read;
+mod remember;
 mod search;
 mod write;
 

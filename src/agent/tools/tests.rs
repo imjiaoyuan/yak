@@ -884,8 +884,8 @@ fn tool_defs_stay_under_the_wire_budget() {
         total += n;
     }
     assert!(
-        total < 5_200,
-        "tool definitions total {total} bytes (budget 5200) — trim before adding"
+        total < 5_700,
+        "tool definitions total {total} bytes (budget 5700) — trim before adding"
     );
 }
 

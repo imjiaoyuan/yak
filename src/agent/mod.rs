@@ -6,6 +6,7 @@ pub mod approval;
 pub mod blacklist;
 pub mod compact;
 pub mod ext;
+pub mod memory;
 pub mod repl;
 pub mod session;
 pub mod settings;

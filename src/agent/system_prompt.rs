@@ -82,6 +82,7 @@ pub fn build_system_prompt(
                      - ls: List directory contents\n\
                      - webfetch: Fetch a URL and return its text content\n\
                      - update_plan: Track a multi-step plan\n\
+                     - remember: Save one durable fact to the user's global memory\n\
                      \n\
                      In addition to the tools above, you may have access to other custom tools \
                      depending on the project.\n\
@@ -98,6 +99,16 @@ pub fn build_system_prompt(
                        restate the plan — the UI shows it.\n\
                      - Be concise in your responses.\n\
                      - Show file paths clearly when working with files.\n\
+                     \n\
+                     Memory (user preferences)\n\
+                     - When the user asks you to remember or note a durable preference \n\
+                       (an environment detail, a long-term decision, a way of working), call \n\
+                       the `remember` tool with one concise line. It lands in the user memory \n\
+                       file named in the `<user_memory>` block below and applies from the \n\
+                       next session on; this session's prompt stays as it is.\n\
+                     - Repo- or directory-scoped rules belong in a project AGENTS.md/CLAUDE.md \n\
+                       instead; do not put project facts in the global memory file.\n\
+                     - Never record secrets, tokens or credentials.\n\
                      \n\
                      Extending yourself\n\
                      - Add tools by writing into {ext_dir} (or the project's nearest \
@@ -129,6 +140,8 @@ pub fn build_system_prompt(
     };
     let mut out = base;
     if !continuation {
+        out.push_str("\n\n");
+        out.push_str(&crate::agent::memory::section());
         if let Some(ctx) = project_context(cwd) {
             out.push_str("\n\n");
             out.push_str(&ctx);
@@ -194,11 +207,12 @@ mod tests {
             "docs/extensions.md",
             "docs/architecture.md",
             "update_plan",
+            "remember",
         ] {
             assert!(out.contains(needle), "missing {needle}: {out}");
         }
-        // the reference's prompt has no memory section, date or environment line
-        assert!(!out.contains("<user_memory"), "{out}");
+        // the reference's prompt shape, plus the memory block llm keeps
+        assert!(out.contains("<user_memory"), "{out}");
         assert!(!out.contains("Today's date"), "{out}");
         assert!(!out.contains("Environment: "), "{out}");
         // stable across builds in the same directory (the prefix cache)
