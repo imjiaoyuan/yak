@@ -1,4 +1,4 @@
-//! The session browser behind `llm -r` and `/resume`: one filterable list of
+//! The session browser behind `yak -r` and `/resume`: one filterable list of
 //! recent threads (the fuzzy-filter shape). Enter opens the transcript, then one key
 //! resumes it in the agent session.
 

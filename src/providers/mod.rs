@@ -48,7 +48,7 @@ pub fn auth_headers(kind: &str, key: &str) -> Vec<(String, String)> {
 /// OpenCode's Go/Zen gateway demands a stable conversation id in
 /// `x-opencode-session`: without it every chat request is a 400
 /// `MissingSessionID`, with it the gateway can pin routing and prompt cache.
-/// One id per process; `LLM_SESSION_ID` pins it across processes for a
+/// One id per process; `YAK_SESSION_ID` pins it across processes for a
 /// caller that keeps one conversation alive.
 pub fn gateway_headers(url: &str) -> Vec<(String, String)> {
     if !is_opencode(url) {
@@ -70,7 +70,7 @@ fn is_opencode(url: &str) -> bool {
 fn session_id() -> String {
     static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SESSION
-        .get_or_init(|| match std::env::var("LLM_SESSION_ID") {
+        .get_or_init(|| match std::env::var("YAK_SESSION_ID") {
             Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
             _ => crate::core::db::ulid(),
         })
@@ -89,7 +89,7 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
 }
 
 /// The model a command run resolves to — the one shared chain for every
-/// agent entry point: `-m` > `LLM_MODEL` > `context` (the conversation's
+/// agent entry point: `-m` > `YAK_MODEL` > `context` (the conversation's
 /// last model, when one is resumed) > the stored default. A dangling
 /// default warns and drops out instead of erroring. Saved per-model
 /// options ride under CLI `-o` pairs.
@@ -135,12 +135,12 @@ pub fn resolve_run_model(
     let query = args
         .opt(&["model"])
         .map(str::to_string)
-        .or_else(|| std::env::var("LLM_MODEL").ok())
+        .or_else(|| std::env::var("YAK_MODEL").ok())
         .or(context)
         .or(stored_default);
     let Some(query) = query else {
         return Err(
-            "No default model configured. Run `llm` and use /login (or edit config.json), or pass -m."
+            "No default model configured. Run `yak` and use /login (or edit config.json), or pass -m."
                 .to_string(),
         );
     };

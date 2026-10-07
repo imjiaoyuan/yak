@@ -1,5 +1,5 @@
-//! `llm agent` — interactive CLI agent (terminal-agent style) plus its one-shot
-//! (`llm agent "task"`) form.
+//! `yak agent` — interactive CLI agent (terminal-agent style) plus its one-shot
+//! (`yak agent "task"`) form.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -91,7 +91,7 @@ const SPECS: &[OptSpec] = &[
 
 fn help() -> String {
     render_help(
-        "llm",
+        "yak",
         "Run an agentic task with tools (bare invocation opens an interactive session)",
         SPECS,
         &[(
@@ -231,7 +231,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         conversation_id = Some(forked);
     }
 
-    // model resolution: -m > LLM_MODEL > session's model > the default. A
+    // model resolution: -m > YAK_MODEL > session's model > the default. A
     // bare interactive start with none of those still opens the REPL: /login
     // and /model live there, and failing here would dead-end a fresh install
     // before it could configure a provider.
@@ -241,7 +241,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             let bare_interactive = prompt.trim().is_empty()
                 && std::io::stdin().is_terminal()
                 && args.opt(&["model"]).is_none()
-                && std::env::var_os("LLM_MODEL").is_none()
+                && std::env::var_os("YAK_MODEL").is_none()
                 && conv_model.is_none();
             if !bare_interactive {
                 return Err(e);

@@ -1,7 +1,7 @@
 //! The provider lifecycle behind the REPL's `/login` and `/logout`: the
 //! wizard (the reference-shaped: pick a provider, paste the key, pick the default model
 //! — esc cancels at every step) and the removal picker. The
-//! `llm login`/`llm logout` CLI is gone — this is library code only.
+//! `yak login`/`yak logout` CLI is gone — this is library code only.
 
 use std::io::{BufRead, Write};
 
@@ -85,7 +85,7 @@ pub(crate) fn logout_picker() -> Result<(), String> {
     let mut cfg = config::load();
     if cfg.providers.is_empty() {
         eprintln!(
-            "{}no providers configured (llm login){}",
+            "{}no providers configured (yak login){}",
             crate::theme::err().dim,
             crate::theme::err().reset
         );
@@ -325,7 +325,7 @@ pub(crate) fn wizard() -> Result<(), String> {
         "Provider '{name}' written to {}",
         config::config_path().display()
     );
-    eprintln!("\nTry it:  llm -m {name} \"hello\"   |   llm  (bare = interactive session)");
+    eprintln!("\nTry it:  yak -m {name} \"hello\"   |   yak  (bare = interactive session)");
     Ok(())
 }
 

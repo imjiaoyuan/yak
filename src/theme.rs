@@ -212,7 +212,7 @@ pub fn cursor() -> &'static Cursor {
     &CURSOR
 }
 
-/// The stdout palette (answer streams, `llm -r` transcript).
+/// The stdout palette (answer streams, `yak -r` transcript).
 pub fn out() -> &'static Palette {
     *OUT
 }

@@ -1,6 +1,6 @@
 //! The model pickers behind the REPL's `/model` and `/thinking`: the
 //! provider → model → thinking cascade saved as the shared default, and the
-//! reasoning-effort picker. The `llm models` CLI is gone — this is library
+//! reasoning-effort picker. The `yak models` CLI is gone — this is library
 //! code only.
 
 use crate::core::config;

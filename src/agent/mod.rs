@@ -1,5 +1,5 @@
 //! Agent primitives: the built-in tools, approval, and the agent loop
-//! driving `llm agent`. The conversation model it speaks (`Msg`, `ToolDef`,
+//! driving `yak agent`. The conversation model it speaks (`Msg`, `ToolDef`,
 //! `ToolCall`) lives in `providers` — see `providers/mod.rs`.
 
 pub mod approval;
@@ -18,7 +18,7 @@ use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};
 use serde_json::json;
 
-/// Progress events surfaced by the loop; `llm agent` renders these as text
+/// Progress events surfaced by the loop; `yak agent` renders these as text
 /// or JSONL (with --json) depending on the entry point.
 pub enum AgentUpdate {
     Delta(String),

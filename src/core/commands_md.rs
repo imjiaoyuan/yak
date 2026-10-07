@@ -1,5 +1,5 @@
-//! User commands: `~/.llm/commands/*.md` (plus the nearest project
-//! `.llm/commands/`, which wins) expanding a REPL `/name [args...]` into a
+//! User commands: `~/.yak/commands/*.md` (plus the nearest project
+//! `.yak/commands/`, which wins) expanding a REPL `/name [args...]` into a
 //! prompt-template invocation — a declarative subcommand with no code.
 //! Markdown frontmatter carries `system` (the body is the prompt, and
 //! `$input` receives the trailing args).
@@ -33,7 +33,7 @@ pub fn valid_name(name: &str) -> bool {
     crate::core::text::valid_plugin_name(name, 64) && !name.starts_with('-')
 }
 
-/// Look up one command by name: nearest `.llm/commands/<name>.md` walking
+/// Look up one command by name: nearest `.yak/commands/<name>.md` walking
 /// up from `cwd`, then `user_dir/commands/<name>.md`. A path probe, not a
 /// directory walk, so the bare-prompt fast path never pays for it.
 pub fn find(name: &str) -> Option<CommandMd> {
@@ -51,9 +51,11 @@ pub fn find(name: &str) -> Option<CommandMd> {
         }
     }
     for d in crate::core::paths::ancestors(&cwd) {
-        let candidate = d.join(".llm/commands").join(&file);
-        if let Ok(text) = std::fs::read_to_string(&candidate) {
-            return Some(parse(&text));
+        for proj in [".yak/commands", ".llm/commands"] {
+            let candidate = d.join(proj).join(&file);
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                return Some(parse(&text));
+            }
         }
     }
     std::fs::read_to_string(user_dir().join("commands").join(&file))

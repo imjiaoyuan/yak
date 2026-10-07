@@ -54,7 +54,7 @@ impl Policy {
 #[derive(Default)]
 pub struct ApprovalConfig {
     pub tool_policies: HashMap<String, Policy>,
-    /// command ask-list (`~/.llm/blacklist` + `.llm/blacklist`); a hit
+    /// command ask-list (`~/.yak/blacklist` + `.yak/blacklist`); a hit
     /// forces the approval prompt in either mode, after the destructive
     /// list
     pub blacklist: crate::agent::blacklist::Blacklist,

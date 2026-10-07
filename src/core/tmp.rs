@@ -1,4 +1,4 @@
-//! Housekeeping for `~/.llm/tmp`: the scratch dir the editor drops pasted
+//! Housekeeping for `~/.yak/tmp`: the scratch dir the editor drops pasted
 //! clipboard images and ctrl+g buffers into. Thread files keep an attachment's
 //! path as provenance, never its bytes, so nothing else ever revisits these
 //! files — without a prune the directory grows for the life of the install.

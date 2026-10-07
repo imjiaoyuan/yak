@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""websearch — a resident llm extension: one tool + one slash command.
+"""websearch — a resident yak extension: one tool + one slash command.
 
-Copy to ~/.llm/extensions/websearch, chmod +x, /reload. It mounts:
+Copy to ~/.yak/extensions/websearch, chmod +x, /reload. It mounts:
 
   web_search {query, limit?}   web search → top titles + URLs
   /web <query>                 run a search straight from the prompt
@@ -30,7 +30,7 @@ import urllib.request
 from html import unescape
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; llm-websearch/1.0)",
+    "User-Agent": "Mozilla/5.0 (compatible; yak-websearch/1.0)",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 

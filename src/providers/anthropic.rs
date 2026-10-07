@@ -771,7 +771,7 @@ mod tests {
         let history = vec![Msg::user("hi"), Msg::assistant("ok")];
         let tools = [crate::providers::testutil::tool_def()];
         let mut i = input(&history, &tools);
-        i.system = Some("you are llm");
+        i.system = Some("you are yak");
         i.cache_anchor = Some(2);
         i.cache_ttl = Some(CacheTtl::Hour);
         let body = build_body(&model("anthropic"), &i, false).unwrap();

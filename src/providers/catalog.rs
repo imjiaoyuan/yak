@@ -1,6 +1,6 @@
 //! The built-in provider catalog, mirroring the reference's provider registry: one row
 //! per known API-key provider with its canonical id, endpoint and env var.
-//! `llm models add` builds its wizard from it. OAuth-only and
+//! `yak models add` builds its wizard from it. OAuth-only and
 //! cloud-signature (Bedrock, Vertex) endpoints are not
 //! catalogued.
 

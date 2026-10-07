@@ -26,14 +26,14 @@ fn readme_block(marker: &str) -> String {
     lines[open + 1..close].join("\n")
 }
 
-/// `llm ARGS` as it would print on a terminal, one-shot and hermetic.
+/// `yak ARGS` as it would print on a terminal, one-shot and hermetic.
 fn rendered(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_llm"))
+    let out = Command::new(env!("CARGO_BIN_EXE_yak"))
         .args(args)
-        .env("LLM_USER_PATH", env!("CARGO_TARGET_TMPDIR"))
+        .env("YAK_USER_PATH", env!("CARGO_TARGET_TMPDIR"))
         .output()
-        .expect("run llm");
-    assert!(out.status.success(), "llm {args:?} failed");
+        .expect("run yak");
+    assert!(out.status.success(), "yak {args:?} failed");
     String::from_utf8(out.stdout).expect("help is UTF-8")
 }
 
@@ -44,32 +44,32 @@ fn assert_matches_readme(marker: &str, args: &[&str]) {
     assert_eq!(
         live.trim_end(),
         block.trim_end(),
-        "README's {marker:?} block is stale — refresh it from `llm {}`",
+        "README's {marker:?} block is stale — refresh it from `yak {}`",
         args.join(" ")
     );
 }
 
 #[test]
 fn the_readme_top_level_help_block_matches_the_binary() {
-    assert_matches_readme("llm [flags] [PROMPT]", &["--help"]);
+    assert_matches_readme("yak [flags] [PROMPT]", &["--help"]);
 }
 
 #[test]
 fn the_readme_install_help_block_matches_the_binary() {
-    assert_matches_readme("Usage: llm install", &["install", "-h"]);
+    assert_matches_readme("Usage: yak install", &["install", "-h"]);
 }
 
 #[test]
 fn the_readme_export_help_block_matches_the_binary() {
-    assert_matches_readme("Usage: llm export", &["export", "-h"]);
+    assert_matches_readme("Usage: yak export", &["export", "-h"]);
 }
 
 #[test]
 fn the_readme_remove_help_block_matches_the_binary() {
-    assert_matches_readme("Usage: llm remove", &["remove", "-h"]);
+    assert_matches_readme("Usage: yak remove", &["remove", "-h"]);
 }
 
 #[test]
 fn the_readme_list_help_block_matches_the_binary() {
-    assert_matches_readme("Usage: llm list", &["list", "-h"]);
+    assert_matches_readme("Usage: yak list", &["list", "-h"]);
 }

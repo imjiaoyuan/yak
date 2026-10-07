@@ -385,7 +385,7 @@ pub fn default_editor() -> &'static str {
 /// Image bytes from the clipboard, if any: PowerShell saves the image to a
 /// temp PNG (-STA: clipboard access needs a single-threaded apartment).
 pub fn paste_clipboard_image() -> Result<Clip, String> {
-    let path = std::env::temp_dir().join(format!("llm-paste-{}.png", std::process::id()));
+    let path = std::env::temp_dir().join(format!("yak-paste-{}.png", std::process::id()));
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms; \
          $i = [System.Windows.Forms.Clipboard]::GetImage(); \

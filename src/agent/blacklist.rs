@@ -1,7 +1,7 @@
 //! Command blacklist: a gitignore-style file of forbidden shell commands,
 //! matched against every command position the approval resolver surfaces.
-//! Two homes, project winning by later lines: `.llm/blacklist` in the
-//! project (nearest walking up) and `~/.llm/blacklist` for the user.
+//! Two homes, project winning by later lines: `.yak/blacklist` in the
+//! project (nearest walking up) and `~/.yak/blacklist` for the user.
 //!
 //! This file is an **ask-list**, not a refusal list. The commands that must
 //! never run — privilege escalation, filesystem/machine destruction — are
@@ -86,7 +86,7 @@ impl Blacklist {
         // project last: its lines win by last-match semantics
         let user = crate::core::config::user_dir().join("blacklist");
         let mut files = vec![user.clone()];
-        if let Some(dir) = crate::core::paths::nearest_dir_up(cwd, ".llm", true) {
+        if let Some(dir) = crate::core::paths::nearest_project_dir(cwd) {
             let project = dir.join("blacklist");
             if project != user {
                 files.push(project);
@@ -120,7 +120,7 @@ impl Blacklist {
     /// from here, which is why they are not seeded here.
     pub fn default_file() -> String {
         String::from(
-            "# llm command ask-list — one pattern per line\n\
+            "# yak command ask-list — one pattern per line\n\
              #\n\
              # A command matched here always asks for your approval before\n\
              # running, even in yolo mode. The truly dangerous ones (sudo,\n\

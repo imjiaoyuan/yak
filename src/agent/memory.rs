@@ -1,4 +1,4 @@
-//! Global user memory: a single hand-editable `~/.llm/LLM.md` injected into
+//! Global user memory: a single hand-editable `~/.yak/YAK.md` injected into
 //! the agent system prompt. The `remember` tool appends one dated line when
 //! the user asks to note something down; everything else is hand-edited by
 //! the user who owns the file.
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 const SECTION_CAP: usize = 16 * 1024;
 
 pub fn memory_path() -> PathBuf {
-    crate::core::config::user_dir().join("LLM.md")
+    crate::core::config::user_dir().join("YAK.md")
 }
 
 /// The `<user_memory>` system-prompt section. Always present, even when the
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn remember_appends_one_dated_line() {
         let dir = crate::core::testutil::scratch_dir("memory-add");
-        let file = dir.join("LLM.md");
+        let file = dir.join("YAK.md");
         // no trailing newline: the new line must not glue onto it
         std::fs::write(&file, "- [2026-01-01] likes concise replies").unwrap();
         assert!(remember_at(&file, "prefers vim over emacs").unwrap());
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn remember_dedups_by_containment_either_way() {
         let dir = crate::core::testutil::scratch_dir("memory-dup");
-        let file = dir.join("LLM.md");
+        let file = dir.join("YAK.md");
         std::fs::write(&file, "- [2026-01-01] likes concise replies\n").unwrap();
         // a noted line contains the new one (case-insensitive)
         assert!(!remember_at(&file, "LIKES CONCISE REPLIES").unwrap());
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn a_missing_or_empty_file_still_names_the_path() {
         let dir = crate::core::testutil::scratch_dir("memory-empty");
-        let file = dir.join("LLM.md");
+        let file = dir.join("YAK.md");
         for absent in [true, false] {
             if !absent {
                 std::fs::write(&file, "   \n").unwrap();
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn section_truncates_on_a_char_boundary() {
         let dir = crate::core::testutil::scratch_dir("memory-cap");
-        let file = dir.join("LLM.md");
+        let file = dir.join("YAK.md");
         std::fs::write(
             &file,
             format!("{}\u{4e2d}{}", "x".repeat(16 * 1024), "y".repeat(64)),

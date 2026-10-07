@@ -1,6 +1,6 @@
 //! Test scratch directories. Every test that touches the filesystem needs one,
 //! and hand-rolling the path at each site produced two recurring defects: the
-//! same `~/.llm`-shaped layout reinvented dozens of times, and names keyed on
+//! same `~/.yak`-shaped layout reinvented dozens of times, and names keyed on
 //! `std::process::id()` — which does not distinguish the tests running in
 //! parallel threads of one test binary, so a reused prefix meant a collision.
 //! These two helpers own the naming (a monotonic ULID, unique under any
@@ -24,7 +24,7 @@ pub fn scratch_dir(tag: &str) -> PathBuf {
 /// (a first `Store::open_path`, a write into a tree the code is meant to
 /// build itself).
 pub fn scratch_path(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("llm-{tag}-{}", crate::core::db::ulid()));
+    let dir = std::env::temp_dir().join(format!("yak-{tag}-{}", crate::core::db::ulid()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -53,6 +53,6 @@ mod tests {
     fn the_path_carries_the_tag() {
         let dir = scratch_path("my-tag");
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("llm-my-tag-"), "{name}");
+        assert!(name.starts_with("yak-my-tag-"), "{name}");
     }
 }

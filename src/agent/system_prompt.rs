@@ -69,7 +69,7 @@ pub fn build_system_prompt(
                     .display()
                     .to_string();
                 format!(
-                    "You are an expert coding assistant operating inside llm, a coding agent harness. \
+                    "You are an expert coding assistant operating inside yak, a coding agent harness. \
                      You help users by reading files, executing commands, editing code, and writing new files.\n\
                      \n\
                      Available tools:\n\
@@ -112,21 +112,21 @@ pub fn build_system_prompt(
                      \n\
                      Extending yourself\n\
                      - Add tools by writing into {ext_dir} (or the project's nearest \
-                       .llm/extensions): a `# --- llm-tool: <name>` header (`description:`, \
+                       .yak/extensions): a `# --- yak-tool: <name>` header (`description:`, \
                        `args: name (type) desc`, `interpreter: python3`) makes any script a tool; \
                        an executable speaking line-delimited JSON on stdio becomes a resident \
-                       extension (tools, commands, event hooks). Restart llm or type /reload \
+                       extension (tools, commands, event hooks). Restart yak or type /reload \
                        to pick a new one up.\n\
-                     - A directory with SKILL.md under {skills_dir} (or the project's .llm/skills) \
+                     - A directory with SKILL.md under {skills_dir} (or the project's .yak/skills) \
                        publishes /skill:<name>.\n\
                      - MCP servers are not built in: mount them with a resident extension that \
                        speaks MCP (JSON-RPC 2.0 over stdio or streamable HTTP) and adds one \
                        `<server>__<tool>` tool per MCP tool, reading a config file beside itself; \
                        write it yourself, or start from the bridge named under Reference docs.\n\
                      \n\
-                     Reference docs (llm's own; base raw.githubusercontent.com/imjiaoyuan/llm/main/)\n\
-                     - Read these only when the user asks about llm itself (extensions, MCP, \
-                       skills, config, internals); in a checkout of the llm repo read the local \
+                     Reference docs (yak's own; base raw.githubusercontent.com/imjiaoyuan/yak/main/)\n\
+                     - Read these only when the user asks about yak itself (extensions, MCP, \
+                       skills, config, internals); in a checkout of the yak repo read the local \
                        files instead.\n\
                      - docs/extensions.md — the extension protocol: manifest fields, every message \
                        and event, the `tool_call` gate, timeouts.\n\
@@ -189,12 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn fresh_prompt_is_shaped_and_carries_llm_additions() {
+    fn fresh_prompt_is_shaped_and_carries_yak_additions() {
         let dir = crate::core::testutil::scratch_dir("spfresh");
         std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
         let out = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         for needle in [
-            "You are an expert coding assistant operating inside llm",
+            "You are an expert coding assistant operating inside yak",
             "Available tools:",
             "- read: Read file contents",
             "In addition to the tools above",
@@ -203,7 +203,7 @@ mod tests {
             "Show file paths clearly when working with files",
             "Extending yourself",
             "Reference docs",
-            "raw.githubusercontent.com/imjiaoyuan/llm/main/",
+            "raw.githubusercontent.com/imjiaoyuan/yak/main/",
             "docs/extensions.md",
             "docs/architecture.md",
             "update_plan",
@@ -211,7 +211,7 @@ mod tests {
         ] {
             assert!(out.contains(needle), "missing {needle}: {out}");
         }
-        // the reference's prompt shape, plus the memory block llm keeps
+        // the reference's prompt shape, plus the memory block yak keeps
         assert!(out.contains("<user_memory"), "{out}");
         assert!(!out.contains("Today's date"), "{out}");
         assert!(!out.contains("Environment: "), "{out}");

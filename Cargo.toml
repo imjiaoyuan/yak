@@ -1,5 +1,5 @@
 [package]
-name = "llm"
+name = "yak"
 version = "0.3.6"
 edition = "2024"
 description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."

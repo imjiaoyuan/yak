@@ -12,15 +12,15 @@
 //! → {"type":"shutdown"}                                  (then stdin closes)
 //! ```
 //!
-//! Discovery is two homes, project overriding user by name: `~/.llm/extensions/`
-//! and the nearest `.llm/extensions/` walking up from the working directory.
+//! Discovery is two homes, project overriding user by name: `~/.yak/extensions/`
+//! and the nearest `.yak/extensions/` walking up from the working directory.
 //! An entry is any executable file (shebang decides the language); config
 //! `extensions.disabled` skips one by name. Extension tools are Exec-tier —
 //! the approval matrix asks by default. stdout carries only the protocol;
 //! stderr is dimmed into a diagnostics tail.
 //!
 //! This file is the host itself — connection state, request dispatch and the
-//! tool wrappers. `manifest.rs` parses the `# --- llm-tool:` headers (and the
+//! tool wrappers. `manifest.rs` parses the `# --- yak-tool:` headers (and the
 //! argv execution of those scripts), `proto.rs` holds the two stdio loops the
 //! connections run on, and `roots.rs` finds the homes.
 

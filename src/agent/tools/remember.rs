@@ -7,7 +7,7 @@ use super::*;
 /// and runs no code.
 pub(super) struct RememberTool;
 
-const DESCRIPTION: &str = "Save one durable fact to the user's global memory (LLM.md), injected into every future session. Use when the user asks you to remember or note a preference, environment detail or long-term decision; not for task-specific details.";
+const DESCRIPTION: &str = "Save one durable fact to the user's global memory (YAK.md), injected into every future session. Use when the user asks you to remember or note a preference, environment detail or long-term decision; not for task-specific details.";
 
 impl Tool for RememberTool {
     fn name(&self) -> &str {

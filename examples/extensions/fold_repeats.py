@@ -8,7 +8,7 @@
 # without hiding the one line that matters. Small results, other tools, and
 # anything it cannot actually shrink pass through untouched.
 #
-# Install into ~/.llm/extensions/ (or .llm/extensions/) and /reload; watch it
+# Install into ~/.yak/extensions/ (or .yak/extensions/) and /reload; watch it
 # with /status. The thread file keeps every original result, so the model can
 # re-run the command if it wants the raw text back.
 import json

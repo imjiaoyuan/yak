@@ -3,7 +3,7 @@
 //! description + location; progressive disclosure — the model reads the full
 //! file with the read tool when it decides to use one). Interop: the
 //! agentskills-standard `.agents/skills` locations are read too, at lower
-//! priority than our own `.llm/skills`, so skills installed by other tools
+//! priority than our own `.yak/skills`, so skills installed by other tools
 //! (npx skills, editors) work unmodified.
 
 use std::path::{Path, PathBuf};
@@ -140,15 +140,20 @@ pub(crate) fn load_dir(dir: &Path, out: &mut Vec<SkillDef>) {
 }
 
 /// Discover skills, lowest priority first so later entries override earlier
-/// by name: installed packages, `~/.agents/skills`, `~/.llm/skills`, then the
-/// nearest project `.agents/skills`, then the nearest `.llm/skills` (project
+/// by name: installed packages, `~/.agents/skills`, `~/.yak/skills`, then the
+/// nearest project `.agents/skills`, then the nearest `.yak/skills` (project
 /// beats user, our dirs beat the interop dirs). `disabled` drops entries by
 /// name.
 pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDef> {
     let mut defs: Vec<SkillDef> = Vec::new();
     // packages first (lowest priority): user then project, so a
     // project-local install shadows the user one
-    for root in [user_dir.join("pkg"), cwd.join(".llm/pkg")] {
+    for root in [
+        user_dir.join("pkg"),
+        crate::core::paths::nearest_project_dir(cwd)
+            .map(|d| d.join("pkg"))
+            .unwrap_or_else(|| cwd.join(".yak/pkg")),
+    ] {
         for pkg in crate::commands::pkg::packages_in(&root) {
             load_package(&pkg, &mut defs);
         }
@@ -161,7 +166,9 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
     if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".agents/skills", true) {
         load_dir(&d, &mut defs);
     }
-    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/skills", true) {
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".yak/skills", true)
+        .or_else(|| crate::core::paths::nearest_dir_up(cwd, ".llm/skills", true))
+    {
         load_dir(&d, &mut defs);
     }
     let mut merged: Vec<SkillDef> = Vec::new();
@@ -287,7 +294,7 @@ mod tests {
         assert!(parse_skill_md("# plain notes\nbody", "notes", Path::new("/s/notes.md")).is_err());
     }
 
-    /// Package installed by `llm install`: the repo root carries SKILL.md
+    /// Package installed by `yak install`: the repo root carries SKILL.md
     /// (a standalone skill repo) and `skills/` holds more of them.
     #[test]
     fn package_mounts_a_root_skill_and_its_skills_dir() {
@@ -313,15 +320,15 @@ mod tests {
     }
 
     #[test]
-    fn project_overrides_user_and_llm_beats_agents() {
+    fn project_overrides_user_and_yak_beats_agents() {
         let tmp = crate::core::testutil::scratch_path("skills");
-        let user = tmp.join("userdir"); // plays ~/.llm
+        let user = tmp.join("userdir"); // plays ~/.yak
         let proj = tmp.join("proj");
         std::fs::create_dir_all(user.join("skills")).unwrap();
-        // interop user dir: ~/.agents/skills sits next to ~/.llm
+        // interop user dir: ~/.agents/skills sits next to ~/.yak
         std::fs::create_dir_all(tmp.join("userdir/.agents/skills").parent().unwrap()).unwrap();
         std::fs::create_dir_all(tmp.join(".agents/skills")).unwrap();
-        std::fs::create_dir_all(proj.join(".llm/skills")).unwrap();
+        std::fs::create_dir_all(proj.join(".yak/skills")).unwrap();
 
         skill_dir(
             &tmp.join(".agents/skills"),
@@ -331,7 +338,7 @@ mod tests {
         skill_dir(&user.join("skills"), "shared", "description: user copy");
         skill_dir(&user.join("skills"), "only-user", "description: u");
         skill_dir(
-            &proj.join(".llm/skills"),
+            &proj.join(".yak/skills"),
             "shared",
             "description: project copy",
         );

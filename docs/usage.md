@@ -1,6 +1,6 @@
 # Usage
 
-Everything beyond the quick start: tools, approvals, the session store, models and config, plugins, attachments, the `--json` machine interface. Nothing here is needed to run `llm "fix the failing test"`; that much is on the front page. This page is for the second day, when you want to tune the agent, write an extension, or understand where your conversations live.
+Everything beyond the quick start: tools, approvals, the session store, models and config, plugins, attachments, the `--json` machine interface. Nothing here is needed to run `yak "fix the failing test"`; that much is on the front page. This page is for the second day, when you want to tune the agent, write an extension, or understand where your conversations live.
 
 ## Table of contents
 
@@ -20,7 +20,7 @@ Everything beyond the quick start: tools, approvals, the session store, models a
 
 ## The interactive session
 
-Bare `llm` opens the interactive session. Slash commands cover the model and the session: `/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/resume`, `/tree`, `/status`, `/reload`, … `/help` lists every one, including your skills as `/skill:<name>`. `!cmd` runs a shell command directly, and tab completes command names and paths.
+Bare `yak` opens the interactive session. Slash commands cover the model and the session: `/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/resume`, `/tree`, `/status`, `/reload`, … `/help` lists every one, including your skills as `/skill:<name>`. `!cmd` runs a shell command directly, and tab completes command names and paths.
 
 Ctrl-c or esc interrupts a running task. There is no input surface while it works: keystrokes other than the interrupt are swallowed, and the next message is composed in the editor once the task ends.
 
@@ -29,13 +29,13 @@ A project instructions file (`AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md`, t
 ## Per-run flags
 
 ```bash
-llm -m deepseek/deepseek-chat "..."        # pick a model for this run
-llm -o temperature=0.2 -o top_p=0.9 "..."  # extra model options
-llm --thinking high "..."                  # off | minimal | low | medium | high | xhigh
-llm -s "you are a Rust reviewer" "..."     # replace the system prompt
-llm --append-system-prompt "be terse" "..."
-llm --tools read,grep "..."                # limit the toolbox
-llm --json "..."                           # line-delimited events instead of the UI
+yak -m deepseek/deepseek-chat "..."        # pick a model for this run
+yak -o temperature=0.2 -o top_p=0.9 "..."  # extra model options
+yak --thinking high "..."                  # off | minimal | low | medium | high | xhigh
+yak -s "you are a Rust reviewer" "..."     # replace the system prompt
+yak --append-system-prompt "be terse" "..."
+yak --tools read,grep "..."                # limit the toolbox
+yak --json "..."                           # line-delimited events instead of the UI
 ```
 
 `--thinking` maps to `reasoning_effort` on OpenAI-compatible endpoints and to a thinking budget on Anthropic ones. `--max-request-bytes` caps one request body in bytes (32MB by default): lower it when a gateway in front of the model refuses less than the provider documents.
@@ -46,7 +46,7 @@ The agent runs automatically: it does whatever it needs without asking. What sto
 
 **Hardcoded: nothing can switch these off.** Privilege escalation (`sudo`, `su`, `doas`), filesystem creation and destruction (`mkfs*`, `mkswap`, `fdisk`, `parted`, `dd`, `shred`, `wipefs`), machine control (`shutdown`, `reboot`, `poweroff`, `halt`, `init`), a fork bomb, a write into a real device node (`> /dev/sda`; `2>/dev/null` is fine), and `rm` aimed at `/` or `~`. These are refused outright, and no config or file edit can re-enable them.
 
-**Your blacklist file: remove or add freely.** `~/.llm/blacklist` for every project, plus `.llm/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment (`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded with `rm` and `git push --force*` plus the syntax as comments; deleting it just resets it to those rules. It is a prompt, not a fence: the check is lexical, so a command a shell builds at runtime is not seen, and neither is a command an extension tool runs for itself.
+**Your blacklist file: remove or add freely.** `~/.yak/blacklist` for every project, plus `.yak/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment (`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded with `rm` and `git push --force*` plus the syntax as comments; deleting it just resets it to those rules. It is a prompt, not a fence: the check is lexical, so a command a shell builds at runtime is not seen, and neither is a command an extension tool runs for itself.
 
 A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to spare that pattern for the rest of the session.
 
@@ -62,14 +62,14 @@ The `read` tool pages through large files instead of loading them whole: `offset
 
 `edit` applies one or more exact-match replacements in one call; `write` creates or overwrites a file. Under context pressure an oversized tool result is cut to its head and tail with a note naming what was dropped: the full text stays in the session log, and the model can re-run the command or re-read the file when it needs the middle back.
 
-`remember` saves one durable fact to `~/.llm/LLM.md` (`- [date] one line`): ask \"记住我喜欢简洁回复\" and the agent calls it. The line is deduped (a fact already noted, either way round, is not repeated) and injected into every future session's system prompt; a hand edit to the file works the same way. Project-scoped rules belong in an `AGENTS.md` in the repo, not here.
+`remember` saves one durable fact to `~/.yak/YAK.md` (`- [date] one line`): ask \"记住我喜欢简洁回复\" and the agent calls it. The line is deduped (a fact already noted, either way round, is not repeated) and injected into every future session's system prompt; a hand edit to the file works the same way. Project-scoped rules belong in an `AGENTS.md` in the repo, not here.
 
 ## Attachments
 
 ```bash
-llm -a shot.png "what is wrong here?"      # attach a file
-llm -a https://example.com/page "summarise this"
-llm -a - "what is this?" < shot.png        # stdin as the attachment
+yak -a shot.png "what is wrong here?"      # attach a file
+yak -a https://example.com/page "summarise this"
+yak -a - "what is this?" < shot.png        # stdin as the attachment
 ```
 
 Images, PDFs, wav/mp3 clips and plain text (.txt, .md, .csv, source files) are sent as native content blocks. Text becomes a document block on Anthropic models and an extra text part elsewhere. Anything the chosen model cannot accept is refused before the request leaves your machine.
@@ -81,27 +81,27 @@ In a session, ctrl+v pastes the clipboard image as a short `[paste #N image]` to
 Every conversation is saved, so you can always come back to it:
 
 ```bash
-llm -c "and in python?"                    # continue the newest session here
-llm -r                                     # browse and resume past sessions
-llm --session 01ABC... "..."               # pick an exact one (a short prefix works)
-llm --no-session "..."                     # this run only, don't save it
-llm --fork "..."                           # branch this session onto a new thread
-llm export notes.md                        # write the newest session here as markdown
+yak -c "and in python?"                    # continue the newest session here
+yak -r                                     # browse and resume past sessions
+yak --session 01ABC... "..."               # pick an exact one (a short prefix works)
+yak --no-session "..."                     # this run only, don't save it
+yak --fork "..."                           # branch this session onto a new thread
+yak export notes.md                        # write the newest session here as markdown
 ```
 
-`-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list. `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `llm-<id>.md` in the working directory by default (the same renderer backs `llm export`).
+`-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list. `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `yak-<id>.md` in the working directory by default (the same renderer backs `yak export`).
 
 ## Skills
 
-Skills are `SKILL.md` folders, discovered from `~/.llm/skills`, `~/.agents/skills` and the nearest `.llm/skills`/`.agents/skills` walking up from where you are (later wins by name). A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
+Skills are `SKILL.md` folders, discovered from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name). A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
 
 ## Prompt templates
 
-Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in `~/.llm/commands/` (or the nearest `.llm/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a `system` prompt on top of the agent's own, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
+Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in `~/.yak/commands/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a `system` prompt on top of the agent's own, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
 
 ## Providers and models
 
-The easy path: run `llm`, type `/login`, pick a provider, paste your API key (hidden), pick the default model from the provider's live model list. That's it: only the model you picked is stored (the provider's full list is fetched live whenever `/model` runs), and the first provider's first model becomes your default, so a fresh install is ready to run. esc cancels at any step without writing anything. The catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider and clears the default if it pointed there.
+The easy path: run `yak`, type `/login`, pick a provider, paste your API key (hidden), pick the default model from the provider's live model list. That's it: only the model you picked is stored (the provider's full list is fetched live whenever `/model` runs), and the first provider's first model becomes your default, so a fresh install is ready to run. esc cancels at any step without writing anything. The catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider and clears the default if it pointed there.
 
 Two accounts on the same provider (say two OpenCode Go subscriptions) are two provider entries: run `/login` for the second one and accept the suggested `NAME-2`, then give it its own key. Models are then picked by the qualified `provider/model` id, and a bare model name served by both accounts is refused as ambiguous rather than guessed.
 
@@ -122,7 +122,7 @@ If you prefer to edit config by hand, add a block like this to `config.json`:
 
 `kind` is `openai-compat` or `anthropic`. `api_key` can hold the key itself or `${ENV_VAR}` to read it from the environment at request time: either works.
 
-`/model` picks the model (live list, with your saved ones pinned on top of it) and its thinking depth, saved for future sessions; `/thinking` changes the depth alone. Both live in the `models` object of config.json. `-m` and `LLM_MODEL` override per run, and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning and a fallback.
+`/model` picks the model (live list, with your saved ones pinned on top of it) and its thinking depth, saved for future sessions; `/thinking` changes the depth alone. Both live in the `models` object of config.json. `-m` and `YAK_MODEL` override per run, and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning and a fallback.
 
 ## Tuning the agent
 
@@ -147,11 +147,11 @@ Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`
 
 ## The --json interface
 
-`--json` replaces the terminal UI with one JSON object per line (`text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end` and a closing `result`) for a supervising process: an editor, a CI lane, or another agent driving a child `llm`. The task is the same task (pass one as an argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. Sessions, usage accounting and persistence are identical to a normal run (a round's `turn_end` carries its `usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two cache numbers are what a supervisor prices); the interactive session is what `--json` is *not*) it wants a task and exits.
+`--json` replaces the terminal UI with one JSON object per line (`text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end` and a closing `result`) for a supervising process: an editor, a CI lane, or another agent driving a child `yak`. The task is the same task (pass one as an argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. Sessions, usage accounting and persistence are identical to a normal run (a round's `turn_end` carries its `usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two cache numbers are what a supervisor prices); the interactive session is what `--json` is *not*) it wants a task and exits.
 
 ## Plugins
 
-Extensions are how you add things the core does not ship. Put a file in `~/.llm/extensions/` (or in the project's `.llm/extensions/`, which wins by name) then restart, or type `/reload`. There are two shapes, and the shape is chosen by the file itself.
+Extensions are how you add things the core does not ship. Put a file in `~/.yak/extensions/` (or in the project's `.yak/extensions/`, which wins by name) then restart, or type `/reload`. There are two shapes, and the shape is chosen by the file itself.
 
 ### A script tool: a script with a header
 
@@ -159,7 +159,7 @@ Add a few comment lines at the top and any script becomes a tool. The host runs 
 
 ```python
 #!/usr/bin/env python3
-# --- llm-tool: wordcount
+# --- yak-tool: wordcount
 # description: count characters in a text
 # args: text (string) the text
 # arg-mode: argv
@@ -197,7 +197,7 @@ Here is a whole resident extension: a tool that shells out to `deploy.sh`:
 
 ```python
 #!/usr/bin/env python3
-# ~/.llm/extensions/deploy
+# ~/.yak/extensions/deploy
 import json, sys
 
 def reply(obj):
@@ -221,13 +221,13 @@ for line in sys.stdin:
 
 ### Delegating: a subagent extension
 
-[`examples/extensions/subagent.py`](../examples/extensions/subagent.py) mounts a `subagent` tool that runs another `llm` in its own context window and returns only its conclusion:
+[`examples/extensions/subagent.py`](../examples/extensions/subagent.py) mounts a `subagent` tool that runs another `yak` in its own context window and returns only its conclusion:
 
 ```bash
-cp examples/extensions/subagent.py ~/.llm/extensions/subagent && chmod +x ~/.llm/extensions/subagent
+cp examples/extensions/subagent.py ~/.yak/extensions/subagent && chmod +x ~/.yak/extensions/subagent
 ```
 
-Agent definitions are markdown with frontmatter (`~/.llm/agents/scout.md`, or the project's `.llm/agents/scout.md` where the nearest wins), with `tools`, `model` and `thinking` optional; four ship in [`examples/agents/`](../examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks` batch, or a `chain` where each step gets the previous answer, and the child's tool calls show up in your session as it works. The child is a plain `llm --json` process: its own tools, its own system prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press ctrl+c and unable to spawn further subagents. Copy the file or don't; nothing in the core knows subagents exist.
+Agent definitions are markdown with frontmatter (`~/.yak/agents/scout.md`, or the project's `.yak/agents/scout.md` where the nearest wins), with `tools`, `model` and `thinking` optional; four ship in [`examples/agents/`](../examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks` batch, or a `chain` where each step gets the previous answer, and the child's tool calls show up in your session as it works. The child is a plain `yak --json` process: its own tools, its own system prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press ctrl+c and unable to spawn further subagents. Copy the file or don't; nothing in the core knows subagents exist.
 
 ## Semantics
 

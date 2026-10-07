@@ -1,6 +1,6 @@
 # Extension API
 
-Extensions are the plugin system: anything the core skips, you build yourself as an executable dropped into `~/.llm/extensions/` or the project's `.llm/extensions/`; drop a file in, restart or `/reload`. This page is the full reference; runnable examples live in [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `subagent.py` a tool that runs another `llm` in its own context window, `repeat_guard.py` a `tool_call` deny gate for stuck loops, `fold_repeats.py` a `tool_result` rewriter that folds repeated log lines, `workspace_checkpoint.py` a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree`, plus the `template.js`/`template.py` starter templates). `template.js` runs as-is under node >= 23.6 (native type stripping); bun and deno work too.
+Extensions are the plugin system: anything the core skips, you build yourself as an executable dropped into `~/.yak/extensions/` or the project's `.yak/extensions/`; drop a file in, restart or `/reload`. This page is the full reference; runnable examples live in [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `subagent.py` a tool that runs another `yak` in its own context window, `repeat_guard.py` a `tool_call` deny gate for stuck loops, `fold_repeats.py` a `tool_result` rewriter that folds repeated log lines, `workspace_checkpoint.py` a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree`, plus the `template.js`/`template.py` starter templates). `template.js` runs as-is under node >= 23.6 (native type stripping); bun and deno work too.
 
 Extensions run with your full user permissions and inherit your environment. Only install or write code you would run yourself.
 
@@ -8,9 +8,9 @@ Extensions run with your full user permissions and inherit your environment. Onl
 
 | Home | Notes |
 |---|---|
-| `.llm/extensions/` (nearest walking up from cwd) | project copy, wins by name |
-| `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `llm install` packages |
-| `~/.llm/extensions/` | user-global |
+| `.yak/extensions/` (nearest walking up from cwd) | project copy, wins by name |
+| `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `yak install` packages |
+| `~/.yak/extensions/` | user-global |
 
 Every file (not directory) in these homes is scanned. Same stem name in two homes: the project copy wins. A file is either a **script tool** (it carries a manifest header, see below) or a **resident extension** (anything else, but it must be executable: the exec bit on unix, one of `.exe`/`.bat`/`.cmd`/`.ps1` on Windows). Config keys:
 
@@ -33,7 +33,7 @@ A comment header on any script makes it a tool. The host spawns it **per call**,
 
 ```python
 #!/usr/bin/env python3
-# --- llm-tool: wordcount
+# --- yak-tool: wordcount
 # description: count characters, words and lines of a text
 # args: text (string) the text to measure
 # arg-mode: argv
@@ -44,11 +44,11 @@ text = sys.argv[1] if len(sys.argv) > 1 else ""
 print(f"{len(text)} chars · {len(text.split())} words")
 ```
 
-Manifest fields (lines of `#` or `//` comments after the `--- llm-tool:` marker, until the first non-comment line):
+Manifest fields (lines of `#` or `//` comments after the `--- yak-tool:` marker, until the first non-comment line):
 
 | Field | Meaning |
 |---|---|
-| `--- llm-tool: <name>` | the marker + tool name (required) |
+| `--- yak-tool: <name>` | the marker + tool name (required) |
 | `description: <text>` | shown to the model in the tool list |
 | `args: <name> (<type>) <desc>` | one schema property; repeatable. Types: `string`, `int`/`integer`, `number`/`float`, `bool`/`boolean`, `list`/`array`. Every declared arg is required |
 | `arg-mode: argv` | single declared argument arrives as plain `argv[1]` instead of stdin JSON |
@@ -108,7 +108,7 @@ Tool names are registry-wide: a name that collides with a built-in or another ex
 ← {"id": 2, "error": "deploy script not found"}        // error tool result
 ```
 
-`tool_call_id` is the model's own id for this call: key per-call state on it when several calls of your tool can be in flight (the read-only batch runs them concurrently). A script tool (`# --- llm-tool:`) does not see it: the host feeds those the arguments only.
+`tool_call_id` is the model's own id for this call: key per-call state on it when several calls of your tool can be in flight (the read-only batch runs them concurrently). A script tool (`# --- yak-tool:`) does not see it: the host feeds those the arguments only.
 
 The reply's `result` should be a string; any other JSON value is serialized as its pretty form.
 
@@ -182,7 +182,7 @@ Reply without a `content` field (or `null`) to observe only. The replacement is 
 
 ## Approval, tiers and policies
 
-Every extension tool is **exec-tier** by default and runs free like `bash`. A tool may declare a lower tier (`# tier: write` in a script manifest, or `"tier": "read"` on a tool in the `initialize` reply) which groups it into the read-only parallel batch. There is no ask mode: a call runs unless a per-tool policy says otherwise, the hardcoded core refuses it, or the blacklist asks. A command in the hardcoded core (privilege escalation, filesystem or machine destruction, a fork bomb, a write into a device node) or one you added to `~/.llm/blacklist` or `.llm/blacklist` is refused or asks; the blacklist is matched against the `bash` tool's command line only: an extension tool is whatever its script does, so gate it with `tool_call` if it can do damage. The blacklist file only *adds* refusals; the core cannot be edited away. Explicit per-tool policies in config.json win over everything, in either direction:
+Every extension tool is **exec-tier** by default and runs free like `bash`. A tool may declare a lower tier (`# tier: write` in a script manifest, or `"tier": "read"` on a tool in the `initialize` reply) which groups it into the read-only parallel batch. There is no ask mode: a call runs unless a per-tool policy says otherwise, the hardcoded core refuses it, or the blacklist asks. A command in the hardcoded core (privilege escalation, filesystem or machine destruction, a fork bomb, a write into a device node) or one you added to `~/.yak/blacklist` or `.yak/blacklist` is refused or asks; the blacklist is matched against the `bash` tool's command line only: an extension tool is whatever its script does, so gate it with `tool_call` if it can do damage. The blacklist file only *adds* refusals; the core cannot be edited away. Explicit per-tool policies in config.json win over everything, in either direction:
 
 ```json
 {"agent": {"tools": {"deploy": "allow", "git_push": "deny"}}}
@@ -223,18 +223,18 @@ The MCP support lives here rather than in the binary: `examples/extensions/mcp_b
 
 The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session). Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of scope: a server that fails its handshake is skipped with a dim warning on stderr and the rest stay up.
 
-## Running another llm: the `subagent.py` example
+## Running another yak: the `subagent.py` example
 
-The one example that exercises every part of this page at once: `subagent.py` mounts a `subagent` tool that spawns a real `llm` child in its own context window and hands the conclusion back as a tool result.
+The one example that exercises every part of this page at once: `subagent.py` mounts a `subagent` tool that spawns a real `yak` child in its own context window and hands the conclusion back as a tool result.
 
 ```bash
-llm --json --no-session --tools read,grep \
+yak --json --no-session --tools read,grep \
     -m <model> --thinking <level> --append-system-prompt "<agent body>" "Task: ..."
 ```
 
-- The child's *agent definition* is markdown with frontmatter, from `~/.llm/agents/<name>.md` or the project's `.llm/agents/<name>.md` (nearest wins): `name`, `description`, `tools`, `model`, `thinking`, and the body becomes the appended system prompt. Discovery, parsing and the depth guard live in the extension: the core knows nothing about agents.
+- The child's *agent definition* is markdown with frontmatter, from `~/.yak/agents/<name>.md` or the project's `.yak/agents/<name>.md` (nearest wins): `name`, `description`, `tools`, `model`, `thinking`, and the body becomes the appended system prompt. Discovery, parsing and the depth guard live in the extension: the core knows nothing about agents.
 - `--json` is what makes the child observable: one JSON object per line (`text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end`, `result`). The extension turns those into the parent's live tool log and reads the final answer off the `result` object, which is why it needs no parsing of human-facing text.
-- The child is stopped on the host's `interrupt` and on its own deadline, `LLM_SUBAGENT_DEPTH` refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all.
+- The child is stopped on the host's `interrupt` and on its own deadline, `YAK_SUBAGENT_DEPTH` refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all.
 - The `subagent` call runs free like any exec tool (there is no ask mode); the definition's `tools:` line is what bounds the child.
 
 `examples/agents/` ships four definitions to copy: `scout` and `reviewer` (read-only), `planner` (think-only) and `worker` (can edit and run commands).

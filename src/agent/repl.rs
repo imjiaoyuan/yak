@@ -560,7 +560,7 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
         .unwrap_or_default();
     let p = crate::theme::err();
     eprintln!(
-        "{p0}llm agent{r} {d}v{v} ·{r} {b}{m}{t}{r}",
+        "{p0}yak agent{r} {d}v{v} ·{r} {b}{m}{t}{r}",
         p0 = p.bold,
         r = p.reset,
         d = p.dim,

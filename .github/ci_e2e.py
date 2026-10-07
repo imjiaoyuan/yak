@@ -367,7 +367,7 @@ def probe_examples(ex_dir, env):
         with open(path, encoding="utf-8") as f:
             body = f.read()
         shebang = body.split("\n", 1)[0]
-        if "llm-tool:" in body[:400]:
+        if "yak-tool:" in body[:400]:
             # a manifest script tool: argv in, stdout out, no protocol
             out = subprocess.run(
                 [sys.executable, "-c",
@@ -467,7 +467,7 @@ def main():
     with open(wc, "w") as f:
         f.write(
             "#!/usr/bin/env python3\n"
-            "# --- llm-tool: wordcount\n"
+            "# --- yak-tool: wordcount\n"
             "# description: count characters in a text\n"
             "# args: text (string) the text\n"
             "# arg-mode: argv\n"
@@ -478,13 +478,13 @@ def main():
     if sys.platform != "win32":
         os.chmod(wc, 0o755)
 
-    env = dict(os.environ, LLM_USER_PATH=user, ECHO_LOG=fake_log)
+    env = dict(os.environ, YAK_USER_PATH=user, ECHO_LOG=fake_log)
 
     p = run([binary, "hi"], env, stdin=subprocess.DEVNULL)
     assert p.returncode == 0, f"prompt rc={p.returncode} err={p.stderr[-500:]}"
     assert "final answer after tool" in p.stdout, f"unexpected stdout: {p.stdout!r}"
     assert seen.get("auth") == "Bearer sk-ci", f"auth header: {seen.get('auth')!r}"
-    assert (seen.get("ua") or "").startswith("llm/"), \
+    assert (seen.get("ua") or "").startswith("yak/"), \
         f"user-agent must name this client, not ureq: {seen.get('ua')!r}"
     assert seen.get("model") == "m-a", f"model: {seen.get('model')!r}"
 
@@ -588,7 +588,7 @@ def main():
         f"the examples lane lost coverage: ran={ran} skipped={skipped}"
     print(f"examples: {len(ran)} probed, {len(skipped)} skipped {skipped}")
 
-    # package lane: a local git repo installs into .llm/pkg (project), its
+    # package lane: a local git repo installs into .yak/pkg (project), its
     # extension mounts, list/remove work
     pkgrepo = os.path.join(work, "pkgrepo")
     os.makedirs(os.path.join(pkgrepo, "extensions"))
@@ -611,7 +611,7 @@ def main():
     assert "skills: wholegit (repo root), demo" in out and "extensions:" in out, \
         f"install did not report the package layout: {out[-400:]!r}"
     ext_name = "hello.cmd" if sys.platform == "win32" else "hello"
-    assert os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo", "extensions", ext_name))
+    assert os.path.exists(os.path.join(work, ".yak", "pkg", "pkgrepo", "extensions", ext_name))
     ls = run([binary, "list"], env, cwd=work, stdin=subprocess.DEVNULL)
     lsout = ls.stdout + ls.stderr
     assert "pkgrepo" in lsout and "wholegit (repo root)" in lsout, f"list: {lsout[-300:]!r}"
@@ -626,7 +626,7 @@ def main():
             stdin=subprocess.DEVNULL)
     assert p.returncode == 2, f"-l and -g must conflict: rc={p.returncode}"
     p = run([binary, "remove", "pkgrepo"], env, cwd=work, stdin=subprocess.DEVNULL)
-    assert p.returncode == 0 and not os.path.exists(os.path.join(work, ".llm", "pkg", "pkgrepo")), \
+    assert p.returncode == 0 and not os.path.exists(os.path.join(work, ".yak", "pkg", "pkgrepo")), \
         f"remove rc={p.returncode}"
 
     # builtin-tool lane: the model writes a real file through the write
@@ -727,7 +727,7 @@ def main():
         f"--json without a task: rc={nj.returncode} out={(nj.stdout + nj.stderr)[-200:]!r}"
 
     # subagent lane: examples/extensions/subagent.py mounts a tool that spawns
-    # a real child llm (--json, its own tools and system prompt), reads its
+    # a real child yak (--json, its own tools and system prompt), reads its
     # event stream and hands the conclusion back as the tool result
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sub_dst = os.path.join(user, "extensions", "subagent")
@@ -745,7 +745,7 @@ def main():
                 "You are the CI scout.\n")
     # a legacy codepage is what Windows CI actually runs under; pinning it on
     # unix too makes the lane prove the example survives one everywhere
-    sub_env = dict(env, LLM_BIN=os.path.abspath(binary), PYTHONIOENCODING="cp1252")
+    sub_env = dict(env, YAK_BIN=os.path.abspath(binary), PYTHONIOENCODING="cp1252")
     sb = run([binary, "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
              sub_env, cwd=work, stdin=subprocess.DEVNULL)
     assert sb.returncode == 0, f"subagent lane rc={sb.returncode} err={sb.stderr[-800:]}"
@@ -812,11 +812,11 @@ def main():
     assert md.startswith("# alpha marker"), f"export title: {md[:120]!r}"
     assert "**User**" in md and "**Assistant**" in md, f"export body: {md[:400]!r}"
     assert "final answer after tool" in md, "the stored answer must be exported"
-    # no path: llm-<id>.md lands in the working directory
+    # no path: yak-<id>.md lands in the working directory
     dflt = run([binary, "export"], env, cwd=here, stdin=subprocess.DEVNULL)
     assert dflt.returncode == 0, \
         f"default export rc={dflt.returncode} err={dflt.stderr[-300:]!r}"
-    named = [f for f in os.listdir(here) if f.startswith("llm-") and f.endswith(".md")]
+    named = [f for f in os.listdir(here) if f.startswith("yak-") and f.endswith(".md")]
     assert named, f"no default-named export in {os.listdir(here)}"
 
     print("e2e smoke passed")

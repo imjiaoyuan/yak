@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Single contributor guide for `llm`: what the project is, how to build, test and release it, the module map, the storage layout and the workflow rules, plus the constraints a change must not break. Everything deeper has exactly one home:
+Single contributor guide for `yak`: what the project is, how to build, test and release it, the module map, the storage layout and the workflow rules, plus the constraints a change must not break. Everything deeper has exactly one home:
 
 | Topic | Home |
 |---|---|
@@ -16,13 +16,13 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 
 ## What this is
 
-`llm` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (nine built-in tools, approvals, skills, compaction, memory, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
+`yak` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (nine built-in tools, approvals, skills, compaction, memory, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
 
 
 
 - `the behavioral spec`: agent loop, tools, streaming REPL, extension/packages shape.
 - `the approval reference`: the approval model.
-- `~/work/references/llm/`: historical: only the JSONL thread-store shape and ULIDs survive from it.
+- `~/work/references/yak/`: historical: only the JSONL thread-store shape and ULIDs survive from it.
 
 ## Commands
 
@@ -39,24 +39,24 @@ cargo clippy --all-targets   # keep at zero warnings
 - Smoke-test the binary hermetically: every path resolves under the override, so nothing touches the real user dir.
 
   ```bash
-  LLM_USER_PATH=/tmp/x cargo run -- "task"
+  YAK_USER_PATH=/tmp/x cargo run -- "task"
   ```
 
-- End-to-end: a python `http.server` mock returning OpenAI-style SSE on `127.0.0.1` (or Anthropic-style `event:`-framed SSE for `/v1/messages`) plus a `config.json` pointing at it exercises any full path. Start server and client in the same script; backgrounded servers do not survive between tool calls, and pass `< /dev/null`: the CLI reads piped stdin as prompt text by design. `.github/ci_e2e.py` is the working instance; run it locally against a fresh build with `python .github/ci_e2e.py target/debug/llm`.
+- End-to-end: a python `http.server` mock returning OpenAI-style SSE on `127.0.0.1` (or Anthropic-style `event:`-framed SSE for `/v1/messages`) plus a `config.json` pointing at it exercises any full path. Start server and client in the same script; backgrounded servers do not survive between tool calls, and pass `< /dev/null`: the CLI reads piped stdin as prompt text by design. `.github/ci_e2e.py` is the working instance; run it locally against a fresh build with `python .github/ci_e2e.py target/debug/yak`.
 - CI (`.github/workflows/ci.yml`) runs test → release build → `ci_e2e.py` → `ci_repl.py` on ubuntu, macOS and windows-latest. The two Python scripts are CI-local harnesses, not shipped code; `ci_repl.py` covers the interactive pty paths (multiline keys, kitty CSI-u folding, `!` tab completion, the ctrl+g editor round-trip) and skips itself on Windows, so run it on Unix to exercise the terminal.
 - `README.md` embeds every command's full `-h` output verbatim. When flags or help text change, refresh the matching block there too and keep it byte-identical (`tests/readme_help.rs` enforces it).
 
 ### Environment overrides
 
-- `LLM_USER_PATH`: relocate the whole user directory (state root, see Storage).
-- `LLM_MODEL`: beats the stored default, loses only to `-m`.
-- `LLM_SHELL`: the shell behind every spawned command (agent bash, `!cmd`); platform default is `sh`/PowerShell.
-- `LLM_SESSION_ID`: pins the per-conversation `x-opencode-session` id across invocations.
+- `YAK_USER_PATH`: relocate the whole user directory (state root, see Storage).
+- `YAK_MODEL`: beats the stored default, loses only to `-m`.
+- `YAK_SHELL`: the shell behind every spawned command (agent bash, `!cmd`); platform default is `sh`/PowerShell.
+- `YAK_SESSION_ID`: pins the per-conversation `x-opencode-session` id across invocations.
 - `COLUMNS`/`LINES`, `TERM`, `COLORTERM`, `NO_COLOR`, `CLICOLOR_FORCE`: terminal sizing and the color gate. `EDITOR`/`VISUAL`: the ctrl+g round-trip. `HOME`/`USERPROFILE`: user dir root. Model traffic honors the usual proxy variables through `ureq`.
 
 ### Releases
 
-Remote is `github.com/imjiaoyuan/llm` (branch `main`); tagged `v*` cuts releases (`.github/workflows/release.yml`, six targets: aarch64/x86_64 Apple, x86_64 Windows, and x86_64-gnu plus x86_64/aarch64-musl Linux; sha256 checksums). The release body is generated, not written: the workflow lists every commit subject since the previous tag (version-bump commits filtered out) above the install one-liner, so commit subjects are the release notes; write each one as a user-facing sentence. There is no CHANGELOG file; the releases page is the changelog. Repo-root `install.sh`/`install.ps1` are the portable installer/updaters over those assets: re-running resolves the latest release and compares versions (`updating old -> new`; equal versions stay unless `LLM_FORCE=1`), with `LLM_VERSION`/`LLM_REPO`/`LLM_INSTALL_DIR` overrides and a user-level `~/.local/bin` everywhere. Keep them in sync with the release asset names (`llm-<target>.tar.gz` on Unix, `llm-<target>.zip` on Windows, each with a `.sha256`). The Pages site (`https://jiaoyuan.org/llm/`, source = main root) serves only the two installer scripts, never binaries.
+Remote is `github.com/imjiaoyuan/yak` (branch `main`); tagged `v*` cuts releases (`.github/workflows/release.yml`, six targets: aarch64/x86_64 Apple, x86_64 Windows, and x86_64-gnu plus x86_64/aarch64-musl Linux; sha256 checksums). The release body is generated, not written: the workflow lists every commit subject since the previous tag (version-bump commits filtered out) above the install one-liner, so commit subjects are the release notes; write each one as a user-facing sentence. There is no CHANGELOG file; the releases page is the changelog. Repo-root `install.sh`/`install.ps1` are the portable installer/updaters over those assets: re-running resolves the latest release and compares versions (`updating old -> new`; equal versions stay unless `YAK_FORCE=1`), with `YAK_VERSION`/`YAK_REPO`/`YAK_INSTALL_DIR` overrides and a user-level `~/.local/bin` everywhere. Keep them in sync with the release asset names (`yak-<target>.tar.gz` on Unix, `yak-<target>.zip` on Windows, each with a `.sha256`). The Pages site (`https://jiaoyuan.org/yak/`, source = main root) serves only the two installer scripts, never binaries.
 
 ## Hard constraint: minimal dependencies
 
@@ -108,16 +108,16 @@ Deep detail on any of these (request flow, loop discipline, tool/approval rules,
 
 ## Storage
 
-All under `user_dir()`, overridable via `LLM_USER_PATH`; `~/.llm` on every platform.
+All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platform.
 
 - `threads/<ulid>.jsonl` (one file per conversation, one `StoredTurn` JSON object per line, one line per agent round appended at the round boundary (a `v` format stamp first) `THREAD_FORMAT_VERSION`, absent on pre-versioning lines: then id, ts, mode, model, cwd, system, prompt, response, reasoning, usage, options, and the round's wire `messages` as the same `providers::Msg` values the request carries). `usage` keeps the round's cache split (`[input, output, cached, cached_write]`; the `[input, output]` pair older lines hold still reads), and a resume seeds the session's totals from it. `append_turn` appends a line (a None thread id starts a fresh thread); `read_thread` returns turns oldest-first under two disciplines: a corrupt line mid-file fails loudly (refusing a damaged thread beats silently resuming without a turn) while a torn final line (a crash mid-append) is the one bounded repair: dropped with a warning. A turn stamped with a future format is refused with the upgrade path named. `latest_thread`/`resolve_thread`/`fork_thread`/`recent_threads` serve the resume and list surfaces (the list falls back to the last parseable line, so a torn tail never hides a thread; each row is summarized from a bounded tail read: a count past the window is a shown lower bound, never a full-file read). Attachments persist as provenance, not pixels (path/url/mime: `stored_messages` strips the payload so a thread file stays small, however many screenshots ride it); `rebuild_turns` reloads local files on resume, and a record whose bytes are gone rides as a text note in place of its block. An attachment rides as the bytes the file holds: nothing is re-encoded, so an oversized screenshot costs what its pixels cost. Every image in a replayed history is re-billed on every request, so `session::budget_images` (run on every round, before pricing) drops the pixels from images outside the newest two user turns, tool results included (a screenshot can enter as a `read` result; provenance stays, so the adapters render the dropped payload as a note), and a resume rehydrates only from that window's start: an image out of the window is never decoded and never read off disk. Every agent session persists unless `--no-session`; there is no global logging switch.
 - `config.json` (the single settings file (0600, `jsonfmt::dumps_indent(2)`, merge-preserving hand-added keys): `providers` with inline `api_key` supporting `${ENV_VAR}` expansion everywhere, the top-level `models` family (`default` + optional `thinking`) one shared model every mode starts on; the per-model `options` table, where `context_window` (an optional per-model token count) anchors auto-compaction to `window - 16384`, the reference's rule), the `agent` behavior section (approval/tools/skills, `compact_at_tokens` (the auto-compaction trigger used only when the window is unknown) `keep_recent_tokens` (the tail each compaction keeps, 20k by default), `tools` policies, `disabled_skills`, `cache_ttl`: how long a provider should hold this conversation's prompt-cache entry, `5m` (the API default) or `1h`, for the wires that take one), the `aliases` object (hand-edited; no CLI command edits it), and the two plugin tables (`extensions.disabled`/`tool_timeout`). This file deliberately deviates from the reference's config.toml + keys.json + default_model.txt + model_options.json split.
 - `history.jsonl`: the REPL input history: one `{"ts", "text"}` object per line, single-write appends (concurrent processes never interleave), 0600, adjacent submissions deduped at record time, rewritten down to a 1600-entry soft cap once past 2000; the in-memory window is the last 200.
-- `blacklist`: the command blacklist file (plus a project `.llm/blacklist`).
-- `LLM.md`: global user memory, hand-edited or appended by the `remember` tool when the user
+- `blacklist`: the command blacklist file (plus a project `.yak/blacklist`).
+- `YAK.md`: global user memory, hand-edited or appended by the `remember` tool when the user
   asks to note something durable; injected into the agent system prompt (`agent/memory.rs`).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories.
-- `pkg/`: packages installed with `llm install`.
+- `pkg/`: packages installed with `yak install`.
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers), swept of anything older than a week at every agent start (`core/tmp.rs`).
 
 ## Workflow

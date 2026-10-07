@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""repeat-guard — loop hygiene as a resident llm extension (a loop guard).
+"""repeat-guard — loop hygiene as a resident yak extension (a loop guard).
 
-Copy to ~/.llm/extensions/repeat-guard.py, chmod +x, /reload. It mounts no
+Copy to ~/.yak/extensions/repeat-guard.py, chmod +x, /reload. It mounts no
 tools and no commands; it subscribes to two events and denies the call that
 keeps a stuck loop alive:
 

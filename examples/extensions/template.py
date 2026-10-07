@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llm extension template (python) — copy to ~/.llm/extensions/<name> and
+"""yak extension template (python) — copy to ~/.yak/extensions/<name> and
 edit the USER SECTION below. The protocol loop above talks to the agent
 host; nothing below needs to know about it."""
 

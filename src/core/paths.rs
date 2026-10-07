@@ -1,4 +1,4 @@
-//! Shared directory-walk helpers: the `.llm/<name>` discovery walks that
+//! Shared directory-walk helpers: the `.yak/<name>` discovery walks that
 //! skills, prompts/commands and drop-in tools all share, plus the one home
 //! lookup every `~` consumer reads.
 
@@ -41,6 +41,16 @@ pub fn nearest_dir_up(cwd: &Path, dir: &str, stop_at_git_root: bool) -> Option<P
         }
     }
     None
+}
+
+/// The project root directory, pre-rename compatibility included: the
+/// nearest `.yak` walking up, else the nearest `.llm` left by the old
+/// name (both are read; only `.yak` is ever written). The `llm`-era
+/// directory is not migrated the way `~/.llm` is — projects belong to
+/// their repositories, not to this machine — so it keeps working where it
+/// sits until the user renames it themselves.
+pub fn nearest_project_dir(cwd: &Path) -> Option<PathBuf> {
+    nearest_dir_up(cwd, ".yak", true).or_else(|| nearest_dir_up(cwd, ".llm", true))
 }
 
 #[cfg(test)]

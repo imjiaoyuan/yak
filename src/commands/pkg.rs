@@ -1,5 +1,5 @@
-//! `llm install|remove|list` — the reference packages, git-only. A package is a git
-//! repository cloned under `~/.llm/pkg/<name>` (`-l`: `.llm/pkg/<name>`,
+//! `yak install|remove|list` — the reference packages, git-only. A package is a git
+//! repository cloned under `~/.yak/pkg/<name>` (`-l`: `.yak/pkg/<name>`,
 //! project-local); its `skills/`, `extensions/` and `commands/` directories
 //! mount into the normal discovery walks. No update command: re-running
 //! `install` refreshes (pinned `@ref` clones are skipped by the refresh).
@@ -13,7 +13,7 @@ const INSTALL_SPECS: &[OptSpec] = &[
     flag_spec!(
         "local",
         Some('l'),
-        "Install project-local (.llm/pkg/ instead of ~/.llm/pkg/)"
+        "Install project-local (.yak/pkg/ instead of ~/.yak/pkg/)"
     ),
     flag_spec!(
         "global",
@@ -32,7 +32,7 @@ pub fn run(argv: &[String]) -> i32 {
         print!(
             "{}",
             render_help(
-                "llm install|remove|list",
+                "yak install|remove|list",
                 "Manage git packages (the reference packages, git-only)\n\nCommands:\n  install git:github.com/user/repo[@ref]\n  remove NAME\n  list",
                 LIST_SPECS,
                 &[],
@@ -49,7 +49,7 @@ pub fn run(argv: &[String]) -> i32 {
             print!(
                 "{}",
                 render_help(
-                    "llm install|remove|list",
+                    "yak install|remove|list",
                     "Manage git packages (the reference packages, git-only)",
                     LIST_SPECS,
                     &[],
@@ -67,7 +67,7 @@ pub fn run(argv: &[String]) -> i32 {
 fn parse_install_args(argv: &[String]) -> (Option<ParsedArgs>, i32) {
     crate::core::args::parse_with_help(argv, INSTALL_SPECS, || {
         render_help(
-            "llm install git:github.com/user/repo[@ref]",
+            "yak install git:github.com/user/repo[@ref]",
             "Clone a package into the pkg directory (re-run to refresh)",
             INSTALL_SPECS,
             &[("SOURCE", "git:github.com/user/repo, with an optional @ref")],
@@ -106,7 +106,7 @@ fn pkg_root(local: bool) -> PathBuf {
     if local {
         std::env::current_dir()
             .unwrap_or_else(|_| Path::new(".").to_path_buf())
-            .join(".llm/pkg")
+            .join(".yak/pkg")
     } else {
         crate::core::config::user_dir().join("pkg")
     }
@@ -129,7 +129,7 @@ fn install(argv: &[String]) -> i32 {
     let (args, code) = parse_install_args(argv);
     let Some(args) = args else { return code };
     let Some(raw) = args.positionals.first() else {
-        eprintln!("Error: Usage: llm install git:github.com/user/repo[@ref]");
+        eprintln!("Error: Usage: yak install git:github.com/user/repo[@ref]");
         return 2;
     };
     let Some((url, ref_)) = parse_source(raw) else {
@@ -162,7 +162,7 @@ fn install(argv: &[String]) -> i32 {
     if target.exists() {
         // refresh, unless the install is pinned to a ref the caller did
         // not repeat (a pinned clone moves only via install @new-ref)
-        let pinned = git(&["config", "llm.pinned"], &target)
+        let pinned = git(&["config", "yak.pinned"], &target)
             .ok()
             .is_some_and(|p| !p.trim().is_empty() && ref_.as_deref() != Some(p.trim()));
         if pinned && ref_.is_none() {
@@ -181,7 +181,7 @@ fn install(argv: &[String]) -> i32 {
             // on a move (or stays empty on a first pin) and the next plain
             // `install NAME` would move a clone the user pinned
             if let Some(ref_) = &ref_
-                && let Err(e) = git(&["config", "llm.pinned", ref_], &target)
+                && let Err(e) = git(&["config", "yak.pinned", ref_], &target)
             {
                 eprintln!(
                     "{}Warning: updated {name} but could not record the new pin ({e}){}",
@@ -211,10 +211,10 @@ fn install(argv: &[String]) -> i32 {
         // a lost marker reads as "unpinned", so a failed write must say so
         // — silence here would have the next install reset a pinned clone
         let pinned_value = ref_.as_deref().unwrap_or("");
-        if let Err(e) = git(&["config", "llm.pinned", pinned_value], &target) {
+        if let Err(e) = git(&["config", "yak.pinned", pinned_value], &target) {
             eprintln!(
                 "{}Warning: installed {name} but could not record its pin ({e}) — \
-                 a later `llm install {name}` will refresh it like an unpinned clone{}",
+                 a later `yak install {name}` will refresh it like an unpinned clone{}",
                 p.dim, p.reset
             );
         }
@@ -283,7 +283,7 @@ fn notes(found: &Carried) -> Vec<String> {
     }
     if out.is_empty() {
         out.push(
-            "nothing llm can mount — needs skills/, extensions/, commands/ or a root SKILL.md"
+            "nothing yak can mount — needs skills/, extensions/, commands/ or a root SKILL.md"
                 .to_string(),
         );
     }
@@ -319,7 +319,7 @@ fn file_stems(dir: &Path, ext: &str) -> Vec<String> {
 fn remove(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, REMOVE_SPECS, || {
         render_help(
-            "llm remove NAME",
+            "yak remove NAME",
             "Delete an installed package",
             REMOVE_SPECS,
             &[],
@@ -327,7 +327,7 @@ fn remove(argv: &[String]) -> i32 {
     });
     let Some(args) = args else { return code };
     let Some(name) = args.positionals.first() else {
-        eprintln!("Error: Usage: llm remove NAME");
+        eprintln!("Error: Usage: yak remove NAME");
         return 2;
     };
     let mut removed = false;
@@ -368,7 +368,7 @@ fn remove(argv: &[String]) -> i32 {
 fn list(argv: &[String]) -> i32 {
     let (args, code) = crate::core::args::parse_with_help(argv, LIST_SPECS, || {
         render_help(
-            "llm list",
+            "yak list",
             "List installed packages and what they carry",
             LIST_SPECS,
             &[],
@@ -409,7 +409,7 @@ fn list(argv: &[String]) -> i32 {
     }
     if !any {
         eprintln!(
-            "{}no packages — llm install git:github.com/user/repo{}",
+            "{}no packages — yak install git:github.com/user/repo{}",
             crate::theme::err().dim,
             crate::theme::err().reset
         );
@@ -505,7 +505,7 @@ mod tests {
         assert!(lines.contains(&"skills: wholegit (repo root), demo, flat".to_string()));
         // a clone with no hooks at all says why it is silent
         let empty = notes(&Carried::default());
-        assert!(empty[0].contains("nothing llm can mount"));
+        assert!(empty[0].contains("nothing yak can mount"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -31,24 +31,67 @@ pub struct Provider {
     pub models: Vec<String>,
 }
 
-/// Platform user directory: LLM_USER_PATH env override, else ~/.llm
-/// (matching the project-level .llm/ convention). Resolved once per process:
+/// Platform user directory: YAK_USER_PATH env override, else ~/.yak
+/// (matching the project-level .yak/ convention). Resolved once per process:
 /// the env never changes mid-run (no code writes it) and the directory is
 /// created on first use, so the ~20 call sites — several per request — pay
 /// neither the env lookup nor the `create_dir_all` syscall again.
+///
+/// The rename from `llm` left the old `~/.llm` behind: when that directory
+/// exists and `~/.yak` does not, it is renamed wholesale (one `fs::rename`,
+/// contents ride along) before anything looks inside, with a stderr line
+/// naming the move — silent data relocation is the one thing a user must
+/// always be told about. An explicit YAK_USER_PATH skips the migration:
+/// it names its own root.
 pub fn user_dir() -> PathBuf {
     static DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
-        let path = match std::env::var_os("LLM_USER_PATH") {
+        let path = match std::env::var_os("YAK_USER_PATH") {
             Some(dir) => PathBuf::from(dir),
-            None => match crate::core::paths::home_dir() {
-                Some(home) => home.join(".llm"),
-                None => PathBuf::from(".llm"),
-            },
+            None => {
+                let home = crate::core::paths::home_dir();
+                if let Some(h) = &home {
+                    match migrate_llm_dir(h) {
+                        Ok(true) => eprintln!(
+                            "Migrated {} -> {} (one-time rename from the llm era)",
+                            h.join(".llm").display(),
+                            h.join(".yak").display()
+                        ),
+                        Err(e) => eprintln!(
+                            "Warning: found {} but cannot migrate it to {}: {e} \u{2014} \
+                             continuing with a fresh {}",
+                            h.join(".llm").display(),
+                            h.join(".yak").display(),
+                            h.join(".yak").display()
+                        ),
+                        Ok(false) => {}
+                    }
+                }
+                match home {
+                    Some(home) => home.join(".yak"),
+                    None => PathBuf::from(".yak"),
+                }
+            }
         };
         let _ = fs::create_dir_all(&path);
         path
     });
     DIR.clone()
+}
+
+/// The one-shot `~/.llm` → `~/.yak` move. Only when the old directory
+/// exists and the new one does not (a fresh-machine install of both would
+/// be pathological, and never clobber what the new name already owns).
+/// `Ok(true)` means the rename happened on this call.
+fn migrate_llm_dir(home: &std::path::Path) -> std::io::Result<bool> {
+    let old = home.join(".llm");
+    let new = home.join(".yak");
+    if !old.is_dir() || new.exists() {
+        return Ok(false);
+    }
+    fs::rename(&old, &new)?;
+    // the memory file rode along under its old name; bring it too
+    let _ = fs::rename(new.join("LLM.md"), new.join("YAK.md"));
+    Ok(true)
 }
 
 pub fn config_path() -> PathBuf {
@@ -204,7 +247,7 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 
 // the default model — the "models" object in config.json:
 // {"default": "provider/model", "thinking": "high"}. One default serves
-// every mode (prompt/agent); -m and LLM_MODEL override per run.
+// every mode (prompt/agent); -m and YAK_MODEL override per run.
 
 /// The shared default model every mode runs on.
 pub fn default_model() -> Option<String> {
@@ -404,6 +447,55 @@ impl Config {
         } else {
             Some(expanded)
         }
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_llm_dir_moves_wholesale_and_renames_the_memory_file() {
+        let home = crate::core::testutil::scratch_dir("migrate-home");
+        std::fs::create_dir_all(home.join(".llm/threads")).unwrap();
+        std::fs::write(home.join(".llm/config.json"), "{\"providers\":{}}").unwrap();
+        std::fs::write(home.join(".llm/LLM.md"), "- prefers concise replies\n").unwrap();
+
+        assert!(migrate_llm_dir(&home).unwrap());
+        assert!(!home.join(".llm").exists(), "the old directory is gone");
+        assert!(home.join(".yak/config.json").is_file());
+        assert!(home.join(".yak/threads").is_dir());
+        assert!(home.join(".yak/YAK.md").is_file());
+        assert!(!home.join(".yak/LLM.md").exists());
+        // and it is one-shot: a second call has nothing to do
+        assert!(!migrate_llm_dir(&home).unwrap());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_present_yak_dir_is_never_touched() {
+        let home = crate::core::testutil::scratch_dir("migrate-fresh");
+        std::fs::create_dir_all(home.join(".llm")).unwrap();
+        std::fs::write(home.join(".llm/config.json"), "{}").unwrap();
+        std::fs::create_dir_all(home.join(".yak")).unwrap();
+        std::fs::write(home.join(".yak/config.json"), "{\"new\":true}").unwrap();
+
+        assert!(!migrate_llm_dir(&home).unwrap());
+        // both survive untouched: never clobber what the new name owns
+        assert!(home.join(".llm").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(home.join(".yak/config.json")).unwrap(),
+            "{\"new\":true}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_home_without_the_old_dir_is_a_no_op() {
+        let home = crate::core::testutil::scratch_dir("migrate-none");
+        assert!(!migrate_llm_dir(&home).unwrap());
+        assert!(!home.join(".yak").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

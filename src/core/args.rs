@@ -301,7 +301,7 @@ mod tests {
             value_spec!("conversation", None, "Continue a conversation", "ID"),
             value_spec!("cid", None, "(alias of --conversation)", "ID"),
         ];
-        let help = render_help("llm t", "T", specs, &[]);
+        let help = render_help("yak t", "T", specs, &[]);
         assert!(help.contains("--conversation, --cid ID"));
         assert!(!help.contains("(alias of"));
     }

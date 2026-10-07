@@ -600,7 +600,7 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
 pub fn identity_headers() -> Vec<(String, String)> {
     vec![(
         "user-agent".to_string(),
-        format!("llm/{}", env!("CARGO_PKG_VERSION")),
+        format!("yak/{}", env!("CARGO_PKG_VERSION")),
     )]
 }
 
@@ -931,7 +931,7 @@ mod tests {
         let h = identity_headers();
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].0, "user-agent");
-        assert!(h[0].1.starts_with("llm/"));
+        assert!(h[0].1.starts_with("yak/"));
     }
 
     #[test]

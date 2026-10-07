@@ -13,7 +13,9 @@ pub fn discover_dirs(cwd: &Path) -> Vec<PathBuf> {
     // ordering the home directories below use)
     dirs.extend(crate::commands::pkg::extension_dirs(true));
     dirs.extend(crate::commands::pkg::extension_dirs(false));
-    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".llm/extensions", true) {
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".yak/extensions", true)
+        .or_else(|| crate::core::paths::nearest_dir_up(cwd, ".llm/extensions", true))
+    {
         dirs.push(d);
     }
     dirs.push(crate::core::config::user_dir().join("extensions"));

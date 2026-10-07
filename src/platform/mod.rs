@@ -80,7 +80,7 @@ pub fn run_shell_interactive(cmd: &str, cwd: &Path) -> std::io::Result<std::proc
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-compile_error!("llm supports Linux, macOS and Windows only");
+compile_error!("yak supports Linux, macOS and Windows only");
 
 /// One raw byte from the terminal, or a poll timeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +142,7 @@ impl ShellSpec {
         }
     }
 
-    /// Parse `LLM_SHELL`.
+    /// Parse `YAK_SHELL`.
     ///
     /// The basename decides the argument style; names that are not known shell
     /// programs use the POSIX `-c` convention. This is an explicit user
@@ -184,10 +184,10 @@ pub struct ShellOutcome {
     pub timed_out: bool,
 }
 
-/// LLM_SHELL is a configuration knob, not a fallback: only an explicit value
+/// YAK_SHELL is a configuration knob, not a fallback: only an explicit value
 /// changes the shell, and it is honored identically on every platform.
 pub fn shell_spec() -> ShellSpec {
-    match std::env::var_os("LLM_SHELL") {
+    match std::env::var_os("YAK_SHELL") {
         Some(v) => ShellSpec::from_name(&v.into_string().unwrap_or_default()),
         None => ShellSpec::platform_default(),
     }

@@ -12,7 +12,7 @@ use crate::core::threads::{Store, StoredTurn};
 use crate::providers::{Attachment, Msg};
 
 /// Export this directory's newest conversation (the newest anywhere when it
-/// has none), returning the session id and the file written. `llm export`
+/// has none), returning the session id and the file written. `yak export`
 /// calls this with the CLI's PATH argument; the REPL's `/export` shares
 /// [`export_thread`] with the live session id instead.
 pub fn export_latest(cwd: &Path, path: Option<&str>) -> Result<(String, PathBuf), String> {
@@ -40,16 +40,16 @@ pub fn export_thread(cid: &str, cwd: &Path, path: Option<&str>) -> Result<PathBu
     Ok(target)
 }
 
-/// `llm-<id>.md` unless a file name was given; a directory argument gets
+/// `yak-<id>.md` unless a file name was given; a directory argument gets
 /// that name inside it.
 fn output_path(cwd: &Path, path: Option<&str>, cid: &str) -> PathBuf {
-    let default = || cwd.join(format!("llm-{cid}.md"));
+    let default = || cwd.join(format!("yak-{cid}.md"));
     match path {
         None => default(),
         Some(raw) => {
             let p = Path::new(raw);
             if p.is_dir() {
-                p.join(format!("llm-{cid}.md"))
+                p.join(format!("yak-{cid}.md"))
             } else if p.is_absolute() {
                 p.to_path_buf()
             } else {
@@ -87,7 +87,7 @@ pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
         turns.len(),
         if turns.len() == 1 { "" } else { "s" }
     ));
-    out.push_str(&format!("{} — exported by llm\n", meta.join(" · ")));
+    out.push_str(&format!("{} — exported by yak\n", meta.join(" · ")));
 
     let mut last_model = first.map(|t| t.model.clone()).unwrap_or_default();
     for (n, turn) in turns.iter().enumerate() {
@@ -260,7 +260,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // no argument: the session-named default in cwd
-        assert_eq!(output_path(&cwd, None, "01ABC"), cwd.join("llm-01ABC.md"));
+        assert_eq!(output_path(&cwd, None, "01ABC"), cwd.join("yak-01ABC.md"));
         // a relative name resolves against cwd
         assert_eq!(
             output_path(&cwd, Some("notes.md"), "01ABC"),
@@ -270,7 +270,7 @@ mod tests {
         let as_dir = dir.display().to_string();
         assert_eq!(
             output_path(&cwd, Some(&as_dir), "01ABC"),
-            dir.join("llm-01ABC.md")
+            dir.join("yak-01ABC.md")
         );
         // an absolute path to a file is used as given
         let abs = root.join("elsewhere.md");

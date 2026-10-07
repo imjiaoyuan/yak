@@ -26,7 +26,7 @@ pub(super) fn configure_shell_command(command: &mut Command) {
 /// Image bytes from the clipboard, if any: AppleScript writes the PNGf
 /// record to a temp file (osascript cannot emit binary to stdout).
 pub fn paste_clipboard_image() -> Result<Clip, String> {
-    let path = std::env::temp_dir().join(format!("llm-paste-{}.png", std::process::id()));
+    let path = std::env::temp_dir().join(format!("yak-paste-{}.png", std::process::id()));
     let script = format!(
         "set theFile to (open for access (POSIX file \"{}\") with write permission)\n\
          write (the clipboard as \u{ab}class PNGf\u{bb}) to theFile\n\

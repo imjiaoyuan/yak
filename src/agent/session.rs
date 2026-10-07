@@ -623,7 +623,7 @@ fn persist_round(
     } else {
         String::new()
     };
-    // cwd rides in turn options as provenance so `llm logs` can show
+    // cwd rides in turn options as provenance so `yak logs` can show
     // and filter conversations by project directory
     let mut turn_options = identity.model.options.clone();
     turn_options.push(("cwd".to_string(), identity.cwd.display().to_string()));

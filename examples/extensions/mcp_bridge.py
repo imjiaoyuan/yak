@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mcp-bridge — Model Context Protocol servers as llm tools (resident extension).
+"""mcp-bridge — Model Context Protocol servers as yak tools (resident extension).
 
 The host speaks its own newline-delimited protocol; MCP servers speak
 JSON-RPC 2.0 over stdio or streamable HTTP. This extension sits between
@@ -349,7 +349,7 @@ class Server:
         params = {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "llm-mcp-bridge", "version": "1"},
+            "clientInfo": {"name": "yak-mcp-bridge", "version": "1"},
         }
         result = self.transport.request("initialize", params, INIT_TIMEOUT)
         if result is None:

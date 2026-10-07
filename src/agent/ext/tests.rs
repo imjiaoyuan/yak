@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn parses_a_python_manifest_header() {
-    let text = "#!/usr/bin/env python3\n# --- llm-tool: wordcount\n# description: count characters\n# args: text (string) the text\n# arg-mode: argv\n# interpreter: python\nimport sys\n";
+    let text = "#!/usr/bin/env python3\n# --- yak-tool: wordcount\n# description: count characters\n# args: text (string) the text\n# arg-mode: argv\n# interpreter: python\nimport sys\n";
     let spec = parse_tool_manifest(text, Path::new("/x/wordcount")).expect("manifest");
     assert_eq!(spec.name, "wordcount");
     assert_eq!(spec.description, "count characters");
@@ -24,7 +24,7 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
     // executable by extension, unix by the exec bit) for the stem path
     std::fs::write(
         dir.join("helper.py"),
-        "# --- llm-tool: search\n# description: find things\n",
+        "# --- yak-tool: search\n# description: find things\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -69,7 +69,7 @@ fn plain_scripts_have_no_manifest() {
 
 #[test]
 fn manifest_tier_defaults_to_exec_and_parses_declarations() {
-    let base = "#!/bin/sh\n# --- llm-tool: t\n";
+    let base = "#!/bin/sh\n# --- yak-tool: t\n";
     let plain = parse_tool_manifest(base, Path::new("/x/t")).expect("manifest");
     assert_eq!(plain.tier, Tier::Exec, "absent tier stays exec");
     let read =
@@ -325,7 +325,7 @@ done
 
 /// Write an executable `sh` stub into a fresh temp dir and return its
 /// path. Discovery is bypassed on purpose: the test connects the script
-/// directly, so it never reads the real `~/.llm` (which would make the
+/// directly, so it never reads the real `~/.yak` (which would make the
 /// test non-hermetic). Plain `sh` like the respawn test above — a python
 /// stub would start far heavier under a fully parallel test run.
 #[cfg(unix)]
@@ -527,7 +527,7 @@ fn a_reply_without_a_result_is_an_error() {
 /// script receives exactly what its manifest asked for.
 #[test]
 fn argv_mode_picks_the_declared_argument_by_name() {
-    let text = "# --- llm-tool: shout\n# description: shout a word\n# args: word (string) the word\n# arg-mode: argv\nimport sys\nprint(sys.argv[1])\n";
+    let text = "# --- yak-tool: shout\n# description: shout a word\n# args: word (string) the word\n# arg-mode: argv\nimport sys\nprint(sys.argv[1])\n";
     let spec = parse_tool_manifest(text, Path::new("/x/shout")).expect("manifest");
     let tool = ScriptTool {
         spec,

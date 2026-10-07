@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""subagent — delegate a task to a fresh llm in its own context window.
+"""subagent — delegate a task to a fresh yak in its own context window.
 
-Copy to `~/.llm/extensions/subagent` (chmod +x) and `/reload`. The tool it
-mounts is the reference's subagent idea in this repo's shape: the child is a real `llm`
+Copy to `~/.yak/extensions/subagent` (chmod +x) and `/reload`. The tool it
+mounts is the reference's subagent idea in this repo's shape: the child is a real `yak`
 process with its own window, its own tool subset and its own system prompt,
 so a long reconnaissance burns the *child's* context and you receive the
 conclusion instead of the transcript.
 
 Agent definitions are markdown with frontmatter, one file per agent:
 
-    ~/.llm/agents/scout.md          user-level
-    <project>/.llm/agents/scout.md  project-level, walks up from cwd and
+    ~/.yak/agents/scout.md          user-level
+    <project>/.yak/agents/scout.md  project-level, walks up from cwd and
                                     wins by name (nearest last)
 
     ---
     name: scout
     description: fast reconnaissance; returns compressed findings
     tools: read, grep, glob, ls, webfetch
-    model: openai/gpt-5-mini    # optional, else the child resolves like any llm
+    model: openai/gpt-5-mini    # optional, else the child resolves like any yak
     thinking: low               # off|minimal|low|medium|high|xhigh, optional
     ---
     You are a scout. Report file:line facts, not prose. Never edit anything.
@@ -28,12 +28,12 @@ two built-ins of the same names cover the case where no file exists at all.
 
 How a child runs
 ----------------
-    llm --json --no-session --tools <definition> \
+    yak --json --no-session --tools <definition> \
         [--model M] [--thinking L] --append-system-prompt <body> "Task: ..."
 
 `--json` is the line-delimited event stream this extension parses: tool calls
 become progress lines, the closing `result` object is the answer. Because the
-child is a plain llm, everything the CLI can do (models, thinking levels,
+child is a plain yak, everything the CLI can do (models, thinking levels,
 tool subsets) is available to a definition, and nothing here can outlive a
 `/reload`.
 
@@ -44,7 +44,7 @@ context — the tool result is exactly the string we return.
 *Budget.* A subagent takes minutes, so the initialize reply asks the host
 for a matching `tool_timeout`; each child is also killed on its own deadline
 below rather than leaving a runaway process behind.
-*Depth.* A child cannot spawn a child: we pass LLM_SUBAGENT_DEPTH down and
+*Depth.* A child cannot spawn a child: we pass YAK_SUBAGENT_DEPTH down and
 refuse when it is at the limit. The child's `--tools` whitelist excludes this
 extension anyway, so the guard only has to catch a hand-run child.
 *Abort.* ctrl+c in the parent abandons the call; the host tells us with an
@@ -82,7 +82,7 @@ MAX_PARALLEL = 4
 # Nesting limit: a child may not delegate further.
 MAX_DEPTH = 1
 # Wall-clock deadline per child (the host's own cap is asked for below).
-CHILD_TIMEOUT = int(os.environ.get("LLM_SUBAGENT_TIMEOUT") or 1500)
+CHILD_TIMEOUT = int(os.environ.get("YAK_SUBAGENT_TIMEOUT") or 1500)
 # The answer we hand back is a conclusion, not a transcript.
 MAX_RESULT = 20000
 
@@ -110,7 +110,7 @@ BUILTIN_AGENTS = {
 TOOL = {
     "name": "subagent",
     "description": (
-        "Delegate to a subagent: a fresh llm with its own context window, its "
+        "Delegate to a subagent: a fresh yak with its own context window, its "
         "own tool subset and its own system prompt. Use it for reconnaissance "
         "that would flood this context, or to run one task several ways at "
         "once. Modes (pass exactly one): `task` plus optional `agent` for a "
@@ -127,7 +127,7 @@ TOOL = {
             "task": {"type": "string", "description": "the instruction for one subagent"},
             "agent": {
                 "type": "string",
-                "description": "agent definition name (scout, worker, or a *.md in ~/.llm/agents)",
+                "description": "agent definition name (scout, worker, or a *.md in ~/.yak/agents)",
             },
             "tasks": {
                 "type": "array",
@@ -199,15 +199,15 @@ def reply(obj):
 
 # ---------------------------------------------------------------- agents --
 def user_dir():
-    return os.environ.get("LLM_USER_PATH") or os.path.join(os.path.expanduser("~"), ".llm")
+    return os.environ.get("YAK_USER_PATH") or os.path.join(os.path.expanduser("~"), ".yak")
 
 
 def project_agent_dirs(start):
-    """`.llm/agents` from the filesystem root down to cwd: the nearest one is
+    """`.yak/agents` from the filesystem root down to cwd: the nearest one is
     last, and a later definition replaces an earlier one by name."""
     dirs, path = [], os.path.abspath(start)
     while True:
-        dirs.append(os.path.join(path, ".llm", "agents"))
+        dirs.append(os.path.join(path, ".yak", "agents"))
         parent = os.path.dirname(path)
         if parent == path:
             return list(reversed(dirs))
@@ -270,8 +270,8 @@ def child_tools(agent):
     return [t for t in names if t and t not in ("subagent", "task")]
 
 
-def llm_binary():
-    return os.environ.get("LLM_BIN") or shutil.which("llm") or shutil.which("llm.exe")
+def yak_binary():
+    return os.environ.get("YAK_BIN") or shutil.which("yak") or shutil.which("yak.exe")
 
 
 # --------------------------------------------------------------- one child --
@@ -288,14 +288,14 @@ def run_child(binary, agent, prompt, label, depth):
     if agent.get("prompt"):
         cmd += ["--append-system-prompt", agent["prompt"]]
     cmd.append(prompt)
-    env = dict(os.environ, LLM_SUBAGENT_DEPTH=str(depth + 1))
+    env = dict(os.environ, YAK_SUBAGENT_DEPTH=str(depth + 1))
     note("[%s] %s · tools: %s" % (label, agent["name"], ",".join(tools) or "none"))
     try:
         child = subprocess.Popen(
             cmd,
             # stdin is explicitly empty: the child must never read the pipe
             # this extension talks to the host over (a non-tty stdin makes
-            # llm append it to the prompt, and it would block forever)
+            # yak append it to the prompt, and it would block forever)
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -303,7 +303,7 @@ def run_child(binary, agent, prompt, label, depth):
             env=env,
         )
     except OSError as e:
-        return False, "cannot start the subagent (%s); set LLM_BIN to the llm binary" % e
+        return False, "cannot start the subagent (%s); set YAK_BIN to the yak binary" % e
 
     tail = []
 
@@ -413,17 +413,17 @@ def unknown(agents, name):
 
 def handle(args):
     _abandoned.clear()
-    depth = int(os.environ.get("LLM_SUBAGENT_DEPTH") or 0)
+    depth = int(os.environ.get("YAK_SUBAGENT_DEPTH") or 0)
     if depth >= MAX_DEPTH:
         return (
-            "error: nested subagents are disabled (LLM_SUBAGENT_DEPTH=%d) — "
+            "error: nested subagents are disabled (YAK_SUBAGENT_DEPTH=%d) — "
             "do this work here instead." % depth
         )
-    binary = llm_binary()
+    binary = yak_binary()
     if not binary:
         return (
-            "error: cannot find the llm binary; set LLM_BIN to its path "
-            "(e.g. LLM_BIN=/path/to/target/release/llm)"
+            "error: cannot find the yak binary; set YAK_BIN to its path "
+            "(e.g. YAK_BIN=/path/to/target/release/yak)"
         )
     agents = load_agents()
     default_agent = (args.get("agent") or "worker").strip()

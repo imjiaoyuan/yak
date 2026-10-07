@@ -21,9 +21,9 @@
 # is right far more often than it is wrong, and /tree's own warning
 # ("everything after it is dropped") is the contract this extends to disk.
 #
-# Install into ~/.llm/extensions/ (or .llm/extensions/), chmod +x, /reload.
+# Install into ~/.yak/extensions/ (or .yak/extensions/), chmod +x, /reload.
 # The shadow root lives in the system temp dir; override with
-# LLM_CHECKPOINT_DIR. Turn it off for a session by removing the file.
+# YAK_CHECKPOINT_DIR. Turn it off for a session by removing the file.
 import json
 import os
 import shutil
@@ -34,15 +34,15 @@ import time
 # don't mirror these anywhere they appear: VCS internals, dependency trees,
 # the shadow dir itself if it sits under the project
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__",
-             ".venv", "venv", "target", "dist", "build", ".llm"}
+             ".venv", "venv", "target", "dist", "build", ".yak"}
 # files over this many bytes are referenced, not copied (symlink)
 BIG_FILE = 1 << 20
 KEEP_DAYS = 7
 
 
 def shadow_root():
-    root = os.environ.get("LLM_CHECKPOINT_DIR") or os.path.join(
-        tempfile.gettempdir(), "llm-workspace-checkpoints")
+    root = os.environ.get("YAK_CHECKPOINT_DIR") or os.path.join(
+        tempfile.gettempdir(), "yak-workspace-checkpoints")
     os.makedirs(root, exist_ok=True)
     return root
 

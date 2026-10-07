@@ -122,7 +122,7 @@ def send(fd, data):
 
 
 def install_lane(binary, work, env):
-    """Drive `llm install` through both of its pickers on a pty: the scope
+    """Drive `yak install` through both of its pickers on a pty: the scope
     menu and the checkbox selection. The e2e lane installs with flags (it has
     no tty), so the keys — and the keep lists they write — are only real
     here. Returns the recap the picker printed."""
@@ -138,7 +138,7 @@ def install_lane(binary, work, env):
         with open(os.path.join(pkg, "extensions", stem), "w") as f:
             f.write(
                 "#!/usr/bin/env python3\n"
-                f"# --- llm-tool: {stem}\n"
+                f"# --- yak-tool: {stem}\n"
                 "# description: smoke\n"
                 "# args: text (string) the text\n"
                 "# arg-mode: argv\n"
@@ -169,7 +169,7 @@ def install_lane(binary, work, env):
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0, f"install exited {status}"
 
-    clone = os.path.join(work, ".llm", "pkg", name)
+    clone = os.path.join(work, ".yak", "pkg", name)
     assert os.path.isdir(clone), f"install did not land in the project (screen {screen[-400:]!r})"
     return screen
 
@@ -198,9 +198,9 @@ def main():
             },
             f,
         )
-    env = dict(os.environ, LLM_USER_PATH=user, TERM="xterm-256color")
+    env = dict(os.environ, YAK_USER_PATH=user, TERM="xterm-256color")
     # a stub $EDITOR so the ctrl+g round-trip is scriptable
-    stub = os.path.join(tempfile.gettempdir(), "llm-ci-editor-stub.sh")
+    stub = os.path.join(tempfile.gettempdir(), "yak-ci-editor-stub.sh")
     with open(stub, "w") as f:
         f.write('#!/bin/sh\nprintf \'from editor\\n\' > "$1"\n')
     os.chmod(stub, 0o755)
@@ -214,7 +214,7 @@ def main():
         f.write("from smoke\n")
     # a skill for the /skill:<name> lane: its prompt must carry the skill's
     # own directory, or the references/ a skill points at resolve against cwd
-    skill_dir = os.path.join(work, ".llm", "skills", "probe")
+    skill_dir = os.path.join(work, ".yak", "skills", "probe")
     os.makedirs(os.path.join(skill_dir, "references"))
     with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
         f.write("---\nname: probe\ndescription: smoke\n---\nRead references/x.md.\n")

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// llm extension template (js, host-compatible) — copy to
-// ~/.llm/extensions/<name> and edit the USER SECTION at the bottom.
+// yak extension template (js, host-compatible) — copy to
+// ~/.yak/extensions/<name> and edit the USER SECTION at the bottom.
 // The shim below speaks the agent's stdio protocol; the user section is
 // written in the host API style (registerTool / registerCommand /
 // on(event)), which maps onto it directly.

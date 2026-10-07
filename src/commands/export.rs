@@ -1,4 +1,4 @@
-//! `llm export [PATH]` — write a conversation as one markdown file: the
+//! `yak export [PATH]` — write a conversation as one markdown file: the
 //! newest thread of the working directory, else the newest anywhere, i.e.
 //! whatever `-c` would have continued. The rendering and writing live in
 //! `core::export`; the REPL's `/export` shares that path with the live
@@ -11,12 +11,12 @@ const SPECS: &[OptSpec] = &[flag_spec!("help", Some('h'), "Show this message and
 
 fn help() -> String {
     render_help(
-        "llm export",
+        "yak export",
         "Export a conversation as a markdown file",
         SPECS,
         &[(
             "PATH",
-            "File to write (default: llm-<session>.md in the working directory)",
+            "File to write (default: yak-<session>.md in the working directory)",
         )],
     )
 }

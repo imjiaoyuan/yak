@@ -21,7 +21,7 @@ pub fn discover(cwd: &Path) -> Discovered {
 }
 
 /// The scan itself over explicit homes, so a test points it at a scratch
-/// directory instead of the real `~/.llm` (the same seam `http.rs` gives
+/// directory instead of the real `~/.yak` (the same seam `http.rs` gives
 /// its interrupt flag); `cwd` only picks the homes, it plays no part in
 /// matching.
 pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
@@ -46,7 +46,7 @@ pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
             if is_disabled(stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
-            // a `--- llm-tool:` manifest header makes any script a tool —
+            // a `--- yak-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
             if let Some(spec) = exec_tool_manifest(&path) {
@@ -61,7 +61,7 @@ pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
     out
 }
 
-/// A `--- llm-tool:` manifest parsed from a script's leading comment block.
+/// A `--- yak-tool:` manifest parsed from a script's leading comment block.
 #[derive(Clone, Debug)]
 pub struct ExecToolSpec {
     pub path: PathBuf,
@@ -80,7 +80,7 @@ pub struct ExecToolSpec {
 }
 
 /// Parse the manifest header off a script. A manifest starts at a comment
-/// line carrying `--- llm-tool: <name>` (`#` or `//` prefix) and extends
+/// line carrying `--- yak-tool: <name>` (`#` or `//` prefix) and extends
 /// over the following comment lines; the first non-comment line ends it.
 /// Fields: `description:`, `args: name (type) desc` (repeatable),
 /// `arg-mode: argv`, `interpreter: <prog>`, `timeout: <secs>`,
@@ -110,7 +110,7 @@ pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
         if !in_header {
             // lines before the marker (shebang, license header) are skipped,
             // not fatal — only a non-comment line ends the scan
-            let Some(rest) = comment.strip_prefix("--- llm-tool:") else {
+            let Some(rest) = comment.strip_prefix("--- yak-tool:") else {
                 continue;
             };
             name = Some(rest.trim().to_string());

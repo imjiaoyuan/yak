@@ -29,7 +29,7 @@ jobs:
             echo '**Install / update:**'
             echo
             echo '```bash'
-            echo 'curl -fsSL https://jiaoyuan.org/llm/install.sh | sh'
+            echo 'curl -fsSL https://jiaoyuan.org/yak/install.sh | sh'
             echo '```'
           } > body.md
       # the taiki-e action's `changelog` input expects a parse-changelog
@@ -70,11 +70,11 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          $env:LLM_USER_PATH = Join-Path $env:RUNNER_TEMP "llm-smoke"
+          $env:YAK_USER_PATH = Join-Path $env:RUNNER_TEMP "yak-smoke"
           cargo run --quiet -- --version
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: llm
+          bin: yak
           target: ${{ matrix.target }}
           build-tool: ${{ matrix.tool }}
           tar: unix

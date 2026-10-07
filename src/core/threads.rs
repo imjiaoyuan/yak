@@ -1,5 +1,5 @@
 //! The conversation store: one JSONL file per thread under
-//! `~/.llm/threads/<ulid>.jsonl`, one turn object per line. Resume is
+//! `~/.yak/threads/<ulid>.jsonl`, one turn object per line. Resume is
 //! the reference shape: a thread id reopens the file, nothing else.
 
 use std::collections::HashSet;
@@ -14,7 +14,7 @@ use crate::providers::Msg;
 
 /// The on-disk turn format this binary writes and reads. The stamp lives on
 /// every stored line; a line without one (written before versioning
-/// existed) reads as version 0. A higher number on read means a newer llm
+/// existed) reads as version 0. A higher number on read means a newer yak
 /// wrote the thread — refused loudly, never guessed at.
 pub const THREAD_FORMAT_VERSION: u32 = 1;
 
@@ -281,8 +281,8 @@ impl Store {
             };
             if turn.v > THREAD_FORMAT_VERSION {
                 return Err(format!(
-                    "thread {id}: format v{} is newer than this llm (writes \
-                     v{THREAD_FORMAT_VERSION}); upgrade llm to resume it",
+                    "thread {id}: format v{} is newer than this yak (writes \
+                     v{THREAD_FORMAT_VERSION}); upgrade yak to resume it",
                     turn.v
                 ));
             }

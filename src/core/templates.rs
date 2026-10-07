@@ -1,6 +1,6 @@
 //! The internal `$var` / `$input` substitution engine behind commands-dir
 //! prompts (`core/commands_md.rs`). Not a file loader and not a CLI: the
-//! `llm templates` family is gone, and nothing here reads the user dir.
+//! `yak templates` family is gone, and nothing here reads the user dir.
 
 use std::collections::BTreeMap;
 

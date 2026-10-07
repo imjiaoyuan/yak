@@ -1,4 +1,4 @@
-//! llm — a minimal terminal coding harness in Rust (the reference-shaped).
+//! yak — a minimal terminal coding harness in Rust (the reference-shaped).
 
 mod agent;
 mod b64;
@@ -18,9 +18,9 @@ const ABOUT: &str = "\
 Access Large Language Models from the command-line
 
 Usage:
-  llm [flags] [PROMPT]
+  yak [flags] [PROMPT]
 
-Bare `llm` opens an interactive agent session; `llm \"task\"` runs the
+Bare `yak` opens an interactive agent session; `yak \"task\"` runs the
 agent once with tools.
 
 Available commands:
@@ -35,7 +35,7 @@ Flags:
 fn main() {
     crate::platform::init_console();
     // SIGPIPE stays ignored (the std default): a broken pipe or socket — a
-    // dead extension child, a provider that hung up, `llm logs | head` —
+    // dead extension child, a provider that hung up, `yak logs | head` —
     // surfaces as a write error instead of killing the process silently.
     // The one user-visible case, output into a closed shell pipe, panics
     // inside print!/eprint!; the hook below exits quietly on it, which is
@@ -56,7 +56,7 @@ fn main() {
 fn dispatch(argv: &[String]) -> i32 {
     match argv.first().map(String::as_str) {
         Some("--version" | "-v") => {
-            println!("llm, version {VERSION}");
+            println!("yak, version {VERSION}");
             0
         }
         Some("--help" | "-h" | "help") => {
@@ -67,7 +67,7 @@ fn dispatch(argv: &[String]) -> i32 {
         Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
             commands::pkg::run(argv)
         }
-        // anything else (flags or plain text) is the agent: bare `llm` on a
+        // anything else (flags or plain text) is the agent: bare `yak` on a
         // terminal is the interactive REPL, text and pipes are one-shot tasks
         _ => commands::agent::run(argv),
     }
