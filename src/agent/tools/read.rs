@@ -17,13 +17,15 @@ impl Tool for ReadTool {
         "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). \
          Images are sent as attachments. For text files, output is truncated to 2000 lines or \
          50KB (whichever is hit first). Use offset/limit for large files. When you need the full \
-         file, continue with offset until complete."
+         file, continue with offset until complete. For JSON/JSONL, append `?q=<filter>` to query \
+         instead: data.json?q=.items[] (key paths, .[], .[N], |, [collect], select(), keys, \
+         length, type, trailing ?)."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+                "path": {"type": "string", "description": "Path to read. JSON/JSONL: append ?q=<filter> to query, e.g. file.json?q=.items[0].name"},
                 "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed)"},
                 "limit": {"type": "integer", "description": "Maximum number of lines to read"}
             },
@@ -32,6 +34,11 @@ impl Tool for ReadTool {
     }
     fn preview(&self, args: &Value) -> String {
         let path = args["path"].as_str().unwrap_or("?").to_string();
+        // a query reads as `file?q=…` on the `$` line: keep it verbatim, the
+        // offset/limit window below does not apply to a query
+        if split_query(&path).is_some() {
+            return path;
+        }
         // the requested line window, the reference's `:start-end`: two reads of the same
         // file at different offsets stay distinguishable on the `$` action
         // line. Shown only when offset/limit were given, and clamped the same
@@ -49,6 +56,13 @@ impl Tool for ReadTool {
     }
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
         let raw_path = args["path"].as_str().unwrap_or("");
+        // `?q=<filter>`: query a JSON/JSONL file instead of reading it whole
+        // (the read-json shape). Split before resolving: the query is not
+        // part of the path.
+        if let Some((file, query)) = split_query(raw_path) {
+            let path = resolve_path(cwd, &file);
+            return super::jq::run_file_query(&path, &file, &query, args);
+        }
         let path = resolve_path(cwd, raw_path);
         // the mime type comes from the file's magic bytes, not its extension:
         // a renamed or extension-less image still rides as vision input, and
@@ -211,6 +225,20 @@ impl Tool for ReadTool {
         }
         ToolOutput::ok(out)
     }
+}
+
+/// Split a `path?q=filter` argument into its file and filter halves. Only
+/// `q` is recognized (the parameter set narrows to the one we support);
+/// a `?` with anything else is a parse error, not a filename with a `?` in
+/// it (a real `?` in a path is exotic enough that the error is the clearer
+/// outcome).
+fn split_query(raw: &str) -> Option<(String, String)> {
+    let (file, query) = raw.split_once('?')?;
+    let (key, value) = query.split_once('=')?;
+    if key.trim() != "q" || value.trim().is_empty() {
+        return None;
+    }
+    Some((file.to_string(), value.trim().to_string()))
 }
 
 /// the reference's `formatSize`: `51200` → `50.0KB` (no space, one decimal past 1KB).
