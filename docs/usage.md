@@ -34,7 +34,7 @@ yak -o temperature=0.2 -o top_p=0.9 "..."  # extra model options
 yak --thinking high "..."                  # off | minimal | low | medium | high | xhigh
 yak -s "you are a Rust reviewer" "..."     # replace the system prompt
 yak --append-system-prompt "be terse" "..."
-yak --tools read,grep "..."                # limit the toolbox
+yak --tools read,grep "..."                # limit the toolbox (names or * patterns; +name/-name edits the default set)
 yak --json "..."                           # line-delimited events instead of the UI
 ```
 
@@ -52,11 +52,15 @@ A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to
 
 ## Tools
 
-Nine built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `remember`. The agent picks them itself; `--tools read,grep` narrows the set.
+Nine built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `remember`. The agent picks them itself; `--tools` narrows the set: plain names or `*` patterns (`read,grep`, `re*`) replace the default set wholesale, while `+name`/`-name` entries edit it in place (`-bash,-edit` runs with the write tools off; `+read` adds `read` back). A pattern must match a whole tool name, mixing the two forms is refused, and an unknown plain name is an error that lists what exists.
+
+Tool calls report their wall time: the session prints a dim `Took 1.5s` line under the output, and `--json` carries `durationMs` on each `tool_end`. Calls in the read-only batch share one clock: every concurrent call reports the batch's span.
 
 `update_plan` is the agent's own checklist for multi-step work: a list of steps, each `pending`, `in_progress` or `completed`, with at most one in progress. Marking a step done as it finishes keeps a long task from losing track of what is left; it touches nothing, so it never asks for approval.
 
 The `read` tool pages through large files instead of loading them whole: `offset` and `limit` walk through them in 2000-line windows (50 KB per call, single lines capped at 2000 characters so a minified bundle cannot flood the context). Text returns bare, with a `[Showing lines a-b of N. Use offset=... to continue.]` note when more remains. Binary formats are refused with a hint at the right local tool: `pdftotext` for PDFs, `samtools` for BAM/CRAM, `duckdb` for Parquet/HDF5, `libreoffice --headless --convert-to csv` for old Office files. Images are read as vision attachments.
+
+For JSON and JSONL, append `?q=<filter>` to the path and the file is queried instead of read whole: `data.json?q=.items[0].name`, `log.jsonl?q=.[] | select(.level == "err")`. The filter language is a practical jq subset — key paths (`.a.b`), iteration (`.[]`), indexing (`.[2]`), pipes (`|`), collection (`[...]`), `select()`, `keys`, `length`, `type` and a trailing `?` — evaluated in-process, no `jq` needed. A JSONL file streams one line at a time, so a multi-gigabyte log never loads whole. Results show up to 100 values (compact JSON, one per line) with an `offset=N` continuation note when more remain, files cap at 5 MB, and an unsupported filter fails loudly with the supported list rather than guessing.
 
 `webfetch <url>` grabs a page and returns it as text (HTML stripped, http(s) only, proxies honoured) so the agent can read docs without a shell.
 
