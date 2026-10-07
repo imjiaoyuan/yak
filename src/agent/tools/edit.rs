@@ -1,10 +1,10 @@
-//! Exact-text editing with the reference's recovery behavior (`the reference edit module`): edits
+//! Exact-text editing with model-friendly recovery: edits
 //! match against the LF-normalized file, a failed exact match falls back to
 //! fuzzy matching (unicode quotes/dashes/spaces folded to ASCII, fullwidth
 //! forms folded, trailing whitespace stripped), CRLF line endings and a
 //! leading BOM survive the write, and a fuzzy hit rewrites only the lines it
 //! touched — every other line keeps its original bytes. Unmatched, ambiguous
-//! or overlapping edits fail with the reference's own error texts so the model can
+//! or overlapping edits fail with error texts a model can
 //! self-correct.
 
 use super::write::write_atomic;
@@ -95,7 +95,7 @@ impl Tool for EditTool {
             return ToolOutput::err(no_change_error(&path, plan.spans.len()));
         }
         // write the file back the way it reads: its own dominant line ending
-        // and its BOM (the reference restores both after working in LF space)
+        // and its BOM (both restored after working in LF space)
         let final_text = format!("{}{}", plan.bom, restore_line_endings(&merged, plan.ending));
         match write_atomic(&path, final_text.as_bytes()) {
             Ok(()) => ToolOutput::ok(format!(
@@ -147,7 +147,7 @@ fn edit_pairs(args: &Value) -> Option<Vec<(&str, &str)>> {
         .collect()
 }
 
-/// the reference's `prepareEditArguments`: models sometimes stringify `edits` or use the
+/// the `prepareEditArguments`: models sometimes stringify `edits` or use the
 /// legacy flat single-edit shape; salvage both before validation instead of
 /// spending a round on a type error.
 fn prepare_edit_args(args: &Value) -> Value {
@@ -205,7 +205,7 @@ pub(super) fn plan_edits<'a>(
     };
     let ending = detect_line_ending(content);
     let normalized = normalize_to_lf(content);
-    // the reference normalizes each oldText/newText to LF too: a model quoting a CRLF
+    // each oldText/newText is normalized to LF too: a model quoting a CRLF
     // file back still matches
     let normalized_edits: Vec<(String, String)> = edits
         .iter()
@@ -220,7 +220,7 @@ pub(super) fn plan_edits<'a>(
         .collect::<Result<_, _>>()?;
 
     // first pass: does any edit need the fuzzy fallback? Then ALL matches run
-    // in fuzzy-normalized space (the reference's rule) and only touched lines are
+    // in fuzzy-normalized space and only touched lines are
     // written back normalized.
     let fuzzy_base = normalize_for_fuzzy_match(&normalized);
     let used_fuzzy = normalized_edits.iter().any(|(old, _)| {
@@ -238,7 +238,7 @@ pub(super) fn plan_edits<'a>(
         let Some((start, len, _)) = fuzzy_find(&match_base, old, &fuzzy_base) else {
             return Err(not_found_error(path, i, normalized_edits.len()));
         };
-        // ambiguity is judged in fuzzy space (the reference's countOccurrences): two
+        // ambiguity is judged in fuzzy space : two
         // occurrences differing only in trailing whitespace are already two
         // regions the model cannot tell apart
         let occurrences = count_occurrences(&fuzzy_base, &normalize_for_fuzzy_match(old));
@@ -295,7 +295,7 @@ pub(super) fn apply_edits(plan: &EditPlan<'_>) -> Result<String, String> {
     }
 }
 
-/// the reference's `fuzzyFindText`: exact match first, then both sides fuzzy-normalized.
+/// Exact match first, then both sides fuzzy-normalized.
 /// Returns `(start, len, fuzzy)`; `len` is always the matched needle's own
 /// length in the space the caller searches.
 fn fuzzy_find(content: &str, old: &str, fuzzy_content: &str) -> Option<(usize, usize, bool)> {
@@ -307,7 +307,7 @@ fn fuzzy_find(content: &str, old: &str, fuzzy_content: &str) -> Option<(usize, u
     Some((i, fuzzy_old.len(), true))
 }
 
-/// the reference's `countOccurrences`: both sides normalized, non-overlapping count.
+/// Both sides normalized, non-overlapping count.
 fn count_occurrences(fuzzy_content: &str, fuzzy_old: &str) -> usize {
     if fuzzy_old.is_empty() {
         // an all-whitespace oldText normalizes to empty; the split-count then
@@ -318,9 +318,9 @@ fn count_occurrences(fuzzy_content: &str, fuzzy_old: &str) -> usize {
     fuzzy_content.split(fuzzy_old).count() - 1
 }
 
-/// Normalize text for fuzzy matching, the reference's `normalizeForFuzzyMatch`: strip
+/// Normalize text for fuzzy matching, strip
 /// trailing whitespace per line, fold smart quotes, dashes and special spaces
-/// to ASCII. Where the reference runs full NFKC this folds the compatibility set that
+/// to ASCII. Full NFKC this folds the compatibility set that
 /// matters in source files — the fullwidth ASCII forms (U+FF01–U+FF5E, the
 /// CJK-input-method spelling of `！Ａｂｃ：`), which NFKC maps by a fixed
 /// offset — and leaves rarer compatibility chars (ligatures, circled digits)
@@ -349,7 +349,7 @@ fn normalize_for_fuzzy_match(text: &str) -> String {
         .join("\n")
 }
 
-/// `\r\n`/`\r` → `\n` (the reference's `normalizeToLF`).
+/// `\r\n`/`\r` → `\n` .
 fn normalize_to_lf(text: &str) -> String {
     if !text.contains('\r') {
         return text.to_string();
@@ -357,7 +357,7 @@ fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// the reference's `detectLineEnding`: CRLF wins when the first CRLF precedes the first
+/// CRLF wins when the first CRLF precedes the first
 /// bare LF (a CRLF implies an LF, so "LF only" is every other case).
 fn detect_line_ending(content: &str) -> &'static str {
     match (content.find("\r\n"), content.find('\n')) {
@@ -366,7 +366,7 @@ fn detect_line_ending(content: &str) -> &'static str {
     }
 }
 
-/// the reference's `restoreLineEndings`: the whole file takes its dominant ending back.
+/// the whole file takes its dominant ending back.
 fn restore_line_endings(text: &str, ending: &str) -> String {
     if ending == "\r\n" {
         text.replace('\n', "\r\n")
@@ -375,7 +375,7 @@ fn restore_line_endings(text: &str, ending: &str) -> String {
     }
 }
 
-/// Lines with their trailing `\n` kept (the last may lack one) — the reference's
+/// Lines with their trailing `\n` kept (the last may lack one) — the
 /// `splitLinesWithEndings`.
 fn split_lines_with_endings(content: &str) -> Vec<&str> {
     let mut lines = Vec::new();
@@ -403,7 +403,7 @@ fn line_spans(content: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// The line range one replacement actually touches (the reference's
+/// The line range one replacement actually touches (the
 /// `getReplacementLineRange`): from the line holding the match start through
 /// the line holding its end.
 fn replacement_line_range(
@@ -425,7 +425,7 @@ fn replacement_line_range(
     Ok((start_line, end_line + 1))
 }
 
-/// the reference's `applyReplacementsPreservingUnchangedLines`: replacements were matched
+/// replacements were matched
 /// in fuzzy space, but the file only takes the lines they touch from that
 /// space — every other line is copied back verbatim, so a fuzzy hit cannot
 /// silently re-whitespace the whole file. `original` and `base` (`base` =

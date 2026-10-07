@@ -1,4 +1,4 @@
-//! yak — a minimal terminal coding harness in Rust (the reference-shaped).
+//! yak — a minimal terminal coding harness in Rust (a minimal terminal-first harness).
 
 mod agent;
 mod b64;

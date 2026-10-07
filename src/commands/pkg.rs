@@ -1,4 +1,4 @@
-//! `yak install|remove|list` — the reference packages, git-only. A package is a git
+//! `yak install|remove|list` — git packages only. A package is a git
 //! repository cloned under `~/.yak/pkg/<name>` (`-l`: `.yak/pkg/<name>`,
 //! project-local); its `skills/`, `extensions/` and `commands/` directories
 //! mount into the normal discovery walks. No update command: re-running
@@ -33,7 +33,7 @@ pub fn run(argv: &[String]) -> i32 {
             "{}",
             render_help(
                 "yak install|remove|list",
-                "Manage git packages (the reference packages, git-only)\n\nCommands:\n  install git:github.com/user/repo[@ref]\n  remove NAME\n  list",
+                "Manage git packages\n\nCommands:\n  install git:github.com/user/repo[@ref]\n  remove NAME\n  list",
                 LIST_SPECS,
                 &[],
             )
@@ -50,7 +50,7 @@ pub fn run(argv: &[String]) -> i32 {
                 "{}",
                 render_help(
                     "yak install|remove|list",
-                    "Manage git packages (the reference packages, git-only)",
+                    "Manage git packages",
                     LIST_SPECS,
                     &[],
                 )

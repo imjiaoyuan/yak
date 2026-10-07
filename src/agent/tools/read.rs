@@ -39,7 +39,7 @@ impl Tool for ReadTool {
         if split_query(&path).is_some() {
             return path;
         }
-        // the requested line window, the reference's `:start-end`: two reads of the same
+        // the requested line window, `:start-end`: two reads of the same
         // file at different offsets stay distinguishable on the `$` action
         // line. Shown only when offset/limit were given, and clamped the same
         // way `execute` reads them (offset >= 1, limit >= 1).
@@ -57,7 +57,7 @@ impl Tool for ReadTool {
     fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
         let raw_path = args["path"].as_str().unwrap_or("");
         // `?q=<filter>`: query a JSON/JSONL file instead of reading it whole
-        // (the read-json shape). Split before resolving: the query is not
+        // Split before resolving: the query is not
         // part of the path.
         if let Some((file, query)) = split_query(raw_path) {
             let path = resolve_path(cwd, &file);
@@ -66,7 +66,7 @@ impl Tool for ReadTool {
         let path = resolve_path(cwd, raw_path);
         // the mime type comes from the file's magic bytes, not its extension:
         // a renamed or extension-less image still rides as vision input, and
-        // a text file with an image extension still reads as text (the reference's
+        // a text file with an image extension still reads as text (the
         // `detectSupportedImageMimeType`). Only a prefix is read for the
         // sniff — the text path streams through the window, never loading
         // the file whole.
@@ -84,7 +84,7 @@ impl Tool for ReadTool {
         if let Some(mime) = image_mime(&head[..head_len]) {
             if mime == "image/bmp" {
                 // model APIs take png/jpeg/webp/gif; BMP arrives only through
-                // a processor we do not have (the reference's refusal, with the local
+                // a processor we do not have (refused, with the local
                 // way past it)
                 return ToolOutput::ok(format!(
                     "Read image file [image/bmp]\n[Image omitted: BMP is not accepted by model \
@@ -170,7 +170,7 @@ impl Tool for ReadTool {
         }
         // the line an offset lands on can dwarf the whole cap (a minified
         // bundle): stepping offsets would keep landing on lines like it, so
-        // name the bash way past it — the reference's message, carrying the line's true
+        // name the bash way past it — carrying the line's true
         // size (the stored head is char-capped long before this)
         if w.first_line_capped && w.first_line_bytes > MAX_BYTES {
             return ToolOutput::ok(format!(
@@ -185,7 +185,7 @@ impl Tool for ReadTool {
         }
         // assemble under the byte cap at line boundaries, so the note can
         // point at the first line the model has not actually seen. The first
-        // line rides without its newline (the reference's accounting), so a line of
+        // line rides without its newline , so a line of
         // exactly the cap fits.
         let mut out = String::new();
         let mut kept = 0usize;
@@ -228,7 +228,7 @@ impl Tool for ReadTool {
 }
 
 /// Split a `path?q=filter` argument into its file and filter halves. Only
-/// `q` is recognized (the parameter set narrows to the one we support);
+/// `q` is recognized (the parameter set narrows to the one supported);
 /// a `?` with anything else is a parse error, not a filename with a `?` in
 /// it (a real `?` in a path is exotic enough that the error is the clearer
 /// outcome).
@@ -241,7 +241,7 @@ fn split_query(raw: &str) -> Option<(String, String)> {
     Some((file.to_string(), value.trim().to_string()))
 }
 
-/// the reference's `formatSize`: `51200` → `50.0KB` (no space, one decimal past 1KB).
+/// `format_size`: `51200` → `50.0KB` (no space, one decimal past 1KB).
 fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")
@@ -255,7 +255,7 @@ fn format_size(bytes: usize) -> String {
 /// The mime type the file's magic bytes declare, for the formats the read
 /// tool can send to a vision-capable model; `None` for anything else (text
 /// falls through to the windowed read, other binaries fail there with a
-/// hint). the reference's signature table — a renamed or extension-less image is still
+/// hint). the signature table — a renamed or extension-less image is still
 /// detected, a text file with an image extension still reads as text.
 fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     let starts = |offset: usize, sig: &[u8]| {
@@ -289,7 +289,7 @@ mod tests {
         let p = |args: Value| tool.preview(&args);
         // no window: the bare path, unchanged
         assert_eq!(p(json!({"path": "R/x.R"})), "R/x.R");
-        // offset only, limit only, both — the reference's `:start-end`
+        // offset only, limit only, both — `:start-end`
         assert_eq!(p(json!({"path": "R/x.R", "offset": 2455})), "R/x.R:2455");
         assert_eq!(p(json!({"path": "R/x.R", "limit": 100})), "R/x.R:1-100");
         assert_eq!(

@@ -21,7 +21,7 @@ use remember::RememberTool;
 use search::{GlobTool, GrepTool};
 use write::WriteTool;
 
-/// Shared truncation constants (the reference's values).
+/// Shared truncation constants.
 pub(crate) const MAX_LINES: usize = 2000;
 pub(crate) const MAX_BYTES: usize = 50 * 1024;
 /// Token-estimate cap on one tool result, applied after the byte cut. The
@@ -74,7 +74,7 @@ const DIFF_MAX_LINES: usize = 30;
 
 /// Print a diff block from `change_hunks` under a `$` action line: wrapped
 /// to the terminal: additions green, deletions red, hunk headers and
-/// context gray (the reference's toolDiff colors).
+/// context gray.
 pub fn print_diff_block(diff: &str) {
     let width = crate::term::columns().max(20);
     let p = crate::theme::err();
@@ -104,7 +104,7 @@ pub trait Tool: Send + Sync {
     fn diff(&self, _args: &Value, _cwd: &Path) -> Option<String> {
         None
     }
-    /// Salvage malformed argument shapes before validation (the reference's
+    /// Salvage malformed argument shapes before validation (the
     /// `prepareArguments`, which the loop runs ahead of the schema check): a
     /// tool may normalize what the model sent. Must be idempotent.
     fn prepare_arguments(&self, args: &Value) -> Value {
@@ -145,7 +145,7 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
 }
 
 /// Validate tool arguments against the schema, coercing in place first
-/// (the reference's `Value.Convert` + `normalizeOptionalNulls`): numeric/boolean strings
+/// (a `Value::Convert` + normalize step): numeric/boolean strings
 /// become their declared types, and `null` on an optional property is
 /// dropped — models routinely send `"offset": "50"` or null optional fields,
 /// and a wasted round over a type spelling is the worst outcome. Unknown
@@ -305,7 +305,7 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
     let mut truncated = lines.len() > max_lines;
     // the byte cap counts the JSON-escaped form: the result rides the wire
     // as a string value, where a newline costs 2 bytes and a control char
-    // 6, so a raw-size cap can ship nearly double the budget (the reference's
+    // 6, so a raw-size cap can ship nearly double the budget (the
     // "count JSON overhead when truncating" fix). Shrink the raw budget
     // until the escaped tail fits — one pass per factor-of-two of slack,
     // bounded because every step cuts at least a byte of raw text.
@@ -430,7 +430,7 @@ pub(crate) fn json_escaped_len(s: &str) -> usize {
 }
 
 /// Merge captured process output into one stream: stderr rides under
-/// stdout, and ANSI escape sequences are stripped (the reference's bash executor does
+/// stdout, and ANSI escape sequences are stripped (as escape bytes are tokens about terminal state,
 /// the same at capture): the result is model context first — escape bytes
 /// are tokens about terminal state, not the command's answer — and the
 /// live head renders through wrap paths that count them as zero cells, so
@@ -449,7 +449,7 @@ fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 /// Tail-truncate process output and, when anything was cut, spill the full
-/// text to the user tmp dir and name the file in the note (the reference's shape:
+/// text to the user tmp dir and name the file in the note (the shape:
 /// `[Showing lines X-Y of N. Full output: path]`). The model can read the
 /// rest on demand instead of re-running the command.
 pub(crate) fn truncate_with_spill(text: &str) -> String {
@@ -483,7 +483,7 @@ pub(crate) fn truncate_with_spill_in(dir: &Path, text: &str) -> String {
 
 /// Save the full output of a truncated command to the scratch dir (the
 /// weekly sweep ages it out like every other scratch file there); the
-/// truncation note names the file, the reference's spill. `None` when the write fails —
+/// truncation note names the file, the spill. `None` when the write fails —
 /// the caller falls back to the plain truncation mark rather than losing the
 /// output twice.
 fn spill_full_output(dir: &Path, text: &str) -> Option<String> {
@@ -522,7 +522,7 @@ pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
     )
 }
 
-/// Human duration for the `Took …` chrome line (the reference's `formatDuration`):
+/// Human duration for the `Took …` chrome line:
 /// tenths below a minute, then `Xm Ys`, then `Xh Ym Zs`.
 pub(crate) fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
@@ -537,11 +537,11 @@ pub(crate) fn format_duration(d: std::time::Duration) -> String {
     format!("{}h {}m {s}s", m / 60, m % 60)
 }
 
-/// `--tools` selection (the reference's semantics): a list of plain names and `*`
+/// `--tools` selection: a list of plain names and `*`
 /// patterns keeps the matching tools (replacing the default set); a list of
 /// only `+name`/`-name` entries instead edits the default set in order, and
 /// patterns are exact there. Mixing the two forms is an error, the same one
-/// the reference reports, because the meaning of a plain name would depend on position.
+/// reports, because the meaning of a plain name would depend on position.
 pub fn select_tools(available: &[String], wanted: &[String]) -> Result<Vec<String>, String> {
     let is_modifier = |e: &str| e.starts_with('+') || e.starts_with('-');
     let modifiers = wanted.iter().filter(|e| is_modifier(e)).count();
@@ -577,7 +577,7 @@ pub fn select_tools(available: &[String], wanted: &[String]) -> Result<Vec<Strin
     }
     // plain names/patterns: an allowlist. Every entry must match something
     // (a typo is louder than an empty toolbox); `*` matches any run of
-    // characters, the reference's `toolPatternRegExp`.
+    // characters (a `*`-glob, no other metacharacters).
     let unknown: Vec<&String> = wanted
         .iter()
         .filter(|w| !w.contains('*') && !available.iter().any(|a| a.as_str() == w.as_str()))
@@ -600,7 +600,7 @@ pub fn select_tools(available: &[String], wanted: &[String]) -> Result<Vec<Strin
     Ok(matched)
 }
 
-/// One allowlist entry against one tool name: exact, or `*` runs (the reference's
+/// One allowlist entry against one tool name: exact, or `*` runs (the
 /// `createToolNameMatcher`, without the regex — a two-cursor scan is enough
 /// for a leading/trailing/inner pattern).
 fn tool_pattern_match(pattern: &str, name: &str) -> bool {

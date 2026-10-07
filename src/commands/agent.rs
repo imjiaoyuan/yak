@@ -1,4 +1,4 @@
-//! `yak agent` — interactive CLI agent (terminal-agent style) plus its one-shot
+//! `yak agent` — interactive CLI agent plus its one-shot
 //! (`yak agent "task"`) form.
 
 use std::io::IsTerminal;
@@ -369,7 +369,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
 
     // built-ins plus plugin tools, all through the shared rebuild path;
     // --tools selects the subset: plain names/patterns replace the registry,
-    // +name/-name entries edit it (the reference's --tools semantics)
+    // +name/-name entries edit it (the --tools semantics)
     session.rebuild_tools();
     if let Some(wanted) = &wanted {
         let available: Vec<String> = session.tools.iter().map(|t| t.name().to_string()).collect();

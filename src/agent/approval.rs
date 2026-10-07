@@ -1,4 +1,4 @@
-//! Three-tier tool approval (the style): every tool declares a tier, a mode
+//! Three-tier tool approval: every tool declares a tier, a mode
 //! sets the baseline, per-tool policies override, and `a` on a prompt allows
 //! the tool for the rest of the session.
 

@@ -1,5 +1,5 @@
 //! A one-pass evaluator for the jq subset the read tool's `?q=` query takes
-//! (the reference shells out to jaq for this; the minimal-dependency rule says
+//! (evaluated in-process: the minimal-dependency rule says
 //! hand-write it instead). Supported grammar, in jq's own shapes:
 //!
 //! ```text
@@ -378,11 +378,11 @@ pub fn render(results: &[Value]) -> String {
 }
 
 /// `?q=` reads are bounded like any other read result: at most this many
-/// result lines ride one call (the limit default), and the note names the
+/// result lines ride one call, and the note names the
 /// continuation shape.
 const QUERY_RESULT_LIMIT: usize = 100;
 
-/// The whole-file ceiling for a `?q=` read (the 5MB capture cap): a bigger
+/// The whole-file ceiling for a `?q=` read: a bigger
 /// JSON is not parsed at all, and the message says so.
 const QUERY_FILE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 

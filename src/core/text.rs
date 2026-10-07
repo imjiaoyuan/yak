@@ -62,7 +62,7 @@ pub fn pop_utf8_char(buf: &mut Vec<u8>) {
 /// tool result: OSC (`ESC ]` … BEL/ST) and CSI-style sequences (an ESC or
 /// C1 U+009B introducer, optional intermediates and params, one final
 /// byte) go, the text between them stays. The pattern shape is the one
-/// ansi-regex uses (the reference's strip-ansi derives from it); an unterminated
+/// ansi-regex uses (ansi-regex is its source); an unterminated
 /// sequence at the very end is dropped — the process was cut mid-escape,
 /// and passing the bare introducer on would hand the terminal an unbound
 /// sequence.

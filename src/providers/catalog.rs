@@ -1,4 +1,4 @@
-//! The built-in provider catalog, mirroring the reference's provider registry: one row
+//! The built-in provider catalog, mirroring the provider registry: one row
 //! per known API-key provider with its canonical id, endpoint and env var.
 //! `yak models add` builds its wizard from it. OAuth-only and
 //! cloud-signature (Bedrock, Vertex) endpoints are not
@@ -10,7 +10,7 @@ pub struct Entry {
     /// our adapter kind: openai-compat | anthropic
     pub kind: &'static str,
     pub base_url: &'static str,
-    /// the env var the ecosystem shares for the API key
+    /// the conventional env var for the API key
     pub env: &'static str,
 }
 
@@ -223,7 +223,7 @@ pub const ALL: &[Entry] = &[
         "https://ai-gateway.vercel.sh",
         "AI_GATEWAY_API_KEY",
     ),
-    // kept additions beyond the shared registry
+    // kept additions beyond the registry
     e(
         "siliconflow",
         "openai-compat",

@@ -1,11 +1,11 @@
-//! System prompt assembly: the built-in instructions (the reference's shape), project
+//! System prompt assembly: the built-in instructions (the shape), project
 //! context discovery and the trailing cwd line.
 
 use std::path::Path;
 
 /// First AGENTS.override.md/AGENTS.md/CLAUDE.md walking up from cwd, stopping
 /// at the git root. `AGENTS.override.md` wins (a local override), then
-/// `AGENTS.md`, then `CLAUDE.md`; both title-cases are tried for each (the reference's
+/// `AGENTS.md`, then `CLAUDE.md`; both title-cases are tried for each (the
 /// candidate list).
 pub fn find_project_file(cwd: &Path) -> Option<std::path::PathBuf> {
     for d in crate::core::paths::ancestors(cwd) {
@@ -211,7 +211,7 @@ mod tests {
         ] {
             assert!(out.contains(needle), "missing {needle}: {out}");
         }
-        // the reference's prompt shape, plus the memory block yak keeps
+        // the prompt shape, plus the memory block yak keeps
         assert!(out.contains("<user_memory"), "{out}");
         assert!(!out.contains("Today's date"), "{out}");
         assert!(!out.contains("Environment: "), "{out}");

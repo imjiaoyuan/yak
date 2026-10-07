@@ -1,5 +1,5 @@
 //! The color theme: two palettes behind one gate. The answer text
-//! (markdown streaming + replay) uses the reference's dark palette — truecolor
+//! (markdown streaming + replay) uses a dark palette — truecolor
 //! where `COLORTERM` says so, nearest-256 otherwise. The chrome keeps
 //! the tool's original near-monochrome set (gray 90/2, bold, green `$`
 //! preview, cyan `Allow?`, red errors) byte-for-byte. Both are gated the
@@ -10,12 +10,12 @@
 use std::io::IsTerminal;
 use std::sync::LazyLock;
 
-/// the reference's the theme file colors, one field per role. Every field is a complete
+/// One palette field per role. Every field is a complete
 /// SGR sequence (the empty string when colors are off) so call sites can
 /// interpolate directly; [`Palette::reset`] closes whatever is open.
 #[derive(Default)]
 pub struct Palette {
-    // markdown (theme tokens)
+    // markdown theme tokens
     /// mdHeading: #f0c674
     pub heading: String,
     /// mdLink: #81a2be
@@ -60,8 +60,8 @@ pub struct Palette {
 /// Routine maintenance wears this; a warning that needs attention wears `!`.
 pub const NOTICE: &str = "· ";
 
-/// The answer-text palette: the reference's the theme file markdown tokens. `tc` picks
-/// truecolor (`38;2;R;G;B`, the reference's exact hex) over the nearest 256-color
+/// The answer-text palette: the markdown token palette. `tc` picks
+/// truecolor (`38;2;R;G;B`) over the nearest 256-color
 /// index (`38;5;N`). Only `render_md` reads the md tokens; the chrome
 /// fields here mirror the legacy chrome palette so a stray use stays
 /// consistent.
@@ -123,7 +123,7 @@ static TRUECOLOR: LazyLock<Palette> = LazyLock::new(|| build(true));
 static ANSI256: LazyLock<Palette> = LazyLock::new(|| build(false));
 static PLAIN: LazyLock<Palette> = LazyLock::new(Palette::default);
 
-/// the reference's exact hex palette (truecolor terminals).
+/// the palette (truecolor terminals).
 pub(crate) fn truecolor() -> &'static Palette {
     &TRUECOLOR
 }
@@ -207,7 +207,7 @@ static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
     }
 });
 
-/// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. the reference's
+/// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. the
 /// `osc8_hyperlink` shape. The URI is sanitized first — control characters
 /// (including the terminators themselves) are dropped so a crafted URL
 /// cannot close the sequence early and smuggle terminal chrome.

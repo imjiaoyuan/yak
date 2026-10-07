@@ -21,7 +21,7 @@ use unicode_width::UnicodeWidthChar;
 /// next word would straddle the edge anyway.
 const WRAP_EARLY: usize = 3;
 
-/// the reference caps a horizontal rule at 80 cells.
+/// A horizontal rule caps at 80 cells.
 const HR_MAX: usize = 80;
 
 /// An open inline marker waits for its closing run while the span it holds
@@ -144,7 +144,7 @@ enum InlEvent<'a> {
     },
 }
 
-/// SGR codes for a span (the styles: strong = bold, em = italic, no hues).
+/// SGR codes for a span (strong = bold, em = italic, no hues).
 fn span_codes(p: &Palette, span: InlSpan) -> String {
     match span {
         InlSpan::Code => p.code.clone(),
@@ -894,7 +894,7 @@ impl StyleStream {
                 self.ctx = codes;
                 self.open = self.ctx.clone();
                 if level >= 3 {
-                    // the reference keeps the `### ` prefix visible for deep headings
+                    // the `### ` prefix stays visible for deep headings
                     for _ in 0..level {
                         self.putc('#', out);
                     }
@@ -916,7 +916,7 @@ impl StyleStream {
                 self.st = St::Inline(at);
             }
             Decision::List { indent, at } => {
-                // the reference nests four spaces per level; two source spaces nest
+                // four spaces per level; two source spaces nest
                 let level = (1 + indent / 2).min(3);
                 // replay scans the nesting lead and the marker as part of the
                 // item's text under the item's continuation budget, so the
@@ -1479,7 +1479,8 @@ pub(crate) fn escape_end(bytes: &[u8], i: usize) -> usize {
     }
 }
 
-/// Terminal cell width: delegated to [`unicode-width`], with the one emulator correction for U+FF9E/U+FF9F
+/// Terminal cell width: delegated to [`unicode-width`] (the same source
+/// used by several terminal agents), with the one emulator correction for U+FF9E/U+FF9F
 /// halfwidth voiced sound marks, which [`unicode-width`] reports as 0 but
 /// real terminals render as 1 cell. Getting this right keeps hard-wrap widths
 /// aligned with the terminal's real column count, so rows don't soft-wrap

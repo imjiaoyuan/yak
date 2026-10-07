@@ -1,5 +1,5 @@
 //! The extension host: user-built executables that extend the agent with
-//! custom tools, slash commands and event hooks (the reference's extensions, done
+//! custom tools, slash commands and event hooks (the extensions, done
 //! out-of-process). One extension = one executable speaking newline-delimited
 //! JSON over stdio:
 //!
@@ -351,7 +351,7 @@ impl Ext {
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
             // a segment list: each item is a string, or `{"text": ..,
-            // "console": true}` for console lines — laid out the reference
+            // "console": true}` for console lines — laid out
             // segmented way, so several output items cannot run together
             Some(Value::Array(items)) if !items.is_empty() => format_segments(items),
             Some(other) => crate::jsonfmt::dumps_indent(other, 2),
@@ -413,7 +413,7 @@ impl Ext {
 }
 
 /// Lay out a segmented tool result so the model can tell items apart
-/// (the reference segmented's `formatOutput`): with more than one text segment each
+/// with more than one text segment each
 /// starts with a `==> text N/M <==` line, and console segments follow all
 /// other output in one `<console_output>` block. An empty list or a list
 /// with no text and no console lines renders as its pretty JSON — the

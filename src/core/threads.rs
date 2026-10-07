@@ -1,6 +1,6 @@
 //! The conversation store: one JSONL file per thread under
 //! `~/.yak/threads/<ulid>.jsonl`, one turn object per line. Resume is
-//! the reference shape: a thread id reopens the file, nothing else.
+//! a thread id reopens the file, nothing else.
 
 use std::collections::HashSet;
 use std::fs;

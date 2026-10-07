@@ -139,7 +139,7 @@ impl HttpError {
 
     /// What went wrong, as far as the status and body say. The class decides
     /// retryability: transport failures and rate limits get another chance,
-    /// auth and bad requests never do (the reference shape taxonomy, lean on
+    /// auth and bad requests never do (deliberately lean taxonomy, lean on
     /// purpose — the reference-spirited).
     fn class(&self) -> Class {
         match self.status {
@@ -204,11 +204,11 @@ impl Class {
 }
 
 /// Bodies across providers that all mean "the prompt does not fit". The list
-/// is the reference's (`packages/ai/src/utils/the overflow module`) — every entry is provider or
+/// keeps every entry is provider or
 /// gateway wording seen in the wild, translated to the substring tests a
-/// regex-free build can run (the reference's `\\d` shaping only narrowed matches the
+/// regex-free build can run (the `\d` shaping only narrowed matches the
 /// words already name). Second element: a needle that must also appear, for
-/// the patterns anchoring on both sides.
+/// the patterns anchored on both sides.
 const OVERFLOW_NEEDLES: &[(&str, Option<&str>)] = &[
     ("prompt is too long", None),                       // Anthropic
     ("request_too_large", None),                        // Anthropic 413
@@ -232,15 +232,15 @@ const OVERFLOW_NEEDLES: &[(&str, Option<&str>)] = &[
     ("prompt too long", None),                          // Ollama
     ("range of input length should be", None),          // DashScope/Qwen
     ("context_length_exceeded", None),                  // generic
-    ("context length exceeded", None), // generic (the reference: context[_ ]length[_ ]exceeded)
-    ("exceed context limit", None),    // generic
-    ("too many tokens", None),         // generic (the exclusions keep throttling out)
-    ("token limit exceeded", None),    // generic
+    ("context length exceeded", None),                  // generic
+    ("exceed context limit", None),                     // generic
+    ("too many tokens", None), // generic (the exclusions keep throttling out)
+    ("token limit exceeded", None), // generic
 ];
 
 fn context_too_large(message: &str) -> bool {
     let m = message.to_lowercase();
-    // the reference's non-overflow exclusions run first: throttling and rate-limit texts
+    // non-overflow exclusions run first: throttling and rate-limit texts
     // also speak of token counts (Bedrock wraps "too many tokens" in a
     // ThrottlingException), and a throttle must retry, not compact
     if m.contains("rate limit")
@@ -291,7 +291,7 @@ impl std::fmt::Display for HttpError {
 }
 
 /// Per-request retry budget. Connection failures get their own, larger
-/// counter with a longer backoff (the reference's split): a dead network is worth
+/// counter with a longer backoff: a dead network is worth
 /// waiting out, a flaky 5xx is not. The connection budget is still bounded
 /// for an attended terminal — six attempts top out around three minutes of
 /// automatic fighting, then the error surfaces and a human decides; every
@@ -988,7 +988,7 @@ mod tests {
 
     #[test]
     fn context_overflow_matches_provider_wordings_and_skips_throttling() {
-        // the reference's the overflow module corpus, one entry per provider family
+        // the corpus, one entry per provider family
         for body in [
             "This endpoint's maximum context length is 64000 tokens. However, you requested about 100000 tokens",
             "Requested token count exceeds the model's maximum context length of 131072 tokens",

@@ -38,7 +38,7 @@ pub enum AgentUpdate {
     ToolEnd {
         summary: String,
         is_error: bool,
-        /// measured wall-clock duration of the execution (the reference's `durationMs`):
+        /// measured wall-clock duration of the execution (the `durationMs`):
         /// rendered as a dim `Took 1.2s` line and carried on the `--json`
         /// `tool_end` event
         duration: std::time::Duration,
@@ -238,7 +238,7 @@ pub fn run_agent(
     const MAX_OVERFLOW_COMPACTIONS: usize = 2;
     let mut overflow_compactions = 0usize;
     // The auto-compaction trigger: `window - reserve` when the model's window
-    // is known (the reference's rule), else the configured fallback. It never changes
+    // is known, else the configured fallback. It never changes
     // across the run. 0 switches it off; a provider that refuses a prompt
     // still forces one.
     let mut compact_trigger = opts
@@ -303,7 +303,7 @@ pub fn run_agent(
             ..c.clone()
         });
         price_and_rewrite(&mut history, usage_marker, cfg_now.as_ref(), on_update);
-        // the reference's pre-request compaction check (the reference session): a session
+        // the pre-request compaction check: a session
         // that was interrupted — or resumed — over its window is compacted
         // before this request goes out, so ctrl-c cannot skip the gate the way
         // a check that only runs after a completed turn can.
@@ -480,7 +480,7 @@ pub fn run_agent(
 
         // A gateway can overflow silently — no 400, just a usage report past
         // the window, or a length stop that consumed the whole window and
-        // produced nothing (the reference's the overflow module cases 2 and 3). The window must
+        // produced nothing . The window must
         // be known to see it; then it is the same forced-compact-and-retry as
         // an outright refusal, bounded the same way.
         if let (Some(u), Some(w)) = (usage, model.context_window)
@@ -697,7 +697,7 @@ struct AfterTurn {
 /// Compact when the estimate says the window is under pressure: prune
 /// oversized tool results first (no model call, and it may relieve enough to
 /// skip summarizing at all), then summarize at a turn boundary. Runs before a
-/// request goes out (the reference's pre-request check), so an interrupted or resumed
+/// request goes out (the pre-request check), so an interrupted or resumed
 /// session cannot skip it. A compaction that cannot run reports why through
 /// the sink instead of leaving the session quietly over its window.
 fn maybe_compact(
@@ -737,7 +737,7 @@ fn maybe_compact(
     }
     if compact::should_compact(estimate, cfg.trigger_tokens) {
         // the trigger is window-anchored, not a running count: it stays where
-        // it is after a compaction (the reference's rule)
+        // it is after a compaction
         match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
             Ok(()) => {}
             // The history is untouched either way: the run continues, but a
@@ -863,7 +863,7 @@ fn run_tool_calls(
         on_update,
     } = sinks;
     let mut interrupted = false;
-    // other agents run a batch of read-only calls together; anything that
+    // a batch of read-only calls runs together; anything that
     // mutates or executes stays serial
     let readonly_batch = tool_calls.len() > 1
         && !crate::core::http::interrupted()
@@ -997,7 +997,7 @@ fn run_tool_calls(
 /// Terminal preview of a tool result: the first ten non-empty lines, each
 /// truncated, with a count of the lines that did not fit.
 fn summarize(content: &str) -> String {
-    /// lines shown in the user-facing tool-result preview (matches the reference's
+    /// lines shown in the user-facing tool-result preview (the
     /// collapsed default); the model still receives the full output
     const SHOWN: usize = 10;
     let mut lines: Vec<String> = Vec::new();
@@ -1214,7 +1214,7 @@ fn prepare_call<'a>(
     if let Some(rewritten) = rewritten {
         call.arguments = rewritten;
     }
-    // the tool may salvage the shape it was sent (the reference's prepareArguments,
+    // the tool may salvage the shape it was sent (prepareArguments,
     // which runs ahead of validation): the edit tool parses a stringified
     // `edits` array and the legacy flat single-edit shape
     if let Some(tool) = tools.iter().find(|t| t.name() == call.name) {

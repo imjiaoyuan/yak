@@ -29,7 +29,7 @@ impl Tool for BashTool {
     }
     fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
         let command = args["command"].as_str().unwrap_or("");
-        // 0 means no timeout (the reference's default: the command runs until it exits)
+        // 0 means no timeout: the command runs until it exits
         let timeout = args["timeout"].as_u64().unwrap_or(0);
         let outcome = crate::platform::run_shell_stream(
             command,

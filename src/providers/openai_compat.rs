@@ -210,7 +210,7 @@ pub fn build_body(
                 .collect(),
         );
         // Explicitly allow the model to batch independent tool calls into one
-        // assistant message (other agents both send this). Without it, a
+        // assistant message. Without it, a
         // gateway may let the model emit only one call per turn, so an
         // exploratory task costs a full round-trip per lookup. The agent loop
         // runs read-only calls from one batch concurrently. Applied before the

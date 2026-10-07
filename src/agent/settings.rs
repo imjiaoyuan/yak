@@ -40,7 +40,7 @@ impl AgentSettings {
     /// Compaction limits for a run. `compact_at_tokens` is the fallback
     /// trigger for an unknown window (64k by default); a known window anchors
     /// the trigger at `window - reserve` instead. `keep_recent_tokens` is the
-    /// tail each compaction keeps (20k by default, the reference's value).
+    /// tail each compaction keeps (20k by default, the value).
     pub fn compact_config(&self) -> CompactConfig {
         CompactConfig {
             trigger_tokens: self.compact_at_tokens.unwrap_or(64_000),

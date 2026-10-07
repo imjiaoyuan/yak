@@ -1,6 +1,6 @@
 use super::*;
 
-/// The model-owned checklist (the reference's `update_plan` shape: each step carries
+/// The model-owned checklist (the `update_plan` shape: each step carries
 /// a `status`, at most one `in_progress` at a time). The plan needs no
 /// harness-side state: it lives in the assistant's own tool call, so it is
 /// re-read from the transcript every turn and survives a resume for free.

@@ -1,6 +1,6 @@
 //! Context compaction: estimate tokens (last usage + chars/4 tail), cut at a
 //! turn boundary keeping a recent window, and summarize the dropped prefix
-//! with one tool-free LLM call (the reference's single-strategy approach).
+//! with one tool-free LLM call (one strategy, no menu).
 
 use crate::core::http::{Event, Usage};
 use crate::providers::Msg;
@@ -10,11 +10,11 @@ use crate::providers::PromptInput;
 pub struct CompactConfig {
     /// The auto-compaction trigger in tokens (`agent.compact_at_tokens`), used
     /// only when the model's context window is unknown: a known window anchors
-    /// the trigger at `window - reserve` (the reference's rule) and this value is ignored.
+    /// the trigger at `window - reserve` and this value is ignored.
     /// `0` switches automatic compaction off; a provider that refuses a prompt
     /// still forces one, so a session that ran into a wall is not left there.
     pub trigger_tokens: u64,
-    /// The tail compaction keeps (the reference's default is 20k).
+    /// The tail compaction keeps (20k by default).
     pub keep_recent_tokens: u64,
 }
 
@@ -105,12 +105,12 @@ pub fn should_compact(estimate: u64, trigger: u64) -> bool {
 }
 
 /// The room every auto-compaction leaves below the model's real window for the
-/// next answer and the summarizer call itself — the reference's reserve
+/// next answer and the summarizer call itself — the reserve
 /// (the compaction module).
 pub const RESERVE_TOKENS: u64 = 16_384;
 
 /// The auto-compaction trigger: `window - reserve` when the model's window is
-/// known (the reference's rule, the compaction module), else the configured fallback. There
+/// known, else the configured fallback. There
 /// is no ladder — the trigger is anchored to the window, not a running count.
 pub fn effective_trigger(configured: u64, window: Option<u64>) -> u64 {
     window.map_or(configured, |w| w.saturating_sub(RESERVE_TOKENS))
@@ -247,7 +247,7 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
 }
 
 /// Run the summarization call: streaming, no tools. A prefix that already
-/// starts with a summary is an incremental update (the reference's
+/// starts with a summary is an incremental update (the
 /// `UPDATE_SUMMARIZATION_PROMPT`), not a from-scratch re-summary.
 pub fn summarize(
     model: &crate::providers::ResolvedModel,
@@ -360,7 +360,7 @@ pub fn trim_old_attachments(history: &mut [Msg]) {
 /// not bytes): a tool result over the threshold becomes its head, a marker
 /// naming what was cut, and its tail. Head + tail stay under the threshold,
 /// so a pruned result never re-qualifies and a second pass is a no-op. The
-/// cut middle is dropped — the reference's compaction is lossy, and the untouched
+/// cut middle is dropped — compaction is lossy, and the untouched
 /// original still lives in the thread file and the session log.
 pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
 pub const PRUNE_HEAD_CHARS: usize = 4096;
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn keep_recent_never_outgrows_the_trigger_it_guards() {
-        // the default trigger honors the full configured tail (the reference's 20k)
+        // the default trigger honors the full configured tail (the 20k)
         let big = CompactConfig::default();
         assert_eq!(big.effective_keep_recent(big.trigger_tokens), 20_000);
         // a small trigger clamps it to half, so a cut always exists once
@@ -622,7 +622,7 @@ mod tests {
         assert!(!should_compact(u64::MAX, 0));
     }
 
-    /// A known window anchors the trigger at `window - reserve` (the reference's rule);
+    /// A known window anchors the trigger at `window - reserve` ;
     /// the configured value is only the fallback for an unknown window.
     #[test]
     fn a_known_window_anchors_the_trigger() {

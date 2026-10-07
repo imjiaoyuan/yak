@@ -1,6 +1,6 @@
 use super::*;
 
-/// Lines longer than this are truncated in a grep hit (the reference's value).
+/// Lines longer than this are truncated in a grep hit .
 pub(super) const GREP_LINE_LIMIT: usize = 500;
 
 pub(super) struct GrepTool;

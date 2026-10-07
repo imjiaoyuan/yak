@@ -28,7 +28,7 @@ const HISTORY_LIMIT: usize = 200;
 const LISTING_LIMIT: usize = 16;
 /// the persisted history file keeps more than the in-memory window; past
 /// this it is rewritten down to a soft cap so trimming doesn't refire on
-/// every submit (the reference's 0.8 watermark shape)
+/// every submit (the 0.8 watermark shape)
 const HISTORY_FILE_LIMIT: usize = 2000;
 const HISTORY_FILE_KEEP: usize = 1600;
 /// a pasted chunk at or beyond either bound becomes an atomic placeholder
@@ -335,7 +335,7 @@ impl LineEditor {
                 }
                 0x01 => {
                     // ctrl-a: line start; already there means end of the
-                    // previous line (the reference's cross-line extension)
+                    // previous line
                     let start = line_start(&buf, cursor);
                     cursor = if cursor > start {
                         start
@@ -513,7 +513,7 @@ impl LineEditor {
                             }
                         } else if (m <= 2 || m == 7) && (0x20..0x7f).contains(&cp) {
                             // AltGr (ctrl+alt) and stray plain CSI-u chars
-                            // insert literally, like the reference's AltGr rule
+                            // insert literally, like the AltGr rule
                             if let Some(ch) = char::from_u32(cp) {
                                 buf.insert(cursor, ch);
                                 cursor += ch.len_utf8();
@@ -674,7 +674,7 @@ impl LineEditor {
                         }
                     }
                     Some(Esc::Alone) => {
-                        // a lone escape in the line editor keeps the reference's
+                        // a lone escape in the line editor keeps the
                         // meaning: the same cooperative interrupt as ctrl+c
                         line.settle(&mut out, prompt, "", is_command);
                         return LineResult::Interrupt;
@@ -766,7 +766,7 @@ fn col_offset(line: &str, col: usize) -> usize {
 }
 
 /// One logical line up from `cursor`, keeping the nav.preferred char column (the
-/// top line parks at its start, the reference's boundary behavior).
+/// top line parks at its start, the boundary behavior).
 fn up_line(buf: &str, cursor: usize, preferred: Option<usize>) -> usize {
     let start = line_start(buf, cursor);
     if start == 0 {
@@ -827,7 +827,7 @@ fn kill_word_back(buf: &mut String, cursor: &mut usize, kill: &mut String) {
     }
 }
 
-/// rule: up recalls history only while browsing, from an empty
+/// up recalls history only while browsing, from an empty
 /// buffer, or with the cursor parked at the very start of the top line;
 /// every other position moves through the multiline text instead.
 fn recall_on_up(buf: &str, cursor: usize, browsing: bool) -> bool {
@@ -940,7 +940,7 @@ fn load_history_from(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Append one submission as a single write (the reference's atomicity trick so
+/// Append one submission as a single write (a single write so
 /// concurrent processes never interleave a line).
 fn append_history(text: &str) {
     append_history_to(&history_path(), text);

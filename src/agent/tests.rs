@@ -149,7 +149,7 @@ fn empty_extensions() -> &'static crate::agent::ext::Extensions {
 }
 
 /// The options every inline-server test runs with. The loop runs unbounded
-/// (the reference's shape, guarded by compaction); every mock server here terminates
+/// (bounded shape, guarded by compaction); every mock server here terminates
 /// its own run by answering a plain, tool-free round last.
 fn test_opts() -> AgentOptions<'static> {
     AgentOptions {
@@ -277,7 +277,7 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
 
 /// A length-stopped response never runs its tool calls: streamed arguments
 /// are salvaged JSON that may be silently incomplete, so every call in the
-/// message fails with the reference's re-issue message and the model goes another round.
+/// message fails with the re-issue message and the model goes another round.
 #[test]
 fn a_length_stopped_round_fails_its_tool_calls_with_the_reissue_message() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

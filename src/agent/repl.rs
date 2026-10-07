@@ -334,7 +334,7 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
     if let Some(cid) = &session.conversation_id {
         rows.push_str(&format!("session{pad}{cid}\n"));
     }
-    // the plugin surface, the reference-style: what is actually mounted right now, so a
+    // the plugin surface: what is actually mounted right now, so a
     // skill or extension that never loaded is visible here and not only in
     // /help and /status (a label is 7 cells, matching `session`)
     let plugins = session.extensions.plugin_names();
@@ -517,7 +517,7 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
         return Ok(());
     };
     // before the transcript is cut, extensions get one chance to snapshot or
-    // restore the workspace (the reference's git-checkpoint shape): the event names the
+    // restore the workspace (the git-checkpoint shape): the event names the
     // turns being dropped. Fail-open — a broken extension never blocks the
     // jump; its error lands in the diagnostics tail.
     session

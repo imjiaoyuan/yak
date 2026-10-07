@@ -288,7 +288,7 @@ impl Session {
                         } else {
                             crate::agent::tools::print_output_block(&summary);
                         }
-                        // the reference's `Took 1.2s`: the measured duration of what just
+                        // the measured duration of what just
                         // ran, on its own dim line — cheap to print, and it
                         // separates a slow call from a hung one at a glance
                         eprintln!(

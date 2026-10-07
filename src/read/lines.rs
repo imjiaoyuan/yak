@@ -20,7 +20,7 @@ pub(super) struct WindowResult {
     /// the scan reached end-of-input inside the window
     pub eof: bool,
     /// true byte length of `lines[0]` before the char cap: the tool uses it
-    /// to name a line that dwarfs the whole read cap (the reference's first-line
+    /// to name a line that dwarfs the whole read cap (the first-line
     /// message), so the model can go past it with bash instead of stepping
     /// offsets into it forever.
     pub first_line_bytes: usize,

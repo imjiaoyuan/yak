@@ -1,5 +1,5 @@
 //! The provider lifecycle behind the REPL's `/login` and `/logout`: the
-//! wizard (the reference-shaped: pick a provider, paste the key, pick the default model
+//! wizard (pick a provider, paste the key, pick the default model
 //! — esc cancels at every step) and the removal picker. The
 //! `yak login`/`yak logout` CLI is gone — this is library code only.
 
@@ -338,7 +338,7 @@ fn cancelled() -> Result<(), String> {
     Ok(())
 }
 
-/// The catalog entry's env var, the reference's registry (AZURE_OPENAI_API_KEY
+/// The catalog entry's env var, matching the registry (AZURE_OPENAI_API_KEY
 /// for the azure preset, CLOUDFLARE_API_KEY for both cloudflare ones).
 fn env_for(preset_name: &str) -> Option<&'static str> {
     crate::providers::catalog::ALL

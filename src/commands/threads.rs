@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::core::threads::{Store, ThreadSummary};
 
 /// The conversations a picker offers: those that ran in `cwd`, newest first —
-/// like the reference, a resume list is this project's history. A directory with none of
+/// a resume list is this project's history. A directory with none of
 /// its own falls back to every directory's (the items then carry a directory
 /// tag), so a fresh project is never a dead end. None = nothing to show.
 pub fn pick_thread(cwd: &Path, title: &str) -> Result<Option<String>, String> {

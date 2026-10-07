@@ -185,7 +185,7 @@ pub fn build_body(
                 attachments,
                 ..
             } => {
-                // Anthropic's tool_result natively takes image blocks — the reference
+                // Anthropic's tool_result natively takes image blocks
                 // inlines them too — so the shared string-only helper is
                 // bypassed: text parts first, then attachment blocks
                 let blocks = if attachments.is_empty() {

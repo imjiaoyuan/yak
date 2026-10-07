@@ -1,5 +1,5 @@
 //! Skills: SKILL.md packs discovered from the user dir and the project,
-//! surfaced to the model as the reference's `<available_skills>` block (name +
+//! surfaced to the model as the `<available_skills>` block (name +
 //! description + location; progressive disclosure — the model reads the full
 //! file with the read tool when it decides to use one). Interop: the
 //! agentskills-standard `.agents/skills` locations are read too, at lower
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::yaml;
 
-/// Name rules per the Agent Skills spec, enforced as they are enforced: a
+/// Name rules per the Agent Skills spec: a
 /// violation is a warning, not a rejection.
 const MAX_NAME_LENGTH: usize = 64;
 /// Description length cap per the spec, also warning-only.
@@ -26,7 +26,7 @@ pub struct SkillDef {
 }
 
 /// Parse a SKILL.md: `---` yaml frontmatter `---` then the instruction body
-/// (read on demand, never stored here). Rules follow the reference's
+/// (read on demand, never stored here). Rules follow the
 /// `loadSkillFromFile`: frontmatter that cannot be parsed or a missing/
 /// empty description skips the skill with a warning; an invalid name or an
 /// over-long description only warns and the skill still loads.
@@ -184,7 +184,7 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
     merged
 }
 
-/// The system-prompt section, the reference's `formatSkillsForPrompt`: one XML entry
+/// The system-prompt section, the `formatSkillsForPrompt`: one XML entry
 /// per skill the model may pick up on its own, with the file location for
 /// progressive disclosure.
 pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
@@ -217,7 +217,7 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     Some(out)
 }
 
-/// the reference's `escapeXml`, so a description containing angle brackets or quotes
+/// the `escapeXml`, so a description containing angle brackets or quotes
 /// cannot break the block's structure.
 fn escape_xml(value: &str) -> String {
     value
@@ -263,7 +263,7 @@ mod tests {
         assert!(!def.model_invocation);
     }
 
-    /// a SKILL is dropped.md without a usable description: the description is
+    /// a SKILL.md without a usable description is dropped: the description is
     /// what the model matches a task against, so without one it can never
     /// fire.
     #[test]
@@ -280,7 +280,7 @@ mod tests {
 
     /// Frontmatter the YAML subset cannot parse means the metadata is not
     /// understood — a skill fired on guessed metadata is worse than a loud
-    /// skip (skipped too).
+    /// skip.
     #[test]
     fn unparseable_frontmatter_is_skipped_loudly() {
         let err = parse_skill_md(

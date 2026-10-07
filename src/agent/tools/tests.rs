@@ -192,7 +192,7 @@ fn validation_bounces_bad_args() {
 
 #[test]
 fn validation_coerces_numeric_and_boolean_strings() {
-    // the reference's Convert: "50" is an offset, "true" is a flag — a type spelling
+    // numeric coercion: "50" is an offset, "true" is a flag — a type spelling
     // must not cost the model a round
     let schema = json!({
         "type": "object",
@@ -738,7 +738,7 @@ fn read_tool_byte_cut_note_points_at_unseen_lines() {
 fn read_names_the_bash_way_past_an_oversized_single_line() {
     // the line the offset points at is over the whole cap: reporting a
     // "showing lines" note over nothing would send the model stepping
-    // offsets forever, so say how to get past it (the reference's message)
+    // offsets forever, so say how to get past it
     let dir = crate::core::testutil::scratch_dir("readhuge");
     let mut line = "x".repeat(60 * 1024);
     line.push('\n');
@@ -998,7 +998,7 @@ fn pattern_matching_honors_leading_trailing_and_inner_stars() {
 fn truncate_tail_counts_the_json_escaped_form() {
     // a payload of newlines: raw len is well under the cap, but the wire
     // form doubles every byte — the tail must shrink until the escaped
-    // form fits, not just the raw one (the reference's JSON-overhead fix)
+    // form fits, not just the raw one
     let text = "\n".repeat(40 * 1024);
     let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
     assert!(truncated);
