@@ -9,11 +9,14 @@ use std::os::unix::io::AsRawFd;
 use super::{RawByte, TermSize};
 
 mod ffi {
+    use std::ffi::c_void;
     // one declaration per libc symbol, shared by everything below
     unsafe extern "C" {
         pub fn tcgetattr(fd: i32, termios_p: *mut u8) -> i32;
         pub fn tcsetattr(fd: i32, optional_actions: i32, termios_p: *const u8) -> i32;
-        pub fn read(fd: i32, buf: *mut u8, count: usize) -> i32;
+        // libc's own signature (ssize_t/c_void): a mismatched declaration of a
+        // runtime symbol is undefined behavior territory the compiler flags
+        pub fn read(fd: i32, buf: *mut c_void, count: usize) -> isize;
         pub fn ioctl(fd: i32, request: u64, ...) -> i32;
         pub fn signal(signum: i32, handler: usize) -> usize;
         pub fn killpg(pgid: i32, sig: i32) -> i32;
@@ -168,8 +171,8 @@ impl RawTerm {
 
     pub fn next_byte(&mut self) -> RawByte {
         let mut b = [0u8; 1];
-        let got = unsafe { ffi::read(self.fd, b.as_mut_ptr(), 1) };
-        if got > 0 {
+        let got = unsafe { ffi::read(self.fd, b.as_mut_ptr().cast(), 1) };
+        if got >= 1 {
             RawByte::Key(b[0])
         } else {
             RawByte::Timeout
