@@ -350,6 +350,10 @@ impl Ext {
         let result = self.request(&frame, timeout, Some(log))?;
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
+            // a segment list: each item is a string, or `{"text": ..,
+            // "console": true}` for console lines — laid out the reference
+            // segmented way, so several output items cannot run together
+            Some(Value::Array(items)) if !items.is_empty() => format_segments(items),
             Some(other) => crate::jsonfmt::dumps_indent(other, 2),
             // an error frame already surfaced as Err from `request`, so a
             // reply with neither result nor error broke the protocol — say
@@ -406,6 +410,58 @@ impl Ext {
         }
         tail.push_back(line);
     }
+}
+
+/// Lay out a segmented tool result so the model can tell items apart
+/// (the reference segmented's `formatOutput`): with more than one text segment each
+/// starts with a `==> text N/M <==` line, and console segments follow all
+/// other output in one `<console_output>` block. An empty list or a list
+/// with no text and no console lines renders as its pretty JSON — the
+/// extension probably meant a plain value.
+fn format_segments(items: &[Value]) -> String {
+    let seg_text = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(o) => o.get("text").map(|t| match t {
+                Value::String(s) => s.clone(),
+                other => crate::jsonfmt::dumps_indent(other, 2),
+            }),
+            _ => None,
+        }
+    };
+    let is_console =
+        |v: &Value| matches!(v, Value::Object(o) if o.get("console") == Some(&Value::Bool(true)));
+    let total = items
+        .iter()
+        .filter(|v| !is_console(v) && seg_text(v).is_some())
+        .count();
+    let mut out: Vec<String> = Vec::new();
+    let mut console: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    for v in items {
+        if is_console(v) {
+            if let Some(t) = seg_text(v) {
+                console.push(t);
+            }
+        } else if let Some(t) = seg_text(v) {
+            index += 1;
+            if total > 1 {
+                out.push(format!("==> text {index}/{total} <==\n{t}"));
+            } else {
+                out.push(t);
+            }
+        }
+    }
+    if out.is_empty() && console.is_empty() {
+        return crate::jsonfmt::dumps_indent(&Value::Array(items.to_vec()), 2);
+    }
+    if !console.is_empty() {
+        out.push(format!(
+            "<console_output>\n{}\n</console_output>",
+            console.join("\n")
+        ));
+    }
+    out.join("\n")
 }
 
 // ============================================================================

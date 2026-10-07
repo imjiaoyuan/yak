@@ -110,7 +110,7 @@ Tool names are registry-wide: a name that collides with a built-in or another ex
 
 `tool_call_id` is the model's own id for this call: key per-call state on it when several calls of your tool can be in flight (the read-only batch runs them concurrently). A script tool (`# --- yak-tool:`) does not see it: the host feeds those the arguments only.
 
-The reply's `result` should be a string; any other JSON value is serialized as its pretty form.
+The reply's `result` should be a string; a list lays out as **segments** — strings are text items, `{"text": .., "console": true}` items are console lines — with more than one text item each headed `==> text N/M <==` and console lines following in one `<console_output>` block. Any other JSON value is serialized as its pretty form.
 
 **`run_command`**: the user typed your `/command` (deadline 120s):
 

@@ -556,3 +556,46 @@ fn argv_mode_picks_the_declared_argument_by_name() {
     let out = command.output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "RIGHT");
 }
+
+#[test]
+fn segment_results_get_pi_segmented_separators() {
+    use super::format_segments;
+    use serde_json::json;
+    // one text: no header, the text alone
+    assert_eq!(format_segments(&[json!("only")]), "only");
+    // several texts: each headed N/M
+    assert_eq!(
+        format_segments(&[json!("one"), json!("two\nlines")]),
+        "==> text 1/2 <==\none\n==> text 2/2 <==\ntwo\nlines"
+    );
+    // console lines follow in one block
+    assert_eq!(
+        format_segments(&[json!("out"), json!({"text": "log", "console": true})]),
+        "out\n<console_output>\nlog\n</console_output>"
+    );
+    // console-only output: just the block
+    assert_eq!(
+        format_segments(&[
+            json!({"text": "a", "console": true}),
+            json!({"text": "b", "console": true})
+        ]),
+        "<console_output>\na\nb\n</console_output>"
+    );
+    // non-string text values serialize; non-segment items (numbers) are skipped
+    assert_eq!(
+        format_segments(&[json!({"text": 42}), json!("tail")]),
+        "==> text 1/2 <==\n42\n==> text 2/2 <==\ntail"
+    );
+    // nothing textual at all: falls back to pretty JSON of the list
+    let fell_back = format_segments(&[json!(1), json!(2)]);
+    assert!(
+        fell_back.contains("\"1\"") || fell_back.contains("1,"),
+        "{fell_back}"
+    );
+}
+
+#[test]
+fn an_empty_segment_list_is_pretty_json() {
+    use super::format_segments;
+    assert_eq!(format_segments(&[]), "[]");
+}
