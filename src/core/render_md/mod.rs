@@ -131,11 +131,17 @@ enum InlSpan {
     LinkUrl,
 }
 
-/// One unit of resolved inline output: a literal character, or a styled
-/// run the emitter opens, prints and closes itself.
+/// One unit of resolved inline output: a literal character, a styled
+/// run the emitter opens, prints and closes itself, or a link (its own
+/// event so the renderer can wrap it in an OSC 8 hyperlink).
 enum InlEvent<'a> {
     Lit(char),
     Styled(InlSpan, &'a str),
+    /// markdown link: shown `text`, target `href`
+    Link {
+        text: &'a str,
+        href: &'a str,
+    },
 }
 
 /// SGR codes for a span (the styles: strong = bold, em = italic, no hues).
@@ -258,10 +264,7 @@ fn scan_inline_events(
                         let text = &line[i + 1..close];
                         let href = &line[close + 2..close + 2 + end];
                         if !text.is_empty() {
-                            emit(InlEvent::Styled(InlSpan::Link, text));
-                            if text != href {
-                                emit(InlEvent::Styled(InlSpan::LinkUrl, &format!(" ({href})")));
-                            }
+                            emit(InlEvent::Link { text, href });
                             i = close + 2 + end + 1;
                             continue;
                         }
@@ -973,6 +976,33 @@ impl StyleStream {
                 }
                 self.span_close(out);
             }
+            InlEvent::Link { text, href } => {
+                // an OSC 8 hyperlink: the opener rides like a span-open (so
+                // it re-opens after a row break, which is invisible and
+                // correct), the link style paints the text, and the shown
+                // URL follows in parens when it differs from the target
+                let open = crate::theme::osc8_open(href);
+                self.span_open(&format!("{}{}", open, span_codes(p, InlSpan::Link)), out);
+                for ch in text.chars() {
+                    self.putc(ch, out);
+                }
+                if text != href {
+                    // close the link span first — the URL rides in its own
+                    // color, the same bytes the two-span form always printed
+                    self.span_close(out);
+                    self.span_open(&span_codes(p, InlSpan::LinkUrl), out);
+                    self.putc(' ', out);
+                    for ch in format!("({href})").chars() {
+                        self.putc(ch, out);
+                    }
+                }
+                // close: end the open span, end the hyperlink, restore ctx
+                self.span_close(out);
+                let close = crate::theme::osc8_close();
+                if !close.is_empty() && !self.at_start {
+                    out.push_str(close);
+                }
+            }
         });
         self.st = St::Inline(i);
         // stopped early = a marker still holds its span
@@ -1220,7 +1250,12 @@ fn wrap_scan(
     let mut i = 0usize;
     while i < bytes.len() {
         if ansi && bytes[i] == 0x1b {
-            let end = text[i..].find('m').map_or(text.len(), |p| i + p + 1);
+            // any escape sequence is invisible (SGR color, OSC 8
+            // hyperlinks): ride whole and cost no cells. The SGR reset
+            // clears the tracked span; anything else stays open, so a row
+            // break re-issues it (an OSC 8 re-open is invisible and
+            // correct — the link survives the wrap).
+            let end = escape_end(bytes, i);
             let seq = &text[i..end];
             if seq == "\x1b[0m" {
                 active.clear();

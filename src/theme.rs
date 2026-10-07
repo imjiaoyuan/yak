@@ -207,6 +207,42 @@ static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
     }
 });
 
+/// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. the reference's
+/// `osc8_hyperlink` shape. The URI is sanitized first — control characters
+/// (including the terminators themselves) are dropped so a crafted URL
+/// cannot close the sequence early and smuggle terminal chrome.
+pub fn osc8_open(url: &str) -> String {
+    if !hyperlinks_on() {
+        return String::new();
+    }
+    let clean: String = url
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\u{7f}')
+        .collect();
+    if !clean.starts_with("http://") && !clean.starts_with("https://") {
+        return String::new();
+    }
+    format!("\x1b]8;;{clean}\x07")
+}
+
+/// The OSC 8 terminator: an empty URI ends the current hyperlink.
+pub fn osc8_close() -> &'static str {
+    if !hyperlinks_on() {
+        return "";
+    }
+    "\x1b]8;;\x07"
+}
+
+/// Hyperlinks ride only on a terminal that can take them: the same gate as
+/// the cursor chrome (a real stderr, not `TERM=dumb`); `NO_COLOR` turns color
+/// off, not hyperlinks — clicking a link is not color.
+fn hyperlinks_on() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| {
+        std::io::stderr().is_terminal() && std::env::var("TERM").as_deref() != Ok("dumb")
+    });
+    *ON
+}
+
 /// The cursor-control sequences for stderr chrome (see [`Cursor`]).
 pub fn cursor() -> &'static Cursor {
     &CURSOR

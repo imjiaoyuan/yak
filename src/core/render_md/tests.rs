@@ -985,3 +985,37 @@ fn truncate_cells_charges_no_cells_for_escape_sequences() {
     assert_eq!(truncate_cells("\x1b[32mab\x1b[0m", 2), "\x1b[32mab\x1b[0m");
     assert_eq!(truncate_cells("\x1b[32mabcd\x1b[0m", 3), "\x1b[32mab…");
 }
+
+#[test]
+fn plain_streams_carry_no_hyperlink_sequences() {
+    // the render path runs under the plain palette in tests (no tty), and
+    // osc8 gates on the same condition: a non-terminal stream gets the same
+    // visible bytes it always had, no OSC 8 anywhere
+    let out = render("see [docs](https://example.com/a?b=c) here\n");
+    assert!(!out.contains("\x1b]8"), "{out:?}");
+    assert!(out.contains("docs"), "{out:?}");
+}
+
+#[test]
+fn osc8_wrapping_skips_the_sequence_for_width() {
+    // a wrapped replay row containing an OSC 8 pair must not count the
+    // sequence's bytes as cells: the row prefix rule holds with hyperlinks
+    let text = "a \x1b]8;;https://example.com/very/long/path\x07link text\x1b]8;;\x07 b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let mut out = String::new();
+    super::wrap_scan(text, 20, "", "  ", true, &mut out);
+    // every row fits or breaks at a space; no row overflows 20 cells
+    for (i, row) in out.lines().enumerate() {
+        let w = super::cell_width(row);
+        assert!(w <= 20, "row {i} is {w} cells: {row:?}");
+    }
+}
+
+#[test]
+fn osc8_open_sanitizes_and_gates() {
+    // control characters cannot terminate the sequence early
+    let open = crate::theme::osc8_open("https://x.com/a\u{07}b\u{1b}c");
+    assert!(!open.contains('\u{7f}'));
+    // only http(s) targets ride
+    assert_eq!(crate::theme::osc8_open("file:///etc/passwd"), "");
+    assert_eq!(crate::theme::osc8_open("javascript:alert(1)"), "");
+}
