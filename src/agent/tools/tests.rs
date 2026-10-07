@@ -899,3 +899,155 @@ fn webfetch_is_exec_tier() {
     // the one way off the machine is exec-tier like any other shell-out
     assert_eq!(fetch.tier(), Tier::Exec);
 }
+
+#[test]
+fn plain_names_and_patterns_pick_the_allowlist() {
+    let tools: Vec<String> = ["read", "grep", "glob", "ls", "bash"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let pick = |csv: &str| -> Vec<String> {
+        select_tools(
+            &tools,
+            &csv.split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    assert_eq!(pick("read,grep"), vec!["read", "grep"]);
+    // a pattern keeps every match, in registry order (gr* hits grep only:
+    // glob does not start with gr)
+    assert_eq!(pick("gr*"), vec!["grep"]);
+    assert_eq!(pick("*"), tools.clone());
+    assert_eq!(pick("g*b"), vec!["glob"]);
+}
+
+#[test]
+fn a_typo_in_a_plain_selection_fails_loudly() {
+    let tools: Vec<String> = ["read", "bash"].iter().map(|s| s.to_string()).collect();
+    let err = select_tools(&tools, &["raed".to_string()]).unwrap_err();
+    assert!(err.contains("unknown tool 'raed'"), "{err}");
+    assert!(err.contains("available: read, bash"), "{err}");
+}
+
+#[test]
+fn modifiers_add_and_remove_without_replacing_the_set() {
+    let tools: Vec<String> = ["read", "write", "edit"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let run = |csv: &str| {
+        select_tools(
+            &tools,
+            &csv.split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    // remove one, keep the rest
+    assert_eq!(run("-edit"), vec!["read", "write"]);
+    // add a name the registry does not carry yet is refused (nothing to add);
+    // an existing one re-added is a no-op
+    assert_eq!(run("+read"), tools.clone());
+    // order matters: -a,+a ends without it, +a,-a also without it
+    assert_eq!(run("+edit,-edit"), vec!["read", "write"]);
+    // removing everything is the same empty selection error
+    assert!(
+        select_tools(
+            &tools,
+            &"-read,-write,-edit"
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn modifiers_cannot_mix_with_plain_names_or_patterns() {
+    let tools: Vec<String> = vec!["read".to_string()];
+    let mixed = select_tools(&tools, &["+read".into(), "bash".into()]).unwrap_err();
+    assert!(mixed.contains("cannot be mixed"), "{mixed}");
+    let pattern = select_tools(&tools, &["+gr*".into()]).unwrap_err();
+    assert!(pattern.contains("not patterns"), "{pattern}");
+}
+
+#[test]
+fn pattern_matching_honors_leading_trailing_and_inner_stars() {
+    assert!(tool_pattern_match("mcp__radius__*", "mcp__radius__search"));
+    assert!(!tool_pattern_match("mcp__radius__*", "mcp__other__search"));
+    assert!(tool_pattern_match("*search*", "mcp__radius__search"));
+    assert!(tool_pattern_match("read", "read"));
+    assert!(!tool_pattern_match("read", "readonly"));
+    // a trailing star is a prefix match: it consumes the rest of the name
+    assert!(tool_pattern_match("re*", "read"));
+    assert!(!tool_pattern_match("re*", "write"));
+    // a pattern without a trailing star must consume the whole name
+    assert!(!tool_pattern_match("*ad", "readx"));
+    assert!(tool_pattern_match("*ad", "read"));
+    // an inner star spans any run
+    assert!(tool_pattern_match("r*d", "read"));
+    assert!(tool_pattern_match("r*d", "rod"));
+    assert!(!tool_pattern_match("r*d", "redx"));
+}
+
+#[test]
+fn truncate_tail_counts_the_json_escaped_form() {
+    // a payload of newlines: raw len is well under the cap, but the wire
+    // form doubles every byte — the tail must shrink until the escaped
+    // form fits, not just the raw one (the reference's JSON-overhead fix)
+    let text = "\n".repeat(40 * 1024);
+    let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
+    assert!(truncated);
+    assert!(
+        json_escaped_len(&tail) <= MAX_BYTES,
+        "escaped len {}",
+        json_escaped_len(&tail)
+    );
+    // quotes and backslashes double too
+    let quotes = "\"".repeat(40 * 1024);
+    let (tail, _) = truncate_tail(&quotes, MAX_LINES, MAX_BYTES);
+    assert!(json_escaped_len(&tail) <= MAX_BYTES);
+    // control characters become 6-byte escapes
+    let ctl = "\u{1}".repeat(10 * 1024);
+    let (tail, truncated) = truncate_tail(&ctl, MAX_LINES, MAX_BYTES);
+    assert!(truncated);
+    assert!(json_escaped_len(&tail) <= MAX_BYTES);
+    // plain ASCII with no escapes: the cap is the raw len, unchanged
+    let plain = "a".repeat(MAX_BYTES + 5000);
+    let (tail, _) = truncate_tail(&plain, MAX_LINES, MAX_BYTES);
+    assert!(tail.len() <= MAX_BYTES);
+    assert!(json_escaped_len(&tail) <= MAX_BYTES + 2);
+}
+
+#[test]
+fn truncate_head_counts_the_json_escaped_form() {
+    let text = "\n".repeat(40 * 1024);
+    let head = truncate_head_marked(&text);
+    let body = head.trim_end_matches("[output truncated]").trim_end();
+    assert!(
+        json_escaped_len(body) <= MAX_BYTES,
+        "escaped len {}",
+        json_escaped_len(body)
+    );
+}
+
+#[test]
+fn json_escaped_len_matches_serde_for_the_hot_characters() {
+    for s in [
+        "",
+        "plain text",
+        "with \"quotes\"",
+        "back\\slash",
+        "new\nline\r\n",
+        "tab\there",
+        "\u{1}\u{7f}",
+        "汉字 ünïcødé",
+    ] {
+        let serde_len = serde_json::to_string(s).unwrap().len();
+        assert_eq!(json_escaped_len(s), serde_len, "{s:?}");
+    }
+}

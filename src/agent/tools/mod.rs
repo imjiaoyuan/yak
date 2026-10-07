@@ -303,10 +303,23 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
     let lines: Vec<&str> = text.lines().collect();
     let mut out = lines[lines.len().saturating_sub(max_lines)..].join("\n");
     let mut truncated = lines.len() > max_lines;
-    if out.len() > max_bytes {
-        let start = crate::core::text::ceil_boundary(&out, out.len() - max_bytes);
-        out = out[start..].to_string();
-        truncated = true;
+    // the byte cap counts the JSON-escaped form: the result rides the wire
+    // as a string value, where a newline costs 2 bytes and a control char
+    // 6, so a raw-size cap can ship nearly double the budget (the reference's
+    // "count JSON overhead when truncating" fix). Shrink the raw budget
+    // until the escaped tail fits — one pass per factor-of-two of slack,
+    // bounded because every step cuts at least a byte of raw text.
+    let mut budget = max_bytes;
+    loop {
+        if out.len() > budget {
+            let start = crate::core::text::ceil_boundary(&out, out.len() - budget);
+            out = out[start..].to_string();
+            truncated = true;
+        }
+        if json_escaped_len(&out) <= max_bytes || budget == 0 {
+            break;
+        }
+        budget = (budget / 2).max(1).min(budget.saturating_sub(1));
     }
     // the byte cap is not a token cap: a CJK dump of the same size costs
     // 3-4x more, so enforce the estimate too (binary search over char
@@ -351,9 +364,20 @@ pub(crate) fn truncate_head_marked(text: &str) -> String {
     let mut out = lines[..lines.len().min(MAX_LINES)].join("\n");
     let mut truncated = lines.len() > MAX_LINES;
     if out.len() > MAX_BYTES {
-        let end = crate::core::text::floor_boundary(&out, MAX_BYTES);
-        out.truncate(end);
-        truncated = true;
+        // same escaped-size accounting as the tail path: shrink until the
+        // JSON form of this head fits the wire budget
+        let mut budget = MAX_BYTES;
+        loop {
+            if out.len() > budget {
+                let end = crate::core::text::floor_boundary(&out, budget);
+                out.truncate(end);
+                truncated = true;
+            }
+            if json_escaped_len(&out) <= MAX_BYTES || budget == 0 {
+                break;
+            }
+            budget = (budget / 2).max(1).min(budget.saturating_sub(1));
+        }
     }
     let tokens = crate::agent::compact::text_tokens;
     if tokens(&out) > MAX_TOKENS {
@@ -385,6 +409,24 @@ pub(crate) fn truncate_head_marked(text: &str) -> String {
         out.push_str("\n[output truncated]\n");
     }
     out
+}
+
+/// The length this text takes as a JSON string value (the wire form of a
+/// tool result): quotes and backslashes double, common control characters
+/// become two-byte `\\n`-style escapes, and the rest of C0/C1 becomes a
+/// six-byte `\\u00XX`. What the model is billed is the escaped form, so
+/// the truncation budgets are enforced against this, not the raw len.
+pub(crate) fn json_escaped_len(s: &str) -> usize {
+    let mut n = 2usize; // the surrounding quotes
+    for c in s.chars() {
+        n += match c {
+            '"' | '\\' => 2,
+            '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        };
+    }
+    n
 }
 
 /// Merge captured process output into one stream: stderr rides under
@@ -480,6 +522,112 @@ pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
     )
 }
 
+/// Human duration for the `Took …` chrome line (the reference's `formatDuration`):
+/// tenths below a minute, then `Xm Ys`, then `Xh Ym Zs`.
+pub(crate) fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let total = d.as_secs();
+    let (m, s) = (total / 60, total % 60);
+    if m < 60 {
+        return format!("{m}m {s}s");
+    }
+    format!("{}h {}m {s}s", m / 60, m % 60)
+}
+
+/// `--tools` selection (the reference's semantics): a list of plain names and `*`
+/// patterns keeps the matching tools (replacing the default set); a list of
+/// only `+name`/`-name` entries instead edits the default set in order, and
+/// patterns are exact there. Mixing the two forms is an error, the same one
+/// the reference reports, because the meaning of a plain name would depend on position.
+pub fn select_tools(available: &[String], wanted: &[String]) -> Result<Vec<String>, String> {
+    let is_modifier = |e: &str| e.starts_with('+') || e.starts_with('-');
+    let modifiers = wanted.iter().filter(|e| is_modifier(e)).count();
+    if modifiers > 0 {
+        if modifiers < wanted.len() {
+            return Err("tool names cannot be mixed with +name or -name entries".to_string());
+        }
+        if let Some(p) = wanted.iter().find(|e| e.contains('*')) {
+            return Err(format!(
+                "+name and -name entries take exact tool names, not patterns: {p}"
+            ));
+        }
+        // edit the full registry in order: +name adds what exists, -name
+        // removes what is there
+        let mut tools: Vec<String> = available.to_vec();
+        for entry in wanted {
+            let name = &entry[1..];
+            if let Some(pos) = tools.iter().position(|t| t == name) {
+                if entry.starts_with('-') {
+                    tools.remove(pos);
+                }
+            } else if entry.starts_with('+')
+                && !name.is_empty()
+                && available.iter().any(|a| a == name)
+            {
+                tools.push(name.to_string());
+            }
+        }
+        if tools.is_empty() {
+            return Err("--tools selected nothing".to_string());
+        }
+        return Ok(tools);
+    }
+    // plain names/patterns: an allowlist. Every entry must match something
+    // (a typo is louder than an empty toolbox); `*` matches any run of
+    // characters, the reference's `toolPatternRegExp`.
+    let unknown: Vec<&String> = wanted
+        .iter()
+        .filter(|w| !w.contains('*') && !available.iter().any(|a| a.as_str() == w.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "unknown tool '{}' (available: {})",
+            unknown[0],
+            available.join(", ")
+        ));
+    }
+    let matched: Vec<String> = available
+        .iter()
+        .filter(|a| wanted.iter().any(|w| tool_pattern_match(w, a)))
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        return Err("--tools selected nothing".to_string());
+    }
+    Ok(matched)
+}
+
+/// One allowlist entry against one tool name: exact, or `*` runs (the reference's
+/// `createToolNameMatcher`, without the regex — a two-cursor scan is enough
+/// for a leading/trailing/inner pattern).
+fn tool_pattern_match(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let mut rest = name;
+    for (i, part) in pattern.split('*').enumerate() {
+        if i == 0 {
+            // a leading literal must prefix the name
+            if !rest.starts_with(part) {
+                return false;
+            }
+            rest = &rest[part.len()..];
+        } else if part.is_empty() {
+            continue;
+        } else {
+            let Some(pos) = rest.find(part) else {
+                return false;
+            };
+            rest = &rest[pos + part.len()..];
+        }
+    }
+    // a pattern with no trailing `*` must consume the whole name
+    pattern.ends_with('*') || rest.is_empty()
+}
+
 /// Display verb for the `$` chrome line: tool ids read as actions.
 pub fn display_verb(name: &str) -> &str {
     match name {
@@ -510,6 +658,7 @@ mod bash;
 mod edit;
 mod fetch;
 mod fs;
+mod jq;
 mod plan;
 mod read;
 mod remember;

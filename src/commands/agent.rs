@@ -35,7 +35,7 @@ const SPECS: &[OptSpec] = &[
     value_spec!(
         "tools",
         None,
-        "Comma-separated tool subset (default: all)",
+        "Tool subset: names or * patterns replace the default set; +name/-name entries add or remove",
         "NAMES"
     ),
     value_spec!(
@@ -368,22 +368,14 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     }
 
     // built-ins plus plugin tools, all through the shared rebuild path;
-    // --tools filters the combined registry by name
+    // --tools selects the subset: plain names/patterns replace the registry,
+    // +name/-name entries edit it (the reference's --tools semantics)
     session.rebuild_tools();
     if let Some(wanted) = &wanted {
         let available: Vec<String> = session.tools.iter().map(|t| t.name().to_string()).collect();
-        for want in wanted {
-            if !available.iter().any(|a| a == want) {
-                return Err(format!(
-                    "unknown tool '{want}' (available: {})",
-                    available.join(", ")
-                ));
-            }
-        }
-        session.tools.retain(|t| wanted.contains(&t.name()));
-        if session.tools.is_empty() {
-            return Err("--tools selected nothing".to_string());
-        }
+        let wanted_owned: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
+        let keep = crate::agent::tools::select_tools(&available, &wanted_owned)?;
+        session.tools.retain(|t| keep.iter().any(|k| k == t.name()));
     }
 
     // bare invocation on a terminal → interactive REPL; piped stdin without
