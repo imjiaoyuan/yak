@@ -38,6 +38,10 @@ pub enum AgentUpdate {
     ToolEnd {
         summary: String,
         is_error: bool,
+        /// measured wall-clock duration of the execution (the reference's `durationMs`):
+        /// rendered as a dim `Took 1.2s` line and carried on the `--json`
+        /// `tool_end` event
+        duration: std::time::Duration,
     },
     TurnEnd {
         usage: Option<Usage>,
@@ -883,6 +887,9 @@ fn run_tool_calls(
             let cleared = prepare_call(&mut call, &mut ctx);
             prepared.push((call, cleared));
         }
+        // the batch's wall-clock span: every call in it ran concurrently, so
+        // this is both the batch total and each call's observed duration
+        let started = std::time::Instant::now();
         let outs: Vec<(tools::ToolOutput, Vec<String>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = prepared
                 .iter()
@@ -912,6 +919,7 @@ fn run_tool_calls(
                 })
                 .collect()
         });
+        let batch_took = started.elapsed();
         for ((call, cleared), (out, logs)) in prepared.into_iter().zip(outs) {
             for line in &logs {
                 on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(line)));
@@ -928,7 +936,7 @@ fn run_tool_calls(
                 on_update,
                 opts.hooks,
             );
-            finish_call(&call, out, &mut ctx, history);
+            finish_call(&call, out, &mut ctx, history, batch_took);
         }
     } else {
         for mut call in tool_calls {
@@ -943,6 +951,9 @@ fn run_tool_calls(
                 });
                 continue;
             }
+            // the measured span of this call's execution; a denial measures
+            // zero (nothing ran)
+            let mut took = None;
             let mut ctx = call_ctx(
                 tools,
                 &opts.cwd,
@@ -957,7 +968,10 @@ fn run_tool_calls(
                     let mut log = |line: &str| {
                         on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(line)))
                     };
-                    cleared.tool.execute_call(&call, &opts.cwd, &mut log)
+                    let started = std::time::Instant::now();
+                    let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);
+                    took = Some(started.elapsed());
+                    out
                 }
             };
             let mut ctx = call_ctx(
@@ -968,7 +982,13 @@ fn run_tool_calls(
                 on_update,
                 opts.hooks,
             );
-            finish_call(&call, out, &mut ctx, history);
+            finish_call(
+                &call,
+                out,
+                &mut ctx,
+                history,
+                took.take().unwrap_or_default(),
+            );
         }
     }
     interrupted
@@ -1217,6 +1237,7 @@ fn finish_call(
     out: tools::ToolOutput,
     ctx: &mut CallCtx<'_, '_>,
     history: &mut Vec<Msg>,
+    duration: std::time::Duration,
 ) {
     let hooks = ctx.hooks;
     let on_update = &mut *ctx.on_update;
@@ -1228,6 +1249,7 @@ fn finish_call(
     on_update(AgentUpdate::ToolEnd {
         summary: summarize(&out.content),
         is_error: out.is_error(),
+        duration,
     });
     history.push(Msg::ToolResult {
         call_id: call.id.clone(),

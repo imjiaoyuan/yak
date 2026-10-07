@@ -264,7 +264,11 @@ impl Session {
                         }
                     }
                 }
-                AgentUpdate::ToolEnd { summary, is_error } => {
+                AgentUpdate::ToolEnd {
+                    summary,
+                    is_error,
+                    duration,
+                } => {
                     {
                         view.borrow_mut().pause();
                         if streamed.get() && !is_error {
@@ -284,6 +288,15 @@ impl Session {
                         } else {
                             crate::agent::tools::print_output_block(&summary);
                         }
+                        // the reference's `Took 1.2s`: the measured duration of what just
+                        // ran, on its own dim line — cheap to print, and it
+                        // separates a slow call from a hung one at a glance
+                        eprintln!(
+                            "{}  Took {}{}",
+                            crate::theme::err().dim,
+                            crate::agent::tools::format_duration(duration),
+                            crate::theme::err().reset
+                        );
                         // the next model round is awaited right after: spin,
                         // or the time-to-first-token reads as a hang
                         view.borrow_mut().resume_wait();
@@ -719,9 +732,16 @@ fn event_json(u: &AgentUpdate) -> serde_json::Value {
         }
         AgentUpdate::ToolLog(line) => serde_json::json!({"type": "tool_log", "line": line}),
         AgentUpdate::ToolReceiving => serde_json::json!({"type": "tool_receiving"}),
-        AgentUpdate::ToolEnd { summary, is_error } => {
-            serde_json::json!({"type": "tool_end", "summary": summary, "is_error": is_error})
-        }
+        AgentUpdate::ToolEnd {
+            summary,
+            is_error,
+            duration,
+        } => serde_json::json!({
+            "type": "tool_end",
+            "summary": summary,
+            "is_error": is_error,
+            "durationMs": duration.as_millis() as u64
+        }),
         AgentUpdate::TurnEnd { usage } => {
             serde_json::json!({"type": "turn_end", "usage": usage_json(usage.as_ref())})
         }
@@ -1860,8 +1880,9 @@ mod tests {
                 AgentUpdate::ToolEnd {
                     summary: "ok".into(),
                     is_error: false,
+                    duration: std::time::Duration::from_millis(1500),
                 },
-                json!({"type": "tool_end", "summary": "ok", "is_error": false}),
+                json!({"type": "tool_end", "summary": "ok", "is_error": false, "durationMs": 1500}),
             ),
             (
                 AgentUpdate::TurnEnd {
