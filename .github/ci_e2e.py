@@ -372,15 +372,53 @@ def pin_thread_mtimes(user_dir, offsets):
             os.utime(path, (stamp, stamp))
 
 
-def run(cmd, env, cwd=None, stdin=None):
+def run(cmd, env, cwd=None, stdin=None, timeout=120):
     # the CLI writes UTF-8 whatever the platform default is, so the decode is
     # pinned: Windows would otherwise read it through the console code page
     # (cp1252) and kill the reader thread on a multi-byte glyph's byte, which
     # surfaces as a None stdout rather than the actual failure
-    return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        env=env, cwd=cwd, stdin=stdin, timeout=120,
-    )
+    #
+    # the child gets its own process group (unix) so a timeout can take down
+    # the whole tree: the worktree lane spawns grandchildren (a subagent
+    # extension, child yaks), and a lone kill() would orphan them holding
+    # the very pipes the hung parent was waiting on
+    if sys.platform == "win32":
+        popen = lambda: subprocess.Popen(
+            cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", env=env, cwd=cwd)
+    else:
+        popen = lambda: subprocess.Popen(
+            cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", env=env, cwd=cwd,
+            start_new_session=True)
+    proc = popen()
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # communicate() discards what the child already wrote, so the timeout
+        # path kills first, then drains: a hang leaves a trail in the --json
+        # event stream (or stderr) saying where it stopped
+        proc.kill()
+        try:
+            out, err = proc.communicate(timeout=5)  # drains what a kill leaves behind
+        except subprocess.TimeoutExpired:
+            out, err = None, None
+        print("== TIMEOUT after %ss ==\ncmd: %r\n-- stdout tail --\n%s\n-- stderr tail --\n%s"
+              % (timeout, cmd, (out or "")[-4000:], (err or "")[-4000:],),
+              file=sys.stderr, flush=True)
+        # tree take-down: taskkill /T walks the spawn chain on windows, the
+        # process group gets the whole session on unix
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True)
+            else:
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 HANDSHAKE = '{"id":1,"type":"initialize","params":{}}\n'
