@@ -31,7 +31,7 @@ impl Tool for RememberTool {
     fn preview(&self, args: &Value) -> String {
         short(args["text"].as_str().unwrap_or("?"))
     }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let text = args["text"].as_str().map(str::trim).unwrap_or("");
         if text.is_empty() {
             return ToolOutput::err("nothing to remember");

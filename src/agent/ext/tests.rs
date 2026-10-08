@@ -255,8 +255,10 @@ done
     );
     let mut log: Vec<String> = Vec::new();
     let out = ext
-        .call_tool("ping", &json!({}), None, &mut |line| {
-            log.push(line.to_string())
+        .call_tool("ping", &json!({}), None, &mut |p| {
+            if let super::super::tools::ToolProgress::Line(l) = p {
+                log.push(l)
+            }
         })
         .unwrap();
     assert_eq!(out, "done", "stderr is progress, never part of the result");
@@ -269,6 +271,68 @@ done
         lock(&ext.tail).iter().any(|l| l.contains("step two")),
         "the tail must keep stderr too: {:?}",
         *lock(&ext.tail)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Id-less `{"type":"lane",..}` frames stream as `Lane` progress (rows the
+/// view rewrites in place), never land in the diagnostics tail, and a lane
+/// frame after a call's reply does not leak into the next call.
+#[cfg(unix)]
+#[test]
+fn lane_frames_arrive_as_lane_progress_not_tail_noise() {
+    let dir = crate::core::testutil::scratch_dir("ext-lane");
+    let script = dir.join("laner");
+    let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      printf '{"type":"lane","lane":"1/2 coder","text":"bash: cargo test"}\n'
+      printf '{"type":"lane","lane":"1/2 coder","text":"done: 3 tool calls"}\n'
+      printf '{"type":"lane","text":"missing the lane name"}\n'
+      printf '{"type":"noise"}\n'
+      sleep 0.3
+      printf '{"id":%s,"result":"done"}\n' "$id"
+      ;;
+  esac
+done
+"#;
+    std::fs::write(&script, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ext = connect_stub(&script);
+    assert!(lock(&ext.state).is_ok(), "handshake");
+    let mut lanes = Vec::new();
+    let out = ext
+        .call_tool("ping", &json!({}), None, &mut |p| {
+            if let super::super::tools::ToolProgress::Lane { lane, text } = p {
+                lanes.push((lane, text));
+            }
+        })
+        .unwrap();
+    assert_eq!(out, "done", "lanes are progress, never the result");
+    assert_eq!(
+        lanes,
+        vec![
+            ("1/2 coder".to_string(), "bash: cargo test".to_string()),
+            ("1/2 coder".to_string(), "done: 3 tool calls".to_string()),
+        ],
+        "both updates arrive in order"
+    );
+    let tail = lock(&ext.tail);
+    assert!(
+        tail.iter().any(|l| l.contains("missing the lane name"))
+            && tail.iter().any(|l| l.contains("noise")),
+        "malformed lane frames and other id-less frames stay diagnostics: {tail:?}"
+    );
+    assert!(
+        !tail.iter().any(|l| l.contains("cargo test")),
+        "a well-formed lane never lands in the tail: {tail:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -304,8 +368,10 @@ done
 
     let ext = connect_stub(&script);
     let mut log: Vec<String> = Vec::new();
-    let out = ext.call_tool("ping", &json!({}), None, &mut |line| {
-        log.push(line.to_string())
+    let out = ext.call_tool("ping", &json!({}), None, &mut |p| {
+        if let super::super::tools::ToolProgress::Line(l) = p {
+            log.push(l)
+        }
     });
     assert_eq!(
         out.unwrap(),

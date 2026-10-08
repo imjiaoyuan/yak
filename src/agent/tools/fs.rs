@@ -25,7 +25,7 @@ impl Tool for LsTool {
     fn preview(&self, args: &Value) -> String {
         args["path"].as_str().unwrap_or(".").to_string()
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let limit = args["limit"].as_u64().unwrap_or(500) as usize;
         let dir = resolve_path(cwd, args["path"].as_str().unwrap_or("."));
         let Ok(rd) = std::fs::read_dir(&dir) else {

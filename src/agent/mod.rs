@@ -32,6 +32,12 @@ pub enum AgentUpdate {
     },
     /// a live output line from the running tool (bash stdout)
     ToolLog(String),
+    /// a named one-line status row an extension rewrites as its work moves
+    /// (parallel subagents each own one); rendered in place, never persisted
+    Lane {
+        lane: String,
+        text: String,
+    },
     /// the model is streaming a tool call's arguments in; the spinner shows
     /// a plain "running" status while it arrives
     ToolReceiving,
@@ -901,8 +907,11 @@ fn run_tool_calls(
                             // read-only tools do not stream: buffer any lines and
                             // replay them in order below
                             let mut logs: Vec<String> = Vec::new();
-                            let out = tool
-                                .execute_call(call, cwd, &mut |l: &str| logs.push(l.to_string()));
+                            let out = tool.execute_call(call, cwd, &mut |l| {
+                                if let tools::ToolProgress::Line(line) = l {
+                                    logs.push(line)
+                                }
+                            });
                             (out, logs)
                         }))
                     }
@@ -965,8 +974,13 @@ fn run_tool_calls(
             let out = match prepare_call(&mut call, &mut ctx) {
                 Err(denied) => denied.into(),
                 Ok(cleared) => {
-                    let mut log = |line: &str| {
-                        on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(line)))
+                    let mut log = |p: tools::ToolProgress| match p {
+                        tools::ToolProgress::Line(line) => {
+                            on_update(AgentUpdate::ToolLog(crate::core::text::strip_ansi(&line)))
+                        }
+                        tools::ToolProgress::Lane { lane, text } => {
+                            on_update(AgentUpdate::Lane { lane, text })
+                        }
                     };
                     let started = std::time::Instant::now();
                     let out = cleared.tool.execute_call(&call, &opts.cwd, &mut log);

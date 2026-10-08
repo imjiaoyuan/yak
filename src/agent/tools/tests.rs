@@ -834,8 +834,13 @@ fn the_registry_exposes_update_plan_as_a_read_tier_tool() {
 fn update_plan_renders_the_checklist_and_bounces_bad_plans() {
     let tools = builtin_tools();
     let plan = tools.iter().find(|t| t.name() == "update_plan").unwrap();
-    let run =
-        |args: serde_json::Value| plan.execute(&args, std::path::Path::new("."), &mut |_: &str| {});
+    let run = |args: serde_json::Value| {
+        plan.execute(
+            &args,
+            std::path::Path::new("."),
+            &mut |_: super::ToolProgress| {},
+        )
+    };
     let ok = run(json!({"plan": [
         {"step": "read the parser", "status": "completed"},
         {"step": "fix the offset bug", "status": "in_progress"},

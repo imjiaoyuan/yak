@@ -26,7 +26,12 @@ impl Tool for ScriptTool {
     fn preview(&self, args: &Value) -> String {
         crate::agent::tools::args_preview(&self.spec.name, args)
     }
-    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(
+        &self,
+        args: &Value,
+        cwd: &Path,
+        log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
+    ) -> ToolOutput {
         let mut command = match self.spec.interpreter.as_deref() {
             Some(prog) => {
                 let mut c = std::process::Command::new(prog);
@@ -70,7 +75,7 @@ impl Tool for ScriptTool {
             stdin_payload.as_deref(),
             self.spec.timeout,
             crate::core::http::interrupt_flag(),
-            log,
+            &mut |line| log(crate::agent::tools::ToolProgress::line(line)),
         );
         if outcome.interrupted {
             return ToolOutput::err("script tool interrupted");

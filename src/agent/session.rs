@@ -180,6 +180,40 @@ impl Session {
         // live-updating counter line
         let logged = std::cell::Cell::new(0usize);
         const LOG_HEAD: usize = 5;
+        // extension lane rows (see AgentUpdate::Lane): ordered one-line
+        // status rows rewritten in place while a tool runs. `rows` keeps
+        // insertion order; `painted` says the block is on screen right now
+        // — any other output must retract it first (`erase_lanes`) so rows
+        // never interleave with streamed text, then a later lane update
+        // repaints the whole block below the new output. Scoped to one tool
+        // call: ToolStart resets it (a lane is progress, not transcript).
+        let lane_rows = std::cell::RefCell::new(Vec::<(String, String)>::new());
+        let lanes_painted = std::cell::Cell::new(0usize);
+        let erase_lanes = |lanes_painted: &std::cell::Cell<usize>| {
+            let painted = lanes_painted.get();
+            if painted == 0 {
+                return;
+            }
+            let c = crate::theme::cursor();
+            eprint!("{}{}", c.up(painted), c.clear_below());
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            lanes_painted.set(0);
+        };
+        let draw_lanes = |rows: &[(String, String)], lanes_painted: &std::cell::Cell<usize>| {
+            if rows.is_empty() {
+                return;
+            }
+            let p = crate::theme::err();
+            let width = crate::term::columns().max(20).saturating_sub(2);
+            for (lane, text) in rows {
+                let row = crate::core::render_md::wrap_block(&format!("{lane}: {text}"), width, 2);
+                eprintln!("{}{row}{}", p.gray, p.reset);
+            }
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            lanes_painted.set(rows.len());
+        };
         let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
         // the round in flight: its reasoning deltas and its clock, flushed at
@@ -223,6 +257,8 @@ impl Session {
                     view.borrow_mut().tool_started();
                     streamed.set(false);
                     logged.set(0);
+                    lane_rows.borrow_mut().clear();
+                    erase_lanes(&lanes_painted);
                     // the approval prompt already echoed this exact call
                     let dup = approved_echo
                         .borrow()
@@ -238,6 +274,19 @@ impl Session {
                     }
                     view.borrow_mut().resume_running();
                 }
+                AgentUpdate::Lane { lane, text } => {
+                    // one row per lane name: an update rewrites its row in
+                    // place; a new lane appends below the block
+                    erase_lanes(&lanes_painted);
+                    {
+                        let mut rows = lane_rows.borrow_mut();
+                        match rows.iter_mut().find(|(l, _)| l == &lane) {
+                            Some(slot) => slot.1 = text,
+                            None => rows.push((lane, text)),
+                        }
+                        draw_lanes(&rows, &lanes_painted);
+                    }
+                }
                 AgentUpdate::ToolReceiving => {
                     // show a plain "running" status; the live argument
                     // size was confusing and the `$ run <cmd>` chrome
@@ -246,6 +295,7 @@ impl Session {
                 }
                 AgentUpdate::ToolLog(line) => {
                     {
+                        erase_lanes(&lanes_painted);
                         streamed.set(true);
                         let n = logged.get() + 1;
                         logged.set(n);
@@ -278,6 +328,7 @@ impl Session {
                     duration,
                 } => {
                     {
+                        erase_lanes(&lanes_painted);
                         view.borrow_mut().pause();
                         if streamed.get() && !is_error {
                             // close the live counter line, if one is open
@@ -746,6 +797,9 @@ fn event_json(u: &AgentUpdate) -> serde_json::Value {
             v
         }
         AgentUpdate::ToolLog(line) => serde_json::json!({"type": "tool_log", "line": line}),
+        AgentUpdate::Lane { lane, text } => {
+            serde_json::json!({"type": "lane", "lane": lane, "text": text})
+        }
         AgentUpdate::ToolReceiving => serde_json::json!({"type": "tool_receiving"}),
         AgentUpdate::ToolEnd {
             summary,
@@ -2049,6 +2103,13 @@ mod tests {
             (
                 AgentUpdate::ToolLog("[exit 1]".into()),
                 json!({"type": "tool_log", "line": "[exit 1]"}),
+            ),
+            (
+                AgentUpdate::Lane {
+                    lane: "1/2 coder".into(),
+                    text: "bash: cargo test".into(),
+                },
+                json!({"type": "lane", "lane": "1/2 coder", "text": "bash: cargo test"}),
             ),
             (
                 AgentUpdate::ToolReceiving,

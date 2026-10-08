@@ -73,7 +73,7 @@ impl Tool for EditTool {
             .collect();
         Some(change_hunks(&plan.match_base, &spans, 2, DIFF_MAX_LINES))
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,

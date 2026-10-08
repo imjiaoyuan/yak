@@ -34,7 +34,7 @@ impl Tool for GrepTool {
     fn preview(&self, args: &Value) -> String {
         format!("\"{}\"", args["pattern"].as_str().unwrap_or("?"))
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let pattern = args["pattern"].as_str().unwrap_or("");
         let limit = args["limit"].as_u64().unwrap_or(100) as usize;
         let root = resolve_path(cwd, args["path"].as_str().unwrap_or("."));
@@ -119,7 +119,7 @@ impl Tool for GlobTool {
     fn preview(&self, args: &Value) -> String {
         args["pattern"].as_str().unwrap_or("?").to_string()
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let pattern = args["pattern"].as_str().unwrap_or("");
         let limit = args["limit"].as_u64().unwrap_or(1000) as usize;
         let root = resolve_path(cwd, args["path"].as_str().unwrap_or("."));

@@ -49,7 +49,7 @@ impl Tool for PlanTool {
     fn preview(&self, args: &Value) -> String {
         summary(args)
     }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         match validate_plan(args) {
             // the model reads its own latest plan back on the next turn: the
             // checklist rides the result, not just the call that carried it

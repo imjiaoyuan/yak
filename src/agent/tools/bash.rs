@@ -27,7 +27,7 @@ impl Tool for BashTool {
     fn preview(&self, args: &Value) -> String {
         args["command"].as_str().unwrap_or("?").to_string()
     }
-    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let command = args["command"].as_str().unwrap_or("");
         // 0 means no timeout: the command runs until it exits
         let timeout = args["timeout"].as_u64().unwrap_or(0);
@@ -36,7 +36,7 @@ impl Tool for BashTool {
             cwd,
             timeout,
             crate::core::http::interrupt_flag(),
-            log,
+            &mut |line| log(ToolProgress::line(line)),
         );
         if outcome.interrupted {
             return ToolOutput::err("command interrupted");

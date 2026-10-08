@@ -29,7 +29,7 @@ impl Tool for FetchTool {
     fn preview(&self, args: &Value) -> String {
         args["url"].as_str().unwrap_or("").to_string()
     }
-    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, _cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let Some(url) = args["url"].as_str() else {
             return ToolOutput::err("missing string argument 'url'");
         };

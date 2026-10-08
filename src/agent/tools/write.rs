@@ -60,7 +60,7 @@ impl Tool for WriteTool {
             }
         }
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let path = resolve_path(cwd, args["path"].as_str().unwrap_or(""));
         let content = args["content"].as_str().unwrap_or("");
         if let Some(parent) = path.parent()

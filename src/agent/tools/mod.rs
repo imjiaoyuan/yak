@@ -110,9 +110,10 @@ pub trait Tool: Send + Sync {
     fn prepare_arguments(&self, args: &Value) -> Value {
         args.clone()
     }
-    /// `log` receives live progress lines while the tool runs (bash streams
-    /// its stdout); tools without progress simply ignore it
-    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput;
+    /// `log` receives live progress while the tool runs: plain output lines
+    /// (bash streams its stdout) or lane updates (an extension's parallel
+    /// progress rows); tools without progress simply ignore it
+    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(ToolProgress)) -> ToolOutput;
 
     /// Execute with the full call in hand. The default drops the call (a
     /// tool's arguments are all it needs); extension tools override it so
@@ -122,9 +123,26 @@ pub trait Tool: Send + Sync {
         &self,
         call: &crate::providers::ToolCall,
         cwd: &Path,
-        log: &mut dyn FnMut(&str),
+        log: &mut dyn FnMut(ToolProgress),
     ) -> ToolOutput {
         self.execute(&call.arguments, cwd, log)
+    }
+}
+
+/// What a running tool reports to the live view. `Line` is stream output
+/// (the classic bash stdout path); `Lane` is a named one-line status row an
+/// extension rewrites as its work moves (parallel subagents each own one).
+/// Neither ever enters the transcript — only the final `ToolOutput` does.
+pub enum ToolProgress {
+    Line(String),
+    Lane { lane: String, text: String },
+}
+
+impl ToolProgress {
+    /// The line form, for call sites that only stream text (platform
+    /// shell plumbing hands back plain lines).
+    pub fn line(text: impl Into<String>) -> ToolProgress {
+        ToolProgress::Line(text.into())
     }
 }
 

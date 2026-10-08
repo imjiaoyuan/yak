@@ -98,6 +98,10 @@ struct Conn {
     /// prints is visible while it works and still never enters the model's
     /// context (the tool result is the protocol reply alone)
     progress: Arc<Mutex<VecDeque<String>>>,
+    /// id-less `{"type":"lane", ..}` frames the extension streamed since
+    /// the last drain: same delivery shape as stderr progress, but these
+    /// are live status rows the view rewrites in place
+    lanes: Arc<Mutex<VecDeque<(String, String)>>>,
 }
 
 impl Drop for Conn {
@@ -139,6 +143,11 @@ impl Conn {
     /// buffer (the caller discards them to start a call on a clean slate).
     fn take_progress(&self) -> Vec<String> {
         lock(&self.progress).drain(..).collect()
+    }
+
+    /// Take the lane frames written since the last drain, same discipline.
+    fn take_lanes(&self) -> Vec<(String, String)> {
+        lock(&self.lanes).drain(..).collect()
     }
 }
 
@@ -218,7 +227,7 @@ impl Ext {
         &self,
         msg: &Value,
         timeout: Duration,
-        mut log: Option<&'a mut (dyn FnMut(&str) + 'b)>,
+        mut log: Option<&'a mut (dyn FnMut(crate::agent::tools::ToolProgress) + 'b)>,
     ) -> Result<Value, String> {
         self.ensure_alive()?;
         match self.request_live(msg, timeout, log.as_deref_mut()) {
@@ -248,7 +257,7 @@ impl Ext {
         &self,
         msg: &Value,
         timeout: Duration,
-        mut log: Option<&'a mut (dyn FnMut(&str) + 'b)>,
+        mut log: Option<&'a mut (dyn FnMut(crate::agent::tools::ToolProgress) + 'b)>,
     ) -> Result<Value, String> {
         let mut guard = lock(&self.conn);
         let conn = guard
@@ -263,9 +272,11 @@ impl Ext {
             .expect("host messages always carry an id");
         let (tx, rx) = sync_channel(1);
         lock(&conn.pending).insert(id, tx);
-        // a call starts on a clean slate: stderr from an earlier call (or an
-        // idle chatty extension) must not replay as this call's progress
+        // a call starts on a clean slate: stderr or lanes from an earlier
+        // call (or an idle chatty extension) must not replay as this call's
+        // progress
         conn.take_progress();
+        conn.take_lanes();
         // a host-built frame is plain data; a serialization failure would
         // corrupt the framing (an empty line to the child), so it aborts
         // loudly instead of degrade silently
@@ -279,11 +290,14 @@ impl Ext {
         loop {
             match rx.recv_timeout(POLL_SLICE) {
                 Ok(result) => {
-                    // whatever stderr arrived alongside the reply still counts
-                    // as progress for this call
+                    // whatever stderr or lanes arrived alongside the reply
+                    // still counts as progress for this call
                     if let Some(f) = log.as_mut() {
                         for line in conn.take_progress() {
-                            (**f)(&line);
+                            (**f)(crate::agent::tools::ToolProgress::line(line));
+                        }
+                        for (lane, text) in conn.take_lanes() {
+                            (**f)(crate::agent::tools::ToolProgress::Lane { lane, text });
                         }
                     }
                     return result;
@@ -293,7 +307,10 @@ impl Ext {
                     // extension working; the model never sees these lines
                     if let Some(f) = log.as_mut() {
                         for line in conn.take_progress() {
-                            (**f)(&line);
+                            (**f)(crate::agent::tools::ToolProgress::line(line));
+                        }
+                        for (lane, text) in conn.take_lanes() {
+                            (**f)(crate::agent::tools::ToolProgress::Lane { lane, text });
                         }
                     }
                     if crate::core::http::interrupted() {
@@ -334,7 +351,7 @@ impl Ext {
         name: &str,
         args: &Value,
         call_id: Option<&str>,
-        log: &mut dyn FnMut(&str),
+        log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
     ) -> Result<String, String> {
         let timeout = match &*lock(&self.state) {
             Ok(state) => state.tool_timeout,
@@ -917,12 +934,20 @@ impl Ext {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
         let progress: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let lanes: Arc<Mutex<VecDeque<(String, String)>>> = Arc::new(Mutex::new(VecDeque::new()));
 
         let reader_pending = Arc::clone(&pending);
         let reader_dead = Arc::clone(&dead);
         let reader_tail = Arc::clone(&self.tail);
+        let reader_lanes = Arc::clone(&lanes);
         std::thread::spawn(move || {
-            reader_loop(stdout, &reader_pending, &reader_dead, &reader_tail)
+            reader_loop(
+                stdout,
+                &reader_pending,
+                &reader_dead,
+                &reader_tail,
+                &reader_lanes,
+            )
         });
 
         let stderr_tail = Arc::clone(&self.tail);
@@ -952,6 +977,7 @@ impl Ext {
             pending,
             dead,
             progress,
+            lanes,
         })
     }
 }
@@ -1023,7 +1049,12 @@ impl Tool for ExtTool {
     fn preview(&self, args: &Value) -> String {
         super::tools::args_preview(&self.tool_name, args)
     }
-    fn execute(&self, args: &Value, cwd: &Path, log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(
+        &self,
+        args: &Value,
+        cwd: &Path,
+        log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
+    ) -> ToolOutput {
         // direct calls (tests) carry no call id: the frame then omits
         // `tool_call_id` rather than inventing one. The agent loop routes
         // through execute_call, which has the real id.
@@ -1033,7 +1064,7 @@ impl Tool for ExtTool {
         &self,
         call: &crate::providers::ToolCall,
         cwd: &Path,
-        log: &mut dyn FnMut(&str),
+        log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
     ) -> ToolOutput {
         self.run(&call.arguments, Some(call.id.as_str()), cwd, log)
     }
@@ -1045,7 +1076,7 @@ impl ExtTool {
         args: &Value,
         call_id: Option<&str>,
         _cwd: &Path,
-        log: &mut dyn FnMut(&str),
+        log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
     ) -> ToolOutput {
         match self.ext.call_tool(&self.tool_name, args, call_id, log) {
             Ok(text) => {

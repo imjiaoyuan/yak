@@ -662,7 +662,7 @@ impl tools::Tool for ProbeTool {
         &self,
         _args: &serde_json::Value,
         _cwd: &std::path::Path,
-        _log: &mut dyn FnMut(&str),
+        _log: &mut dyn FnMut(tools::ToolProgress),
     ) -> tools::ToolOutput {
         self.0.lock().unwrap().push(std::thread::current().id());
         tools::ToolOutput::ok("probed")

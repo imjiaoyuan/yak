@@ -37,6 +37,7 @@ pub(super) fn reader_loop(
     pending: &PendingMap,
     dead: &AtomicBool,
     tail: &Mutex<VecDeque<String>>,
+    lanes: &Mutex<VecDeque<(String, String)>>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -50,11 +51,33 @@ pub(super) fn reader_loop(
             continue;
         };
         let Some(id) = value.get("id").and_then(Value::as_u64) else {
-            let mut t = lock(tail);
-            if t.len() >= TAIL_LINES {
-                t.pop_front();
+            // an id-less but well-formed frame: a lane status update an
+            // extension streams while a call is in flight (see the subagent
+            // example). Anything else is protocol noise → the tail.
+            if value.get("type").and_then(Value::as_str) == Some("lane") {
+                let (Some(lane), Some(text)) = (
+                    value.get("lane").and_then(Value::as_str),
+                    value.get("text").and_then(Value::as_str),
+                ) else {
+                    let mut t = lock(tail);
+                    if t.len() >= TAIL_LINES {
+                        t.pop_front();
+                    }
+                    t.push_back(line);
+                    continue;
+                };
+                let mut q = lock(lanes);
+                if q.len() >= PROGRESS_LINES {
+                    q.pop_front();
+                }
+                q.push_back((lane.to_string(), text.to_string()));
+            } else {
+                let mut t = lock(tail);
+                if t.len() >= TAIL_LINES {
+                    t.pop_front();
+                }
+                t.push_back(line);
             }
-            t.push_back(line);
             continue;
         };
         let sender = lock(pending).remove(&id);

@@ -54,7 +54,7 @@ impl Tool for ReadTool {
             None => format!("{path}:{start}"),
         }
     }
-    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(&str)) -> ToolOutput {
+    fn execute(&self, args: &Value, cwd: &Path, _log: &mut dyn FnMut(ToolProgress)) -> ToolOutput {
         let raw_path = args["path"].as_str().unwrap_or("");
         // `?q=<filter>`: query a JSON/JSONL file instead of reading it whole
         // Split before resolving: the query is not

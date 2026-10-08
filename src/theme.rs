@@ -190,19 +190,41 @@ pub struct Cursor {
     pub clear_line: &'static str,
     /// erase the whole screen and home the cursor (`\x1b[2J\x1b[H`)
     pub clear_screen: &'static str,
+    /// are the row-control helpers below live? A piped stderr must not
+    /// print them: the helpers then degrade to printing only (no rewriting)
+    pub rows_live: bool,
+}
+
+impl Cursor {
+    /// Move up `n` rows (`ESC [ n A`), clamped at zero.
+    pub fn up(&self, n: usize) -> String {
+        if !self.rows_live || n == 0 {
+            return String::new();
+        }
+        format!("\x1b[{n}A")
+    }
+
+    /// Erase from the cursor to the end of the screen (`ESC [ J`): the
+    /// tail of a partially rewritten row block.
+    pub fn clear_below(&self) -> &'static str {
+        if self.rows_live { "\x1b[J" } else { "" }
+    }
 }
 
 static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
     let dumb = std::env::var("TERM").as_deref() == Ok("dumb");
-    if std::io::stderr().is_terminal() && !dumb {
+    let live = std::io::stderr().is_terminal() && !dumb;
+    if live {
         Cursor {
             clear_line: "\r\x1b[2K",
             clear_screen: "\x1b[2J\x1b[H",
+            rows_live: true,
         }
     } else {
         Cursor {
             clear_line: "",
             clear_screen: "",
+            rows_live: false,
         }
     }
 });
