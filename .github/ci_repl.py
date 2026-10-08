@@ -558,6 +558,14 @@ def main():
     time.sleep(0.2)
     send(fd2, b"after the jump\r")
     read_until(fd2, rb"checkpoint round done")
+    # the final round's answer record is appended at its RoundEnd, which the
+    # agent loop emits only after the answer text has settled onto the
+    # screen — so the marker can be visible while line 7 is still a
+    # microsecond from the file. The prompt glyph is the true barrier: it
+    # is printed by the REPL loop after run_task returned, and run_task
+    # returns only past every persist of the task. (The pre-jump loop above
+    # already had this discipline; the final read lacked it.)
+    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
     # the rebuilt wire history: the abandoned siblings must be gone and
     # the root chain intact
     wire = json.dumps(seen.get("last_msgs") or [])
@@ -573,7 +581,8 @@ def main():
                                  "01localresumeprobe0000000.jsonl"))
                if l.strip()]
     assert len(lines_f) == 7, \
-        f"the file must hold both branches: {len(lines_f)} lines"
+        f"the file must hold both branches: {len(lines_f)} lines " \
+        f"(prompts: {[t.get('prompt') for t in lines_f]})"
     assert all(t.get("parent") is None for t in lines_f[:-2]), \
         f"pre-jump lines carry no edge: {[t.get('id') for t in lines_f]}"
     # the jump's rounds branch off the root: the first post-jump line
