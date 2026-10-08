@@ -47,6 +47,16 @@ below rather than leaving a runaway process behind.
 *Depth.* A child cannot spawn a child: we pass YAK_SUBAGENT_DEPTH down and
 refuse when it is at the limit. The child's `--tools` whitelist excludes this
 extension anyway, so the guard only has to catch a hand-run child.
+*Isolation.* Writers get a git worktree: when the working directory is a git
+repo and the agent's `tools:` line names a mutating tool (write, edit or
+bash), the child runs in `<tmp>/yak-wt-<pid>/<n>` on a fresh branch
+`yak/subagent-<pid>-<n>`, so parallel writers never touch one tree. A
+terminating writer commits its diff there (if any) and the parent repo
+merges the branch back: a clean merge lands the changes, a conflict aborts
+the merge and reports the branch for you to resolve, and the branch always
+survives (deleted only after a clean merge) — nothing a writer did is ever
+lost. Readers (no mutating tool) and non-repo directories run in place,
+unchanged. Set YAK_SUBAGENT_WORKTREES=0 to disable the isolation.
 *Abort.* ctrl+c in the parent abandons the call; the host tells us with an
 `interrupt` message, which a reader thread picks up while the main thread is
 busy — every running child is killed on the spot (this is why stdin is read
@@ -64,6 +74,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -85,6 +96,15 @@ MAX_DEPTH = 1
 CHILD_TIMEOUT = int(os.environ.get("YAK_SUBAGENT_TIMEOUT") or 1500)
 # The answer we hand back is a conclusion, not a transcript.
 MAX_RESULT = 20000
+# Writers (agents with a mutating tool) run in git worktrees unless this
+# is set to 0.
+WORKTREES = os.environ.get("YAK_SUBAGENT_WORKTREES", "1") != "0"
+# The tools that make an agent a writer: any one of them means its edits
+# need the worktree isolation.
+MUTATING_TOOLS = {"write", "edit", "bash"}
+# worktree roots are shared per process (parallel steps under one call).
+_WORKTREE_SEQ = [0]
+_WORKTREE_LOCK = threading.Lock()
 
 BUILTIN_AGENTS = {
     "scout": {
@@ -274,10 +294,116 @@ def yak_binary():
     return os.environ.get("YAK_BIN") or shutil.which("yak") or shutil.which("yak.exe")
 
 
+# ------------------------------------------------------- worktree isolation --
+def git(repo, *args):
+    """One git invocation; returns (rc, out). Never raises: every caller
+    treats a failed git as degraded isolation, not a crash."""
+    try:
+        p = subprocess.run(
+            ["git", "-C", repo] + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+
+
+def repo_root(start):
+    """The repo root above `start`, or None. A repo without commits yet
+    (no HEAD to branch from) does not qualify: worktree add would fail."""
+    rc, out = git(start, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return None
+    root = out.splitlines()[0] if out else None
+    if not root:
+        return None
+    # a repository with no commit has no tree to fork a worktree from
+    rc, _ = git(root, "rev-parse", "--verify", "HEAD")
+    return root if rc == 0 else None
+
+
+def is_writer(agent):
+    return bool(MUTATING_TOOLS & set(child_tools(agent)))
+
+
+def make_worktree(root):
+    """One worktree on its own branch: returns (path, branch) or (None, why)."""
+    with _WORKTREE_LOCK:
+        _WORKTREE_SEQ[0] += 1
+        n = _WORKTREE_SEQ[0]
+    base = os.path.join(
+        tempfile.gettempdir(), "yak-wt-%d" % os.getpid())
+    path = os.path.join(base, "wt-%d" % n)
+    branch = "yak/subagent-%d-%d" % (os.getpid(), n)
+    os.makedirs(base, exist_ok=True)
+    rc, out = git(root, "worktree", "add", path, "-b", branch)
+    if rc != 0:
+        return None, "git worktree add failed: %s" % (out.splitlines()[-1] if out else path)
+    return path, branch
+
+
+def commit_worktree(path):
+    """Commit the child's diff inside the worktree. Returns (committed,
+    why_not): `committed` is False for both an empty diff (nothing to do)
+    and a failure (reported, never fatal — the tree stays for inspection)."""
+    rc, _ = git(path, "add", "-A")
+    if rc != 0:
+        return False, "git add failed in the worktree"
+    rc, out = git(path, "diff", "--cached", "--quiet")
+    if rc == 0:
+        return False, ""  # no changes: nothing to merge
+    if rc != 1:  # not "differs": git itself failed
+        return False, "git diff failed in the worktree"
+    rc, _ = git(
+        path, "commit", "-m", "subagent changes",
+        "--no-verify", "-q")
+    return (rc == 0), ("" if rc == 0 else "git commit failed in the worktree")
+
+
+def merge_back(root, branch, path):
+    """Merge a writer's branch into the parent repo. Returns a one-line
+    status for the tool result: merged|conflict|none, plus detail."""
+    rc, out = git(root, "merge", "--no-edit", branch)
+    if rc == 0:
+        if "Already up to date" in out or "Already up-to-date" in out:
+            return "none", "nothing to merge"
+        return "merged", out.splitlines()[0] if out else branch
+    # a conflict leaves MERGE_HEAD behind and must be aborted so the parent
+    # tree is never left mid-merge; a dirty-tree refusal fails before any
+    # merge state exists (there abort would itself error). Both keep the
+    # branch for the human
+    if git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        git(root, "merge", "--abort")
+    first = next((l for l in out.splitlines() if "CONFLICT" in l), None)
+    detail = first or (out.splitlines()[0] if out else "merge failed")
+    return "conflict", "%s — branch %s kept; resolve with git merge %s" % (
+        detail, branch, branch)
+
+
+def drop_worktree(root, path):
+    git(root, "worktree", "remove", "--force", path)
+
+
 # --------------------------------------------------------------- one child --
-def run_child(binary, agent, prompt, label, depth):
-    """Run one child to completion. Returns (ok, text)."""
+def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=None):
+    """Run one child to completion. Returns (ok, text). With `isolate` the
+    child runs in a fresh git worktree whose diff is committed and merged
+    back (see the module docstring); the merge verdict lands in the text."""
     tools = child_tools(agent)
+    cwd = None
+    wt = None  # (path, branch, root) when isolated
+    if isolate:
+        root = repo_root(os.getcwd())
+        if root:
+            path, branch = make_worktree(root)
+            if path:
+                wt = (path, branch, root)
+                cwd = path
+            else:
+                note("[%s] no worktree isolation: %s" % (label, branch))
+        else:
+            note("[%s] not a git repo: the writer runs in place" % label)
     cmd = [binary, "--json", "--no-session"]
     if tools:
         cmd += ["--tools", ",".join(tools)]
@@ -289,7 +415,9 @@ def run_child(binary, agent, prompt, label, depth):
         cmd += ["--append-system-prompt", agent["prompt"]]
     cmd.append(prompt)
     env = dict(os.environ, YAK_SUBAGENT_DEPTH=str(depth + 1))
-    note("[%s] %s · tools: %s" % (label, agent["name"], ",".join(tools) or "none"))
+    note("[%s] %s · tools: %s%s" % (
+        label, agent["name"], ",".join(tools) or "none",
+        " · worktree %s" % wt[1] if wt else ""))
     try:
         child = subprocess.Popen(
             cmd,
@@ -301,6 +429,7 @@ def run_child(binary, agent, prompt, label, depth):
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            cwd=cwd,
         )
     except OSError as e:
         return False, "cannot start the subagent (%s); set YAK_BIN to the yak binary" % e
@@ -365,6 +494,39 @@ def run_child(binary, agent, prompt, label, depth):
             _children.discard(child)
 
     secs = time.time() - started
+    if wt:
+        path, branch, root = wt
+        verdict, detail = "none", ""
+        if _abandoned.is_set():
+            drop_worktree(root, path)  # interrupted: the branch survives
+            return False, "[%s] interrupted (branch %s kept)" % (label, branch)
+        if status != 0 or error:
+            # a failed writer's tree may still hold partial edits: keep the
+            # worktree and branch for inspection, report where they are
+            note("[%s] failed; worktree kept for inspection: %s" % (label, path))
+            detail = error or ("the subagent exited with status %d" % status)
+            if tail:
+                detail += "\n" + "\n".join(tail)
+            return False, "[%s] %s\nworktree kept: %s (branch %s)" % (label, detail, path, branch)
+        committed, why = commit_worktree(path)
+        if committed:
+            if merge_lock is not None:
+                with merge_lock:
+                    verdict, detail = merge_back(root, branch, path)
+            else:
+                verdict, detail = merge_back(root, branch, path)
+        else:
+            verdict = "none"
+            detail = why or "no changes"
+            if why:
+                note("[%s] worktree not committed: %s (kept for inspection)" % (label, why))
+        if verdict == "merged" or verdict == "none":
+            drop_worktree(root, path)
+            if verdict == "merged":
+                # only after the worktree is gone can the branch be deleted
+                # (git refuses while a worktree holds it checked out)
+                git(root, "branch", "-D", branch)
+        note("[%s] worktree %s: %s" % (label, verdict, detail))
     if _abandoned.is_set():
         return False, "[%s] interrupted" % label
     if status != 0 or error:
@@ -377,6 +539,8 @@ def run_child(binary, agent, prompt, label, depth):
         spent = " · %s in / %s out" % (thousands(usage.get("input")), thousands(usage.get("output")))
     note("[%s] done: %d tool calls · %.0fs" % (label, calls, secs))
     header = "[%s] %d tool calls · %.0fs%s\n" % (label, calls, secs, spent)
+    if wt and verdict != "none":
+        header += "merge %s: %s\n" % (verdict, detail)
     return True, header + (final if final is not None else "(no answer)")
 
 
@@ -427,6 +591,14 @@ def handle(args):
         )
     agents = load_agents()
     default_agent = (args.get("agent") or "worker").strip()
+    # writers run isolated when the working directory is a git repo;
+    # readers never pay the worktree cost
+    isolate = WORKTREES and is_writer(agents.get(default_agent, {}))
+    for name in set(s.get("agent", default_agent) for s in (args.get("tasks") or []) + (args.get("chain") or []) if isinstance(s, dict)):
+        if is_writer(agents.get(name, {})):
+            isolate = True
+    if not WORKTREES:
+        isolate = False
 
     chain, batch = args.get("chain") or [], args.get("tasks") or []
     if chain and batch:
@@ -448,21 +620,26 @@ def handle(args):
             return unknown(agents, step["agent"])
 
     if mode != "chain":
-        return run_batch(binary, agents, steps, mode, depth)
-    return run_chain(binary, agents, steps, depth)
+        return run_batch(binary, agents, steps, mode, depth, isolate)
+    return run_chain(binary, agents, steps, depth, isolate)
 
 
-def run_batch(binary, agents, steps, mode, depth):
+def run_batch(binary, agents, steps, mode, depth, isolate=False):
     results = [None] * len(steps)
     gate = threading.Semaphore(MAX_PARALLEL)
+    # parallel writers each edit their own worktree concurrently; only the
+    # merge back into the parent repo is serialized (git merges are not
+    # concurrent), so the lock wraps merge_back alone, never the child run
+    merge_gate = threading.Lock()
 
     def one(index, step):
         label = step["agent"] if mode == "single" else "%d/%d %s" % (index + 1, len(steps), step["agent"])
+        writer = isolate and is_writer(agents[step["agent"]])
         with gate:
             try:
                 results[index] = run_child(
-                    binary, agents[step["agent"]], "Task: " + step["task"], label, depth
-                )
+                    binary, agents[step["agent"]], "Task: " + step["task"], label, depth,
+                    isolate=writer, merge_lock=merge_gate if writer else None)
             except Exception as e:  # a crashed thread must not read as "never ran"
                 results[index] = (False, "[%s] the subagent runner crashed: %r" % (label, e))
 
@@ -483,7 +660,7 @@ def run_batch(binary, agents, steps, mode, depth):
     return out
 
 
-def run_chain(binary, agents, steps, depth):
+def run_chain(binary, agents, steps, depth, isolate=False):
     blocks, prior = [], None
     for index, step in enumerate(steps):
         if _abandoned.is_set():
@@ -492,7 +669,8 @@ def run_chain(binary, agents, steps, depth):
         prompt = "Task: " + step["task"]
         if prior is not None:
             prompt += "\n\nWork from the previous subagent's result:\n\n" + prior
-        ok, text = run_child(binary, agents[step["agent"]], prompt, label, depth)
+        ok, text = run_child(binary, agents[step["agent"]], prompt, label, depth,
+                             isolate=isolate and is_writer(agents[step["agent"]]))
         if not ok:
             return "error: %s\n\n%s" % (text, clamp("\n\n".join(blocks)))
         blocks.append(text)
