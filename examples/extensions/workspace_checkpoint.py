@@ -7,19 +7,20 @@
 # that extension, portable to projects with no VCS at all.
 #
 #   turn_start           — mirror the working tree into a shadow dir (one per
-#                          turn, hardlinks where possible so unchanged files
-#                          cost nothing), after pruning checkpoints older
+#                          turn, named for the wall-clock moment it was
+#                          taken), after pruning checkpoints older
 #                          than KEEP_DAYS
-#   session_before_tree  — /tree picked a jump point: merge every snapshot
-#                          from the turns leaving the active branch, newest
-#                          first, back into the working tree
+#   session_before_tree  — /tree picked a jump point: merge the snapshots
+#                          the dropped turns began with, oldest winning,
+#                          back into the working tree
 #
-# The merge is additive by design: files the dropped turns created or edited
-# come back as they were, files untouched since the cut point stay as they
-# are now. Deletions are not resurrected by later turns' snapshots shadowing
-# them — the newest snapshot that still holds the file wins. That heuristic
-# is right far more often than it is wrong, and /tree's own warning
-# ("everything after it is dropped") is the contract this extends to disk.
+# The merge is additive by design: files the dropped turns edited come back
+# as they were at the oldest selected snapshot (the moment the first dropped
+# turn began), files untouched since the cut point stay as they are now, and
+# nothing is ever deleted — files the dropped turns created stay behind. One
+# assumption is stated rather than hidden: the snapshots of a project's
+# dropped turns are the newest ones on disk (a second yak session in the
+# same directory interleaves its own; close it before you jump).
 #
 # Install into ~/.yak/extensions/ (or .yak/extensions/), chmod +x, /reload.
 # The shadow root lives in the system temp dir; override with
@@ -38,6 +39,13 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__",
 # files over this many bytes are referenced, not copied (symlink)
 BIG_FILE = 1 << 20
 KEEP_DAYS = 7
+
+# a snapshot stamp is the wall clock in ULID time-ordering: 10 Crockford
+# base32 chars encoding the millisecond (the first half of every ULID yak
+# mints), so stamps sort exactly the way turn ids do
+STAMP_LEN = 10
+CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz"
+CROCKFORD_ALPHABET = frozenset(CROCKFORD)
 
 
 def shadow_root():
@@ -58,13 +66,35 @@ def project_root(cwd):
     return root
 
 
-def turn_stamp(ts):
-    # turn ids are ulids, and ulids sort by time — the stamp keeps that order
-    return ts
+def encode_stamp(ms):
+    chars = ["0"] * STAMP_LEN
+    for slot in reversed(range(STAMP_LEN)):
+        chars[slot] = CROCKFORD[ms & 31]
+        ms >>= 5
+    return "".join(chars)
 
 
-def snapshot_dir(root, turn_id):
-    return os.path.join(root, turn_stamp(turn_id))
+_LAST_STAMP_MS = [0]
+
+
+def stamp_now():
+    ms = int(time.time() * 1000)
+    if ms <= _LAST_STAMP_MS[0]:
+        # two turn_starts inside one wall-clock millisecond must not
+        # collide, or the later snapshot silently overwrites the earlier
+        # one — borrow the next millisecond, the way a monotonic ULID does
+        ms = _LAST_STAMP_MS[0] + 1
+    _LAST_STAMP_MS[0] = ms
+    return encode_stamp(ms)
+
+
+def is_stamp(name):
+    return (len(name) == STAMP_LEN
+            and all(c in CROCKFORD_ALPHABET for c in name))
+
+
+def snapshot_dir(root, stamp):
+    return os.path.join(root, stamp)
 
 
 def prune(root, keep_seconds=KEEP_DAYS * 86400):
@@ -113,20 +143,24 @@ def mirror(src, dst):
                     pass  # vanished mid-walk: it will not be in the snapshot
 
 
-def take_snapshot(cwd, turn_id):
+def take_snapshot(cwd, stamp):
     root = project_root(cwd)
     prune(root)
-    mirror(cwd, snapshot_dir(root, turn_id))
+    mirror(cwd, snapshot_dir(root, stamp))
 
 
-def restore(cwd, dropped_ids):
-    """Fold the dropped turns' snapshots back, newest first."""
+def restore(cwd, dropped_count):
+    """Fold the last `dropped_count` snapshots back into the working tree,
+    oldest winning per file. The dropped turns are the active branch's tail,
+    so their begin-of-turn snapshots are the newest ones on disk for the
+    project; the oldest of them is the state the first dropped turn found,
+    which is the state the jump returns the workspace to."""
     root = project_root(cwd)
+    stamps = sorted(s for s in os.listdir(root) if is_stamp(s))
+    selected = stamps[-dropped_count:] if dropped_count > 0 else []
     merged = set()
-    for turn_id in sorted(dropped_ids, reverse=True):
-        snap = snapshot_dir(root, turn_id)
-        if not os.path.isdir(snap):
-            continue
+    for stamp in selected:
+        snap = snapshot_dir(root, stamp)
         for dirpath, _, filenames in os.walk(snap):
             rel = os.path.relpath(dirpath, snap)
             target = cwd if rel == "." else os.path.join(cwd, rel)
@@ -155,14 +189,17 @@ def handle(msg):
     params = msg.get("params", {})
     cwd = os.getcwd()
     if name == "turn_start":
-        # turn_start carries only the round number, so key the snapshot on
-        # the wall clock; ulid ordering would be nicer but the id is not
-        # known until the turn is persisted
-        take_snapshot(cwd, time.strftime("%Y%m%dT%H%M%S"))
+        # turn_start carries only the round number, so the snapshot is keyed
+        # on the wall clock; ordering is what matters, and the stamp sorts
+        # the way turn ids do
+        take_snapshot(cwd, stamp_now())
     elif name == "session_before_tree":
-        # the turns leaving the active branch — restore the workspace to
-        # where those turns found it, newest snapshot first
-        restore(cwd, params.get("dropped_ids", []))
+        # the turns leaving the active branch: restore the workspace to
+        # where the oldest of them began. `dropped_turns` is the payload's
+        # own count (the ids only identify the turns, and the snapshots are
+        # keyed on time, not ids)
+        restore(cwd, params.get("dropped_turns",
+                                len(params.get("dropped_ids", []))))
     return None
 
 
