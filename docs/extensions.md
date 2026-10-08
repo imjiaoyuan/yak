@@ -150,7 +150,7 @@ No reply is expected (the request is already abandoned; answer if you like, the 
 | `tool_call` | **before** each tool runs: see gate semantics | `{tool, args}` |
 | `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}`: reply `{"content": ..}` to replace it, see below |
 | `agent_end` | task finished or interrupted | `{final_text, interrupted}` |
-| `session_before_tree` | `/tree` picked a turn, before the transcript is cut | `{thread, kept_turns, dropped_turns, dropped_ids}`: snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
+| `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
 
 ### The `tool_call` gate
 

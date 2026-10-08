@@ -427,11 +427,15 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     };
     let store = crate::core::threads::Store::open()?;
     let turns = store.read_thread(&cid)?;
-    let rebuilt = crate::agent::session::rebuild_turns(&turns);
+    // only the active branch replays, and the conversation continues
+    // linearly from its end — jumping into a resumed thread is /tree's
+    // business, not the resume's
+    let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
     session.seed = rebuilt.messages;
     session.system = rebuilt.system;
     session.usage = rebuilt.usage;
     session.conversation_id = Some(cid);
+    session.branch_parent = None;
     render_history(&session.seed);
     // the replay above shows the thread as stored; the projection happens
     // before the next request, where it belongs
@@ -483,9 +487,57 @@ fn turn_label(t: &crate::core::threads::StoredTurn) -> String {
     }
 }
 
-/// `/tree`: jump to any past turn of this session — the seed and the thread
-/// file are truncated to just after the picked turn, and the next task
-/// continues from there.
+/// Depth per turn: a turn without a `parent` (or whose parent is the line
+/// before it) continues the previous line at its depth; a `parent` naming
+/// an earlier line starts a sibling branch one level under that parent.
+/// Every turn of the file gets a depth, so the whole tree renders.
+fn tree_depths(turns: &[StoredTurn]) -> Vec<usize> {
+    let mut by_id = std::collections::HashMap::new();
+    for (i, t) in turns.iter().enumerate() {
+        by_id.insert(t.id.as_str(), i);
+    }
+    let mut depths = vec![0usize; turns.len()];
+    for i in 0..turns.len() {
+        depths[i] = match &turns[i].parent {
+            None => i.checked_sub(1).map(|p| depths[p]).unwrap_or(0),
+            Some(parent) => match by_id.get(parent.as_str()) {
+                Some(&p) if p < i => depths[p] + 1,
+                // an edge chain_indices would refuse; the tree view is not
+                // the place to fail, so a bad edge sits at the top level
+                _ => 0,
+            },
+        };
+    }
+    depths
+}
+
+/// The picker rows for `/tree`: one per turn in file order, indented to its
+/// branch depth, the active branch marked with `*`. Rows are plain text —
+/// the picker filters on them, so the depth indent keeps a branch's rows
+/// matching a query together.
+fn tree_rows(turns: &[StoredTurn], chain: &[usize]) -> Vec<String> {
+    let depths = tree_depths(turns);
+    let on_chain: std::collections::HashSet<usize> = chain.iter().copied().collect();
+    turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mark = if on_chain.contains(&i) { "* " } else { "  " };
+            let indent = "  ".repeat(depths[i]);
+            format!(
+                "{mark}{indent}{} · \"{}\"",
+                &t.ts[..t.ts.len().min(19)],
+                turn_label(t)
+            )
+        })
+        .collect()
+}
+
+/// `/tree`: pick any turn of this session and continue from there — the
+/// next task branches the thread off that turn instead of extending it.
+/// The old rounds are not removed: they stay in the file as a sibling
+/// branch (the store is append-only; the transcript never loses a turn),
+/// and the tree below shows every branch so the jump can land anywhere.
 fn tree_jump(session: &mut Session) -> Result<(), String> {
     let Some(cid) = session.conversation_id.clone() else {
         eprintln!(
@@ -505,49 +557,75 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
         );
         return Ok(());
     }
-    let items: Vec<String> = turns
-        .iter()
-        .map(|t| format!("{} · \"{}\"", &t.ts[..t.ts.len().min(19)], turn_label(t)))
-        .collect();
-    let Some(i) = crate::term::lineedit::pick(
-        "jump to turn (everything after it is dropped):",
-        &items,
-        true,
-    ) else {
+    // the active branch: last line walked back to the root. It matches the
+    // seed the session already carries — landing anywhere else is the
+    // jump, landing on it is a no-op that still shows the tree.
+    let active = crate::core::threads::chain_indices(&turns, turns.len() - 1)?;
+    let items: Vec<String> = tree_rows(&turns, &active);
+    let Some(picked) =
+        crate::term::lineedit::pick("jump to turn (the next task branches here):", &items, true)
+    else {
         return Ok(());
     };
-    // before the transcript is cut, extensions get one chance to snapshot or
-    // restore the workspace (the git-checkpoint shape): the event names the
-    // turns being dropped. Fail-open — a broken extension never blocks the
-    // jump; its error lands in the diagnostics tail.
-    session
-        .extensions
-        .fire("session_before_tree", &tree_event_params(&cid, &turns, i));
-    // the wire messages of the kept turns are the new seed; the picked turn
-    // itself stays — "everything after it is dropped"
-    let cut: usize = turns[..=i].iter().map(|t| t.messages.len()).sum();
-    session.seed.truncate(cut);
-    store.truncate_thread(&cid, i + 1)?;
+    // `picked` indexes the file-order rows, so it may name a turn on a
+    // sibling branch — the chain that ends at that turn is its own walk
+    // to the root, which is exactly the conversation the jump replays
+    let landed = crate::core::threads::chain_indices(&turns, picked)?;
+    // before the conversation moves, extensions get one chance to snapshot
+    // or restore the workspace (the git-checkpoint shape): the event names
+    // the turns leaving the active branch. Fail-open — a broken extension
+    // never blocks the jump; its error lands in the diagnostics tail.
+    session.extensions.fire(
+        "session_before_tree",
+        &tree_event_params(&cid, &turns, &active, &landed),
+    );
+    // rebuild the seed from the chain that ends at the picked turn, then
+    // arm the branch: the next persisted round lands with the picked
+    // turn's id as its parent and the thread grows a branch instead of a
+    // continuation
+    let rebuilt = crate::agent::session::rebuild_chain(&turns, &landed)?;
+    session.seed = rebuilt.messages;
+    session.usage = rebuilt.usage;
+    session.branch_parent = Some(turns[picked].id.clone());
+    let side = if picked + 1 == turns.len() {
+        "on the active branch's newest turn"
+    } else if active.contains(&picked) {
+        "to an earlier turn of the active branch"
+    } else {
+        "onto another branch"
+    };
     eprintln!(
-        "{}rewound to turn {} — type the next task{}",
+        "{}jumped {side}; the next task branches off it (older rounds stay in the thread){}",
         crate::theme::err().dim,
-        i + 1,
         crate::theme::err().reset
     );
     Ok(())
 }
 
-/// The `session_before_tree` payload: which thread is about to lose which
-/// turns. `kept` is the picked index, so turns `kept + 1..` are the ones
-/// going away — ids, not labels, because the extension keys its snapshots on
-/// what the store persists.
-fn tree_event_params(thread: &str, turns: &[StoredTurn], kept: usize) -> serde_json::Value {
-    let dropped: &[StoredTurn] = &turns[kept + 1..];
+/// The `session_before_tree` payload: which thread's active branch is
+/// about to move, and which turns leave it — the active chain minus the
+/// chain the jump landed on. Ids, not labels, because the extension keys
+/// its snapshots on what the store persists. The turns stay in the file
+/// (the thread only grows); what the extension restores is the workspace
+/// those turns wrote.
+fn tree_event_params(
+    thread: &str,
+    turns: &[StoredTurn],
+    active: &[usize],
+    landed: &[usize],
+) -> serde_json::Value {
+    let keep: std::collections::HashSet<usize> = landed.iter().copied().collect();
+    let dropped: Vec<&str> = active
+        .iter()
+        .copied()
+        .filter(|i| !keep.contains(i))
+        .map(|i| turns[i].id.as_str())
+        .collect();
     serde_json::json!({
         "thread": thread,
-        "kept_turns": kept + 1,
+        "kept_turns": landed.len(),
         "dropped_turns": dropped.len(),
-        "dropped_ids": dropped.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        "dropped_ids": dropped,
     })
 }
 
@@ -1372,6 +1450,7 @@ mod tests {
         let stored = |prompt: &str, response: &str, messages: Vec<Msg>| StoredTurn {
             v: 0,
             id: "t".into(),
+            parent: None,
             ts: "2026-09-24T11:14:07".into(),
             mode: "agent".into(),
             model: "m".into(),
@@ -1410,12 +1489,68 @@ mod tests {
         assert_eq!(turn_label(&stored("", "", Vec::new())), "--");
     }
 
+    /// The tree view indents a branch one level under its parent and
+    /// marks only the active branch: the abandoned sibling sits unmarked
+    /// at the same depth as the work that replaced it.
+    #[test]
+    fn tree_rows_indent_and_mark_the_active_branch() {
+        use crate::core::threads::StoredTurn;
+        use crate::providers::Msg;
+        let turn = |id: &str, parent: Option<String>| StoredTurn {
+            v: 0,
+            id: id.into(),
+            parent,
+            ts: "2026-09-24T11:14:07".into(),
+            mode: "agent".into(),
+            model: "m".into(),
+            cwd: None,
+            system: None,
+            prompt: id.into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::User {
+                text: id.into(),
+                attachments: Vec::new(),
+            }],
+        };
+        // root, continuation, abandoned tip; then a branch off the root
+        let turns = vec![
+            turn("a", None),
+            turn("b", None),
+            turn("c", None),
+            turn("d", Some("a".into())),
+        ];
+        assert_eq!(tree_depths(&turns), vec![0, 0, 0, 1]);
+        // the active chain ends at the branch
+        let chain = crate::core::threads::chain_indices(&turns, 3).unwrap();
+        assert_eq!(chain, vec![0, 3]);
+        let rows = tree_rows(&turns, &chain);
+        assert_eq!(rows.len(), 4, "every turn of the file gets a row");
+        assert!(
+            rows[0].starts_with("* "),
+            "the root is on the chain: {}",
+            rows[0]
+        );
+        assert!(rows[1].starts_with("  "), "the sibling is off the chain");
+        assert!(
+            rows[3].starts_with("*   "),
+            "the branch is marked and indented"
+        );
+        // a bad edge renders at the top level rather than failing the view
+        let depths = tree_depths(&[turn("a", None), turn("e", Some("ghost".into()))]);
+        assert_eq!(depths[1], 0, "a dangling edge sits at the top");
+    }
+
     #[test]
     fn tree_jump_event_names_what_is_dropped() {
         use crate::providers::Msg;
         let turn = |id: &str| StoredTurn {
             v: 0,
             id: id.into(),
+            parent: None,
             ts: "2026-09-24T11:14:07".into(),
             mode: "agent".into(),
             model: "m".into(),
@@ -1433,14 +1568,21 @@ mod tests {
             }],
         };
         let turns = vec![turn("a"), turn("b"), turn("c"), turn("d")];
-        let p = tree_event_params("thread-1", &turns, 1);
+        let chain: Vec<usize> = (0..4).collect();
+        let p = tree_event_params("thread-1", &turns, &chain, &chain[..2]);
         assert_eq!(p["thread"], "thread-1");
         assert_eq!(p["kept_turns"], 2);
         assert_eq!(p["dropped_turns"], 2);
         assert_eq!(p["dropped_ids"], serde_json::json!(["c", "d"]));
-        // jumping to the last turn drops nothing, but the event still fires:
-        // the extension learns the jump happened and that no work is undone
-        let none = tree_event_params("thread-1", &turns, 3);
+        // jumping to the last turn leaves nothing inactive, but the event
+        // still fires: the extension learns the jump happened and that no
+        // work is undone
+        let none = tree_event_params("thread-1", &turns, &chain, &chain);
         assert_eq!(none["dropped_ids"], serde_json::json!([]));
+        // landing on a sibling branch keeps only the shared prefix; the
+        // old tip counts as dropped even though it stays in the file
+        let sibling = vec![0, 1, 3];
+        let crossed = tree_event_params("thread-1", &turns, &chain, &sibling);
+        assert_eq!(crossed["dropped_ids"], serde_json::json!(["c"]));
     }
 }

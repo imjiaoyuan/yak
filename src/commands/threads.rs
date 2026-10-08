@@ -126,8 +126,18 @@ pub fn show_transcript(cid: &str) -> i32 {
             return 1;
         }
     };
+    // the preview is the conversation as it stands — the active branch,
+    // not the sibling branches a /tree jump left in the file
+    let chain = match crate::core::threads::chain_indices(&turns, turns.len().saturating_sub(1)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let active: Vec<&crate::core::threads::StoredTurn> = chain.iter().map(|&i| &turns[i]).collect();
     let p = crate::theme::out();
-    if let Some(first) = turns.first() {
+    if let Some(first) = active.first() {
         let where_ = match first.cwd.as_deref() {
             Some(cwd) => format!(" · {cwd}"),
             None => String::new(),
@@ -137,7 +147,7 @@ pub fn show_transcript(cid: &str) -> i32 {
             p.dim, first.model, p.reset
         );
     }
-    for turn in &turns {
+    for turn in &active {
         let p = crate::theme::out();
         println!("{}{} {}", p.dim, turn.ts, p.reset);
         if !turn.prompt.is_empty() {

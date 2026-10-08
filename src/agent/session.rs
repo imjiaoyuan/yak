@@ -40,6 +40,12 @@ pub struct Session {
     /// which is a thread filename and only exists once a turn is persisted
     pub cache_key: String,
     pub seed: Vec<Msg>,
+    /// the turn id the next persisted round continues: None is the linear
+    /// rule (the round follows the thread's last line), Some names the turn
+    /// a `/tree` jump landed on, so the rounds after it branch the thread
+    /// instead of extending it. Cleared when the conversation is left for a
+    /// fresh one (`/clear`, a resume) — a new thread has no parent to name.
+    pub branch_parent: Option<String>,
     /// reasoning effort level; None sends no parameter
     pub thinking: Option<String>,
     /// the extension host: user executables registering tools (and, later,
@@ -100,6 +106,7 @@ impl Session {
     pub fn clear(&mut self) {
         self.seed.clear();
         self.conversation_id = None;
+        self.branch_parent = None;
         self.usage = crate::core::http::Usage::default();
         self.last_usage = None;
     }
@@ -197,6 +204,7 @@ impl Session {
                     persist_round(
                         self.store.as_ref(),
                         &mut self.conversation_id,
+                        &mut self.branch_parent,
                         &mut self.persist_error,
                         &identity,
                         &messages,
@@ -436,6 +444,7 @@ impl Session {
                 persist_round(
                     self.store.as_ref(),
                     &mut self.conversation_id,
+                    &mut self.branch_parent,
                     &mut self.persist_error,
                     &TaskIdentity {
                         model,
@@ -515,6 +524,7 @@ impl Session {
                     persist_round(
                         self.store.as_ref(),
                         &mut self.conversation_id,
+                        &mut self.branch_parent,
                         &mut self.persist_error,
                         &identity,
                         messages,
@@ -576,6 +586,7 @@ impl Session {
                 persist_round(
                     self.store.as_ref(),
                     &mut self.conversation_id,
+                    &mut self.branch_parent,
                     &mut self.persist_error,
                     &TaskIdentity {
                         model,
@@ -611,6 +622,7 @@ struct TaskIdentity<'a> {
 fn persist_round(
     store: Option<&crate::core::threads::Store>,
     conversation_id: &mut Option<String>,
+    branch_parent: &mut Option<String>,
     persist_error: &mut Option<String>,
     identity: &TaskIdentity<'_>,
     messages: &[Msg],
@@ -675,6 +687,9 @@ fn persist_round(
     let turn = StoredTurn {
         v: crate::core::threads::THREAD_FORMAT_VERSION,
         id: crate::core::db::ulid(),
+        // the tree edge: Some only on the first round after a /tree jump —
+        // the rounds after it extend the new branch linearly
+        parent: branch_parent.take(),
         ts: crate::core::db::now_turn_datetime(),
         mode: "agent".to_string(),
         model: identity.model.qualified_id(),
@@ -863,16 +878,31 @@ pub struct Rebuilt {
 }
 
 /// Rebuild a wire-level history (plus the original system prompt) from a
-/// thread's stored turns. The messages *are* `Msg` — the thread stores the
-/// same struct the request carries — so the walk only filters empty user
-/// turns and restores the final assistant answer, which the store pops out
-/// of `messages` and keeps as the turn's `response` field. The first turn's
-/// system is the prompt; later `Summary` messages are compaction summaries.
-pub fn rebuild_turns(turns: &[StoredTurn]) -> Rebuilt {
+/// thread's stored turns — the thread's *active branch*: turns hang off a
+/// `/tree` jump's abandoned siblings too, and only the chain from the last
+/// line back to the root is the conversation (see
+/// `threads::chain_indices`). On a linear thread that chain is every turn,
+/// so old threads rebuild exactly as before. The messages *are* `Msg` —
+/// the thread stores the same struct the request carries — so the walk
+/// only filters empty user turns and restores the final assistant answer,
+/// which the store pops out of `messages` and keeps as the turn's
+/// `response` field. The first turn's system is the prompt; later
+/// `Summary` messages are compaction summaries. A broken `parent` edge
+/// fails loudly instead of resuming the wrong branch.
+pub fn rebuild_turns(turns: &[StoredTurn]) -> Result<Rebuilt, String> {
+    let chain = crate::core::threads::chain_indices(turns, turns.len().saturating_sub(1))?;
+    rebuild_chain(turns, &chain)
+}
+
+/// [`rebuild_turns` over an explicit chain](`chain_indices`): the chain's
+/// turns root-first as indices into `turns`. A chain prefix is itself a
+/// valid linear thread (each turn's parent is the line before it in the
+/// prefix), which is exactly what a `/tree` jump replays.
+pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, String> {
     let mut msgs: Vec<Msg> = Vec::new();
     let mut system: Option<String> = None;
     let mut usage = crate::core::http::Usage::default();
-    for turn in turns {
+    for turn in chain.iter().map(|&i| &turns[i]) {
         if system.is_none() {
             system = turn.system.clone();
         }
@@ -903,11 +933,11 @@ pub fn rebuild_turns(turns: &[StoredTurn]) -> Rebuilt {
         let restored = rehydrated(m);
         *m = restored;
     }
-    Rebuilt {
+    Ok(Rebuilt {
         messages: msgs,
         system,
         usage,
-    }
+    })
 }
 
 /// How many of the newest user turns keep their pixels on a replay. Every
@@ -969,6 +999,7 @@ mod tests {
         persist_round(
             session.store.as_ref(),
             &mut session.conversation_id,
+            &mut session.branch_parent,
             &mut session.persist_error,
             &TaskIdentity {
                 model: session.model.as_ref().expect("test session has a model"),
@@ -1035,6 +1066,7 @@ mod tests {
             conversation_id: None,
             cache_key: "cache-test".to_string(),
             seed,
+            branch_parent: None,
             thinking: None,
             extensions: crate::agent::ext::Extensions::connect(std::path::Path::new(
                 "/nonexistent",
@@ -1198,6 +1230,7 @@ mod tests {
             conversation_id: None,
             cache_key: "round-persist".to_string(),
             seed: Vec::new(),
+            branch_parent: None,
             thinking: None,
             extensions: crate::agent::ext::Extensions::connect(&dir),
             usage: crate::core::http::Usage::default(),
@@ -1229,9 +1262,144 @@ mod tests {
         );
 
         // the rebuilt history is the exact wire conversation the seed now holds
-        let rebuilt = rebuild_turns(&turns);
+        let rebuilt = rebuild_turns(&turns).expect("the chain holds");
         assert_eq!(rebuilt.messages, session.seed);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A jump arms the branch once: the next persisted round carries the
+    /// picked turn's id as its parent, and the round after that is back to
+    /// linear — a fork never rides two rounds, so an armed-but-failed
+    /// round cannot fork off a turn that never reached the file.
+    #[test]
+    fn a_branch_parent_is_consumed_once() {
+        let dir = crate::core::testutil::scratch_dir("branch-once");
+        let store = threads::Store::open_path(&dir).unwrap();
+        let turn = |id: &str, prompt: &str| StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: id.into(),
+            parent: None,
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: None,
+            prompt: prompt.into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::User {
+                text: prompt.into(),
+                attachments: Vec::new(),
+            }],
+        };
+        let id = store.append_turn(None, &turn("t1", "one")).unwrap();
+        // the jump's round: armed with the picked turn's id
+        let mut parent = Some("t1".to_string());
+        let mut cid = Some(id.clone());
+        let mut persist_error = None;
+        let model = crate::providers::ResolvedModel {
+            provider_name: "mock".into(),
+            kind: "openai-compat".into(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: None,
+            model_id: "m".into(),
+            context_window: None,
+            options: vec![],
+        };
+        persist_round(
+            Some(&store),
+            &mut cid,
+            &mut parent,
+            &mut persist_error,
+            &TaskIdentity {
+                model: &model,
+                cwd: &dir,
+                system: None,
+            },
+            &[Msg::User {
+                text: "two".into(),
+                attachments: Vec::new(),
+            }],
+            None,
+            "",
+            std::time::Instant::now(),
+        );
+        assert!(parent.is_none(), "the branch edge is spent on the round");
+        let turns = store.read_thread(&id).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].parent.as_deref(), Some("t1"));
+        // the round after that is a plain continuation: no edge left to spend
+        store.append_turn(Some(&id), &turn("t3", "three")).unwrap();
+        let turns = store.read_thread(&id).unwrap();
+        assert_eq!(turns[2].parent, None, "only the jump's round branches");
+        // and the active chain runs through the branch: t1, t2, t3
+        let chain = crate::core::threads::chain_indices(&turns, turns.len() - 1).unwrap();
+        assert_eq!(chain, vec![0, 1, 2]);
+        let rebuilt = rebuild_chain(&turns, &chain).expect("the chain holds");
+        assert_eq!(rebuilt.messages.len(), 3, "user, user, user replayed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Replaying an explicit chain prefix is what a `/tree` jump seeds the
+    /// session with: the abandoned sibling never enters the wire history,
+    /// even though it stays in the file.
+    #[test]
+    fn rebuild_chain_skips_the_abandoned_sibling() {
+        let turn = |id: &str, prompt: &str, parent: Option<String>| StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: id.into(),
+            parent,
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: Some("sys".into()),
+            prompt: prompt.into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![Msg::User {
+                text: prompt.into(),
+                attachments: Vec::new(),
+            }],
+        };
+        // root, abandoned tip, branch off root
+        let turns = vec![
+            turn("t1", "one", None),
+            turn("t2", "two", None),
+            turn("t3", "again", Some("t1".into())),
+        ];
+        let rebuilt = rebuild_chain(&turns, &[0, 2]).expect("the chain holds");
+        assert_eq!(rebuilt.system.as_deref(), Some("sys"));
+        let texts: Vec<&str> = rebuilt
+            .messages
+            .iter()
+            .map(|m| match m {
+                Msg::User { text, .. } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["one", "again"],
+            "the sibling stays in the file, off the wire"
+        );
+        // and the thread's own active branch is the branch, not the sibling
+        let rebuilt = rebuild_turns(&turns).expect("the chain holds");
+        let texts: Vec<&str> = rebuilt
+            .messages
+            .iter()
+            .map(|m| match m {
+                Msg::User { text, .. } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(texts, vec!["one", "again"]);
     }
 
     /// A round that failed late (stream drop after tool rounds) must still
@@ -1264,6 +1432,7 @@ mod tests {
             conversation_id: None,
             cache_key: "cache-test".to_string(),
             seed: Vec::new(),
+            branch_parent: None,
             thinking: None,
             extensions: crate::agent::ext::Extensions::connect(&cwd),
             usage: crate::core::http::Usage::default(),
@@ -1337,6 +1506,7 @@ mod tests {
             conversation_id: None,
             cache_key: "cache-test".to_string(),
             seed: Vec::new(),
+            branch_parent: None,
             thinking: None,
             extensions: crate::agent::ext::Extensions::connect(&cwd),
             usage: crate::core::http::Usage::default(),
@@ -1571,6 +1741,7 @@ mod tests {
             StoredTurn {
                 v: crate::core::threads::THREAD_FORMAT_VERSION,
                 id: format!("t{n}"),
+                parent: None,
                 ts: "2026-08-23T01:00:00+00:00".into(),
                 mode: "agent".into(),
                 model: "prov/m".into(),
@@ -1594,7 +1765,9 @@ mod tests {
                 )],
             }
         };
-        let msgs = rebuild_turns(&[turn(0), turn(1), turn(2)]).messages;
+        let msgs = rebuild_turns(&[turn(0), turn(1), turn(2)])
+            .expect("linear thread")
+            .messages;
         let payload = |i: usize| match &msgs[i] {
             Msg::User { attachments, .. } => attachments[0].base64_data.clone(),
             _ => panic!("expected the stored user message"),
@@ -1618,6 +1791,7 @@ mod tests {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: id.into(),
             ts: "2026-08-23T01:00:00+00:00".into(),
+            parent: None,
             mode: "agent".into(),
             model: "prov/m".into(),
             cwd: None,
@@ -1651,7 +1825,8 @@ mod tests {
             ),
             // a turn with no usage report adds nothing at all
             turn("t3", None),
-        ]);
+        ])
+        .expect("linear");
         assert_eq!(
             rebuilt.usage,
             crate::core::http::Usage {
@@ -1681,6 +1856,7 @@ mod tests {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "t1".into(),
             ts: "2026-08-23T01:00:00+00:00".into(),
+            parent: None,
             mode: "agent".into(),
             model: "prov/m".into(),
             cwd: None,
@@ -1700,7 +1876,7 @@ mod tests {
                 ],
             )],
         };
-        let msgs = rebuild_turns(&[turn]).messages;
+        let msgs = rebuild_turns(&[turn]).expect("linear").messages;
         let Msg::User { attachments, .. } = &msgs[0] else {
             panic!("expected the stored user message")
         };
@@ -1720,6 +1896,7 @@ mod tests {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "t1".into(),
             ts: "2026-08-23T01:00:00+00:00".into(),
+            parent: None,
             mode: "agent".into(),
             model: "prov/m".into(),
             cwd: None,
@@ -1769,7 +1946,7 @@ mod tests {
         store.append_turn(Some("th1"), &turn).unwrap();
 
         let turns = store.read_thread("th1").unwrap();
-        let rebuilt = rebuild_turns(&turns);
+        let rebuilt = rebuild_turns(&turns).expect("linear");
         let (msgs, system) = (rebuilt.messages, rebuilt.system);
         assert_eq!(system.as_deref(), Some("sys"));
         assert_eq!(msgs.len(), 4);
@@ -1814,6 +1991,7 @@ mod tests {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "t1".into(),
             ts: "2026-08-23T01:00:00+00:00".into(),
+            parent: None,
             mode: "agent".into(),
             model: "prov/m".into(),
             cwd: None,

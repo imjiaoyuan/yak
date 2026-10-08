@@ -170,7 +170,10 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             ));
         };
         let turns = store.read_thread(&cid)?;
-        let rebuilt = crate::agent::session::rebuild_turns(&turns);
+        // only the active branch rebuilds: a thread that jumped branches
+        // carries its abandoned siblings too, and resuming must land on
+        // the branch the thread ended on
+        let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
         seed = rebuilt.messages;
         conv_system = rebuilt.system;
         conv_usage = rebuilt.usage;
@@ -199,7 +202,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
                     p.reset
                 );
             }
-            let rebuilt = crate::agent::session::rebuild_turns(&turns);
+            let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
             seed = rebuilt.messages;
             conv_system = rebuilt.system;
             conv_usage = rebuilt.usage;
@@ -352,6 +355,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             .clone()
             .unwrap_or_else(crate::core::db::ulid),
         conversation_id,
+        branch_parent: None,
         seed,
         thinking,
         extensions,

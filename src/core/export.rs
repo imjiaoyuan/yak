@@ -29,11 +29,15 @@ pub fn export_latest(cwd: &Path, path: Option<&str>) -> Result<(String, PathBuf)
 }
 
 /// Render thread `cid` to markdown and write it to `path` — a directory
-/// takes the default name, a relative one resolves against `cwd`.
+/// takes the default name, a relative one resolves against `cwd`. The
+/// export is the conversation as it stands: the active branch, not the
+/// sibling branches a `/tree` jump left in the file.
 pub fn export_thread(cid: &str, cwd: &Path, path: Option<&str>) -> Result<PathBuf, String> {
     let store = Store::open()?;
     let turns = store.read_thread(cid)?;
-    let md = to_markdown(cid, &turns);
+    let chain = crate::core::threads::chain_indices(&turns, turns.len().saturating_sub(1))?;
+    let active: Vec<&StoredTurn> = chain.iter().map(|&i| &turns[i]).collect();
+    let md = to_markdown(cid, &active);
     let target = output_path(cwd, path, cid);
     crate::core::fsx::write_atomic(&target, md.as_bytes(), None)
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
@@ -59,8 +63,8 @@ fn output_path(cwd: &Path, path: Option<&str>, cid: &str) -> PathBuf {
     }
 }
 
-/// Render `turns` (thread `id`, oldest first) as markdown.
-pub fn to_markdown(id: &str, turns: &[StoredTurn]) -> String {
+/// Render `turns` (the thread's active branch, oldest first) as markdown.
+pub fn to_markdown(id: &str, turns: &[&StoredTurn]) -> String {
     let mut out = String::new();
 
     // the first prompt makes the better title; the id is the fallback
@@ -283,6 +287,7 @@ mod tests {
         StoredTurn {
             v: crate::core::threads::THREAD_FORMAT_VERSION,
             id: "01TESTTURN".into(),
+            parent: None,
             ts: "2026-09-13T10:00:00+00:00".into(),
             mode: "agent".into(),
             model: "openai/gpt-5".into(),
@@ -324,7 +329,7 @@ mod tests {
                 attachments: Vec::new(),
             },
         ]);
-        let md = to_markdown("01THREAD", &[t]);
+        let md = to_markdown("01THREAD", &[&t]);
         assert!(md.starts_with("# hello world\n"), "{md}");
         assert!(md.contains("`01THREAD` · 2026-09-13T10:00:00+00:00 · `/tmp/project`"));
         assert!(md.contains("## 1 · 2026-09-13T10:00:00+00:00 · 4.2s · ↑1200 ↓345"));
@@ -365,7 +370,7 @@ mod tests {
                 filename: None,
             }],
         )]);
-        let md = to_markdown("01THREAD", &[t]);
+        let md = to_markdown("01THREAD", &[&t]);
         assert!(md.contains("*attachment* `image/png` — `/tmp/shot.png`"));
         assert!(!md.contains("QUJDREVGRw"));
     }
@@ -384,7 +389,7 @@ mod tests {
             },
         ]);
         t.response = "the final answer".into();
-        let md = to_markdown("01THREAD", &[t]);
+        let md = to_markdown("01THREAD", &[&t]);
         assert!(md.contains("**Assistant**\n\ncalling"));
         assert!(md.contains("**Assistant**\n\nthe final answer"));
 
@@ -399,7 +404,7 @@ mod tests {
             },
         ]);
         t.response = "the final answer".into();
-        let md = to_markdown("01THREAD", &[t]);
+        let md = to_markdown("01THREAD", &[&t]);
         assert_eq!(md.matches("the final answer").count(), 1);
     }
 
@@ -407,7 +412,7 @@ mod tests {
     fn a_prompt_only_thread_still_exports() {
         let mut t = turn(Vec::new());
         t.response = "done".into();
-        let md = to_markdown("01THREAD", &[t]);
+        let md = to_markdown("01THREAD", &[&t]);
         assert!(md.contains("**User**\n\nhello  world"));
         assert!(md.contains("**Assistant**\n\ndone"));
     }

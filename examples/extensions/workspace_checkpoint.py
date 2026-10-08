@@ -10,9 +10,9 @@
 #                          turn, hardlinks where possible so unchanged files
 #                          cost nothing), after pruning checkpoints older
 #                          than KEEP_DAYS
-#   session_before_tree  — /tree picked a cut point: merge every snapshot
-#                          from the dropped turns, newest first, back into
-#                          the working tree
+#   session_before_tree  — /tree picked a jump point: merge every snapshot
+#                          from the turns leaving the active branch, newest
+#                          first, back into the working tree
 #
 # The merge is additive by design: files the dropped turns created or edited
 # come back as they were, files untouched since the cut point stay as they
@@ -160,6 +160,8 @@ def handle(msg):
         # known until the turn is persisted
         take_snapshot(cwd, time.strftime("%Y%m%dT%H%M%S"))
     elif name == "session_before_tree":
+        # the turns leaving the active branch — restore the workspace to
+        # where those turns found it, newest snapshot first
         restore(cwd, params.get("dropped_ids", []))
     return None
 

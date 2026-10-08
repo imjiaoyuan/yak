@@ -15,8 +15,10 @@ use crate::providers::Msg;
 /// The on-disk turn format this binary writes and reads. The stamp lives on
 /// every stored line; a line without one (written before versioning
 /// existed) reads as version 0. A higher number on read means a newer yak
-/// wrote the thread — refused loudly, never guessed at.
-pub const THREAD_FORMAT_VERSION: u32 = 1;
+/// wrote the thread — refused loudly, never guessed at. Version 2 added the
+/// optional `parent` field that turns a thread into a tree (a `/tree` jump
+/// appends a branched turn instead of rewriting the file).
+pub const THREAD_FORMAT_VERSION: u32 = 2;
 
 /// `skip_serializing_if` for the version stamp: version 0 stays absent so
 /// pre-versioning lines keep their exact shape.
@@ -98,6 +100,13 @@ pub struct StoredTurn {
     pub v: u32,
     /// turn id (ulid)
     pub id: String,
+    /// the turn this one continues, when it does not simply follow the
+    /// previous line: the tree edge a `/tree` jump creates. Absent on every
+    /// turn of a linear thread (and on the first turn of any thread — its
+    /// parent would be nothing). The active branch of a thread is the last
+    /// line walked back along these edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// `db::now_turn_datetime()`
     pub ts: String,
     /// "agent" or "prompt" — provenance for the logs list
@@ -439,24 +448,6 @@ impl Store {
         Ok(Some(new_id))
     }
 
-    /// Keep only the first `keep` turns of a thread (the `/tree` jump):
-    /// the file is rewritten, so the dropped turns are gone for good.
-    pub fn truncate_thread(&self, id: &str, keep: usize) -> Result<(), String> {
-        let turns = self.read_thread(id)?;
-        if keep >= turns.len() {
-            return Ok(());
-        }
-        let mut out = String::new();
-        for turn in &turns[..keep] {
-            out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
-            out.push('\n');
-        }
-        let path = self.thread_path(id);
-        // atomic: truncation is the one rewrite the user cannot undo
-        crate::core::fsx::write_atomic(&path, out.as_bytes(), None)
-            .map_err(|e| format!("cannot rewrite thread {id}: {e}"))
-    }
-
     fn entries(&self) -> Result<Vec<fs::DirEntry>, String> {
         let rd = fs::read_dir(&self.dir)
             .map_err(|e| format!("cannot list {}: {e}", self.dir.display()))?;
@@ -482,6 +473,76 @@ fn entry_id(entry: &fs::DirEntry) -> Result<String, String> {
         .ok_or_else(|| "thread file without a stem".to_string())
 }
 
+/// Walk a thread's turns back from line `leaf` to the root along `parent`
+/// edges, returning the chain's indices root-first. The thread's *active
+/// branch* is this walk from its last line: the newest turn written is
+/// where the conversation stands, and no separate leaf marker exists to
+/// keep consistent (a crash mid-append leaves the previous chain fully
+/// intact, the same torn-tail discipline `read_thread` keeps). A turn
+/// without a `parent` continues the line before it (the linear-thread
+/// rule, and the tree's way of saying "the previous line"), so a chain
+/// through a turn whose parent is the line right before it reads exactly
+/// as a linear prefix. A `parent` naming a missing id — a corrupted or
+/// hand-edited edge — fails loudly: guessing at a chain would silently
+/// resume the wrong branch, the same refusal `read_thread` gives a
+/// corrupt line.
+pub fn chain_indices(turns: &[StoredTurn], leaf: usize) -> Result<Vec<usize>, String> {
+    if turns.is_empty() {
+        return Ok(Vec::new());
+    }
+    if leaf >= turns.len() {
+        return Err(format!(
+            "chain leaf {leaf} is past the thread's {} turns",
+            turns.len()
+        ));
+    }
+    // line index by turn id; duplicate ids (a hand-edited file) make the
+    // edge ambiguous, which is also refused
+    let mut by_id: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(turns.len());
+    for (i, t) in turns.iter().enumerate() {
+        if by_id.insert(t.id.as_str(), i).is_some() {
+            return Err(format!("duplicate turn id {} in thread", t.id));
+        }
+    }
+    let mut chain = vec![leaf];
+    let mut cursor = leaf;
+    loop {
+        let next = match &turns[cursor].parent {
+            // the linear rule: no parent, continue the previous line
+            None => cursor.checked_sub(1),
+            // the first line names a parent only to point before the file's
+            // start, which is nothing
+            Some(_) if cursor == 0 => None,
+            Some(parent) => match by_id.get(parent.as_str()) {
+                Some(&i) if i < cursor => Some(i),
+                Some(&i) => {
+                    return Err(format!(
+                        "turn {} branches off turn {} below it — the edge must point at an \
+                         earlier line",
+                        turns[cursor].id, turns[i].id
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "turn {} names parent {parent}, which no line of this thread carries",
+                        turns[cursor].id
+                    ));
+                }
+            },
+        };
+        match next {
+            Some(i) => {
+                chain.push(i);
+                cursor = i;
+            }
+            None => break,
+        }
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +551,7 @@ mod tests {
         StoredTurn {
             v: THREAD_FORMAT_VERSION,
             id: id.to_string(),
+            parent: None,
             ts: format!("2026-08-23T0{}:00:00+00:00", id),
             mode: mode.to_string(),
             model: "prov/m".to_string(),
@@ -510,6 +572,121 @@ mod tests {
         let mut t = turn(id, prompt, "ans", "agent");
         t.cwd = Some(cwd.to_string());
         t
+    }
+
+    /// A turn branching off the named parent (the edge a `/tree` jump's
+    /// next round writes).
+    fn branch(id: &str, parent: &str, prompt: &str) -> StoredTurn {
+        let mut t = turn(id, prompt, "ans", "agent");
+        t.parent = Some(parent.to_string());
+        t
+    }
+
+    /// The active chain of a linear thread is every line, in order: a
+    /// thread that never jumped reads exactly as before the tree existed.
+    #[test]
+    fn a_linear_thread_is_its_own_chain() {
+        let turns = vec![
+            turn("1", "a", "b", "agent"),
+            turn("2", "c", "d", "agent"),
+            turn("3", "e", "f", "agent"),
+        ];
+        assert_eq!(chain_indices(&turns, 2).unwrap(), vec![0, 1, 2]);
+    }
+
+    /// A branched turn ends the active chain: the jump's rounds read back
+    /// through it, and the abandoned sibling stays in the file, off the
+    /// chain.
+    #[test]
+    fn a_branched_turn_ends_the_active_chain() {
+        // 0 ← 1 ← 2, then a jump to 1 writes 3 with parent 1
+        let turns = vec![
+            turn("1", "a", "b", "agent"),
+            turn("2", "c", "d", "agent"),
+            turn("3", "e", "f", "agent"),
+            branch("4", "2", "g"),
+        ];
+        assert_eq!(chain_indices(&turns, 3).unwrap(), vec![0, 1, 3]);
+        // and the abandoned tip is still a walkable chain of its own
+        assert_eq!(chain_indices(&turns, 2).unwrap(), vec![0, 1, 2]);
+    }
+
+    /// A parent naming a missing turn is a broken edge: the thread fails
+    /// loudly instead of resuming some guessed branch.
+    #[test]
+    fn a_dangling_parent_fails_loudly() {
+        let turns = vec![turn("1", "a", "b", "agent"), branch("2", "nope", "c")];
+        let err = chain_indices(&turns, 1).unwrap_err();
+        assert!(err.contains("nope") && err.contains("parent"), "{err}");
+    }
+
+    /// An edge pointing at a later line walks the chain forward, which is
+    /// not a conversation — refused, the same way a dangling one is. The
+    /// first line naming any parent at all stops at the root: nothing
+    /// before it could be the parent, so it is one.
+    #[test]
+    fn a_forward_edge_is_refused() {
+        let turns = vec![
+            turn("1", "a", "b", "agent"),
+            branch("2", "3", "c"),
+            turn("3", "e", "f", "agent"),
+        ];
+        let err = chain_indices(&turns, 2).unwrap_err();
+        assert!(err.contains("below it"), "{err}");
+        // the first line with a parent stops at the root rather than error
+        let solo = vec![branch("1", "ghost", "a")];
+        assert_eq!(chain_indices(&solo, 0).unwrap(), vec![0]);
+    }
+
+    /// A duplicate id makes every edge to it ambiguous — also refused,
+    /// the same way a corrupt line is.
+    #[test]
+    fn duplicate_ids_fail_loudly() {
+        let turns = vec![turn("1", "a", "b", "agent"), turn("1", "c", "d", "agent")];
+        let err = chain_indices(&turns, 1).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    /// The parent field rides through a store round-trip: what a jump's
+    /// next round wrote reads back with its edge intact.
+    #[test]
+    fn the_parent_edge_survives_the_round_trip() {
+        let dir = scratch("parent-edge");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        store
+            .append_turn(Some(&id), &branch("2", "1", "c"))
+            .unwrap();
+        let turns = store.read_thread(&id).unwrap();
+        assert_eq!(turns[0].parent, None, "the first line is the root");
+        assert_eq!(
+            turns[1].parent.as_deref(),
+            Some("1"),
+            "the branch edge round-trips"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Lines written before the `parent` field existed deserialize with it
+    /// absent — the tree degrades to a linear chain on old threads.
+    #[test]
+    fn pre_parent_lines_read_as_linear() {
+        let dir = scratch("pre-parent");
+        let store = Store::open_path(&dir).unwrap();
+        let id = store
+            .append_turn(None, &turn("1", "a", "b", "agent"))
+            .unwrap();
+        let path = store.thread_path(&id);
+        let text = fs::read_to_string(&path).unwrap();
+        // hand-strip a parent-shaped line: an old writer would not have one
+        let old = text.replace(",\"parent\":\"1\"", "");
+        fs::write(&path, &old).unwrap();
+        let turns = store.read_thread(&id).unwrap();
+        assert_eq!(turns[0].parent, None);
+        assert_eq!(chain_indices(&turns, 0).unwrap(), vec![0]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// What this binary writes round-trips whole, and the pair older files
@@ -792,7 +969,7 @@ mod tests {
             .unwrap();
         let path = store.thread_path(&id);
         let text = fs::read_to_string(&path).unwrap();
-        let bumped = text.replace("\"v\":1", "\"v\":99");
+        let bumped = text.replace("\"v\":2", "\"v\":99");
         assert_ne!(text, bumped, "the stamp must be present to bump");
         fs::write(&path, bumped).unwrap();
         let err = store.read_thread(&id).unwrap_err();
@@ -850,7 +1027,7 @@ mod tests {
         let store = Store::open_path(&dir).unwrap();
         let path = store.thread_path("oldthread");
         let text = serde_json::to_string(&turn("1", "a", "b", "agent")).unwrap();
-        let old = text.replace("\"v\":1,", "");
+        let old = text.replace("\"v\":2,", "");
         assert_ne!(text, old, "the stamp must be present to strip");
         fs::write(&path, old).unwrap();
         let turns = store.read_thread("oldthread").unwrap();

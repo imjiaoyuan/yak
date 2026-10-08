@@ -95,6 +95,10 @@ yak export notes.md                        # write the newest session here as ma
 
 `-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list. `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `yak-<id>.md` in the working directory by default (the same renderer backs `yak export`).
 
+## Session tree
+
+`/tree` opens the session as a tree: every turn of every branch, indented under its parent, the active branch marked. Picking a turn jumps there — the session replays that turn's branch back to the root, and your next message continues from it. Nothing is deleted: the turns after the jump point stay in the file as a sibling branch, and a later `/tree` can jump right back onto them. The export and log surfaces always show the active branch (the conversation as it stands, not the abandoned siblings).
+
 ## Skills
 
 Skills are `SKILL.md` folders, discovered from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name). A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
