@@ -342,17 +342,20 @@ def git(repo, *args):
 
 
 def repo_root(start):
-    """The repo root above `start`, or None. A repo without commits yet
-    (no HEAD to branch from) does not qualify: worktree add would fail."""
+    """The repo root above `start`, or (None, why). A repo without commits
+    yet (no HEAD to branch from) does not qualify: worktree add would
+    fail; the why carries the git failure so a lane can show it."""
     rc, out = git(start, "rev-parse", "--show-toplevel")
     if rc != 0:
-        return None
+        return None, out or "git rev-parse failed"
     root = out.splitlines()[0] if out else None
     if not root:
-        return None
+        return None, "git rev-parse returned nothing"
     # a repository with no commit has no tree to fork a worktree from
     rc, _ = git(root, "rev-parse", "--verify", "HEAD")
-    return root if rc == 0 else None
+    if rc != 0:
+        return None, "the repo has no commit to fork from"
+    return root, ""
 
 
 def is_writer(agent):
@@ -434,7 +437,7 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
         # the chain is visible in the parent's --json stream instead of a
         # silent stall (the exact bug this pinned down on windows CI)
         lane(label, "resolving the repo")
-        root = repo_root(os.getcwd())
+        root, why_not = repo_root(os.getcwd())
         if root:
             lane(label, "forking a worktree")
             path, branch = make_worktree(root)
@@ -444,7 +447,8 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             else:
                 lane(label, "no worktree isolation: %s" % branch)
         else:
-            lane(label, "not a git repo: the writer runs in place")
+            lane(label, "not a git repo: the writer runs in place (%s)"
+                 % first_line(why_not))
     cmd = [binary, "--json", "--no-session"]
     if tools:
         cmd += ["--tools", ",".join(tools)]
