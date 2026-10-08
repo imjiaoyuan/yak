@@ -239,6 +239,10 @@ The MCP support lives here rather than in the binary: `examples/extensions/mcp_b
 
 The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session). Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of scope: a server that fails its handshake is skipped with a dim warning on stderr and the rest stay up.
 
+## Notion in one file: the `mcp_notion.py` example
+
+Where the bridge stops — an OAuth-only server with no static token — `examples/extensions/mcp_notion.py` picks up: Notion's remote MCP endpoint, login flow included, with nothing to configure. Copy it into `~/.yak/extensions/` (executable, no `mcp.json` needed) and the first start mounts a single `notion__login` tool; the model calls it, you open the URL it prints (or the auto-opened browser tab), log into Notion, approve — the RFC 9728 discovery → RFC 7591 dynamic registration → PKCE S256 → form-encoded token exchange round runs inside the tool call, and the token lands in `token.json` beside the extension, 0600. `/reload` remounts with the full `notion__*` tool list (search, fetch, create-pages, comments, ...). A token lives ~8h; when it expires every call says so, and one more `notion__login` round fixes it.
+
 ## Running another yak: the `subagent.py` example
 
 The one example that exercises every part of this page at once: `subagent.py` mounts a `subagent` tool that spawns a real `yak` child in its own context window and hands the conclusion back as a tool result.
