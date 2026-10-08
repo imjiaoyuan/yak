@@ -884,22 +884,6 @@ def main():
             f.write("seed\n")
         git("add", "-A")
         git("commit", "-qm", "seed")
-        # probe: the same spawn shape the subagent extension uses (a python
-        # grandchild with PIPEs and a communicate deadline) — when the lane
-        # degrades to "not a git repo" on windows, this says whether plain
-        # git-from-python hangs there too or only the extension's copy does
-        probe = subprocess.run(
-            [sys.executable, "-c",
-             "import subprocess, sys, time;"
-             "t=time.time();"
-             "p=subprocess.Popen([\"git\",\"-C\",sys.argv[1],\"rev-parse\",\"--show-toplevel\"],"
-             "stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE);"
-             "out,err=p.communicate(timeout=30);"
-             "print(\"probe rc=%d in %.1fs out=%r\" % (p.returncode, time.time()-t, out[:80]))",
-             repo],
-            capture_output=True, text=True, timeout=60)
-        print("git-probe:", probe.stdout.strip(), probe.stderr.strip()[:200],
-              flush=True)
         with open(os.path.join(user, "agents", "writer.md"), "w") as f:
             f.write("---\nname: writer\ndescription: ci writer\n"
                     "tools: read, write\nmodel: mock-wtw/m-wtw\n---\n"
