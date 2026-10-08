@@ -62,6 +62,10 @@ pub struct Session {
     /// `--json`: write the task as a line-delimited JSON event stream instead
     /// of driving the terminal UI (one-shot mode only)
     pub json: bool,
+    /// `--approval allow`: answer approval prompts with allow instead of
+    /// failing closed. Meant for unattended children (a subagent has no
+    /// terminal to answer at); the interactive path never sets it.
+    pub unattended_allow: bool,
     /// the last persistence failure, kept sticky: the run continues in
     /// memory, but the banner and /status must say the transcript is not
     /// being written — a disk-full session that looks healthy is lost work
@@ -194,8 +198,12 @@ impl Session {
             if painted == 0 {
                 return;
             }
+            let _guard = crate::theme::row_lock().lock();
             let c = crate::theme::cursor();
-            eprint!("{}{}", c.up(painted), c.clear_below());
+            // home the column too: `up` alone keeps it (mid-row after a
+            // spinner frame), and a clear from column 20 would leave the
+            // first 20 cells of the block's top row on screen
+            eprint!("{}{}{}", c.up(painted), c.clear_line, c.clear_below());
             use std::io::Write;
             let _ = std::io::stderr().flush();
             lanes_painted.set(0);
@@ -204,7 +212,23 @@ impl Session {
             if rows.is_empty() {
                 return;
             }
+            let _guard = crate::theme::row_lock().lock();
             let p = crate::theme::err();
+            let c = crate::theme::cursor();
+            // the region rewrite: back up over the previous lane block (if
+            // any), wipe it and everything below (the spinner's stale frame
+            // included), then print the rows fresh. The cursor ends one row
+            // below the block — exactly where a live ticker paints its next
+            // frame, so the spinner rides below the lanes, never over them
+            let painted_before = lanes_painted.get();
+            // `up` alone keeps the column (mid-row after a spinner frame);
+            // the clear_line's \r homes it so the wipe covers the whole row
+            eprint!(
+                "{}{}{}",
+                c.up(painted_before),
+                c.clear_line,
+                c.clear_below()
+            );
             let width = crate::term::columns().max(20).saturating_sub(2);
             let mut painted = 0usize;
             for (lane, text) in rows {
@@ -304,41 +328,33 @@ impl Session {
                         let n = logged.get() + 1;
                         logged.set(n);
                         if n <= LOG_HEAD {
-                            // once output starts streaming, drop the spinner:
-                            // its redraw frame would collide with the lines
-                            // being printed on the same row
-                            if n == 1 {
-                                view.borrow_mut().spin_pause();
-                            }
+                            // the streamed line prints under the row lock —
+                            // the spinner frame waits, then redraws on the
+                            // fresh row below on its next tick, so the
+                            // tool's clock runs for the whole call
+                            let _guard = crate::theme::row_lock().lock();
                             eprint!("{}", crate::theme::cursor().clear_line);
                             crate::agent::tools::print_output_block(&line);
                         } else {
-                            // beyond the head: one line, rewritten in place
-                            let p = crate::theme::err();
-                            eprint!(
-                                "{}{}  … +{n} lines{}      ",
-                                crate::theme::cursor().clear_line,
-                                p.gray,
-                                p.reset
-                            );
-                            use std::io::Write;
-                            let _ = std::io::stderr().flush();
+                            // beyond the head the count rides the spinner's
+                            // own row as a phase swap: one row, redrawn by
+                            // its owning thread, clock and count together
+                            view.borrow_mut().relabel(&format!("+{n} lines"));
                         }
                     }
                 }
                 AgentUpdate::ToolEnd {
                     summary,
                     is_error,
-                    duration,
+                    duration: _,
                 } => {
                     {
                         erase_lanes(&lanes_painted);
                         view.borrow_mut().pause();
                         if streamed.get() && !is_error {
-                            // close the live counter line, if one is open
-                            if logged.get() > LOG_HEAD {
-                                eprintln!();
-                            }
+                            // the streamed lines are already on screen and
+                            // the spinner's own stop retracted its row:
+                            // nothing to add
                         } else if is_error {
                             let p = crate::theme::err();
                             for (i, line) in summary.lines().enumerate() {
@@ -351,15 +367,11 @@ impl Session {
                         } else {
                             crate::agent::tools::print_output_block(&summary);
                         }
-                        // the measured duration of what just
-                        // ran, on its own dim line — cheap to print, and it
-                        // separates a slow call from a hung one at a glance
-                        eprintln!(
-                            "{}  Took {}{}",
-                            crate::theme::err().dim,
-                            crate::agent::tools::format_duration(duration),
-                            crate::theme::err().reset
-                        );
+                        // the measured duration stays on the `--json`
+                        // `durationMs` event; the terminal shows the whole
+                        // call's clock in the spinner row (kept live through
+                        // streamed output as the `+N lines` phase), so a
+                        // closing `Took` line would only repeat it
                         // the next model round is awaited right after: spin,
                         // or the time-to-first-token reads as a hang
                         view.borrow_mut().resume_wait();
@@ -595,7 +607,25 @@ impl Session {
             }
             emit_event(&event_json(&u));
         };
-        let mut on_approval = |req: ApprovalRequest| approval::prompt_approval(&req);
+        // --approval allow answers the ask-list prompt instead of failing
+        // closed: a subagent child runs with stdin closed, and a hard deny
+        // would just send the model looking for unlisted ways to do the same
+        // thing. The hardcoded refusals never consult an approval prompt at
+        // all, so they still deny under this flag.
+        let unattended_allow = self.unattended_allow;
+        let mut on_approval = |req: ApprovalRequest| {
+            if unattended_allow {
+                emit_event(&serde_json::json!({
+                    "type": "approval",
+                    "tool": req.tool,
+                    "preview": req.preview,
+                    "pattern": req.pattern,
+                    "answer": "allow",
+                }));
+                return ApprovalResponse::Allow;
+            }
+            approval::prompt_approval(&req)
+        };
         // no KeyWatcher here: stdin belongs to the caller (usually a pipe),
         // and ctrl-c kills this process like any other child
         let result = run_agent(
@@ -1132,6 +1162,7 @@ mod tests {
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
+            unattended_allow: false,
             persist_error: None,
         }
     }
@@ -1296,6 +1327,7 @@ mod tests {
             // the --json driver: identical loop and persistence, without the
             // KeyWatcher (whose blocking stdin read has no terminal here)
             json: true,
+            unattended_allow: false,
             persist_error: None,
         };
         let (_outcome, _) = session
@@ -1496,6 +1528,7 @@ mod tests {
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
+            unattended_allow: false,
             persist_error: None,
         };
         let history = vec![
@@ -1570,6 +1603,7 @@ mod tests {
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
+            unattended_allow: false,
             persist_error: None,
         };
         // a store whose directory vanishes after opening: append_turn cannot

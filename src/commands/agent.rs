@@ -50,6 +50,12 @@ const SPECS: &[OptSpec] = &[
         "Largest request body to send, in bytes (32MB by default)",
         "N"
     ),
+    value_spec!(
+        "approval",
+        None,
+        "Unattended approval answer: allow (hardcoded refusals still deny)",
+        "MODE"
+    ),
     flag_spec!(
         "no-session",
         None,
@@ -275,6 +281,16 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     blacklist::Blacklist::ensure_default();
     approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
 
+    // --approval allow: the unattended answer for approval prompts (a
+    // subagent child has no terminal to answer one). Only the ask layer is
+    // answered — the hardcoded refusals in `forbidden_command` still deny,
+    // whatever this flag says
+    let unattended_allow = match args.opt(&["approval"]) {
+        None => false,
+        Some("allow") => true,
+        Some(mode) => return Err(format!("invalid --approval '{mode}' (want allow)")),
+    };
+
     // one request body's ceiling: a gateway in front of the model may refuse
     // far less than the provider documents, so the local pre-flight can be
     // tightened per run (the flag beats the config key)
@@ -344,6 +360,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         // how long the provider holds this conversation's cache entries
         // (agent.cache_ttl); None leaves its own default in place
         cache_ttl: settings.cache_ttl(),
+        unattended_allow,
         model,
         tools: Vec::new(),
         system,

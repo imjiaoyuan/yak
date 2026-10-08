@@ -540,21 +540,6 @@ pub(crate) fn args_preview(prefix: &str, args: &Value) -> String {
     )
 }
 
-/// Human duration for the `Took …` chrome line:
-/// tenths below a minute, then `Xm Ys`, then `Xh Ym Zs`.
-pub(crate) fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    let total = d.as_secs();
-    let (m, s) = (total / 60, total % 60);
-    if m < 60 {
-        return format!("{m}m {s}s");
-    }
-    format!("{}h {}m {s}s", m / 60, m % 60)
-}
-
 /// `--tools` selection: a list of plain names and `*`
 /// patterns keeps the matching tools (replacing the default set); a list of
 /// only `+name`/`-name` entries instead edits the default set in order, and

@@ -48,13 +48,13 @@ The agent runs automatically: it does whatever it needs without asking. What sto
 
 **Your blacklist file: remove or add freely.** `~/.yak/blacklist` for every project, plus `.yak/blacklist` in one repo (its lines win). This layer only *adds* refusals on top of the hardcoded ones. Ordinary `rm` is **not** refused by default: deleting files is normal work. Each line is a command word (`deploy` stops `deploy x` and `echo hi | deploy`), a whole segment (`git push --force origin main`), a glob (`mkfs*`), or `!pattern` to re-allow. The file is seeded with `rm` and `git push --force*` plus the syntax as comments; deleting it just resets it to those rules. It is a prompt, not a fence: the check is lexical, so a command a shell builds at runtime is not seen, and neither is a command an extension tool runs for itself.
 
-A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to spare that pattern for the rest of the session.
+A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to spare that pattern for the rest of the session. In a non-interactive run (`--json`) there is no terminal to answer at, so an ask fails closed and the call is denied. `--approval allow` answers every ask-list prompt with allow instead — meant for unattended children (a subagent driving a child `yak`): the hardcoded refusals above still deny whatever the flag says, and the interactive session never needs it.
 
 ## Tools
 
 Nine built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `remember`. The agent picks them itself; `--tools` narrows the set: plain names or `*` patterns (`read,grep`, `re*`) replace the default set wholesale, while `+name`/`-name` entries edit it in place (`-bash,-edit` runs with the write tools off; `+read` adds `read` back). A pattern must match a whole tool name, mixing the two forms is refused, and an unknown plain name is an error that lists what exists.
 
-Tool calls report their wall time: the session prints a dim `Took 1.5s` line under the output, and `--json` carries `durationMs` on each `tool_end`. Calls in the read-only batch share one clock: every concurrent call reports the batch's span.
+Tool calls are timed: the whole call's clock runs in the spinner row while it executes (streamed output beyond the first lines folds into that row as a `+N lines` phase, so the clock stays visible through chatty tools), and `--json` carries `durationMs` on each `tool_end`. Calls in the read-only batch share one clock: every concurrent call reports the batch's span.
 
 `update_plan` is the agent's own checklist for multi-step work: a list of steps, each `pending`, `in_progress` or `completed`, with at most one in progress. Marking a step done as it finishes keeps a long task from losing track of what is left; it touches nothing, so it never asks for approval.
 

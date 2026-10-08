@@ -225,8 +225,17 @@ def reply(obj):
 # parallel-progress display). stderr stays the fire-and-forget channel.
 _out_lock = threading.RLock()
 
+# The live-lane registry: one row per child, in start order. `run` rows are
+# repainted every second with a spinner frame and the elapsed time (the
+# quiet minutes while a child's first model round streams are the dead
+# window this exists to kill), `queued`/`done`/`fail` rows stay put.
+_LIVE = {}
+_LIVE_LOCK = threading.Lock()
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_TICK_MS = 0.9
 
-def lane(name, text):
+
+def _send_lane(name, text):
     text = text.rstrip("\n")[:160]
     with _out_lock:
         try:
@@ -234,6 +243,58 @@ def lane(name, text):
             sys.stdout.flush()
         except (OSError, ValueError):
             pass  # progress is best-effort, never worth a crash
+
+
+def _render_lane(label, frame=None):
+    with _LIVE_LOCK:
+        slot = _LIVE.get(label) or {"state": "run", "t0": time.time(), "text": ""}
+        state, text, t0 = slot["state"], slot["text"], slot["t0"]
+    if state == "queued":
+        return "· queued%s" % ((" · " + text) if text else "")
+    if state == "done":
+        return "✓ %s" % text
+    if state == "fail":
+        return "✗ %s" % text
+    spin = frame or _SPINNER[int(t0 * 7) % len(_SPINNER)]
+    return "%s %ds · %s" % (spin, max(0, int(time.time() - t0)), text)
+
+
+def lane(name, text, state="run"):
+    """Update one lane's status text; `state` moves it queued/run/done/fail.
+    A `run` update from a queued lane starts its clock."""
+    with _LIVE_LOCK:
+        slot = _LIVE.setdefault(name, {"t0": time.time(), "state": "run", "text": ""})
+        slot["text"] = text
+        if state in ("done", "fail"):
+            slot["state"] = state
+        elif state == "run":
+            if slot["state"] == "queued":
+                slot["t0"] = time.time()
+            slot["state"] = "run"
+        else:
+            slot["state"] = state
+    _send_lane(name, _render_lane(name))
+
+
+def _tick_loop(stop):
+    frame = 0
+    while not stop.wait(_TICK_MS):
+        frame += 1
+        with _LIVE_LOCK:
+            labels = [l for l, s in _LIVE.items() if s["state"] == "run"]
+        for l in labels:
+            _send_lane(l, _render_lane(l, frame=_SPINNER[frame % len(_SPINNER)]))
+
+
+def start_ticker():
+    stop = threading.Event()
+    t = threading.Thread(target=_tick_loop, args=(stop,), daemon=True)
+    t.start()
+    return stop
+
+
+def stop_ticker(stop):
+    stop.set()
 
 
 # ---------------------------------------------------------------- agents --
@@ -314,7 +375,15 @@ def yak_binary():
 
 
 # ------------------------------------------------------- worktree isolation --
-def git(repo, *args):
+def _hostname():
+    import socket
+    try:
+        return socket.gethostname() or "localhost"
+    except OSError:
+        return "localhost"
+
+
+def git(repo, *args, **kw):
     """One git invocation; returns (rc, out). Never raises and never hangs:
     a caller treats a failed git as degraded isolation, not a crash, and
     run(timeout=..) alone cannot guarantee that on Windows — after the kill
@@ -323,7 +392,13 @@ def git(repo, *args):
     rather than hanging the extension.
 
     The environment pins git to non-interactive mode: prompts, pagers and
-    color must never block a pipe-only grandchild on a CI console."""
+    color must never block a pipe-only grandchild on a CI console. The
+    global config stays in play except where it would break us: an
+    `ident`-needing write (commit) gets an explicit `-c user.*` identity so
+    it never depends on (nor reads) any gitconfig — a missing identity
+    used to fail the commit silently and the worktree was then dropped
+    with all the child's uncommitted changes gone.
+    """
     env = dict(os.environ)
     env.update({
         "TERM": "dumb",
@@ -332,12 +407,22 @@ def git(repo, *args):
         "PAGER": "cat",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
         "LC_ALL": "C",
     })
+    argv = ["git", "-C", repo] + list(args)
+    # an identity-needing write (commit) carries its own -c user.* identity:
+    # it must never depend on (nor read) any gitconfig — a missing identity
+    # used to fail the commit silently and the worktree was then dropped
+    # with all the child's uncommitted changes gone
+    if kw.get("ident"):
+        env.pop("GIT_CONFIG_GLOBAL", None)
+        argv[1:1] = [
+            "-c", "user.name=yak-subagent",
+            "-c", "user.email=yak-subagent@%s" % _hostname(),
+        ]
     try:
         p = subprocess.Popen(
-            ["git", "-C", repo] + list(args),
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
@@ -410,10 +495,10 @@ def commit_worktree(path):
         return False, ""  # no changes: nothing to merge
     if rc != 1:  # not "differs": git itself failed
         return False, "git diff failed in the worktree"
-    rc, _ = git(
+    rc, out = git(
         path, "commit", "-m", "subagent changes",
-        "--no-verify", "-q")
-    return (rc == 0), ("" if rc == 0 else "git commit failed in the worktree")
+        "--no-verify", "-q", ident=True)
+    return (rc == 0), ("" if rc == 0 else "git commit failed: %s" % first_line(out))
 
 
 def merge_back(root, branch, path):
@@ -437,7 +522,9 @@ def merge_back(root, branch, path):
 
 
 def drop_worktree(root, path):
-    git(root, "worktree", "remove", "--force", path)
+    rc, _ = git(root, "worktree", "remove", "--force", path)
+    if rc != 0:
+        note("[subagent] warning: could not remove the worktree %s; it stays on disk" % path)
 
 
 # --------------------------------------------------------------- one child --
@@ -466,6 +553,11 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             lane(label, "not a git repo: the writer runs in place (%s)"
                  % first_line(why_not))
     cmd = [binary, "--json", "--no-session"]
+    if os.environ.get("YAK_SUBAGENT_APPROVAL") == "allow":
+        # opt-in: answer the ask-list prompts with allow (hardcoded
+        # refusals still deny); without it a child hitting `rm` fails
+        # closed and the model quietly routes around the list
+        cmd += ["--approval", "allow"]
     if tools:
         cmd += ["--tools", ",".join(tools)]
     if agent.get("model"):
@@ -501,12 +593,16 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
     tail = []
 
     def pump_stderr():
+        # the child's stderr is status, not a transcript: the last line rides
+        # the lane row (a retry notice, an approval refusal), the full tail
+        # still lands in the result text when the child fails
         for line in child.stderr:
             line = line.rstrip("\n")
             if len(tail) == 8:
                 tail.pop(0)
             tail.append(line)
-            note("[%s] %s" % (label, line))
+            if line.strip():
+                lane(label, first_line(line))
 
     pump = threading.Thread(target=pump_stderr, daemon=True)
     pump.start()
@@ -584,6 +680,7 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
         verdict, detail = "none", ""
         if _abandoned.is_set():
             drop_worktree(root, path)  # interrupted: the branch survives
+            lane(label, "interrupted (branch %s kept)" % branch, state="fail")
             return False, "[%s] interrupted (branch %s kept)" % (label, branch)
         if status != 0 or error:
             # a failed writer's tree may still hold partial edits: keep the
@@ -605,28 +702,36 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             detail = why or "no changes"
             if why:
                 lane(label, "worktree not committed: %s (kept for inspection)" % first_line(why))
-        if verdict == "merged" or verdict == "none":
+        if verdict == "merged":
             drop_worktree(root, path)
-            if verdict == "merged":
-                # only after the worktree is gone can the branch be deleted
-                # (git refuses while a worktree holds it checked out)
-                git(root, "branch", "-D", branch)
+            # only after the worktree is gone can the branch be deleted
+            # (git refuses while a worktree holds it checked out)
+            git(root, "branch", "-D", branch)
+        elif verdict == "none" and not why:
+            # only a truly clean tree (no diff at all) may be dropped: a
+            # commit that failed keeps the worktree and its branch, so
+            # nothing the child wrote is ever lost to a cleanup
+            drop_worktree(root, path)
         lane(label, "worktree %s: %s" % (verdict, first_line(detail)))
     if _abandoned.is_set():
-        lane(label, "interrupted")
+        lane(label, "interrupted", state="fail")
         return False, "[%s] interrupted" % label
     if status != 0 or error:
         detail = error or ("the subagent exited with status %d" % status)
         if tail:
             detail += "\n" + "\n".join(tail)
-        lane(label, "failed: %s" % first_line(detail))
+        lane(label, "failed: %s" % first_line(detail), state="fail")
         return False, "[%s] %s" % (label, detail)
     spent = ""
     if usage:
         spent = " · %s in / %s out" % (thousands(usage.get("input")), thousands(usage.get("output")))
-    lane(label, "done: %d tool calls · %.0fs%s" % (calls, secs, spent))
+    lane(label, "done: %d tool calls · %.0fs%s" % (calls, secs, spent), state="done")
     header = "[%s] %d tool calls · %.0fs%s\n" % (label, calls, secs, spent)
-    if wt and verdict != "none":
+    if wt and verdict == "none" and why:
+        # the diff never became a commit: say where it still lives
+        header += "uncommitted changes kept in worktree %s (branch %s): %s\n" % (
+            path, branch, first_line(why))
+    if wt and verdict not in ("none",):
         header += "merge %s: %s\n" % (verdict, detail)
     return True, header + (final if final is not None else "(no answer)")
 
@@ -724,10 +829,12 @@ def run_batch(binary, agents, steps, mode, depth, isolate=False):
     # merge back into the parent repo is serialized (git merges are not
     # concurrent), so the lock wraps merge_back alone, never the child run
     merge_gate = threading.Lock()
+    ticker = start_ticker()
 
     def one(index, step):
         label = step["agent"] if mode == "single" else "%d/%d %s" % (index + 1, len(steps), step["agent"])
         writer = isolate and is_writer(agents[step["agent"]])
+        lane(label, step["task"].splitlines()[0][:80] if step["task"] else "", state="queued")
         with gate:
             try:
                 results[index] = run_child(
@@ -741,6 +848,9 @@ def run_batch(binary, agents, steps, mode, depth, isolate=False):
         t.start()
     for t in threads:
         t.join()
+    stop_ticker(ticker)
+    with _LIVE_LOCK:
+        _LIVE.clear()
     blocks, failed = [], []
     for step, result in zip(steps, results):
         ok, text = result or (False, "the subagent never ran")
@@ -755,6 +865,7 @@ def run_batch(binary, agents, steps, mode, depth, isolate=False):
 
 def run_chain(binary, agents, steps, depth, isolate=False):
     blocks, prior = [], None
+    ticker = start_ticker()
     for index, step in enumerate(steps):
         if _abandoned.is_set():
             break
@@ -765,9 +876,13 @@ def run_chain(binary, agents, steps, depth, isolate=False):
         ok, text = run_child(binary, agents[step["agent"]], prompt, label, depth,
                              isolate=isolate and is_writer(agents[step["agent"]]))
         if not ok:
+            stop_ticker(ticker)
             return "error: %s\n\n%s" % (text, clamp("\n\n".join(blocks)))
         blocks.append(text)
         prior = text
+    stop_ticker(ticker)
+    with _LIVE_LOCK:
+        _LIVE.clear()
     return clamp("\n\n".join(blocks[-1:]))
 
 

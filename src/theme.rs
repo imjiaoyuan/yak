@@ -229,6 +229,17 @@ static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
     }
 });
 
+/// The bottom-row handshake: the spinner thread redraws the status row
+/// every tick while chrome output (streamed tool lines, lane repaints)
+/// rewrites rows around it. Both sides take this lock for the span of one
+/// screen write, so a spinner frame can never land inside a half-written
+/// block. Never hold it across a ticker stop — `stop` joins the spinner
+/// thread, which may itself be waiting here.
+pub fn row_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
 /// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. the
 /// `osc8_hyperlink` shape. The URI is sanitized first — control characters
 /// (including the terminators themselves) are dropped so a crafted URL

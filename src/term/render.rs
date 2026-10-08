@@ -414,7 +414,7 @@ impl TaskView {
         self.renderer.lock().unwrap().finish_stream();
     }
 
-    fn relabel(&mut self, label: &str) {
+    pub(crate) fn relabel(&mut self, label: &str) {
         // hot-swap the label when a ticker is already running; only a true
         // restart after a pause may reset the clock
         if let Some(ticker) = &self.ticker {
@@ -428,13 +428,6 @@ impl TaskView {
         if self.live && !self.renderer.lock().unwrap().has_dangling() {
             self.ticker = Some(crate::term::ticker::Ticker::start(label));
         }
-    }
-
-    /// Stop the spinner: once a tool's output starts streaming, the spinner
-    /// frame would collide with the lines being printed on the same row, so
-    /// it is dropped for the remainder of the tool.
-    pub fn spin_pause(&mut self) {
-        self.stop_ticker();
     }
 
     /// One trace line per task, printed before whatever follows the thinking.
