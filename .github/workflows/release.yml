@@ -16,14 +16,10 @@ jobs:
           PREV=$(git describe --tags --abbrev=0 '${{ github.ref_name }}^' 2>/dev/null || true)
           if [ -n "$PREV" ]; then
             RANGE="$PREV..${{ github.ref_name }}"
-            HEADER="Commits since $PREV:"
           else
             RANGE="${{ github.ref_name }}"
-            HEADER="Commits:"
           fi
           {
-            echo "$HEADER"
-            echo
             git log --format='- %s' "$RANGE" | grep -vEi '^- (bump( the)? version( to)?|release) v?[0-9]' || true
             echo
             echo '**Install / update:**'

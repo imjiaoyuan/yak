@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
-"""mcp_notion — Notion's MCP server as yak tools, OAuth login included.
+"""mcp_notion — Notion's MCP server as yak tools, login run by the human.
 
 Notion's remote MCP endpoint (https://mcp.notion.com/mcp) is
-streamable-HTTP and OAuth-only: the docs say "copy this configuration
-and complete the OAuth flow when prompted" —
+streamable-HTTP and OAuth-only. This file is two programs:
 
-    {"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}
+  python3 mcp_notion.py login     # you, in a terminal: the browser round
+  python3 mcp_notion.py status    # is there a token, how long left
+  (no arguments)                  # the yak host: the resident protocol
 
-but a resident extension has no browser prompt. This one is the whole
-journey in a single file: it mounts every tool Notion's server lists
-(`notion__notion-search`, `notion__notion-fetch`, ...) and runs the
-OAuth flow itself, on demand, through a `notion__login` tool.
-
-First start (no token cached): the extension mounts only `notion__login`.
-The model (or you, via a manual `notion__login {}` call) triggers it:
+Login is deliberately manual. No tool call ever opens a browser: the
+extension mounts tools only from what is already on disk, so startup is
+network-free and cannot blow the host's 10s window. The flow when you do
+run it:
 
   1. POST the MCP endpoint once unauthenticated: the 401's
      WWW-Authenticate carries the RFC 9728 resource_metadata pointer.
   2. Register a throwaway public client at Notion's /register (RFC 7591),
      redirect http://localhost:8917/callback, no client secret.
-  3. Print the authorize URL into the tool log (stderr streams to the
-     terminal live) and open it in the default browser; log in, approve.
+  3. Print the authorize URL and open it in the default browser; you log
+     into Notion and approve.
   4. The one-shot local listener catches the redirect, exchanges code +
      PKCE verifier (S256, form-encoded — Notion 400s a JSON token
      request), and the tokens land in `token.json` beside this file,
-     0600. That cache is the whole persistence: re-login overwrites it.
-  5. `/reload` (or the next yak start) remounts with the full tool list.
+     0600. The tool list lands in `tools.json` beside it.
+  5. `/reload` (or the next yak start) mounts the tools from disk.
 
-The access token lives ~8h. When it expires the server starts
-answering 401 and this extension says so in every tool result: one
-`notion__login` round refreshes it (a new token, not a refresh-token
-grant — the flow is the same three clicks).
+The access token lives ~8h. When it expires every tool call says so;
+`python3 mcp_notion.py login` again, then `/reload`. That cache pair is
+the whole persistence: re-login overwrites both.
 
 Everything is stdlib on purpose (the yak constraint), every HTTP round
 retries transient TLS blips (Cloudflare cuts a handshake now and then),
@@ -59,9 +56,16 @@ UA = "yak-mcp-notion/1 (https://github.com/imjiaoyuan/yak)"
 HTTP_TRIES = 3           # transient TLS blips get retried, verdicts do not
 INIT_TIMEOUT = 10.0
 CALL_TIMEOUT = 60.0
+MOUNT_BUDGET = 7.0       # startup answers initialize inside the host's 10s
 AUTH_WAIT = 300.0        # seconds the login listener waits for the browser
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(HERE, "token.json")
+TOOLS_CACHE = os.path.join(HERE, "tools.json")
+INIT_PARAMS = {
+    "protocolVersion": PROTOCOL_VERSION,
+    "capabilities": {},
+    "clientInfo": {"name": "yak-mcp-notion", "version": "1"},
+}
 
 
 def log(msg):
@@ -70,7 +74,7 @@ def log(msg):
     sys.stderr.flush()
 
 
-# -- the token cache --------------------------------------------------------
+# -- caches ------------------------------------------------------------------
 
 def load_token():
     """The cached access token, or None. A corrupt cache is deleted loudly
@@ -91,12 +95,46 @@ def load_token():
         return None
 
 
-def save_token(doc):
-    tmp = TOKEN_FILE + ".tmp"
+def token_ttl():
+    """Seconds left on the cached token, or None when unknown."""
+    try:
+        with open(TOKEN_FILE, encoding="utf-8") as f:
+            doc = json.load(f)
+        return doc.get("expires_in", 0) - (time.time() - doc.get("obtained_at", 0))
+    except (OSError, ValueError):
+        return None
+
+
+def _save(path, doc):
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(doc, f)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, TOKEN_FILE)
+    os.replace(tmp, path)
+
+
+def load_cached_tools():
+    """The advertised tool list, cached at login time. Startup answers the
+    host's initialize from disk and never waits on the network; a corrupt
+    cache is deleted loudly and rebuilt by the next login or bounded mount."""
+    try:
+        with open(TOOLS_CACHE, encoding="utf-8") as f:
+            doc = json.load(f)
+        tools = doc.get("tools")
+        return tools if isinstance(tools, list) and tools else None
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        log(f"tool cache unreadable ({e}); removing it")
+        try:
+            os.unlink(TOOLS_CACHE)
+        except OSError:
+            pass
+        return None
+
+
+def save_cached_tools(tools):
+    _save(TOOLS_CACHE, {"tools": tools, "cached_at": time.time()})
 
 
 # -- oauth: discovery, registration, the browser round ----------------------
@@ -173,12 +211,13 @@ def register_client(auth_meta):
 
 
 def run_login():
-    """The whole browser round. Returns a human-facing summary string."""
+    """The whole browser round, for a human at the terminal. Returns a
+    summary string."""
     auth_meta = discover_auth_server()
-    log(f"authorization server: {auth_meta.get('issuer', 'unknown')}")
+    print(f"authorization server: {auth_meta.get('issuer', 'unknown')}")
     client = register_client(auth_meta)
     redirect_uri = client["redirect_uris"][0]
-    log(f"registered client {client['client_id']}")
+    print(f"registered client {client['client_id']}")
 
     state = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)
@@ -223,18 +262,23 @@ def run_login():
     server = http.server.HTTPServer(("127.0.0.1", CALLBACK_PORT), CB)
     threading.Thread(target=server.handle_request, daemon=True).start()
 
-    log("open this URL in a browser, log into Notion, approve:")
-    sys.stderr.write(f"\n  {url}\n\n")
-    sys.stderr.flush()
+    print("\n  open this URL in a browser, log into Notion, approve:\n")
+    print(f"  {url}\n")
     import webbrowser
     try:
         webbrowser.open(url)
+        print("  (opened in your default browser)\n")
     except Exception:
         pass  # headless: the printed URL is the manual path
 
     deadline = time.monotonic() + AUTH_WAIT
     while not got and time.monotonic() < deadline:
+        remaining = int(deadline - time.monotonic())
+        if remaining % 10 == 0:
+            print(f"\r  waiting for approval ... {remaining:3d}s ", end="",
+                  flush=True)
         time.sleep(0.2)
+    print()
     server.server_close()
     if "error" in got:
         return f"authorization failed: {got.get('error')}"
@@ -252,11 +296,33 @@ def run_login():
                              "code_verifier": verifier})
     if not tokens.get("access_token"):
         raise RuntimeError(f"token response held no access_token: {tokens}")
-    save_token(tokens)
+    tokens["obtained_at"] = time.time()
+    _save(TOKEN_FILE, tokens)
+
+    # cache the tool list while the human is watching, so the yak host
+    # starts from disk and never touches the network
+    session = open_session(tokens["access_token"])
+    tools, _ = mount(session)
+    save_cached_tools(tools)
     ttl = tokens.get("expires_in")
     return ("login OK — token cached ("
             + (f"expires in {ttl}s" if ttl else "unknown ttl")
-            + "). /reload now mounts the full tool list.")
+            + f"), {len(tools)} tools cached. Run /reload in yak.")
+
+
+def cmd_status():
+    token = load_token()
+    if not token:
+        print("not logged in — run: python3 mcp_notion.py login")
+        return 1
+    ttl = token_ttl()
+    tools = load_cached_tools()
+    left = f"{int(ttl)}s left" if ttl is not None and ttl > 0 else "expired"
+    print(f"logged in ({left}), "
+          f"{len(tools) if tools else 0} tools cached")
+    if ttl is not None and ttl <= 0:
+        print("re-login: python3 mcp_notion.py login")
+    return 0
 
 
 # -- the mcp client ----------------------------------------------------------
@@ -334,22 +400,15 @@ class McpSession:
         return reply.get("result")
 
 
-def text_of(result):
-    """MCP tool content → plain text, plus a Notion citation url if any."""
-    parts = []
-    for c in (result or {}).get("content") or []:
-        if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
-            parts.append(c["text"])
-    return "\n".join(parts) if parts else json.dumps(result, ensure_ascii=False)
+def open_session(token, timeout=INIT_TIMEOUT):
+    """One MCP initialize handshake; the session id rides every later post."""
+    s = McpSession(token)
+    s.request("initialize", INIT_PARAMS, timeout)
+    return s
 
 
 def mount(session):
-    """initialize + tools/list → the resident tool list for the host."""
-    session.request("initialize", {
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {},
-        "clientInfo": {"name": "yak-mcp-notion", "version": "1"},
-    }, INIT_TIMEOUT)
+    """tools/list → the resident tool list for the host."""
     listing = session.request("tools/list", {}, INIT_TIMEOUT)
     tools = []
     for t in listing.get("tools") or []:
@@ -369,28 +428,48 @@ def mount(session):
     return tools, session
 
 
+def mount_now(token, budget=MOUNT_BUDGET):
+    """The mount handshake in a daemon thread under a hard join: whatever
+    the network does, startup answers the host inside its window."""
+    box = {}
+
+    def run():
+        try:
+            box["r"] = mount(open_session(token))
+        except Exception as e:  # noqa: BLE001 - surfaced through the box
+            box["e"] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(budget)
+    if "r" in box:
+        return box["r"]
+    if "e" in box:
+        raise box["e"]
+    raise TimeoutError(f"handshake exceeded {budget:.0f}s")
+
+
 # -- the resident protocol loop ----------------------------------------------
 
-def main():
+def serve():
     token = load_token()
-    login_only = {"name": "notion__login", "description":
-                  "Run the Notion OAuth login: prints the authorize URL, "
-                  "waits for the browser approval, caches the token. "
-                  "Call with no arguments when tools report 'not logged in'.",
-                  "parameters": {"type": "object", "properties": {},
-                                 "additionalProperties": False},
-                  "tier": "exec"}
+    tools, session = [], None
     if not token:
-        tools, session = [login_only], None
+        log("not logged in — run: python3 "
+            f"{os.path.abspath(__file__)} login")
     else:
-        session = McpSession(token)
-        try:
-            tools, session = mount(session)
-        except Exception as e:
-            # a dead/expired token still mounts the login tool (that is the
-            # fix for it); the failure is loud, not papered over
-            log(f"notion tools not mounted ({e}); only notion__login is up")
-            tools, session = [login_only], None
+        cached = load_cached_tools()
+        if cached:
+            # advertised from disk: startup never touches the network, the
+            # MCP session opens lazily on the first tool call
+            tools = cached
+        else:
+            try:
+                tools, session = mount_now(token)
+                save_cached_tools(tools)
+            except Exception as e:
+                # a slow handshake costs the tools until the next login or
+                # restart; the failure is loud, not papered over
+                log(f"tools not mounted ({e}) — re-login or retry /reload")
 
     def reply(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
@@ -413,32 +492,57 @@ def main():
                 reply({"id": mid, "result": None})
             continue
         tool = msg.get("name") or ""
-
-        if tool == "notion__login":
-            try:
-                reply({"id": mid, "result": run_login()})
-            except Exception as e:
-                reply({"id": mid, "error": f"login failed: {e}"})
-            continue
-        if session is None:
+        if token is None:
             reply({"id": mid, "error":
-                   "not logged into Notion — call notion__login first "
-                   "(no arguments), then /reload"})
+                   "not logged into Notion — run: python3 "
+                   f"{os.path.abspath(__file__)} login, then /reload"})
             continue
         mcp_name = tool[len("notion__"):] if tool.startswith("notion__") else tool
         try:
+            if session is None:
+                # the session opens here, under this call's deadline instead
+                # of the startup one
+                session = open_session(token)
             result = session.request(
                 "tools/call", {"name": mcp_name,
                                "arguments": msg.get("args") or {}},
                 CALL_TIMEOUT)
             reply({"id": mid, "result": text_of(result)})
         except urllib.error.HTTPError as e:
-            hint = (" — token expired? run notion__login, then /reload"
+            hint = (" — token expired? python3 mcp_notion.py login, /reload"
                     if e.code == 401 else "")
             reply({"id": mid, "error": f"notion http {e.code}{hint}"})
         except Exception as e:
             reply({"id": mid, "error": str(e)})
 
 
+def text_of(result):
+    """MCP tool content → plain text."""
+    parts = []
+    for c in (result or {}).get("content") or []:
+        if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+            parts.append(c["text"])
+    return "\n".join(parts) if parts else json.dumps(result, ensure_ascii=False)
+
+
+def main(argv):
+    if len(argv) > 1:
+        if argv[1] == "login":
+            try:
+                print(run_login())
+                return 0
+            except KeyboardInterrupt:
+                print("\naborted")
+                return 1
+            except Exception as e:  # noqa: BLE001 - a CLI names its failure
+                print(f"login failed: {e}", file=sys.stderr)
+                return 1
+        if argv[1] == "status":
+            return cmd_status()
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    serve()
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv) or 0)

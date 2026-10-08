@@ -241,7 +241,14 @@ The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON bod
 
 ## Notion in one file: the `mcp_notion.py` example
 
-Where the bridge stops — an OAuth-only server with no static token — `examples/extensions/mcp_notion.py` picks up: Notion's remote MCP endpoint, login flow included, with nothing to configure. Copy it into `~/.yak/extensions/` (executable, no `mcp.json` needed) and the first start mounts a single `notion__login` tool; the model calls it, you open the URL it prints (or the auto-opened browser tab), log into Notion, approve — the RFC 9728 discovery → RFC 7591 dynamic registration → PKCE S256 → form-encoded token exchange round runs inside the tool call, and the token lands in `token.json` beside the extension, 0600. `/reload` remounts with the full `notion__*` tool list (search, fetch, create-pages, comments, ...). A token lives ~8h; when it expires every call says so, and one more `notion__login` round fixes it.
+Where the bridge stops — an OAuth-only server with no static token — `examples/extensions/mcp_notion.py` picks up: Notion's remote MCP endpoint, with the login run by the human instead of the agent. Copy it into `~/.yak/extensions/` (executable, no `mcp.json` needed) and log in once from a terminal:
+
+```bash
+python3 ~/.yak/extensions/mcp_notion login    # prints the URL, opens the browser
+python3 ~/.yak/extensions/mcp_notion status   # token left? tools cached?
+```
+
+No tool call ever opens a browser: the extension answers the host's `initialize` purely from disk (`token.json` + `tools.json` beside the file, 0600, both written by `login`), so startup is network-free and cannot blow the host's 10s window. With a token cached it mounts the full `notion__*` tool list (search, fetch, create-pages, comments, ...); without one it mounts nothing and every yak start says how to log in. The MCP session itself opens lazily on the first tool call. A token lives ~8h; when it expires every call says so, and another `login` + `/reload` fixes it. The login round is the same spec chain (RFC 9728 discovery → RFC 7591 dynamic registration → PKCE S256 → form-encoded exchange) the bridge declines to run.
 
 ## Running another yak: the `subagent.py` example
 
