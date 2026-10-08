@@ -320,12 +320,28 @@ def git(repo, *args):
     run(timeout=..) alone cannot guarantee that on Windows — after the kill
     it still waits for the pipes to close, and whatever holds them can hold
     the thread forever. The second, hard deadline leaks the git process
-    rather than hanging the extension."""
+    rather than hanging the extension.
+
+    The environment pins git to non-interactive mode: prompts, pagers and
+    color must never block a pipe-only grandchild on a CI console."""
+    env = dict(os.environ)
+    env.update({
+        "TERM": "dumb",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "PAGER": "cat",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "LC_ALL": "C",
+    })
     try:
         p = subprocess.Popen(
             ["git", "-C", repo] + list(args),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
+            env=env,
         )
         try:
             out, err = p.communicate(timeout=30)
