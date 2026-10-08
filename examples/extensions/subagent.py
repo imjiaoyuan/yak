@@ -347,16 +347,20 @@ def is_writer(agent):
 
 
 def make_worktree(root):
-    """One worktree on its own branch: returns (path, branch) or (None, why)."""
+    """One worktree on its own branch: returns (path, branch) or (None, why).
+    The whole add runs under the lock: concurrent `worktree add` on one repo
+    races inside .git/worktrees (and its locks behave differently on Windows
+    filesystems), so forking trees serializes — the child runs, which is the
+    slow part, still overlap."""
     with _WORKTREE_LOCK:
         _WORKTREE_SEQ[0] += 1
         n = _WORKTREE_SEQ[0]
-    base = os.path.join(
-        tempfile.gettempdir(), "yak-wt-%d" % os.getpid())
-    path = os.path.join(base, "wt-%d" % n)
-    branch = "yak/subagent-%d-%d" % (os.getpid(), n)
-    os.makedirs(base, exist_ok=True)
-    rc, out = git(root, "worktree", "add", path, "-b", branch)
+        base = os.path.join(
+            tempfile.gettempdir(), "yak-wt-%d" % os.getpid())
+        path = os.path.join(base, "wt-%d" % n)
+        branch = "yak/subagent-%d-%d" % (os.getpid(), n)
+        os.makedirs(base, exist_ok=True)
+        rc, out = git(root, "worktree", "add", path, "-b", branch)
     if rc != 0:
         return None, "git worktree add failed: %s" % (out.splitlines()[-1] if out else path)
     return path, branch
@@ -446,6 +450,10 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # the child yak writes UTF-8 whatever the platform default is;
+            # the default locale decoder (cp1252 on Windows) dies on a byte
+            # it has no glyph for, which would silently kill this reader
+            encoding="utf-8", errors="replace",
             env=env,
             cwd=cwd,
         )
@@ -472,6 +480,26 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
 
     started = time.time()
     final, error, calls, usage = None, None, 0, None
+
+    # the deadline covers the stream loop too, not just the final wait:
+    # `for line in child.stdout` blocks on readline with no bound, so a
+    # child that stalls (never exits, never closes stdout) would hang the
+    # call past every timeout. The timer kills on schedule; the loop then
+    # drains to EOF and the wait below reports the kill.
+    def deadline_kill():
+        time.sleep(CHILD_TIMEOUT)
+        with _children_lock:
+            gone = child not in _children
+        if not gone and child.poll() is None:
+            note("[%s] timed out after %ds: killing the child" % (label, CHILD_TIMEOUT))
+            try:
+                child.kill()
+            except OSError:
+                pass
+
+    watchdog = threading.Timer(CHILD_TIMEOUT, deadline_kill)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         for line in child.stdout:
             line = line.strip()
@@ -508,6 +536,7 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             error = "timed out after %ds" % CHILD_TIMEOUT
         pump.join(timeout=1)
     finally:
+        watchdog.cancel()
         with _children_lock:
             _children.discard(child)
 
