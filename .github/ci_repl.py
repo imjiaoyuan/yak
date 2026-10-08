@@ -16,6 +16,7 @@ import json
 import os
 import pty
 import re
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -71,6 +72,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     c = m.get("content")
                     seen["system"] = c if isinstance(c, str) else json.dumps(c)
                     break
+        if body.get("model") == "m-ckpt":
+            # checkpoint lane: every round writes hello.txt, its content
+            # naming the round, so /tree's restore has real bytes to undo.
+            # the answer turn is recognized by the conversation ending on
+            # this round's tool result (earlier rounds' tool messages stay
+            # in the history, so "any tool message" would misfire); the
+            # volatile <context> note rides last and is skipped first
+            hist = list(msgs)
+            if hist and hist[-1].get("role") == "user" \
+                    and isinstance(hist[-1].get("content"), str) \
+                    and hist[-1]["content"].startswith("<context>"):
+                hist = hist[:-1]
+            if hist and hist[-1].get("role") == "tool":
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "checkpoint round done"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                prompt = ""
+                for m in reversed(hist):
+                    c = m.get("content")
+                    if m.get("role") == "user" and isinstance(c, str) \
+                            and not c.startswith("<context>"):
+                        prompt = c
+                        break
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_ckpt", "type": "function",
+                         "function": {"name": "write",
+                                      "arguments": json.dumps({
+                                          "path": "hello.txt",
+                                          "content": f"written during: {prompt}\n"})}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for chunk in chunks:
+                self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -195,6 +237,12 @@ def main():
                         "base_url": f"http://127.0.0.1:{PORT}/v1",
                         "api_key": "sk-x",
                         "models": ["m-a"],
+                    },
+                    "mock-ckpt": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-x",
+                        "models": ["m-ckpt"],
                     }
                 },
                 "models": {"default": "mock/m-a"},
@@ -426,14 +474,34 @@ def main():
     # resuming the same thread: two rounds, a /tree jump back to the first
     # turn, then a third. the file must hold the abandoned sibling, the
     # new branch's line must carry the jumped-to turn as its parent, and
-    # the wire history after the jump must be the branch's chain only
+    # the wire history after the jump must be the branch's chain only.
+    # the model behind this child is m-ckpt: every round writes hello.txt
+    # with the round's prompt in it, and the checkpoint extension (the
+    # shipped example, installed into the probe user dir with its shadow
+    # root pinned under /tmp) must restore the pre-jump bytes when the
+    # jump lands — the write lane and the tree lane in one child
     OUT.clear()
     seen.clear()
     OUT_DONE.clear()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ckpt = os.path.join(user, "extensions", "workspace_checkpoint.py")
+    os.makedirs(os.path.join(user, "extensions"), exist_ok=True)
+    with open(os.path.join(here, "examples", "extensions",
+                           "workspace_checkpoint.py")) as fsrc, open(ckpt, "w") as fdst:
+        fdst.write(fsrc.read())
+    os.chmod(ckpt, 0o755)
+    ckpt_shadow = tempfile.mkdtemp()
+    tree_env = dict(env, YAK_CHECKPOINT_DIR=ckpt_shadow)
+    # the resumed root turn predates this lane; its own snapshot is whatever
+    # hello.txt held before the child's first round rewrites it
+    hello = os.path.join(work, "hello.txt")
+    with open(hello, "w") as f:
+        f.write("from smoke\n")
     pid2, fd2 = pty.fork()
     if pid2 == 0:
         os.chdir(work)
-        os.execve(binary, [binary, "--session", "01localresumeprobe0000000"], env)
+        os.execve(binary, [binary, "--session", "01localresumeprobe0000000",
+                           "-m", "mock-ckpt/m-ckpt"], tree_env)
     fcntl.ioctl(fd2, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     threading.Thread(target=drain_reader, args=(fd2,), daemon=True).start()
     read_until(fd2, rb"local session marker")
@@ -449,9 +517,14 @@ def main():
     for label in (b"second round on the tree", b"third round on the tree"):
         time.sleep(0.2)
         send(fd2, label + b"\r")
-        read_until(fd2, rb"ok from mock")
+        read_until(fd2, rb"checkpoint round done")
         read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
         OUT.clear()
+    # the checkpoint extension must have snapshotted before each round; the
+    # mock writes are real, so the file now holds the newest round's bytes
+    with open(hello) as f:
+        assert f.read() == "written during: third round on the tree\n", \
+            f"m-ckpt never wrote the round: {open(hello).read()!r}"
     time.sleep(0.2)
     send(fd2, b"/tree\r")
     read_until(fd2, rb"jump to turn")
@@ -460,28 +533,57 @@ def main():
     send(fd2, b"\r")
     read_until(fd2, rb"jumped to an earlier turn")
     read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    # the checkpoint restore: two dropped rounds each rewrote hello.txt, so
+    # by the time the prompt returns the workspace must hold the bytes the
+    # first dropped round found — the pre-lane "from smoke" state, not any
+    # dropped round's write. session_before_tree is fire-and-forget: the
+    # event was sent, but the extension's writes may still be in flight, so
+    # the check holds a short window rather than racing the subprocess
+    restored = None
+    for _ in range(50):
+        with open(hello) as f:
+            restored = f.read()
+        if restored == "from smoke\n":
+            break
+        time.sleep(0.1)
+    assert restored == "from smoke\n", \
+        f"the checkpoint extension did not restore the pre-jump workspace: {restored!r}"
+    # the shadow root only ever holds this project's snapshots, each named
+    # by a ULID-ordering stamp
+    shadow_project = os.listdir(ckpt_shadow)[0]
+    assert all(len(s) == 10 for s in
+               os.listdir(os.path.join(ckpt_shadow, shadow_project))), \
+        "snapshot dirs must be stamp-named"
     OUT.clear()
     time.sleep(0.2)
     send(fd2, b"after the jump\r")
-    read_until(fd2, rb"ok from mock")
+    read_until(fd2, rb"checkpoint round done")
     # the rebuilt wire history: the abandoned siblings must be gone and
     # the root chain intact
     wire = json.dumps(seen.get("last_msgs") or [])
     for gone in ("second round on the tree", "third round on the tree"):
         assert gone not in wire, "the abandoned branch reached the wire"
     assert "local session marker" in wire, "the root left the rebuilt history"
-    # the thread file: four lines (root + two abandoned + the branch), the
-    # branch's line carrying the jumped-to turn's id as its parent
+    # the thread file: five lines (the root, two tool rounds of two
+    # lines each… the mock's rounds are tool-then-answer, so each user
+    # turn persists two lines, plus the branch's own round) — assert the
+    # shape by parent edges instead of a brittle count
     lines_f = [json.loads(l) for l in
                open(os.path.join(user, "threads",
                                  "01localresumeprobe0000000.jsonl"))
                if l.strip()]
-    assert len(lines_f) == 4, \
+    assert len(lines_f) == 7, \
         f"the file must hold both branches: {len(lines_f)} lines"
-    assert all(t.get("parent") is None for t in lines_f[:3]), \
+    assert all(t.get("parent") is None for t in lines_f[:-2]), \
         f"pre-jump lines carry no edge: {[t.get('id') for t in lines_f]}"
-    assert lines_f[3].get("parent") == lines_f[0]["id"], \
-        f"the jump's round branches off the first turn: {lines_f[3].get('parent')!r}"
+    # the jump's rounds branch off the root: the first post-jump line
+    # carries the root's id as its parent
+    assert lines_f[-2].get("parent") == lines_f[0]["id"], \
+        f"the jump's round branches off the first turn: {lines_f[-2].get('parent')!r}"
+    # and the branch's own round wrote through the restored workspace
+    with open(hello) as f:
+        assert f.read() == "written during: after the jump\n", \
+            "the post-jump round never wrote the file"
     send(fd2, b"\x03")
     time.sleep(0.2)
     send(fd2, b"\x03")

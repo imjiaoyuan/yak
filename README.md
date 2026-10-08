@@ -64,6 +64,7 @@ The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.
 - [Tools](docs/usage.md#tools): the nine built-ins and how they behave
 - [Attachments](docs/usage.md#attachments): files, URLs, stdin, clipboard pastes
 - [Sessions](docs/usage.md#sessions): resume, fork, export, `--no-session`
+- [Session tree](docs/usage.md#session-tree): `/tree` jumps that branch instead of truncating
 - [Skills](docs/usage.md#skills) and [prompt templates](docs/usage.md#prompt-templates)
 - [Providers and models](docs/usage.md#providers-and-models): `/login`, hand-edited config, aliases
 - [Tuning the agent](docs/usage.md#tuning-the-agent): tool policies, request caps, cache TTL, compaction

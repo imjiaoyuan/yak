@@ -43,7 +43,7 @@ cargo clippy --all-targets   # keep at zero warnings
   ```
 
 - End-to-end: a python `http.server` mock returning OpenAI-style SSE on `127.0.0.1` (or Anthropic-style `event:`-framed SSE for `/v1/messages`) plus a `config.json` pointing at it exercises any full path. Start server and client in the same script; backgrounded servers do not survive between tool calls, and pass `< /dev/null`: the CLI reads piped stdin as prompt text by design. `.github/ci_e2e.py` is the working instance; run it locally against a fresh build with `python .github/ci_e2e.py target/debug/yak`.
-- CI (`.github/workflows/ci.yml`) runs test → release build → `ci_e2e.py` → `ci_repl.py` on ubuntu, macOS and windows-latest. The two Python scripts are CI-local harnesses, not shipped code; `ci_repl.py` covers the interactive pty paths (multiline keys, kitty CSI-u folding, `!` tab completion, the ctrl+g editor round-trip) and skips itself on Windows, so run it on Unix to exercise the terminal.
+- CI (`.github/workflows/ci.yml`) runs test → release build → `ci_e2e.py` → `ci_repl.py` on ubuntu, macOS and windows-latest. The two Python scripts are CI-local harnesses, not shipped code; `ci_repl.py` covers the interactive pty paths (multiline keys, kitty CSI-u folding, `!` tab completion, the ctrl+g editor round-trip, and a `/tree` branch round-trip whose model rounds write real files so the `workspace_checkpoint.py` example's restore is exercised end to end) and skips itself on Windows, so run it on Unix to exercise the terminal.
 - `README.md` embeds every command's full `-h` output verbatim. When flags or help text change, refresh the matching block there too and keep it byte-identical (`tests/readme_help.rs` enforces it).
 
 ### Environment overrides
