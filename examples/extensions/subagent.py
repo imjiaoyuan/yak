@@ -315,16 +315,29 @@ def yak_binary():
 
 # ------------------------------------------------------- worktree isolation --
 def git(repo, *args):
-    """One git invocation; returns (rc, out). Never raises: every caller
-    treats a failed git as degraded isolation, not a crash."""
+    """One git invocation; returns (rc, out). Never raises and never hangs:
+    a caller treats a failed git as degraded isolation, not a crash, and
+    run(timeout=..) alone cannot guarantee that on Windows — after the kill
+    it still waits for the pipes to close, and whatever holds them can hold
+    the thread forever. The second, hard deadline leaks the git process
+    rather than hanging the extension."""
     try:
-        p = subprocess.run(
+        p = subprocess.Popen(
             ["git", "-C", repo] + list(args),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
         )
-        return p.returncode, (p.stdout + p.stderr).strip()
-    except (OSError, subprocess.TimeoutExpired) as e:
+        try:
+            out, err = p.communicate(timeout=30)
+            return p.returncode, (out + err).strip()
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # leaked on purpose: this thread must not hang with it
+            return 1, "git timed out after 30s"
+    except OSError as e:
         return 1, str(e)
 
 
@@ -417,8 +430,13 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
     cwd = None
     wt = None  # (path, branch, root) when isolated
     if isolate:
+        # trace frames: a lane before each git stage, so a hang anywhere in
+        # the chain is visible in the parent's --json stream instead of a
+        # silent stall (the exact bug this pinned down on windows CI)
+        lane(label, "resolving the repo")
         root = repo_root(os.getcwd())
         if root:
+            lane(label, "forking a worktree")
             path, branch = make_worktree(root)
             if path:
                 wt = (path, branch, root)
