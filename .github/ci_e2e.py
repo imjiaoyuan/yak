@@ -859,6 +859,19 @@ def main():
         ends = [e.get("summary", "") for e in summaries
                 if e.get("type") == "tool_end"]
         assert len(ends) == 1, f"expected one subagent call: {len(ends)}"
+        # lane frames: the extension streams one rewritten status row per
+        # parallel writer while the call runs; the --json stream surfaces
+        # each as a `lane` event (the terminal path renders them in place)
+        lane_events = [(e.get("lane", ""), e.get("text", "")) for e in summaries
+                       if e.get("type") == "lane"]
+        lanes_seen = {name for name, _ in lane_events}
+        assert len(lanes_seen) == 2, \
+            f"two parallel writers must own two lanes: {lane_events!r}"
+        assert any("starting" in t for _, t in lane_events), \
+            f"a lane must report the spawn: {lane_events!r}"
+        assert any("worktree merged" in t or "worktree conflict" in t
+                   for _, t in lane_events), \
+            f"a lane must report the merge verdict: {lane_events!r}"
         result = ends[0]
         assert "merge merged" in result and "merge conflict" in result, \
             f"one clean merge and one conflict must be reported: {result[:500]!r}"

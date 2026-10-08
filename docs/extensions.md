@@ -139,6 +139,22 @@ No reply is expected (the request is already abandoned; answer if you like, the 
 
 **`shutdown`**: `{"type": "shutdown"}` with no id; clean up and exit.
 
+### Lane frames
+
+While a call is in flight an extension may stream **lane frames** on stdout — id-less lines the terminal renders as one status row per lane, rewritten in place as work moves (stderr stays the fire-and-forget diagnostics channel):
+
+```json
+→ {"type": "lane", "v": 1, "lane": "1/2 coder", "text": "bash: cargo test"}
+```
+
+- one lane name = one row on screen; an update with a known name rewrites that row, an unknown name appends a row below the block
+- `text` is one line (overlong rows wrap to the terminal); the whole block retracts before any other output prints and repaints below it, so rows never interleave with streamed tool output
+- scoped to the running call: the block is gone at the next `tool_start`, and lanes never enter the transcript — the tool result is the report
+- `--json` surfaces each frame as a `{"type": "lane", "lane": .., "text": ..}` event, so a wrapper can mirror the parallel view
+- a lane frame missing `lane` or `text` is not an error: it lands in the diagnostics tail like any other id-less line
+
+`subagent.py` drives its whole live view this way: every child's tool activity, worktree verdict and final state update that child's row, so two parallel writers read as two rows each ticking on their own.
+
 ### Events
 
 | Event | Fired | `params` |

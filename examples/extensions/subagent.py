@@ -213,8 +213,27 @@ def stop_children():
 
 
 def reply(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    # stdout carries the protocol: a reply must never interleave with a
+    # lane frame another thread is writing mid-line
+    with _out_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+
+# Lane frames: id-less `{"type":"lane",..}` lines the host renders as
+# one rewritten status row per lane while the call is in flight (the
+# parallel-progress display). stderr stays the fire-and-forget channel.
+_out_lock = threading.RLock()
+
+
+def lane(name, text):
+    text = text.rstrip("\n")[:160]
+    with _out_lock:
+        try:
+            sys.stdout.write(json.dumps({"type": "lane", "lane": name, "text": text}) + "\n")
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass  # progress is best-effort, never worth a crash
 
 
 # ---------------------------------------------------------------- agents --
@@ -401,9 +420,9 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
                 wt = (path, branch, root)
                 cwd = path
             else:
-                note("[%s] no worktree isolation: %s" % (label, branch))
+                lane(label, "no worktree isolation: %s" % branch)
         else:
-            note("[%s] not a git repo: the writer runs in place" % label)
+            lane(label, "not a git repo: the writer runs in place")
     cmd = [binary, "--json", "--no-session"]
     if tools:
         cmd += ["--tools", ",".join(tools)]
@@ -415,9 +434,8 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
         cmd += ["--append-system-prompt", agent["prompt"]]
     cmd.append(prompt)
     env = dict(os.environ, YAK_SUBAGENT_DEPTH=str(depth + 1))
-    note("[%s] %s · tools: %s%s" % (
-        label, agent["name"], ",".join(tools) or "none",
-        " · worktree %s" % wt[1] if wt else ""))
+    lane(label, "starting · tools: %s%s" % (
+        ",".join(tools) or "none", " · worktree %s" % wt[1] if wt else ""))
     try:
         child = subprocess.Popen(
             cmd,
@@ -468,15 +486,15 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             kind = event.get("type")
             if kind == "tool_start":
                 calls += 1
-                note("[%s] %s: %s" % (label, event.get("name"), event.get("preview", "")[:120]))
+                lane(label, "%s: %s" % (event.get("name"), event.get("preview", "")[:110]))
             elif kind == "tool_end" and event.get("is_error"):
-                note("[%s] ✗ %s" % (label, event.get("summary", "")[:120]))
+                lane(label, "✗ %s" % event.get("summary", "")[:110])
             elif kind == "tool_results_pruned":
-                note("[%s] pruned %s tool results from its context" % (label, event.get("count")))
+                lane(label, "pruned %s tool results" % event.get("count"))
             elif kind == "compacted":
-                note("[%s] compacted its context (%s messages)" % (label, event.get("removed")))
+                lane(label, "compacted context (%s messages)" % event.get("removed"))
             elif kind == "stream_recovered":
-                note("[%s] stream dropped, recovered %s chars" % (label, event.get("chars")))
+                lane(label, "stream dropped, recovered %s chars" % event.get("chars"))
             elif kind == "result":
                 final = event.get("text") or ""
                 usage = event.get("usage") or {}
@@ -503,7 +521,7 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
         if status != 0 or error:
             # a failed writer's tree may still hold partial edits: keep the
             # worktree and branch for inspection, report where they are
-            note("[%s] failed; worktree kept for inspection: %s" % (label, path))
+            lane(label, "failed; worktree kept: %s" % path)
             detail = error or ("the subagent exited with status %d" % status)
             if tail:
                 detail += "\n" + "\n".join(tail)
@@ -519,29 +537,37 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
             verdict = "none"
             detail = why or "no changes"
             if why:
-                note("[%s] worktree not committed: %s (kept for inspection)" % (label, why))
+                lane(label, "worktree not committed: %s (kept for inspection)" % first_line(why))
         if verdict == "merged" or verdict == "none":
             drop_worktree(root, path)
             if verdict == "merged":
                 # only after the worktree is gone can the branch be deleted
                 # (git refuses while a worktree holds it checked out)
                 git(root, "branch", "-D", branch)
-        note("[%s] worktree %s: %s" % (label, verdict, detail))
+        lane(label, "worktree %s: %s" % (verdict, first_line(detail)))
     if _abandoned.is_set():
+        lane(label, "interrupted")
         return False, "[%s] interrupted" % label
     if status != 0 or error:
         detail = error or ("the subagent exited with status %d" % status)
         if tail:
             detail += "\n" + "\n".join(tail)
+        lane(label, "failed: %s" % first_line(detail))
         return False, "[%s] %s" % (label, detail)
     spent = ""
     if usage:
         spent = " · %s in / %s out" % (thousands(usage.get("input")), thousands(usage.get("output")))
-    note("[%s] done: %d tool calls · %.0fs" % (label, calls, secs))
+    lane(label, "done: %d tool calls · %.0fs%s" % (calls, secs, spent))
     header = "[%s] %d tool calls · %.0fs%s\n" % (label, calls, secs, spent)
     if wt and verdict != "none":
         header += "merge %s: %s\n" % (verdict, detail)
     return True, header + (final if final is not None else "(no answer)")
+
+
+def first_line(text):
+    """A lane row is one line; a verdict detail that spans lines keeps its
+    first (the report carries the whole text)."""
+    return (text or "").strip().split("\n", 1)[0][:160]
 
 
 def thousands(value):
