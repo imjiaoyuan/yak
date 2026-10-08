@@ -60,6 +60,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if isinstance(last.get("content"), str) and last["content"].startswith("<context>"):
                 last = msgs[-2] if len(msgs) > 1 else last
             seen.setdefault("prompts", []).append(last.get("content", ""))
+            # the full wire history of the latest request, so a lane can
+            # assert what a rebuild kept and dropped
+            seen["last_msgs"] = msgs
             # the assembled system prompt, so a lane can assert a
             # commands-dir `system:` really shipped (and did not replace the
             # agent's own guidance)
@@ -417,6 +420,78 @@ def main():
     md = open(exported).read()
     assert md.startswith("# local session marker"), f"export: {md[:200]!r}"
     assert "**Assistant**" in md, f"export body: {md[:400]!r}"
+
+    # -- /tree branches instead of truncating ------------------------------
+    # a second child with a real store (the first runs --no-session),
+    # resuming the same thread: two rounds, a /tree jump back to the first
+    # turn, then a third. the file must hold the abandoned sibling, the
+    # new branch's line must carry the jumped-to turn as its parent, and
+    # the wire history after the jump must be the branch's chain only
+    OUT.clear()
+    seen.clear()
+    OUT_DONE.clear()
+    pid2, fd2 = pty.fork()
+    if pid2 == 0:
+        os.chdir(work)
+        os.execve(binary, [binary, "--session", "01localresumeprobe0000000"], env)
+    fcntl.ioctl(fd2, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    threading.Thread(target=drain_reader, args=(fd2,), daemon=True).start()
+    read_until(fd2, rb"local session marker")
+    # the resumed history echoes the stored "ok from mock" and a "> " row
+    # of its own, so the boot is settled by the real prompt glyph (bold >
+    # followed by reset+space; the history row's ">" carries no reset)
+    # the key watcher keeps draining stdin while the task's trailing UI
+    # (footer, prompt redraw) lands; its stop() joins within ~100ms, so the
+    # lane holds a beat after each round's prompt before typing the next
+    # line — otherwise the first keystroke is swallowed by design
+    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    OUT.clear()
+    for label in (b"second round on the tree", b"third round on the tree"):
+        time.sleep(0.2)
+        send(fd2, label + b"\r")
+        read_until(fd2, rb"ok from mock")
+        read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+        OUT.clear()
+    time.sleep(0.2)
+    send(fd2, b"/tree\r")
+    read_until(fd2, rb"jump to turn")
+    # the picker lists every turn in file order, oldest first: the opening
+    # selection is the root — the turn this child resumed from
+    send(fd2, b"\r")
+    read_until(fd2, rb"jumped to an earlier turn")
+    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    OUT.clear()
+    time.sleep(0.2)
+    send(fd2, b"after the jump\r")
+    read_until(fd2, rb"ok from mock")
+    # the rebuilt wire history: the abandoned siblings must be gone and
+    # the root chain intact
+    wire = json.dumps(seen.get("last_msgs") or [])
+    for gone in ("second round on the tree", "third round on the tree"):
+        assert gone not in wire, "the abandoned branch reached the wire"
+    assert "local session marker" in wire, "the root left the rebuilt history"
+    # the thread file: four lines (root + two abandoned + the branch), the
+    # branch's line carrying the jumped-to turn's id as its parent
+    lines_f = [json.loads(l) for l in
+               open(os.path.join(user, "threads",
+                                 "01localresumeprobe0000000.jsonl"))
+               if l.strip()]
+    assert len(lines_f) == 4, \
+        f"the file must hold both branches: {len(lines_f)} lines"
+    assert all(t.get("parent") is None for t in lines_f[:3]), \
+        f"pre-jump lines carry no edge: {[t.get('id') for t in lines_f]}"
+    assert lines_f[3].get("parent") == lines_f[0]["id"], \
+        f"the jump's round branches off the first turn: {lines_f[3].get('parent')!r}"
+    send(fd2, b"\x03")
+    time.sleep(0.2)
+    send(fd2, b"\x03")
+    time.sleep(0.5)
+    # the double ctrl-c must take the second child down too; a live one is
+    # SIGKILLed so the lane's own exit state stays the assertion
+    _, st2 = os.waitpid(pid2, os.WNOHANG)
+    if st2 == 0 and not OUT_DONE.wait(3.0):
+        os.kill(pid2, 9)
+        os.waitpid(pid2, 0)
 
     # -- exit: the kitty stack is popped ------------------------------------
     send(fd, b"\x03")
