@@ -206,13 +206,17 @@ impl Session {
             }
             let p = crate::theme::err();
             let width = crate::term::columns().max(20).saturating_sub(2);
+            let mut painted = 0usize;
             for (lane, text) in rows {
                 let row = crate::core::render_md::wrap_block(&format!("{lane}: {text}"), width, 2);
+                // a wrapped row spans several terminal lines; the erase
+                // count below must match what was printed, not the lane count
+                painted += row.matches('\n').count() + 1;
                 eprintln!("{}{row}{}", p.gray, p.reset);
             }
             use std::io::Write;
             let _ = std::io::stderr().flush();
-            lanes_painted.set(rows.len());
+            lanes_painted.set(painted);
         };
         let mut total = crate::core::http::Usage::default();
         let mut last_usage: Option<crate::core::http::Usage> = None;
