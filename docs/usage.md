@@ -239,6 +239,8 @@ cp examples/extensions/subagent.py ~/.yak/extensions/subagent && chmod +x ~/.yak
 
 Agent definitions are markdown with frontmatter (`~/.yak/agents/scout.md`, or the project's `.yak/agents/scout.md` where the nearest wins), with `tools`, `model` and `thinking` optional; four ship in [`examples/agents/`](../examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks` batch, or a `chain` where each step gets the previous answer, and the child's tool calls show up in your session as it works. The child is a plain `yak --json` process: its own tools, its own system prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press ctrl+c and unable to spawn further subagents. Copy the file or don't; nothing in the core knows subagents exist.
 
+A subagent whose definition names a mutating tool (`write`, `edit`, `bash`) runs in a **git worktree** when your cwd is a git repo: its changes are committed to a `yak/subagent-*` branch and merged back when it finishes. Parallel writers merge one at a time; a conflicting merge is aborted clean and reported with the branch name left for you to resolve — nothing a writer did is dropped. `YAK_SUBAGENT_WORKTREES=0` runs writers in place instead.
+
 ## Semantics
 
 Models are named `provider/model`. Short aliases can be mapped in the `aliases` object of config.json.

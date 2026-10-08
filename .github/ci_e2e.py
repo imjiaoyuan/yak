@@ -125,6 +125,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
             seen["last_prompt"] = prompt_of(messages)
             seen["last_messages"] = messages
             seen.setdefault("prompts", []).append(prompt_of(messages))
+        if body.get("model") == "m-wtw":
+            # worktree-writer child: one write whose content comes from the
+            # task text ("write: X" → the file says "from X"), so two
+            # parallel writers fork the same blob and the second merge
+            # must conflict; the answer round rides the tool result back
+            msgs = body.get("messages", [])
+            hist = list(msgs)
+            if hist and hist[-1].get("role") == "tool":
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "writer done"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                prompt = ""
+                for m in reversed(hist):
+                    c = m.get("content")
+                    if m.get("role") == "user" and isinstance(c, str):
+                        prompt = c
+                        break
+                tag = prompt.split("write:")[-1].strip() if "write:" in prompt else "worker"
+                args = json.dumps(
+                    {"path": "worker.txt", "content": "from %s\n" % tag})
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_wtw", "type": "function",
+                         "function": {"name": "write",
+                                      "arguments": args}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
+            return
+        if body.get("model") == "m-wt":
+            # worktree parent: one subagent call batching two writers over
+            # the same file, then the answer round
+            if any(m.get("role") == "tool" for m in body.get("messages", [])):
+                seen["wt_round2"] = body.get("messages", [])
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "parent saw the writers"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                args = json.dumps({"tasks": [
+                    {"agent": "writer", "task": "write: writer one"},
+                    {"agent": "writer", "task": "write: writer two"}]})
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_wt", "type": "function",
+                         "function": {"name": "subagent",
+                                      "arguments": args}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
+            return
         if seen.get("tools") and any(
             t.get("function", {}).get("name") == "wordcount"
             for t in body.get("tools", [])
@@ -447,6 +500,18 @@ def main():
                         "api_key": "sk-ci",
                         "models": ["m-sub"],
                     },
+                    "mock-wt": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-ci",
+                        "models": ["m-wt"],
+                    },
+                    "mock-wtw": {
+                        "kind": "openai-compat",
+                        "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "sk-ci",
+                        "models": ["m-wtw"]
+                    },
                 },
                 "models": {"default": "mock/m-a"},
                 # the anthropic lane asserts the long prompt-cache lifetime
@@ -759,6 +824,66 @@ def main():
         f"the child's answer must reach the parent: {result_text[:400]!r}"
     assert ["read", "grep"] in (seen.get("generic_tools") or []), \
         f"the child must run with its definition's tool subset: {seen.get('generic_tools')}"
+
+    # worktree lane: the same subagent extension, but the parent runs in a
+    # git repo and the child definition names a mutating tool, so the writer
+    # must fork a worktree, write there, and merge back. Two parallel
+    # writers over one file: the first merge lands, the second conflicts,
+    # the conflict aborts clean and the branch survives for the human.
+    # git may be absent on a CI box: the lane skips (the mock still sees
+    # the subagent call, which the asserts above already cover)
+    if shutil.which("git"):
+        repo = tempfile.mkdtemp()
+
+        def git(*a):
+            return subprocess.run(["git", "-C", repo] + list(a),
+                                  capture_output=True, text=True)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "ci@example.invalid")
+        git("config", "user.name", "ci")
+        with open(os.path.join(repo, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        git("add", "-A")
+        git("commit", "-qm", "seed")
+        with open(os.path.join(user, "agents", "writer.md"), "w") as f:
+            f.write("---\nname: writer\ndescription: ci writer\n"
+                    "tools: read, write\nmodel: mock-wtw/m-wtw\n---\n"
+                    "You are the CI writer.\n")
+        wt = run([binary, "--no-session", "--json", "-m", "mock-wt/m-wt",
+                  "delegate to the writers"],
+                 dict(sub_env), cwd=repo, stdin=subprocess.DEVNULL)
+        assert wt.returncode == 0, \
+            f"worktree lane rc={wt.returncode} out={wt.stdout[-400:]!r} err={wt.stderr[-400:]!r}"
+        summaries = [json.loads(l) for l in wt.stdout.splitlines() if l.strip()]
+        ends = [e.get("summary", "") for e in summaries
+                if e.get("type") == "tool_end"]
+        assert len(ends) == 1, f"expected one subagent call: {len(ends)}"
+        result = ends[0]
+        assert "merge merged" in result and "merge conflict" in result, \
+            f"one clean merge and one conflict must be reported: {result[:500]!r}"
+        assert "CONFLICT (add/add): Merge conflict in worker.txt" in result, \
+            f"the conflict must name the file: {result[:500]!r}"
+        assert "resolve with git merge yak/subagent-" in result, \
+            f"the conflict must leave the branch and name it: {result[:500]!r}"
+        # the parent repo: the first writer's bytes landed, no merge state,
+        # the conflicting branch kept, its worktree still there for scrutiny
+        assert open(os.path.join(repo, "worker.txt")).read().startswith("from "), \
+            "the clean merge never landed in the parent repo"
+        assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode != 0, \
+            "a conflicted merge was left mid-state instead of aborted"
+        kept = [l for l in git("branch").stdout.splitlines() if "yak/subagent-" in l]
+        assert kept, "the conflicting writer's branch was deleted"
+        listed = git("worktree", "list").stdout
+        assert "yak/subagent-" in listed, \
+            f"the conflicting writer's worktree was deleted: {listed!r}"
+        # the round-2 wire history carries the whole verdict: the parent
+        # model reads the conflict, not just the conclusion
+        wt_round2 = seen.get("wt_round2") or []
+        wt_tool = [m for m in wt_round2 if m.get("role") == "tool"]
+        assert wt_tool and "merge conflict" in wt_tool[0].get("content", ""), \
+            "the merge verdict must reach the parent model"
+
 
     # sessions land as thread files in the store
     assert any(f.endswith(".jsonl") for f in os.listdir(os.path.join(user, "threads"))), \
