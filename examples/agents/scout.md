@@ -1,7 +1,7 @@
 ---
 name: scout
 description: fast reconnaissance; returns compressed findings instead of a transcript
-tools: read, grep, glob, ls, webfetch
+tools: -write, -edit, -bash
 thinking: low
 ---
 

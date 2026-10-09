@@ -454,12 +454,16 @@ fn round_actions(messages: &[crate::providers::Msg]) -> Vec<String> {
         if let Msg::Assistant { tool_calls, .. } = msg {
             for call in tool_calls {
                 let verb = crate::agent::tools::display_verb(&call.name);
+                // an extension tool has no preview shape here, so its row is
+                // the verb alone: "webfetch" reads as an action, while
+                // "webfetch webfetch" (name twice) reads as a stutter
                 let preview = tools
                     .iter()
                     .find(|t| t.name() == call.name)
                     .map(|t| t.preview(&call.arguments))
-                    .unwrap_or_else(|| call.name.clone());
-                actions.push(format!("{verb} {preview}"));
+                    .unwrap_or_default();
+                let sep = if preview.is_empty() { "" } else { " " };
+                actions.push(format!("{verb}{sep}{preview}"));
             }
         }
     }
@@ -1478,7 +1482,7 @@ mod tests {
                 reasoning_meta: None,
             }],
         );
-        assert_eq!(turn_label(&tool_round), "read R/cli.R · webfetch webfetch");
+        assert_eq!(turn_label(&tool_round), "read R/cli.R · webfetch");
         // a user round shows the text, a plain answer its first line
         assert_eq!(
             turn_label(&stored("read cli.R", "", Vec::new())),

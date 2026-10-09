@@ -17,10 +17,8 @@ Protocol: newline-delimited JSON on stdio, one reply per request id
 """
 
 import json
-import os
 import socket
 import sys
-import time
 import urllib.error
 import urllib.request
 

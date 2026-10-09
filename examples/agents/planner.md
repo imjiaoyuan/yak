@@ -1,7 +1,7 @@
 ---
 name: planner
 description: turns a rough request into an ordered plan grounded in the real code
-tools: read, grep, glob, ls
+tools: -write, -edit, -bash
 thinking: high
 ---
 

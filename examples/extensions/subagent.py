@@ -16,14 +16,19 @@ Agent definitions are markdown with frontmatter, one file per agent:
     ---
     name: scout
     description: fast reconnaissance; returns compressed findings
-    tools: read, grep, glob, ls, webfetch
+    tools: -write, -edit, -bash   # like the CLI --tools flag: plain names
+                                  # name tools outright, +name/-name edits the
+                                  # mounted set, so this line is "everything
+                                  # except the writers" and never names a tool
+                                  # the child does not have
     model: openai/gpt-5-mini    # optional, else the child resolves like any yak
     thinking: low               # off|minimal|low|medium|high|xhigh, optional
     ---
     You are a scout. Report file:line facts, not prose. Never edit anything.
 
 Four sample definitions ship in `examples/agents/` — scout and reviewer
-(read-only), planner (think-only), worker (edits and runs commands) — and
+(inspect and report; the shipped reviewer also runs commands), planner
+(think-only), worker (edits and runs commands) — and
 two built-ins of the same names cover the case where no file exists at all.
 
 How a child runs
@@ -64,8 +69,8 @@ by a thread rather than by the protocol loop).
 *Trust.* The child runs without approvals: there is nobody at its terminal
 to answer a prompt. The parent call is the approval point — this is an
 ordinary exec-tier extension tool, and the definition's `tools:` line is
-what the child may then touch. Read-only agents (scout, reviewer) therefore
-stay read-only.
+what the child may then touch. A read-only definition (the shipped scout) therefore
+stays read-only.
 """
 
 import json
@@ -109,7 +114,7 @@ _WORKTREE_LOCK = threading.Lock()
 BUILTIN_AGENTS = {
     "scout": {
         "description": "fast reconnaissance: returns compressed file:line facts",
-        "tools": "read,grep,glob,ls,webfetch",
+        "tools": "-write,-edit,-bash",
         "prompt": (
             "You are a scout. Survey what was asked and report only what you "
             "found, as file:line facts and short quotes rather than prose. Say "
@@ -118,7 +123,7 @@ BUILTIN_AGENTS = {
     },
     "worker": {
         "description": "does the work: edits files, runs commands, verifies",
-        "tools": "read,write,edit,bash,grep,glob,ls",
+        "tools": "read,write,edit,bash",
         "prompt": (
             "You are a worker. Do the task, then verify it with the narrowest "
             "command that proves it. Report what changed and what you ran. "
@@ -329,7 +334,11 @@ def parse_definition(path):
             for line in text[3:end].splitlines():
                 key, _, value = line.partition(":")
                 if value.strip():
-                    fields[key.strip().lower()] = value.strip()
+                    # an unquoted ` # ` starts a comment, the yaml convention:
+                    # the shipped samples annotate their tools: lines inline
+                    value = value.split(" #", 1)[0].strip()
+                    if value:
+                        fields[key.strip().lower()] = value.strip()
             body = text[end + 4:]
     name = fields.get("name") or os.path.splitext(os.path.basename(path))[0]
     return {
@@ -368,6 +377,24 @@ def child_tools(agent):
     name the tool cannot call it, whatever the depth guard says."""
     names = [t.strip() for t in agent.get("tools", "").split(",")]
     return [t for t in names if t and t not in ("subagent", "task")]
+
+
+def selects_mutating(entries):
+    """Whether a resolved tool list lets the child touch anything: a plain
+    name must be one of the mutating tools; a `-name` list strips them
+    instead (the CLI's modifier form), so it mutates only if some mutating
+    tool survives the subtractions — `-bash` alone still leaves write."""
+    plain = [e for e in entries if not e.startswith(("+", "-"))]
+    if plain:
+        return bool(MUTATING_TOOLS & set(plain))
+    mutating = set(MUTATING_TOOLS)
+    for entry in entries:
+        if entry.startswith("-"):
+            mutating.discard(entry[1:])
+        elif entry.startswith("+"):
+            if entry[1:] in MUTATING_TOOLS:
+                mutating.add(entry[1:])
+    return bool(mutating)
 
 
 def yak_binary():
@@ -460,7 +487,7 @@ def repo_root(start):
 
 
 def is_writer(agent):
-    return bool(MUTATING_TOOLS & set(child_tools(agent)))
+    return selects_mutating(child_tools(agent))
 
 
 def make_worktree(root):

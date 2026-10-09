@@ -620,7 +620,7 @@ fn the_registry_holds_exactly_the_surviving_builtins() {
 
 #[test]
 fn plain_names_and_patterns_pick_the_allowlist() {
-    let tools: Vec<String> = ["read", "edit", "webfetch", "bash"]
+    let tools: Vec<String> = ["read", "write", "edit", "bash"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -634,8 +634,8 @@ fn plain_names_and_patterns_pick_the_allowlist() {
         .unwrap()
     };
     assert_eq!(pick("read,edit"), vec!["read", "edit"]);
-    // a pattern keeps every match, in registry order (w* hits webfetch only)
-    assert_eq!(pick("w*"), vec!["webfetch"]);
+    // a pattern keeps every match, in registry order (w* hits write only)
+    assert_eq!(pick("w*"), vec!["write"]);
     assert_eq!(pick("*"), tools.clone());
     assert_eq!(pick("r*d"), vec!["read"]);
 }
