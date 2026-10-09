@@ -67,7 +67,10 @@ fn msg_tokens(msg: &Msg) -> u64 {
     let text: &str = match msg {
         Msg::User { text, .. } | Msg::Summary { text } => text,
         Msg::Assistant {
-            text, tool_calls, ..
+            text,
+            tool_calls,
+            reasoning,
+            ..
         } => {
             let calls: u64 = tool_calls
                 .iter()
@@ -75,7 +78,12 @@ fn msg_tokens(msg: &Msg) -> u64 {
                     text_tokens(&c.name) + text_tokens(&c.arguments.to_string()) + 8 // tool-call overhead
                 })
                 .sum();
-            return text_tokens(text) + calls + 16;
+            // a replayed thinking trace rides the wire (and the context
+            // window) like any other content; pricing it keeps the
+            // compaction trigger from lagging the real prompt size on
+            // hosts that require the trace back
+            let trace = reasoning.as_deref().map(text_tokens).unwrap_or(0);
+            return text_tokens(text) + calls + trace + 16;
         }
         Msg::ToolResult { content, .. } => content,
     };
@@ -562,6 +570,27 @@ mod tests {
         // an assistant is a boundary, so cutting to it is valid
         let history = vec![user("hi"), Msg::assistant("ho")];
         assert_eq!(find_cut(&history, 1), Some(1));
+    }
+
+    #[test]
+    fn estimate_prices_a_replayed_thinking_trace() {
+        let plain = user("hi");
+        let trace = Msg::Assistant {
+            text: "hi".into(),
+            tool_calls: vec![],
+            reasoning: Some("thinking the answer through at length".into()),
+            reasoning_meta: None,
+        };
+        // the trace rides the wire on replay hosts, so it must ride the
+        // estimate too, or compaction lags the real prompt size
+        assert!(msg_tokens(&trace) > msg_tokens(&plain));
+        let without = Msg::Assistant {
+            text: "hi".into(),
+            tool_calls: vec![],
+            reasoning: None,
+            reasoning_meta: None,
+        };
+        assert!(msg_tokens(&trace) > msg_tokens(&without));
     }
 
     #[test]
