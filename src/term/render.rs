@@ -192,7 +192,14 @@ impl Renderer {
             return 0; // cadence gate: installments land on the tick, not on
             // however often a tick happens to fire
         }
-        let behind = self.backlog.chars().count();
+        // the count only feeds the accel divisor and the budget caps at
+        // MAX_GRANT, so counting past the point where it saturates is
+        // wasted work on a long backlog: count that far and stop
+        let behind = self
+            .backlog
+            .chars()
+            .take((MAX_GRANT - BASE_CHARS) * ACCEL_DIV)
+            .count();
         let budget = (BASE_CHARS + behind / ACCEL_DIV).min(MAX_GRANT);
         // never cut an escape sequence (`\x1b[...m`) in half: emit up to
         // and including it, the sequence itself is invisible on screen
