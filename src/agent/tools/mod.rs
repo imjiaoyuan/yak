@@ -14,7 +14,6 @@ use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
 use fetch::FetchTool;
-use plan::PlanTool;
 use read::ReadTool;
 use remember::RememberTool;
 use search::{GlobTool, GrepTool};
@@ -148,7 +147,6 @@ impl ToolProgress {
 /// The built-in tool registry: the handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(PlanTool),
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
@@ -659,7 +657,6 @@ mod bash;
 mod edit;
 mod fetch;
 mod jq;
-mod plan;
 mod read;
 mod remember;
 mod search;

@@ -80,11 +80,11 @@ pub fn build_system_prompt(
                      - grep: Search file contents for patterns (respects .gitignore)\n\
                      - glob: Find files by glob pattern (respects .gitignore)\n\
                      - webfetch: Fetch a URL and return its text content\n\
-                     - update_plan: Track a multi-step plan\n\
                      - remember: Save one durable fact to the user's global memory\n\
                      \n\
                      In addition to the tools above, you may have access to other custom tools \
-                     depending on the project.\n\
+                     depending on the project (update_plan, ls and the like are ordinary \
+                     extensions in this setup).\n\
                      \n\
                      Guidelines:\n\
                      - Use read to examine files instead of cat or sed.\n\
@@ -92,10 +92,6 @@ pub fn build_system_prompt(
                      - When changing multiple separate locations in one file, use one edit call \
                        with multiple entries in edits[] instead of multiple edit calls.\n\
                      - Use write only for new files or complete rewrites.\n\
-                     - Multi-step work (past the simplest 25%): track steps with `update_plan`, one \
-                       `in_progress` at a time.\n\
-                     - Keep the plan current; it persists across turns. After `update_plan`, NEVER \
-                       restate the plan — the UI shows it.\n\
                      - Be concise in your responses.\n\
                      - Show file paths clearly when working with files.\n\
                      \n\
@@ -211,7 +207,6 @@ mod tests {
             "raw.githubusercontent.com/imjiaoyuan/yak/main/",
             "docs/extensions.md",
             "docs/architecture.md",
-            "update_plan",
             "remember",
         ] {
             assert!(out.contains(needle), "missing {needle}: {out}");

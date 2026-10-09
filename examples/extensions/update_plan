@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""update_plan — a resident yak extension: one tool, no state.
+
+Copy to ~/.yak/extensions/update_plan, chmod +x, /reload. It mounts:
+
+  update_plan {plan}    the model-owned checklist
+
+This is the built-in update_plan moved onto the extension surface,
+byte-compatible with its former self (the worked example that the plugin
+system can carry a core tool). The plan needs no harness-side state: it
+lives in the model's own tool call, is re-read from the transcript every
+turn and survives a resume for free. Read-tier: it touches no files and
+runs nothing, so it never prompts. Protocol: newline-delimited JSON on
+stdio, one reply per request id (docs/extensions.md has the reference).
+"""
+
+import json
+import sys
+
+DESCRIPTION = (
+    "Update the task plan: a list of steps, each with a `step` and a "
+    "`status` (`pending`, `in_progress`, `completed`); at most one "
+    "`in_progress` at a time."
+)
+
+TOOLS = [
+    {
+        "name": "update_plan",
+        "description": DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step": {"type": "string", "description": "Step text"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "Status",
+                            },
+                        },
+                        "required": ["step", "status"],
+                    },
+                }
+            },
+            "required": ["plan"],
+        },
+        "tier": "read",
+    },
+]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def short(text, max_chars=60):
+    """core.text::truncate_chars: cut on the char boundary, append …"""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "…"
+
+
+def validate_plan(args):
+    """Deep validation, mirroring the built-in's error strings exactly."""
+    plan = args.get("plan")
+    if not isinstance(plan, list):
+        return "`plan` must be an array of {step, status} objects"
+    if not plan:
+        return "`plan` must contain at least one step"
+    in_progress = 0
+    for i, item in enumerate(plan, start=1):
+        if not isinstance(item, dict):
+            return f"plan step {i} is missing its `step` text"
+        step = item.get("step")
+        if not isinstance(step, str) or not step.strip():
+            return f"plan step {i} is missing its `step` text"
+        status = item.get("status")
+        if status in ("pending", "completed"):
+            pass
+        elif status == "in_progress":
+            in_progress += 1
+        elif isinstance(status, str):
+            return (
+                f"plan step {i} has unknown status '{status}' "
+                "(use pending, in_progress or completed)"
+            )
+        else:
+            return f"plan step {i} is missing its `status`"
+    if in_progress > 1:
+        return (
+            f"at most one step may be in_progress at a time, got {in_progress}"
+        )
+    return None
+
+
+def render_plan(args):
+    """The checklist as the model reads it back: [x] done, [>] active, [ ] pending."""
+    plan = args.get("plan")
+    if not isinstance(plan, list):
+        return ""
+    lines = []
+    for item in plan:
+        status = item.get("status")
+        mark = (
+            "[x]" if status == "completed"
+            else "[>]" if status == "in_progress"
+            else "[ ]"
+        )
+        step = item.get("step") if isinstance(item.get("step"), str) else ""
+        lines.append(f"{mark} {step.strip()}")
+    return "\n".join(lines)
+
+
+def summary(args):
+    """One-line chrome preview: step counts plus the step in progress."""
+    plan = args.get("plan")
+    if not isinstance(plan, list):
+        return ""
+    done = sum(1 for s in plan if s.get("status") == "completed")
+    active = next(
+        (s.get("step") for s in plan if s.get("status") == "in_progress"), None
+    )
+    n = len(plan)
+    word = "step" if n == 1 else "steps"
+    out = f"{n} {word} · {done} done"
+    if isinstance(active, str):
+        out += f" · now: {short(active.strip())}"
+    return out
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+        elif kind == "call_tool":
+            args = msg.get("args") or {}
+            if msg.get("name") == "update_plan":
+                err = validate_plan(args)
+                if err:
+                    reply({"id": mid, "error": err})
+                else:
+                    # one live lane row while the call is in flight: the
+                    # checklist rendered as the built-in's chrome preview did
+                    sys.stdout.write(
+                        json.dumps(
+                            {"type": "lane", "v": 1, "lane": "plan", "text": summary(args)}
+                        )
+                        + "\n"
+                    )
+                    # the model reads its own latest plan back on the next
+                    # turn: the checklist rides the result, not just the call
+                    reply({"id": mid, "result": render_plan(args)})
+            else:
+                reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()
