@@ -1472,13 +1472,16 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![
                     call("read", serde_json::json!({"path": "R/cli.R"})),
-                    call("grep", serde_json::json!({"pattern": "theme"})),
+                    call("webfetch", serde_json::json!({"url": "https://x.dev"})),
                 ],
                 reasoning: None,
                 reasoning_meta: None,
             }],
         );
-        assert_eq!(turn_label(&tool_round), "read R/cli.R · grep \"theme\"");
+        assert_eq!(
+            turn_label(&tool_round),
+            "read R/cli.R · webfetch https://x.dev"
+        );
         // a user round shows the text, a plain answer its first line
         assert_eq!(
             turn_label(&stored("read cli.R", "", Vec::new())),

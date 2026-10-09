@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""grep + glob — a resident yak extension: two read-tier tools over ripgrep.
+
+Copy to ~/.yak/extensions/search, chmod +x, /reload. It mounts:
+
+  grep {pattern, path?, glob?, ignoreCase?, context?, limit?, literal?}
+  glob {pattern, path?, limit?}
+
+This is the built-in grep/glob pair moved onto the extension surface,
+byte-compatible with its former self. Both delegate to ripgrep (`rg`) on
+PATH: grep runs `rg --no-heading --with-filename --line-number --hidden`,
+glob runs `rg --files`; .gitignore is respected by rg itself. Read-tier:
+both only read. Protocol: newline-delimited JSON on stdio, one reply per
+request id (docs/extensions.md has the reference).
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+GREP_LINE_LIMIT = 500
+MAX_LINES = 2000
+MAX_BYTES = 50 * 1024
+MAX_TOKENS = 12_000
+
+TOOLS = [
+    {
+        "name": "grep",
+        "description": "Search file contents for a pattern (needs ripgrep). "
+        "Returns matching lines with file paths and line numbers. "
+        "Respects .gitignore.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Search pattern (regex or literal string)",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search (default .)",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Only search files matching this glob, e.g. *.rs",
+                },
+                "ignoreCase": {
+                    "type": "boolean",
+                    "description": "Case-insensitive search",
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Lines of context around each match",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max matches (default 100)",
+                },
+                "literal": {
+                    "type": "boolean",
+                    "description": "Treat pattern as a literal string",
+                },
+            },
+            "required": ["pattern"],
+        },
+        "tier": "read",
+    },
+    {
+        "name": "glob",
+        "description": "Search for files by glob pattern. Returns matching file "
+        "paths relative to the search directory. Respects .gitignore. "
+        "Needs ripgrep.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match files, e.g. '*.rs', "
+                    "'**/*.json', or 'src/**/*.rs'",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search in (default: current directory)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default: 1000)",
+                },
+            },
+            "required": ["pattern"],
+        },
+        "tier": "read",
+    },
+]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+# ---- core.text / truncate helpers, ported ----------------------------------
+
+
+def char_width(ch):
+    # render_md::char_width: wide chars count 2 cells. The exact East Asian
+    # width table lives in the Rust side's unicode-width; for the token
+    # estimate the pragmatic line is: CJK/fullwidth ranges are wide.
+    cp = ord(ch)
+    if cp in (0xFF9E, 0xFF9F):
+        return 1
+    if (
+        0x1100 <= cp <= 0x115F
+        or 0x2E80 <= cp <= 0xA4CF
+        or 0xAC00 <= cp <= 0xD7A3
+        or 0xF900 <= cp <= 0xFAFF
+        or 0xFE10 <= cp <= 0xFE19
+        or 0xFE30 <= cp <= 0xFE6F
+        or 0xFF00 <= cp <= 0xFF60
+        or 0xFFE0 <= cp <= 0xFFE6
+        or 0x20000 <= cp <= 0x3FFFD
+    ):
+        return 2
+    if 0x0300 <= cp <= 0x036F or cp in (0x200B, 0x200C, 0x200D) or 0xFE00 <= cp <= 0xFE0F:
+        return 0
+    return 1
+
+
+def text_tokens(text):
+    """compact::text_tokens: ascii/4 + wide chars."""
+    ascii_n = wide = 0
+    for ch in text:
+        if char_width(ch) >= 2:
+            wide += 1
+        else:
+            ascii_n += 1
+    return (ascii_n + 3) // 4 + wide
+
+
+def json_escaped_len(s):
+    """tools::json_escaped_len: the wire size of this string as a JSON value."""
+    n = 2  # surrounding quotes
+    for ch in s:
+        if ch in ('"', "\\"):
+            n += 2
+        elif ch in ("\n", "\r", "\t", "\b", "\f"):
+            n += 2
+        elif ord(ch) < 0x20:
+            n += 6
+        else:
+            n += len(ch.encode("utf-8"))
+    return n
+
+
+def rust_lines(text):
+    """Rust str::lines(): no trailing empty piece, and "" has no lines."""
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines = lines[:-1]
+    return lines
+
+
+def truncate_tail(text, max_lines, max_bytes):
+    """tools::truncate_tail: keep the last max_lines lines, then shrink to fit
+    the escaped byte budget, then the token estimate. Returns (out, cut)."""
+    all_lines = rust_lines(text)
+    lines = all_lines[len(all_lines) - max_lines:] if len(all_lines) > max_lines else all_lines
+    out = "\n".join(lines)
+    truncated = len(lines) < len(all_lines)
+    b = out.encode("utf-8")
+    budget = max_bytes
+    while True:
+        if len(b) > budget:
+            start = len(b) - budget
+            while start < len(b) and (b[start] & 0xC0) == 0x80:
+                start += 1
+            b = b[start:]
+            truncated = True
+        out = b.decode("utf-8", "replace")
+        if json_escaped_len(out) <= max_bytes or budget == 0:
+            break
+        budget = max(1, min(budget // 2, budget - 1))
+    if text_tokens(out) > MAX_TOKENS:
+        # binary search over char boundaries, as the Rust side does
+        chars = list(out)
+        lo, hi = 0, len(chars)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if text_tokens("".join(chars[mid:])) <= MAX_TOKENS:
+                hi = mid
+            else:
+                lo = mid + 1
+        if 0 < lo < len(chars):
+            out = "".join(chars[lo:])
+            truncated = True
+    return out, truncated
+
+
+def truncate_marked(text, max_lines=MAX_LINES, max_bytes=MAX_BYTES):
+    out, truncated = truncate_tail(text, max_lines, max_bytes)
+    if truncated:
+        out += "\n[output truncated]\n"
+    return out
+
+
+def truncate_ellipsis(s, max_chars):
+    """core.text::truncate_ellipsis (bytes → chars here, same visual cut)."""
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + "…"
+
+
+def as_u64(v):
+    """serde_json Number.as_u64: a non-negative integer only; bools/floats
+    (even integral ones)/strings are None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v >= 0:
+        return v
+    return None
+
+
+def resolve_path(cwd, arg):
+    """tools::resolve_path: ~/ expands against HOME, absolute wins, else
+    Path::join — which is string concatenation: it keeps `.` and trailing
+    slashes (rg's output prefixes depend on that spelling, so no normpath)."""
+    if arg.startswith("~/"):
+        home = os.environ.get("HOME") or (
+            os.environ.get("USERPROFILE") if os.name == "nt" else None
+        )
+        if home is None:
+            return arg
+        return os.path.join(home, arg[2:])
+    if os.path.isabs(arg):
+        return arg
+    return cwd + "/" + arg
+
+
+def run_rg(cmd_args, cwd):
+    try:
+        p = subprocess.run(
+            ["rg"] + cmd_args,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        return None
+    return p
+
+
+def do_grep(args, cwd):
+    pattern = args.get("pattern") if isinstance(args.get("pattern"), str) else ""
+    limit = as_u64(args.get("limit"))
+    limit = 100 if limit is None else limit
+    path = args.get("path") if isinstance(args.get("path"), str) else "."
+    root = resolve_path(cwd, path)
+    cmd = ["--no-heading", "--with-filename", "--line-number",
+           "--color", "never", "--hidden"]
+    if args.get("literal") is True:
+        cmd.append("--fixed-strings")
+    if args.get("ignoreCase") is True:
+        cmd.append("-i")
+    c = as_u64(args.get("context"))
+    if c is not None and c > 0:
+        cmd += ["-C", str(c)]
+    g = args.get("glob")
+    if isinstance(g, str) and g:
+        cmd += ["-g", g]
+    cmd += ["--", pattern, root]
+    p = run_rg(cmd, cwd)
+    if p is None:
+        return None, "grep needs ripgrep (`rg`) on PATH"
+    # rg exits 2 on a bad pattern; 1 means no matches, which is not an error
+    if p.returncode == 2:
+        return None, truncate_marked(p.stderr.decode("utf-8", "replace"))
+    text = p.stdout.decode("utf-8", "replace")
+    lines = rust_lines(text)
+    if not lines:
+        return "No matches found", None
+    more = len(lines) - limit if len(lines) > limit else 0
+    lines = lines[:limit]
+    # bound a minified line: the path:line prefix is short, so the
+    # surviving ~500 chars are content, not path
+    out = "\n".join(truncate_ellipsis(l, GREP_LINE_LIMIT) for l in lines)
+    if more > 0:
+        out += f"\n... +{more} more matches"
+    return truncate_marked(out), None
+
+
+def do_glob(args, cwd):
+    pattern = args.get("pattern") if isinstance(args.get("pattern"), str) else ""
+    limit = as_u64(args.get("limit"))
+    limit = 1000 if limit is None else limit
+    path = args.get("path") if isinstance(args.get("path"), str) else "."
+    root = resolve_path(cwd, path)
+    # search cwd-relative so results read `src/x.rs`, not `./src/x.rs`; a
+    # root outside cwd keeps its absolute form (strip_prefix fails there).
+    # strip_prefix on the *string*, as Rust does: cwd itself → `.`
+    if root == cwd or root == cwd + "/":
+        search = "."
+    elif root.startswith(cwd + "/"):
+        search = root[len(cwd) + 1:]
+    else:
+        search = root
+    p = run_rg(["--files", "--hidden", "-g", pattern, search], cwd)
+    if p is None:
+        return None, "glob needs ripgrep (`rg`) on PATH"
+    if p.returncode == 2:
+        return None, truncate_marked(p.stderr.decode("utf-8", "replace"))
+    hits = []
+    for line in rust_lines(p.stdout.decode("utf-8", "replace")):
+        l = line.strip()
+        if not l:
+            continue
+        if l.startswith("./"):
+            l = l[2:]
+        hits.append(l.replace("\\", "/"))
+        if len(hits) >= limit:
+            break
+    if not hits:
+        return "No files found matching pattern", None
+    return "\n".join(hits) + "\n", None
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+        elif kind == "call_tool":
+            args = msg.get("args") or {}
+            cwd = (msg.get("params") or {}).get("cwd") or os.getcwd()
+            try:
+                if msg.get("name") == "grep":
+                    out, err = do_grep(args, cwd)
+                elif msg.get("name") == "glob":
+                    out, err = do_glob(args, cwd)
+                else:
+                    reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
+                    continue
+                if err is not None:
+                    reply({"id": mid, "error": err})
+                else:
+                    reply({"id": mid, "result": out})
+            except Exception as e:  # a tool error, not a protocol error
+                reply({"id": mid, "error": f"{type(e).__name__}: {e}"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

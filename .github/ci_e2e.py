@@ -885,7 +885,9 @@ def main():
 
     # subagent lane: examples/extensions/subagent.py mounts a tool that spawns
     # a real child yak (--json, its own tools and system prompt), reads its
-    # event stream and hands the conclusion back as the tool result
+    # event stream and hands the conclusion back as the tool result. The
+    # scout definition's tool subset names grep, which ships as an example
+    # extension too — install it beside the subagent so the child sees it
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sub_dst = os.path.join(user, "extensions", "subagent")
     if sys.platform == "win32":
@@ -896,6 +898,9 @@ def main():
     else:
         shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"), sub_dst)
         os.chmod(sub_dst, 0o755)
+    search_dst = os.path.join(user, "extensions", "search")
+    shutil.copyfile(os.path.join(here, "examples", "extensions", "search"), search_dst)
+    os.chmod(search_dst, 0o755)
     os.makedirs(os.path.join(user, "agents"), exist_ok=True)
     with open(os.path.join(user, "agents", "scout.md"), "w") as f:
         f.write("---\nname: scout\ndescription: ci scout\ntools: read, grep\n---\n"

@@ -3,15 +3,6 @@ use super::fetch::{extract_title, html_to_text};
 use super::write::write_atomic;
 use super::*;
 
-/// grep/glob delegate to ripgrep; CI runners without it skip those tests
-/// (the tools themselves report the missing binary to the model).
-fn rg_available() -> bool {
-    std::process::Command::new("rg")
-        .arg("--version")
-        .output()
-        .is_ok()
-}
-
 #[test]
 fn atomic_write_replaces_content_and_leaves_no_temp_behind() {
     let dir = crate::core::testutil::scratch_dir("atomic");
@@ -458,70 +449,6 @@ fn edit_salvages_stringified_and_flat_legacy_arguments() {
 }
 
 #[test]
-fn grep_literal_and_ignore_case() {
-    if !rg_available() {
-        return;
-    }
-    let dir = crate::core::testutil::scratch_dir("grep");
-    std::fs::write(dir.join("one.txt"), "Hello world\nbye\n").unwrap();
-    std::fs::write(dir.join("two.txt"), "nope\n").unwrap();
-
-    let out = GrepTool.execute(
-        &json!({"pattern": "hello", "path": dir.display().to_string(), "ignoreCase": true}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(!out.is_error());
-    assert!(
-        out.content.contains("one.txt:1:Hello world"),
-        "{}",
-        out.content
-    );
-    assert!(!out.content.contains("two.txt"));
-
-    // case-sensitive regex: no match
-    let exact = GrepTool.execute(
-        &json!({"pattern": "hello", "path": dir.display().to_string()}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert_eq!(exact.content, "No matches found");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn grep_regex_delegates_to_ripgrep() {
-    if !rg_available() {
-        return;
-    }
-    let dir = crate::core::testutil::scratch_dir("grep-re");
-    std::fs::write(dir.join("a.rs"), "fn main() {}\nlet x = 42;\n").unwrap();
-    std::fs::write(dir.join("b.txt"), "nothing\n").unwrap();
-
-    let out = GrepTool.execute(
-        &json!({"pattern": "fn\\s+main", "path": dir.display().to_string()}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(!out.is_error(), "{}", out.content);
-    assert!(
-        out.content.contains("a.rs:1:fn main() {}"),
-        "{}",
-        out.content
-    );
-    assert!(!out.content.contains("b.txt"));
-
-    // a bad pattern is reported as an error, never a crash
-    let bad = GrepTool.execute(
-        &json!({"pattern": "(", "path": dir.display().to_string()}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(bad.is_error(), "{}", bad.content);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn bash_output_beyond_pipe_buffer_does_not_deadlock() {
     // ~108KB of output used to fill the 64KiB pipe and hang until timeout
     let out = BashTool.execute(
@@ -602,71 +529,6 @@ fn tool_output_strips_ansi_before_it_reaches_the_model() {
         out.content.escape_debug()
     );
     assert_eq!(out.content, "aredb");
-}
-
-#[test]
-fn glob_finds_matching_files() {
-    if !rg_available() {
-        return;
-    }
-    let dir = crate::core::testutil::scratch_dir("glob");
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/a.rs"), "").unwrap();
-    std::fs::write(dir.join("b.txt"), "").unwrap();
-    let out = GlobTool.execute(
-        &json!({"pattern": "**/*.rs", "path": dir.display().to_string()}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(out.content.contains("a.rs"), "{}", out.content);
-    assert!(!out.content.contains("b.txt"));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn grep_context_dedups_overlapping_matches() {
-    if !rg_available() {
-        return;
-    }
-    let dir = crate::core::testutil::scratch_dir("grepctx");
-    // hits on adjacent lines with context 1: every line appears exactly
-    // once, shared context included
-    std::fs::write(
-        dir.join("app.txt"),
-        "one\nhit alpha\nhit beta\nhit gamma\nfour\n",
-    )
-    .unwrap();
-    let out = GrepTool.execute(
-        &json!({"pattern": "hit", "path": dir.display().to_string(), "context": 1}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    // ripgrep merges overlapping context and reports each match once
-    assert!(out.content.contains("app.txt"), "{}", out.content);
-    assert!(out.content.contains("hit alpha"), "{}", out.content);
-    assert!(out.content.contains("hit beta"), "{}", out.content);
-    assert!(out.content.contains("hit gamma"), "{}", out.content);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn grep_survives_a_directory_symlink_cycle() {
-    if !rg_available() {
-        return;
-    }
-    let dir = crate::core::testutil::scratch_dir("greplink");
-    std::fs::write(dir.join("needle.txt"), "find me\n").unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
-    // the walk must treat `loop` as a file (not follow it into a cycle
-    // and blow the stack)
-    let out = GrepTool.execute(
-        &json!({"pattern": "find me", "path": dir.display().to_string()}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(out.content.contains("needle.txt:1"), "{}", out.content);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn read_execute(dir: &std::path::Path, args: Value) -> ToolOutput {
@@ -853,7 +715,7 @@ fn webfetch_is_exec_tier() {
 
 #[test]
 fn plain_names_and_patterns_pick_the_allowlist() {
-    let tools: Vec<String> = ["read", "grep", "glob", "bash"]
+    let tools: Vec<String> = ["read", "edit", "webfetch", "bash"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -866,12 +728,11 @@ fn plain_names_and_patterns_pick_the_allowlist() {
         )
         .unwrap()
     };
-    assert_eq!(pick("read,grep"), vec!["read", "grep"]);
-    // a pattern keeps every match, in registry order (gr* hits grep only:
-    // glob does not start with gr)
-    assert_eq!(pick("gr*"), vec!["grep"]);
+    assert_eq!(pick("read,edit"), vec!["read", "edit"]);
+    // a pattern keeps every match, in registry order (w* hits webfetch only)
+    assert_eq!(pick("w*"), vec!["webfetch"]);
     assert_eq!(pick("*"), tools.clone());
-    assert_eq!(pick("g*b"), vec!["glob"]);
+    assert_eq!(pick("r*d"), vec!["read"]);
 }
 
 #[test]

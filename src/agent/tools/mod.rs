@@ -16,7 +16,6 @@ use edit::EditTool;
 use fetch::FetchTool;
 use read::ReadTool;
 use remember::RememberTool;
-use search::{GlobTool, GrepTool};
 use write::WriteTool;
 
 /// Shared truncation constants.
@@ -151,8 +150,6 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(BashTool),
-        Box::new(GrepTool),
-        Box::new(GlobTool),
         Box::new(FetchTool),
         Box::new(RememberTool),
     ]
@@ -659,7 +656,6 @@ mod fetch;
 mod jq;
 mod read;
 mod remember;
-mod search;
 mod write;
 
 #[cfg(test)]
