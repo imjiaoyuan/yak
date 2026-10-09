@@ -77,11 +77,10 @@ pub fn build_system_prompt(
                      - write: Create or overwrite files\n\
                      - edit: Make precise file edits with exact text replacement\n\
                      - bash: Execute a shell command\n\
-                     - webfetch: Fetch a URL and return its text content\n\
                      \n\
                      In addition to the tools above, you may have access to other custom tools \
-                     depending on the project (update_plan, ls, grep, glob and remember \
-                     are ordinary extensions in this setup).\n\
+                     depending on the project (update_plan, ls, grep, glob, remember \
+                     and webfetch are ordinary extensions in this setup).\n\
                      \n\
                      Guidelines:\n\
                      - Use read to examine files instead of cat or sed.\n\

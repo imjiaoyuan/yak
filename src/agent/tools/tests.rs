@@ -1,5 +1,4 @@
 use super::edit::change_hunks;
-use super::fetch::{extract_title, html_to_text};
 use super::write::write_atomic;
 use super::*;
 
@@ -120,48 +119,6 @@ fn truncate_tail_caps_lines_and_bytes() {
     assert!(tail.len() <= MAX_BYTES + 300);
 }
 
-/// A fetched page reads top-down, so its cut keeps the head — the opposite
-/// of a command's output. Same three caps either way, so no tool can hand the
-/// model a result the others are capped below.
-#[test]
-fn the_head_cut_keeps_the_beginning_and_holds_every_cap() {
-    // line cap: the first lines survive, the tail is dropped
-    let text = (1..=3000)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let head = truncate_head_marked(&text);
-    assert!(head.starts_with("1\n2\n3\n"), "{}…", &head[..20]);
-    assert!(head.ends_with("[output truncated]\n"));
-    assert_eq!(
-        head.lines().count(),
-        MAX_LINES + 1,
-        "2000 lines + the marker"
-    );
-
-    // byte cap: one huge line, cut on a char boundary
-    let wide = "x".repeat(MAX_BYTES * 2);
-    let head = truncate_head_marked(&wide);
-    assert!(head.len() < MAX_BYTES + 64, "{} bytes", head.len());
-
-    // token cap: the byte cap is not a token cap, and CJK costs ~1 token per
-    // char, so without this the same byte count would cost 3-4x more
-    let cjk = "中".repeat(MAX_BYTES);
-    let head = truncate_head_marked(&cjk);
-    assert!(
-        crate::agent::compact::text_tokens(&head) <= MAX_TOKENS + 64,
-        "CJK must be cut by the token estimate too"
-    );
-    // a char boundary: the cut must never split a codepoint
-    assert!(!head.trim_end_matches("[output truncated]\n").is_empty());
-    let body = head.trim_end_matches("\n[output truncated]\n");
-    assert!(body.chars().all(|c| c == '中'));
-
-    // under the caps: returned untouched, with no marker
-    let small = "hello";
-    assert_eq!(truncate_head_marked(small), "hello");
-}
-
 #[test]
 fn validation_bounces_bad_args() {
     let schema = json!({
@@ -221,56 +178,6 @@ fn validation_drops_optional_nulls_and_keeps_required_ones() {
     let mut args = json!({"path": "f", "limit": null});
     assert!(validate(&schema, &mut args).is_ok());
     assert!(args.get("limit").is_none(), "the null is dropped");
-}
-
-#[test]
-fn html_to_text_strips_markup_and_scripts() {
-    let html = "<html><head><style>p { color: red }</style></head><body>\
-                <h1>Hello</h1><p>Some <b>bold</b> text.</p>\
-                <script>var leak = \"secret <hidden>\";</script>\
-                <p>After &amp; before.</p></body></html>";
-    let text = html_to_text(html);
-    assert!(text.contains("Hello"));
-    assert!(text.contains("Some bold text."));
-    assert!(text.contains("After & before."));
-    assert!(!text.contains("secret"));
-    assert!(!text.contains("color: red"));
-}
-
-#[test]
-fn webfetch_refuses_non_http_schemes() {
-    let tool = FetchTool;
-    let out = tool.execute(
-        &json!({"url": "file:///etc/passwd"}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(out.is_error());
-    let out = tool.execute(
-        &json!({"url": "ftp://example.com/x"}),
-        Path::new("."),
-        &mut |_| {},
-    );
-    assert!(out.is_error());
-    let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
-    assert!(out.is_error());
-}
-
-#[test]
-fn extract_title_collapses_and_decodes() {
-    assert_eq!(
-        extract_title("<html><head><title>  My &amp; page\n</title></head></html>"),
-        Some("My & page".to_string())
-    );
-    // tags inside the title are stripped
-    assert_eq!(
-        extract_title("<title><b>bold</b> title</title>"),
-        Some("<b>bold</b> title".to_string())
-    );
-    // no title
-    assert_eq!(extract_title("<html><body>no title</body></html>"), None);
-    // empty title is None
-    assert_eq!(extract_title("<title>   </title>"), None);
 }
 
 #[test]
@@ -703,14 +610,12 @@ fn tool_defs_stay_under_the_wire_budget() {
 }
 
 #[test]
-fn webfetch_is_exec_tier() {
-    let tools = builtin_tools();
-    let fetch = tools
+fn the_registry_holds_exactly_the_surviving_builtins() {
+    let names: Vec<String> = builtin_tools()
         .iter()
-        .find(|t| t.name() == "webfetch")
-        .expect("mounted");
-    // the one way off the machine is exec-tier like any other shell-out
-    assert_eq!(fetch.tier(), Tier::Exec);
+        .map(|t| t.name().to_string())
+        .collect();
+    assert_eq!(names, vec!["read", "write", "edit", "bash"]);
 }
 
 #[test]
@@ -833,18 +738,6 @@ fn truncate_tail_counts_the_json_escaped_form() {
     let (tail, _) = truncate_tail(&plain, MAX_LINES, MAX_BYTES);
     assert!(tail.len() <= MAX_BYTES);
     assert!(json_escaped_len(&tail) <= MAX_BYTES + 2);
-}
-
-#[test]
-fn truncate_head_counts_the_json_escaped_form() {
-    let text = "\n".repeat(40 * 1024);
-    let head = truncate_head_marked(&text);
-    let body = head.trim_end_matches("[output truncated]").trim_end();
-    assert!(
-        json_escaped_len(body) <= MAX_BYTES,
-        "escaped len {}",
-        json_escaped_len(body)
-    );
 }
 
 #[test]

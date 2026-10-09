@@ -1478,10 +1478,7 @@ mod tests {
                 reasoning_meta: None,
             }],
         );
-        assert_eq!(
-            turn_label(&tool_round),
-            "read R/cli.R · webfetch https://x.dev"
-        );
+        assert_eq!(turn_label(&tool_round), "read R/cli.R · webfetch webfetch");
         // a user round shows the text, a plain answer its first line
         assert_eq!(
             turn_label(&stored("read cli.R", "", Vec::new())),

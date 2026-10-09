@@ -13,7 +13,6 @@ use super::approval::Tier;
 use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
-use fetch::FetchTool;
 use read::ReadTool;
 use write::WriteTool;
 
@@ -149,7 +148,6 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(BashTool),
-        Box::new(FetchTool),
     ]
 }
 
@@ -356,64 +354,6 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
 /// Tail-truncate and mark, the shared ending for process-shaped tool output.
 pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) -> String {
     let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes);
-    if truncated {
-        out.push_str("\n[output truncated]\n");
-    }
-    out
-}
-
-/// Head-truncate and mark: the ending for content whose *beginning* is the
-/// part worth keeping (a fetched page reads top-down; a command's error reads
-/// bottom-up, which is why `truncate_marked` cuts the tail instead). Applies
-/// the same three caps as the tail version — lines, bytes, and the token
-/// estimate that makes the bound hold for CJK too — so no tool can hand the
-/// model a result the others are capped below.
-pub(crate) fn truncate_head_marked(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = lines[..lines.len().min(MAX_LINES)].join("\n");
-    let mut truncated = lines.len() > MAX_LINES;
-    if out.len() > MAX_BYTES {
-        // same escaped-size accounting as the tail path: shrink until the
-        // JSON form of this head fits the wire budget
-        let mut budget = MAX_BYTES;
-        loop {
-            if out.len() > budget {
-                let end = crate::core::text::floor_boundary(&out, budget);
-                out.truncate(end);
-                truncated = true;
-            }
-            if json_escaped_len(&out) <= MAX_BYTES || budget == 0 {
-                break;
-            }
-            budget = (budget / 2).max(1).min(budget.saturating_sub(1));
-        }
-    }
-    let tokens = crate::agent::compact::text_tokens;
-    if tokens(&out) > MAX_TOKENS {
-        // largest char-boundary prefix that fits. The token count is
-        // nondecreasing in prefix length, so the valid cuts are a prefix of
-        // the boundary list: binary-search the first that overflows and cut
-        // one boundary back. `out.len()` is in the list to make the full
-        // string searchable, and the guard above rules it out as the answer.
-        let bounds: Vec<usize> = out
-            .char_indices()
-            .map(|(i, _)| i)
-            .chain([out.len()])
-            .collect();
-        let (mut lo, mut hi) = (0usize, bounds.len());
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if tokens(&out[..bounds[mid]]) <= MAX_TOKENS {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        if lo > 0 {
-            out.truncate(bounds[lo - 1]);
-            truncated = true;
-        }
-    }
     if truncated {
         out.push_str("\n[output truncated]\n");
     }
@@ -650,7 +590,6 @@ pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
 
 mod bash;
 mod edit;
-mod fetch;
 mod jq;
 mod read;
 mod write;

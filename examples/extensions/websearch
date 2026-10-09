@@ -13,10 +13,10 @@ DuckDuckGo's HTML page, then its Instant Answer JSON, then the Wikipedia
 API (encyclopedia scope, always works). The result's first line says
 which backend answered.
 
-Page fetching is deliberately not mounted: the built-in `webfetch`
-already covers it, so this example mounts only the capability the host
-lacks. All extension tools are exec-tier, gated only by the blacklist and
-per-tool policies. Protocol: newline-delimited JSON on stdio, one reply per request
+Page fetching is deliberately not mounted: the `webfetch` example covers
+it, so this example mounts only the capability the host lacks. All
+extension tools are exec-tier, gated only by the blacklist and per-tool
+policies. Protocol: newline-delimited JSON on stdio, one reply per request
 id (docs/extensions.md has the reference).
 """
 
@@ -44,7 +44,7 @@ def http_get(url, timeout=15):
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         # refuse binary bodies (pdf/image/zip/...): decoded with errors="replace"
-        # they would feed the model mojibake — the built-in webfetch errors by
+        # they would feed the model mojibake — the webfetch example errors by
         # content type for the same reason
         ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         major = ctype.split("/")[0]

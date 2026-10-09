@@ -5,8 +5,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ureq::ResponseExt;
-
 pub fn request_interrupt() {
     crate::platform::interrupt::request();
 }
@@ -434,20 +432,6 @@ pub fn short_agent() -> &'static ureq::Agent {
     })
 }
 
-/// A longer-timeout variant for the webfetch tool: pages download slowly and
-/// a 10s ceiling cuts real content off mid-read; probes stay on
-/// `short_agent` so a dead host still fails fast there.
-pub fn fetch_agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        mk_agent(
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            Duration::from_secs(30),
-        )
-    })
-}
-
 /// POST and hand each SSE `data:` line (with its `event:` type) to the
 /// caller's parser. Retryable failures (transport, 429 with its Retry-After,
 /// 5xx) resend with jittered backoff; a stream that already handed output to
@@ -807,74 +791,6 @@ fn get_blocking(
 }
 
 /// A fetched web page, decoded to text: the final URL (after redirects),
-/// the bare mime type, and the UTF-8 body.
-pub struct FetchedPage {
-    pub url: String,
-    pub content_type: String,
-    pub body: String,
-}
-
-/// Download ceiling for the webfetch tool: the tool result itself is cut to
-/// the shared line/byte/token limits before it reaches the model, and HTML
-/// stripping only shrinks, so 2MB of raw body is generous — a size-limited
-/// read keeps memory bounded while the body streams in.
-const FETCH_DOWNLOAD_MAX_BYTES: usize = 2 * 1024 * 1024;
-
-/// GET with the short-timeout agent for the agent's webfetch tool: follows
-/// redirects, carries the final URL and mime type, and decodes to UTF-8 —
-/// a binary body (image/pdf/audio/…) errors naming its content type instead
-/// of producing garbage text. Fails fast instead of hanging a task.
-pub fn fetch_page(url: &str) -> Result<FetchedPage, String> {
-    // same interruptible shape as get_with, short-agent flavored: the 10s
-    // global timeout bounds a dead fetch, the worker poll bounds a ctrl-c
-    let owned = url.to_string();
-    attempt_interruptible(crate::platform::interrupt::flag(), move || {
-        fetch_page_blocking(fetch_agent(), &owned)
-    })
-    .map_err(|e| e.to_string())
-}
-
-/// The blocking body of `fetch_page`, running on its worker thread.
-fn fetch_page_blocking(agent: &'static ureq::Agent, url: &str) -> Result<FetchedPage, HttpError> {
-    let mut request = agent.get(url);
-    for (k, v) in identity_headers() {
-        request = request.header(k, v);
-    }
-    let resp = request
-        .call()
-        .map_err(|e| HttpError::new(0, format!("Failed to fetch {url}: {e}")))?;
-    let status = resp.status().as_u16();
-    if status >= 400 {
-        return Err(HttpError::new(
-            0,
-            format!("Failed to fetch {url}: HTTP {status}"),
-        ));
-    }
-    let final_url = resp.get_uri().to_string();
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|c| c.split(';').next().unwrap_or(c).trim().to_string())
-        .unwrap_or_default();
-    let buf = read_capped(
-        resp.into_body().into_reader(),
-        FETCH_DOWNLOAD_MAX_BYTES,
-        url,
-    )?;
-    let body = String::from_utf8(buf).map_err(|_| {
-        HttpError::new(
-            0,
-            format!("Failed to read {url}: non-UTF-8 body (content-type: {content_type})"),
-        )
-    })?;
-    Ok(FetchedPage {
-        url: final_url,
-        content_type,
-        body,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

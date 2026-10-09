@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""webfetch — a resident yak extension: one tool, the one way off the machine.
+
+Copy to ~/.yak/extensions/webfetch, chmod +x, /reload. It mounts:
+
+  webfetch {url}    GET the URL, return readable text
+
+This is the built-in webfetch moved onto the extension surface,
+byte-compatible with its former self: HTML is stripped to text with its
+<title> extracted, JSON/XML/plain text pass through untouched, the final
+URL is reported when redirects moved the fetch, proxies are honoured
+(HTTP_PROXY/HTTPS_PROXY/NO_PROXY, via urllib), and the result is cut to
+the shared head (2000 lines / 50KB escaped / 12k tokens) every tool result
+obeys. Exec-tier: it is the one door untrusted content comes in by.
+Protocol: newline-delimited JSON on stdio, one reply per request id
+(docs/extensions.md has the reference).
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+
+MAX_LINES = 2000
+MAX_BYTES = 50 * 1024
+MAX_TOKENS = 12_000
+DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024
+# fetch_agent's dial: 5s resolve, 10s connect, 30s global
+TIMEOUT = 30
+USER_AGENT = "yak/dev"
+
+DESCRIPTION = (
+    "Fetch a URL as text (HTML stripped); JSON, XML and plain text "
+    "pass through."
+)
+
+TOOLS = [
+    {
+        "name": "webfetch",
+        "description": DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "http(s) URL to fetch",
+                }
+            },
+            "required": ["url"],
+        },
+        "tier": "exec",
+    },
+]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+# ---- core.text / truncate helpers, ported ----------------------------------
+
+
+def char_width(ch):
+    # render_md::char_width: wide chars count 2 cells. The exact East Asian
+    # width table lives in the Rust side's unicode-width; for the token
+    # estimate the pragmatic line is: CJK/fullwidth ranges are wide.
+    cp = ord(ch)
+    if cp in (0xFF9E, 0xFF9F):
+        return 1
+    if (
+        0x1100 <= cp <= 0x115F
+        or 0x2E80 <= cp <= 0xA4CF
+        or 0xAC00 <= cp <= 0xD7A3
+        or 0xF900 <= cp <= 0xFAFF
+        or 0xFE10 <= cp <= 0xFE19
+        or 0xFE30 <= cp <= 0xFE6F
+        or 0xFF00 <= cp <= 0xFF60
+        or 0xFFE0 <= cp <= 0xFFE6
+        or 0x20000 <= cp <= 0x3FFFD
+    ):
+        return 2
+    if 0x0300 <= cp <= 0x036F or cp in (0x200B, 0x200C, 0x200D) or 0xFE00 <= cp <= 0xFE0F:
+        return 0
+    return 1
+
+
+def text_tokens(text):
+    """compact::text_tokens: ascii/4 + wide chars."""
+    ascii_n = wide = 0
+    for ch in text:
+        if char_width(ch) >= 2:
+            wide += 1
+        else:
+            ascii_n += 1
+    return (ascii_n + 3) // 4 + wide
+
+
+def json_escaped_len(s):
+    """tools::json_escaped_len: the wire size of this string as a JSON value."""
+    n = 2  # surrounding quotes
+    for ch in s:
+        if ch in ('"', "\\"):
+            n += 2
+        elif ch in ("\n", "\r", "\t", "\b", "\f"):
+            n += 2
+        elif ord(ch) < 0x20:
+            n += 6
+        else:
+            n += len(ch.encode("utf-8"))
+    return n
+
+
+def rust_lines(text):
+    """Rust str::lines(): no trailing empty piece, and "" has no lines."""
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines = lines[:-1]
+    return lines
+
+
+def floor_boundary(b, idx):
+    """core.text::floor_boundary over bytes: never split a codepoint."""
+    while idx > 0 and (b[idx] & 0xC0) == 0x80:
+        idx -= 1
+    return idx
+
+
+def truncate_head_marked(text, max_lines=MAX_LINES, max_bytes=MAX_BYTES):
+    """tools::truncate_head_marked: a fetched page reads top-down, so keep
+    the beginning, then hold the same three caps every tool result obeys."""
+    lines = rust_lines(text)
+    out = "\n".join(lines[: max_lines])
+    truncated = len(lines) > max_lines
+    budget = max_bytes
+    b = out.encode("utf-8")
+    while True:
+        if len(b) > budget:
+            end = floor_boundary(b, budget)
+            b = b[:end]
+            truncated = True
+        out = b.decode("utf-8", "replace")
+        if json_escaped_len(out) <= max_bytes or budget == 0:
+            break
+        budget = max(1, min(budget // 2, budget - 1))
+    if text_tokens(out) > MAX_TOKENS:
+        # binary search over char boundaries, as the Rust side does
+        chars = list(out)
+        lo, hi = 0, len(chars)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if text_tokens("".join(chars[:mid])) <= MAX_TOKENS:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo > 0:
+            out = "".join(chars[: lo - 1])
+            truncated = True
+    if truncated:
+        out += "\n[output truncated]\n"
+    return out
+
+
+def human_bytes(n):
+    """core.text::human_bytes."""
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    size = float(n)
+    unit = 0
+    while size >= 1024.0 and unit < len(units) - 1:
+        size /= 1024.0
+        unit += 1
+    if unit == 0:
+        return f"{n} B"
+    return f"{size:.1f} {units[unit]}"
+
+
+# ---- http::fetch_page, ported ----------------------------------------------
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+def fetch(url):
+    """http::fetch_page: redirects followed, final URL carried, mime kept,
+    body capped. Returns (final_url, content_type, body) or raises with the
+    built-in's error wording."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            status = resp.status
+            final_url = resp.geturl()
+            content_type = resp.headers.get("content-type", "")
+            content_type = content_type.split(";")[0].strip() if content_type else ""
+            # read_capped: cap + 1 bytes, then compare — the error names the
+            # human-readable cap, not the byte count
+            data = resp.read(DOWNLOAD_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise Exception(f"Failed to fetch {url}: HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        # ureq's transport errors read like "url timed out: ..."; keep the
+        # same prefix and carry the reason
+        raise Exception(f"Failed to fetch {url}: {e.reason}") from None
+    except socket.timeout:
+        raise Exception(f"Failed to fetch {url}: timed out") from None
+    if status >= 400:
+        raise Exception(f"Failed to fetch {url}: HTTP {status}")
+    if len(data) > DOWNLOAD_MAX_BYTES:
+        raise Exception(
+            f"Failed to read {url}: body exceeds "
+            f"{human_bytes(DOWNLOAD_MAX_BYTES)} (got more)"
+        )
+    try:
+        body = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Exception(
+            f"Failed to read {url}: non-UTF-8 body (content-type: {content_type})"
+        ) from None
+    return final_url, content_type, body
+
+
+# ---- fetch.rs's html handling, ported --------------------------------------
+
+
+def extract_title(html):
+    """The first <title>…</title>, whitespace-collapsed and entity-decoded."""
+    lower = html.lower()
+    start = lower.find("<title")
+    if start == -1:
+        return None
+    after_open = html[start:]
+    close = after_open.find(">")
+    if close == -1:
+        return None
+    content_start = start + close + 1
+    lower_rest = lower[content_start:]
+    end = lower_rest.find("</title")
+    if end == -1:
+        return None
+    raw = html[content_start : content_start + end]
+    title = " ".join(raw.split())
+    for a, b in (
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", '"'),
+        ("&#39;", "'"),
+        ("&amp;", "&"),
+    ):
+        title = title.replace(a, b)
+    title = title.strip()
+    return title if title else None
+
+
+BREAKING = {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "pre"}
+
+
+def html_to_text(html):
+    """Strip markup: drop script/style blocks, remove tags, decode common
+    entities, collapse blank-line runs."""
+    out = []
+    skip_depth = 0
+    rest = html
+    while True:
+        pos = rest.find("<")
+        if pos == -1:
+            if skip_depth == 0:
+                out.append(rest)
+            break
+        if skip_depth == 0:
+            out.append(rest[:pos])
+        tag_start = pos
+        gt = rest.find(">", pos)
+        tag_end = len(rest) if gt == -1 else gt + 1
+        tag = rest[tag_start:tag_end]
+        lower = tag.lower()
+        name = lower.lstrip("<").lstrip("/")
+        name = name.split(">")[0]
+        for ch in name:
+            if ch.isspace() or ch == ">":
+                name = name[: name.index(ch)]
+                break
+        if name in ("script", "style"):
+            if "</" in lower:
+                skip_depth = max(0, skip_depth - 1)
+            else:
+                skip_depth += 1
+        elif name in BREAKING and skip_depth == 0:
+            out.append("\n")
+        rest = rest[tag_end:]
+        nxt = rest.find("<")
+        if nxt != -1:
+            if skip_depth == 0:
+                out.append(rest[:nxt])
+            rest = rest[nxt:]
+        else:
+            if skip_depth == 0:
+                out.append(rest)
+            rest = ""
+    decoded = "".join(out)
+    for a, b in (
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", '"'),
+        ("&#39;", "'"),
+        ("&amp;", "&"),
+    ):
+        decoded = decoded.replace(a, b)
+    clean = []
+    blank = 0
+    for line in rust_lines(decoded):
+        t = line.strip()
+        if not t:
+            blank += 1
+            if blank <= 1:
+                clean.append("")
+            continue
+        blank = 0
+        clean.append(t)
+    return "\n".join(clean).strip()
+
+
+def webfetch(args):
+    url = args.get("url")
+    if not isinstance(url, str):
+        return None, "missing string argument 'url'"
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None, f"only http(s) URLs are allowed (refusing {url})"
+    try:
+        final_url, content_type, body = fetch(url)
+    except Exception as e:
+        return None, str(e)
+    is_html = content_type.lower() in ("text/html", "application/xhtml+xml")
+    if is_html:
+        text = html_to_text(body)
+        s = ""
+        if final_url != url:
+            s += f"[final URL: {final_url}]\n"
+        title = extract_title(body)
+        if title:
+            s += title + "\n\n"
+        s += text
+    else:
+        s = body.strip()
+    return truncate_head_marked(s), None
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+        elif kind == "call_tool":
+            if msg.get("name") != "webfetch":
+                reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
+                continue
+            result, err = webfetch(msg.get("args") or {})
+            if err is not None:
+                reply({"id": mid, "error": err})
+            else:
+                reply({"id": mid, "result": result})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()
