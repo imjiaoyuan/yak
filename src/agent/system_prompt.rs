@@ -106,8 +106,10 @@ pub fn build_system_prompt(
                        the `remember` tool with one concise line. It lands in the user memory \n\
                        file named in the `<user_memory>` block below and applies from the \n\
                        next session on; this session's prompt stays as it is.\n\
-                     - Repo- or directory-scoped rules belong in a project AGENTS.md/CLAUDE.md \n\
-                       instead; do not put project facts in the global memory file.\n\
+                     - Repo- or directory-scoped rules belong in the project's own memory \n\
+                       file (<project>/.yak/YAK.md, shown as `<project_memory>` below when \n\
+                       present) or a project AGENTS.md/CLAUDE.md; do not put project facts \n\
+                       in the global user memory file.\n\
                      - Never record secrets, tokens or credentials.\n\
                      \n\
                      Extending yourself\n\
@@ -142,6 +144,10 @@ pub fn build_system_prompt(
     if !continuation {
         out.push_str("\n\n");
         out.push_str(&crate::agent::memory::section());
+        if let Some(pm) = crate::agent::memory::project_section(cwd) {
+            out.push_str("\n\n");
+            out.push_str(&pm);
+        }
         if let Some(ctx) = project_context(cwd) {
             out.push_str("\n\n");
             out.push_str(&ctx);
@@ -218,6 +224,15 @@ mod tests {
         // stable across builds in the same directory (the prefix cache)
         let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         assert_eq!(out, again);
+        // a scratch dir without .yak/YAK.md injects no project memory; one
+        // with the file does, wrapped in its own tag (the guideline text
+        // mentions the tag name, so assert on the block opening itself)
+        assert!(!out.contains("<project_memory path="), "{out}");
+        std::fs::create_dir_all(dir.join(".yak")).unwrap();
+        std::fs::write(dir.join(".yak/YAK.md"), "- never commit target/\n").unwrap();
+        let with = build_system_prompt(&dir, None, None, None, &[]).unwrap();
+        assert!(with.contains("<project_memory path="), "{with}");
+        assert!(with.contains("never commit target/"), "{with}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -23,9 +23,16 @@ pub fn section() -> String {
 }
 
 fn section_at(path: &std::path::Path) -> String {
+    section_tagged(path, "user_memory")
+}
+
+/// The shared body of a memory section: read, placeholder when empty, cap,
+/// wrap in the named tag. `<user_memory>` and `<project_memory>` render
+/// through the same rules so neither drifts from the other.
+fn section_tagged(path: &std::path::Path, tag: &str) -> String {
     let body = match std::fs::read_to_string(path) {
         Ok(text) if !text.trim().is_empty() => text,
-        _ => "(empty — durable user preferences belong here, one line each)".to_string(),
+        _ => format!("(empty — durable {tag} notes belong here, one line each)"),
     };
     let mut body = body;
     if body.len() > SECTION_CAP {
@@ -33,10 +40,20 @@ fn section_at(path: &std::path::Path) -> String {
         body.truncate(end);
         body.push_str("\n[truncated]");
     }
-    format!(
-        "<user_memory path=\"{}\">\n{body}\n</user_memory>",
-        path.display()
-    )
+    format!("<{tag} path=\"{}\">\n{body}\n</{tag}>", path.display())
+}
+
+/// The `<project_memory>` section: the nearest `<project>/.yak/YAK.md`
+/// walking up from `cwd` (bounded by the git root, like project docs),
+/// absent entirely when the project carries none — a project without a
+/// memory file spends no tokens on an empty shell.
+pub fn project_section(cwd: &std::path::Path) -> Option<String> {
+    let dir = crate::core::paths::nearest_dir_up(cwd, ".yak", true)?;
+    let path = dir.join("YAK.md");
+    if !path.is_file() {
+        return None;
+    }
+    Some(section_tagged(&path, "project_memory"))
 }
 
 /// The agent-facing `remember`: one dated line appended to the memory file,
