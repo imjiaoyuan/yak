@@ -111,6 +111,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         seen["ua"] = self.headers.get("User-Agent")
         seen["model"] = body.get("model")
         seen["tools"] = [t["function"]["name"] for t in body.get("tools", [])]
+        # the system prompt rides as messages[0]; the skills lane sets a
+        # flag so only its own run is recorded (earlier lanes run before the
+        # shipped skills are installed)
+        if seen.get("want_system"):
+            seen.setdefault("system", messages[0].get("content", "") if messages else "")
         if messages:
             # the agent appends a volatile `<context>…</context>` budget note
             # as the final turn; the real prompt is the message before it
@@ -882,6 +887,32 @@ def main():
     nj = run([binary, "--json"], env, stdin=subprocess.DEVNULL)
     assert nj.returncode == 1 and "needs a task" in nj.stdout + nj.stderr, \
         f"--json without a task: rc={nj.returncode} out={(nj.stdout + nj.stderr)[-200:]!r}"
+
+    # skills lane: the shipped example skills install like any user skill
+    # (copy into ~/.yak/skills/<name>/) and must reach the system prompt as
+    # <available_skills> entries — name, description and location — because
+    # that block is the whole discovery surface for model-invoked skills
+    skills_src = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "examples", "skills")
+    if os.path.isdir(skills_src):
+        for entry in sorted(os.listdir(skills_src)):
+            src = os.path.join(skills_src, entry)
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(user, "skills", entry))
+        seen["want_system"] = True
+        seen.pop("system", None)
+        sk = run([binary, "--no-session", "-m", "mock/m-a", "hi"],
+                 env, stdin=subprocess.DEVNULL)
+        seen["want_system"] = False
+        assert sk.returncode == 0, \
+            f"skills lane rc={sk.returncode} err={sk.stderr[-300:]!r}"
+        system = seen.get("system") or ""
+        assert "<available_skills>" in system, \
+            f"the skills block never reached the system prompt: {system[-400:]!r}"
+        for name in ("commit-hygiene", "pkg-skill-audit", "release-checklist"):
+            assert f"<name>{name}</name>" in system, \
+                f"the shipped skill {name} must be listed: {system[-400:]!r}"
 
     # subagent lane: examples/extensions/subagent.py mounts a tool that spawns
     # a real child yak (--json, its own tools and system prompt), reads its

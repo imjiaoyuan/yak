@@ -105,6 +105,12 @@ The rewind is transcript-only: files the agent wrote stay written. To take the w
 
 Skills are `SKILL.md` folders, discovered from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name). A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
 
+Three ship in [`examples/skills/`](https://github.com/imjiaoyuan/yak/tree/main/examples/skills) — `release-checklist` (the release gates in order), `commit-hygiene` (pre-commit sweeps, with `references/subjects.md` worked examples) and `pkg-skill-audit` (what an installed package mounts, with a `scripts/audit.sh` walker) — copy the folder into `~/.yak/skills/` and it is discoverable:
+
+```bash
+cp -r examples/skills/commit-hygiene ~/.yak/skills/
+```
+
 ## Prompt templates
 
 Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in `~/.yak/commands/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a `system` prompt on top of the agent's own, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task.
