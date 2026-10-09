@@ -9,6 +9,9 @@ pub struct Entry {
     pub id: &'static str,
     /// our adapter kind: openai-compat | anthropic
     pub kind: &'static str,
+    /// the endpoint the request paths hang off, any version segment
+    /// included: the adapters glue `/chat/completions` or `/v1/messages`
+    /// onto it verbatim, they never insert a version themselves
     pub base_url: &'static str,
     /// the conventional env var for the API key
     pub env: &'static str,
@@ -37,12 +40,6 @@ pub const ALL: &[Entry] = &[
         "ANTHROPIC_API_KEY",
     ),
     e(
-        "ant-ling",
-        "anthropic",
-        "https://api.ant-ling.com/v1",
-        "ANT_LING_API_KEY",
-    ),
-    e(
         "minimax",
         "anthropic",
         "https://api.minimax.io/anthropic",
@@ -60,6 +57,14 @@ pub const ALL: &[Entry] = &[
         "openai-compat",
         "https://api.openai.com/v1",
         "OPENAI_API_KEY",
+    ),
+    // anthropic-named, but it serves the OpenAI shape: /v1/chat/completions
+    // answers while /v1/messages is an unrouted 404
+    e(
+        "ant-ling",
+        "openai-compat",
+        "https://api.ant-ling.com/v1",
+        "ANT_LING_API_KEY",
     ),
     // OpenCode's Go (and Zen) subscription gateway: one key, two wire
     // formats. Most models ride the OpenAI /chat/completions path; a few
@@ -99,7 +104,7 @@ pub const ALL: &[Entry] = &[
     e(
         "mistral",
         "openai-compat",
-        "https://api.mistral.ai",
+        "https://api.mistral.ai/v1",
         "MISTRAL_API_KEY",
     ),
     e(
@@ -135,7 +140,7 @@ pub const ALL: &[Entry] = &[
     e(
         "fireworks",
         "openai-compat",
-        "https://api.fireworks.ai/inference",
+        "https://api.fireworks.ai/inference/v1",
         "FIREWORKS_API_KEY",
     ),
     e("xai", "openai-compat", "https://api.x.ai/v1", "XAI_API_KEY"),
@@ -160,7 +165,7 @@ pub const ALL: &[Entry] = &[
     e(
         "kimi-coding",
         "openai-compat",
-        "https://api.kimi.com/coding",
+        "https://api.kimi.com/coding/v1",
         "KIMI_API_KEY",
     ),
     e(
@@ -220,7 +225,7 @@ pub const ALL: &[Entry] = &[
     e(
         "vercel-ai-gateway",
         "openai-compat",
-        "https://ai-gateway.vercel.sh",
+        "https://ai-gateway.vercel.sh/v1",
         "AI_GATEWAY_API_KEY",
     ),
     // kept additions beyond the registry
@@ -362,6 +367,48 @@ mod tests {
             "https://open.bigmodel.cn/api/coding/paas/v4"
         );
         assert_eq!(url_of("zhipu"), "https://open.bigmodel.cn/api/paas/v4");
+    }
+
+    #[test]
+    fn the_openai_compat_rows_mounted_under_v1_keep_it() {
+        // the adapters glue "/models" and "/chat/completions" onto base_url,
+        // so a row whose endpoint lives under a version segment must carry
+        // it: without it the wizard's probe answers 404 (mistral,
+        // fireworks, kimi-coding, vercel-ai-gateway all shipped one)
+        let models = |id: &str| {
+            let entry = ALL
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("missing catalog entry {id}"));
+            models_url(entry.kind, entry.base_url)
+        };
+        for (id, expected) in [
+            ("ant-ling", "https://api.ant-ling.com/v1/models"),
+            ("mistral", "https://api.mistral.ai/v1/models"),
+            ("fireworks", "https://api.fireworks.ai/inference/v1/models"),
+            ("kimi-coding", "https://api.kimi.com/coding/v1/models"),
+            (
+                "vercel-ai-gateway",
+                "https://ai-gateway.vercel.sh/v1/models",
+            ),
+        ] {
+            assert_eq!(models(id), expected, "{id}");
+        }
+    }
+
+    #[test]
+    fn an_anthropic_row_does_not_repeat_the_version_segment() {
+        // models_url appends /v1/models for the anthropic kind, and the
+        // messages adapter appends /v1/messages the same way, so a row that
+        // already ends in /v1 would be requested at .../v1/v1/...
+        for entry in ALL.iter().filter(|e| e.kind == "anthropic") {
+            assert!(
+                !entry.base_url.trim_end_matches('/').ends_with("/v1"),
+                "{}: anthropic base url already carries the version: {}",
+                entry.id,
+                entry.base_url
+            );
+        }
     }
 
     #[test]
