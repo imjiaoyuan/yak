@@ -1441,37 +1441,13 @@ pub(crate) fn cell_width(s: &str) -> usize {
     w
 }
 
-/// Byte offset just past the escape sequence starting at `i` (`ESC`). Handles
-/// CSI (`ESC [`…final), OSC (`ESC ]`…BEL/ST), and the short two-byte forms, so
-/// a stray sequence can never make us skip real content or count a control
-/// byte as a cell.
+/// Byte offset just past the escape sequence starting at `i` (`ESC`). The
+/// one parser lives in `core::text::escape_len`; this wraps it with the
+/// width-accounting convention that an unterminated tail (no terminator
+/// before the input ends) runs to the end, so a stray sequence can never
+/// make us skip real content or count a control byte as a cell.
 pub(crate) fn escape_end(bytes: &[u8], i: usize) -> usize {
-    let n = bytes.len();
-    match bytes.get(i + 1) {
-        Some(b'[') => {
-            let mut j = i + 2;
-            while j < n {
-                if (0x40..=0x7E).contains(&bytes[j]) {
-                    return j + 1;
-                }
-                j += 1;
-            }
-            n
-        }
-        Some(b']') => {
-            let mut j = i + 2;
-            while j < n {
-                match bytes[j] {
-                    0x07 => return j + 1,
-                    0x1b if bytes.get(j + 1) == Some(&b'\\') => return j + 2,
-                    _ => j += 1,
-                }
-            }
-            n
-        }
-        Some(_) => i + 2,
-        None => n,
-    }
+    crate::core::text::escape_len(bytes, i).unwrap_or(bytes.len())
 }
 
 /// Terminal cell width: delegated to [`unicode-width`] (the same source

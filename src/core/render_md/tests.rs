@@ -961,6 +961,11 @@ fn cell_width_skips_every_escape_kind_without_losing_content() {
     assert_eq!(cell_width("a\x1b[2Kb"), 2);
     assert_eq!(cell_width("\x1b[31m中\x1b[0m"), 2);
     assert_eq!(cell_width("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"), 4);
+    // a lone ESC in front of a multibyte character must not panic the
+    // slicing nor eat the character: the offset stays on a boundary and the
+    // character is counted
+    assert_eq!(cell_width("a\u{1b}中b"), 4);
+    assert_eq!(cell_width("\u{1b}中xxx…"), 6);
 }
 
 #[test]
