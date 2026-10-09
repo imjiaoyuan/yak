@@ -25,6 +25,10 @@ pub struct AgentSettings {
     pub cache_ttl: Option<String>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
     pub disabled_skills: Vec<String>,
+    /// `models.thinking` off the same bytes: `settings::load` reads this
+    /// file once, and the agent entry then never re-reads it for the
+    /// stored reasoning level
+    pub default_thinking: Option<String>,
 }
 
 impl AgentSettings {
@@ -113,6 +117,11 @@ pub fn parse(raw: &str) -> AgentSettings {
             }
         }
     }
+    s.default_thinking = value
+        .get("models")
+        .and_then(|m| m.get("thinking"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
     s
 }
 

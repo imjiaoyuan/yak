@@ -111,7 +111,7 @@ fn resolve_model_tail(
     };
     let mut model = ResolvedModel::from_config(&name, provider, &model_id, key_of(provider));
     let qualified = model.qualified_id();
-    let saved = config::load_model_options();
+    let saved = &cfg.model_options;
     model.options = saved
         .get(&qualified)
         .or_else(|| saved.get(&model_id))
@@ -138,7 +138,7 @@ pub fn resolve_run_model(
 ) -> Result<ResolvedModel, String> {
     use crate::core::config;
     let cfg = config::load();
-    let stored_default = config::default_model().filter(|m| {
+    let stored_default = cfg.default_model.clone().filter(|m| {
         let resolves = cfg.resolve_model(m).ok().flatten().is_some();
         if !resolves {
             eprintln!("Warning: models.default '{m}' does not resolve, ignoring it");

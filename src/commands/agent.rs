@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use crate::agent::approval::{ApprovalConfig, Policy};
 use crate::agent::blacklist;
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
-use crate::core::config;
 use crate::core::threads;
 use crate::providers::Msg;
 use crate::{flag_spec, multi_spec, value_spec};
@@ -313,7 +312,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     let thinking: Option<String> = match args.opt(&["thinking"]) {
         Some(level) => crate::providers::parse_thinking_level(level)?,
         None => {
-            let level = config::default_thinking();
+            let level = settings.default_thinking.clone();
             match level.as_deref() {
                 Some(level) if crate::providers::is_valid_reasoning_level(level) => {
                     Some(level.to_string())

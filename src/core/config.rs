@@ -16,9 +16,19 @@ pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
     /// resolved aliases off the same bytes, so per-model resolution does
-    /// not re-read the file (see `load` — one read, two parses)
+    /// not re-read the file (see `load` — one read, all the side tables)
     #[serde(skip)]
     pub aliases: BTreeMap<String, String>,
+    /// the `models.default` string, carried so model resolution does not
+    /// re-read the file for it
+    #[serde(skip)]
+    pub default_model: Option<String>,
+    /// the `models.thinking` string riding the default model
+    #[serde(skip)]
+    pub default_thinking: Option<String>,
+    /// the per-model `models.options` table, resolved once at `load`
+    #[serde(skip)]
+    pub model_options: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -128,8 +138,9 @@ pub fn expand_env(value: &str) -> String {
 
 pub fn load() -> Config {
     let root = read_root_or_die();
-    // aliases ride the same parsed root (Config skips them): one read and
-    // one parse of the file, not a second full parse for one key
+    // every side table rides the same parsed root (the struct skips
+    // them): one read and one parse of the file, not a second full parse
+    // per key
     let aliases = match root.get("aliases") {
         None | Some(serde_json::Value::Null) => BTreeMap::new(),
         Some(v) => serde_json::from_value(v.clone())
@@ -141,7 +152,7 @@ pub fn load() -> Config {
             })
             .unwrap_or_default(),
     };
-    let mut config: Config = serde_json::from_value(root).unwrap_or_else(|e| {
+    let mut config: Config = serde_json::from_value(root.clone()).unwrap_or_else(|e| {
         eprintln!(
             "Error: {} does not hold a valid config: {e}",
             config_path().display()
@@ -149,7 +160,28 @@ pub fn load() -> Config {
         std::process::exit(1);
     });
     config.aliases = aliases;
+    config.apply_models_side_tables(&root);
     config
+}
+
+impl Config {
+    /// Fill the `models` side tables (default/thinking/options) off the
+    /// same parsed root the struct came from — the second parse the file
+    /// used to pay per key, paid once instead.
+    fn apply_models_side_tables(&mut self, root: &serde_json::Value) {
+        let Some(models) = root.get("models") else {
+            return;
+        };
+        self.default_model = default_model_from(models).map(str::to_string);
+        self.default_thinking = models
+            .get("thinking")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        self.model_options = models
+            .get("options")
+            .and_then(|o| serde_json::from_value(o.clone()).ok())
+            .unwrap_or_default();
+    }
 }
 
 /// Extension names from the config `extensions.disabled` list. A missing
@@ -247,32 +279,14 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 
 // the default model — the "models" object in config.json:
 // {"default": "provider/model", "thinking": "high"}. One default serves
-// every mode (prompt/agent); -m and YAK_MODEL override per run.
+// every mode (prompt/agent); -m and YAK_MODEL override per run. Both ride
+// `Config` (resolved at `load`) so resolution never re-reads the file.
 
-/// The shared default model every mode runs on.
-pub fn default_model() -> Option<String> {
-    default_model_from(&read_root_or_die())
-}
-
-fn default_model_from(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("models")
-        .and_then(|m| m.get("default"))
-        .and_then(|m| m.as_str())
-        .map(str::to_string)
-}
-
-/// The global reasoning level riding the default model.
-pub fn default_thinking() -> Option<String> {
-    default_thinking_from(&read_root_or_die())
-}
-
-fn default_thinking_from(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("models")
-        .and_then(|m| m.get("thinking"))
-        .and_then(|t| t.as_str())
-        .map(str::to_string)
+/// The same read off an explicit root: the edit paths (`clear_default_for`)
+/// work on a fresh read, not on a `Config`; `load` calls it on the parsed
+/// `models` object.
+fn default_model_from(models: &serde_json::Value) -> Option<&str> {
+    models.get("default").and_then(|m| m.as_str())
 }
 
 /// Write `models.default`.
@@ -324,7 +338,11 @@ pub fn clear_default_for(provider: &str) -> std::io::Result<bool> {
 /// `provider`. Returns true when anything was removed.
 fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
     let prefix = format!("{provider}/");
-    if default_model_from(root).is_some_and(|m| m.starts_with(&prefix)) {
+    let default = root
+        .get("models")
+        .and_then(|m| m.get("default"))
+        .and_then(|m| m.as_str());
+    if default.is_some_and(|m| m.starts_with(&prefix)) {
         if let Some(models) = root.as_object_mut().and_then(|m| m.get_mut("models"))
             && let Some(map) = models.as_object_mut()
         {
@@ -361,18 +379,8 @@ fn models_map_mut(
     models.as_object_mut().expect("just ensured an object")
 }
 
-/// The mutable `models` object, created when absent.
-fn options_from(value: &serde_json::Value) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
-    serde_json::from_value(value.get("models")?.get("options")?.clone()).ok()
-}
-
 // model settings — every mode's default
 // per-model option table, all under config.json's "models" object
-
-/// Per-model default options, stored as the `models.options` table.
-pub fn load_model_options() -> BTreeMap<String, BTreeMap<String, String>> {
-    options_from(&read_root_or_die()).unwrap_or_default()
-}
 
 /// Remember a provider model seen in the wild (e.g. picked from a live
 /// /models list) so it resolves from config.json from now on.
@@ -529,12 +537,40 @@ mod default_model_tests {
 
     #[test]
     fn default_model_reads_the_single_default() {
-        let root = serde_json::json!({"models": {"default": "a/x", "thinking": "high"}});
-        assert_eq!(default_model_from(&root).as_deref(), Some("a/x"));
-        assert_eq!(default_thinking_from(&root).as_deref(), Some("high"));
-        // nothing set anywhere
-        assert_eq!(default_model_from(&serde_json::json!({})), None);
-        assert_eq!(default_thinking_from(&serde_json::json!({})), None);
+        let root = serde_json::json!({"default": "a/x", "thinking": "high"});
+        assert_eq!(default_model_from(&root), Some("a/x"));
+        assert_eq!(
+            default_model_from(&serde_json::json!({"thinking": "high"})),
+            None
+        );
+    }
+
+    #[test]
+    fn load_carries_the_models_side_tables() {
+        let root = serde_json::json!({
+            "models": {
+                "default": "a/x",
+                "thinking": "high",
+                "options": {"a/x": {"context_window": "200000"}}
+            }
+        });
+        let mut config = Config::default();
+        config.apply_models_side_tables(&root);
+        assert_eq!(config.default_model.as_deref(), Some("a/x"));
+        assert_eq!(config.default_thinking.as_deref(), Some("high"));
+        assert_eq!(
+            config
+                .model_options
+                .get("a/x")
+                .and_then(|o| o.get("context_window"))
+                .map(String::as_str),
+            Some("200000")
+        );
+        // a root without the table stays empty
+        let mut bare = Config::default();
+        bare.apply_models_side_tables(&serde_json::json!({}));
+        assert_eq!(bare.default_model, None);
+        assert!(bare.model_options.is_empty());
     }
 
     #[test]
@@ -556,6 +592,9 @@ mod default_model_tests {
         let mut config = Config {
             providers: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            default_model: None,
+            default_thinking: None,
+            model_options: BTreeMap::new(),
         };
         config.providers.insert(
             "alpha".to_string(),
