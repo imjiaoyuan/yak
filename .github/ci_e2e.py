@@ -929,9 +929,19 @@ def main():
     else:
         shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"), sub_dst)
         os.chmod(sub_dst, 0o755)
-    search_dst = os.path.join(user, "extensions", "search")
-    shutil.copyfile(os.path.join(here, "examples", "extensions", "search"), search_dst)
-    os.chmod(search_dst, 0o755)
+    # search carries no manifest header, so on unix it must be executable to
+    # be discovered as a resident extension; windows has no shebang execution,
+    # so it rides behind a .cmd shim like every other python entry there
+    search_src = os.path.join(here, "examples", "extensions", "search")
+    if sys.platform == "win32":
+        search_py = os.path.join(user, "extensions", "search.py")
+        shutil.copyfile(search_src, search_py)
+        with open(os.path.join(user, "extensions", "search.cmd"), "w") as f:
+            f.write('@"%s" "%s" %%*\r\n' % (sys.executable, search_py))
+    else:
+        search_dst = os.path.join(user, "extensions", "search")
+        shutil.copyfile(search_src, search_dst)
+        os.chmod(search_dst, 0o755)
     os.makedirs(os.path.join(user, "agents"), exist_ok=True)
     with open(os.path.join(user, "agents", "scout.md"), "w") as f:
         f.write("---\nname: scout\ndescription: ci scout\ntools: read, grep\n---\n"
