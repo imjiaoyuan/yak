@@ -161,9 +161,16 @@ impl ScriptTool {
             return Ok(binary);
         }
         let _ = std::fs::create_dir_all(&cache_dir);
-        // compile to a temp name then rename, so a cache hit can never be
-        // a half-written binary from a previous interrupted compile
-        let staging = cache_dir.join(format!(".{stem}-{hash}.building"));
+        // compile to a per-attempt staging name then rename, so a cache hit
+        // can never be a half-written binary from an interrupted compile —
+        // and two processes compiling the same source concurrently (the
+        // cache is content-addressed, so the name collides) never fight
+        // over one staging file: Windows opens linker outputs exclusively
+        // and the loser aborts with LNK1104
+        let staging = cache_dir.join(format!(
+            ".{stem}-{hash}-{}.building",
+            crate::core::db::ulid()
+        ));
         let _ = std::fs::remove_file(&staging);
         let mut compile = std::process::Command::new("rustc");
         compile
@@ -216,10 +223,23 @@ impl ScriptTool {
                 String::from_utf8_lossy(&outcome.stderr)
             ));
         }
-        std::fs::rename(&staging, &binary).map_err(|e| {
+        // publish by rename. A same-name collision means another process
+        // compiled the same source concurrently and published first: the
+        // content-addressed name makes either binary the right one, so the
+        // loser keeps its staging file for the sweep and takes the cache
+        // hit instead of erroring. Windows rename-over-an-existing-file
+        // fails outright, which is exactly the shape handled here.
+        if let Err(e) = std::fs::rename(&staging, &binary) {
+            if binary.is_file() {
+                let _ = std::fs::remove_file(&staging);
+                return Ok(binary);
+            }
             let _ = std::fs::remove_file(&staging);
-            format!("cannot publish compiled tool to {}: {e}", binary.display())
-        })?;
+            return Err(format!(
+                "cannot publish compiled tool to {}: {e}",
+                binary.display()
+            ));
+        }
         Ok(binary)
     }
 }
