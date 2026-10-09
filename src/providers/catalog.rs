@@ -82,6 +82,19 @@ pub const ALL: &[Entry] = &[
         "https://opencode.ai/zen/go",
         "OPENCODE_API_KEY",
     ),
+    // the same gateway without the Go subscription: Zen
+    e(
+        "opencode",
+        "openai-compat",
+        "https://opencode.ai/zen/v1",
+        "OPENCODE_API_KEY",
+    ),
+    e(
+        "opencode-anthropic",
+        "anthropic",
+        "https://opencode.ai/zen",
+        "OPENCODE_API_KEY",
+    ),
     e(
         "deepseek",
         "openai-compat",
@@ -149,6 +162,12 @@ pub const ALL: &[Entry] = &[
         "openai-compat",
         "https://openrouter.ai/api/v1",
         "OPENROUTER_API_KEY",
+    ),
+    e(
+        "meta",
+        "openai-compat",
+        "https://api.meta.ai/v1",
+        "META_API_KEY",
     ),
     e(
         "moonshotai",
@@ -233,6 +252,12 @@ pub const ALL: &[Entry] = &[
         "siliconflow",
         "openai-compat",
         "https://api.siliconflow.cn/v1",
+        "SILICONFLOW_API_KEY",
+    ),
+    e(
+        "siliconflow-com",
+        "openai-compat",
+        "https://api.siliconflow.com/v1",
         "SILICONFLOW_API_KEY",
     ),
     e(
@@ -370,11 +395,11 @@ mod tests {
     }
 
     #[test]
-    fn the_openai_compat_rows_mounted_under_v1_keep_it() {
+    fn a_row_whose_endpoint_is_versioned_carries_the_version() {
         // the adapters glue "/models" and "/chat/completions" onto base_url,
         // so a row whose endpoint lives under a version segment must carry
-        // it: without it the wizard's probe answers 404 (mistral,
-        // fireworks, kimi-coding, vercel-ai-gateway all shipped one)
+        // it: without it the wizard's probe answers 404, which is how
+        // mistral, fireworks, kimi-coding and vercel-ai-gateway shipped
         let models = |id: &str| {
             let entry = ALL
                 .iter()
@@ -391,6 +416,10 @@ mod tests {
                 "vercel-ai-gateway",
                 "https://ai-gateway.vercel.sh/v1/models",
             ),
+            ("meta", "https://api.meta.ai/v1/models"),
+            ("siliconflow-com", "https://api.siliconflow.com/v1/models"),
+            ("opencode", "https://opencode.ai/zen/v1/models"),
+            ("opencode-anthropic", "https://opencode.ai/zen/v1/models"),
         ] {
             assert_eq!(models(id), expected, "{id}");
         }

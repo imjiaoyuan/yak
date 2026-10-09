@@ -46,7 +46,7 @@ cat error.log | yak "what broke?"   # the prompt can come from stdin
 
 Piped output is plain text (no colours, no control codes) so it drops straight into a file or another command.
 
-The first run needs a model: type `/login`, pick a provider from the shipped catalog of 38 (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
+The first run needs a model: type `/login`, pick a provider from the shipped catalog of 42 (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
 
 Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt. Ask \"把这个偏好记住：……\" and the `remember` tool files it in `~/.yak/YAK.md`, injected into every future session.
 

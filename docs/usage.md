@@ -111,7 +111,7 @@ Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.
 
 ## Providers and models
 
-The easy path: run `yak`, type `/login`, pick a provider, paste your API key (hidden), pick the default model from the provider's live model list. That's it: only the model you picked is stored (the provider's full list is fetched live whenever `/model` runs), and the first provider's first model becomes your default, so a fresh install is ready to run. esc cancels at any step without writing anything. The catalog ships 38 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider and clears the default if it pointed there.
+The easy path: run `yak`, type `/login`, pick a provider, paste your API key (hidden), pick the default model from the provider's live model list. That's it: only the model you picked is stored (the provider's full list is fetched live whenever `/model` runs), and the first provider's first model becomes your default, so a fresh install is ready to run. esc cancels at any step without writing anything. The catalog ships 42 providers, including Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, and the local runtimes Ollama, LM Studio, llama.cpp and vLLM. `/logout` removes a provider and clears the default if it pointed there.
 
 Two accounts on the same provider (say two OpenCode Go subscriptions) are two provider entries: run `/login` for the second one and accept the suggested `NAME-2`, then give it its own key. Models are then picked by the qualified `provider/model` id, and a bare model name served by both accounts is refused as ambiguous rather than guessed.
 
