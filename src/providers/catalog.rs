@@ -166,13 +166,13 @@ pub const ALL: &[Entry] = &[
     e(
         "zai",
         "openai-compat",
-        "https://api.z.ai/aterminal coding/paas/v4",
+        "https://api.z.ai/api/coding/paas/v4",
         "ZAI_API_KEY",
     ),
     e(
         "zai-coding-cn",
         "openai-compat",
-        "https://open.bigmodel.cn/aterminal coding/paas/v4",
+        "https://open.bigmodel.cn/api/coding/paas/v4",
         "ZAI_CODING_CN_API_KEY",
     ),
     e(
@@ -233,7 +233,7 @@ pub const ALL: &[Entry] = &[
     e(
         "zhipu",
         "openai-compat",
-        "https://open.bigmodel.cn/aa hosted provider/v4",
+        "https://open.bigmodel.cn/api/paas/v4",
         "ZHIPU_API_KEY",
     ),
     // local runtimes
@@ -318,6 +318,50 @@ mod tests {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn every_catalogued_base_url_is_requestable() {
+        // a URL with a space reaches ureq as "http: invalid uri character",
+        // which the wizard only reports as a failed model fetch — every row
+        // must be a URL the /models request can actually be built from
+        for entry in ALL {
+            assert!(
+                entry.base_url.starts_with("http://") || entry.base_url.starts_with("https://"),
+                "{}: not an http(s) url: {}",
+                entry.id,
+                entry.base_url
+            );
+            assert!(
+                !entry.base_url.contains(char::is_whitespace),
+                "{}: base url contains whitespace: {}",
+                entry.id,
+                entry.base_url
+            );
+            let url = models_url(entry.kind, entry.base_url);
+            assert!(
+                !url.contains(char::is_whitespace),
+                "{}: models url contains whitespace: {}",
+                entry.id,
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn the_zai_family_points_at_the_coding_endpoints() {
+        let url_of = |id: &str| {
+            ALL.iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("missing catalog entry {id}"))
+                .base_url
+        };
+        assert_eq!(url_of("zai"), "https://api.z.ai/api/coding/paas/v4");
+        assert_eq!(
+            url_of("zai-coding-cn"),
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        );
+        assert_eq!(url_of("zhipu"), "https://open.bigmodel.cn/api/paas/v4");
     }
 
     #[test]
