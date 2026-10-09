@@ -4,7 +4,7 @@ use super::*;
 #[test]
 fn parses_a_python_manifest_header() {
     let text = "#!/usr/bin/env python3\n# --- yak-tool: wordcount\n# description: count characters\n# args: text (string) the text\n# arg-mode: argv\n# interpreter: python\nimport sys\n";
-    let spec = parse_tool_manifest(text, Path::new("/x/wordcount")).expect("manifest");
+    let spec = parse_tool_manifest(text, Path::new("/x/wordcount"), 120).expect("manifest");
     assert_eq!(spec.name, "wordcount");
     assert_eq!(spec.description, "count characters");
     assert!(spec.arg_mode_argv);
@@ -39,23 +39,23 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
     }
 
     // nothing disabled: both surface
-    let found = discover_in(std::slice::from_ref(&dir), &[]);
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120);
     assert_eq!(found.script_tools.len(), 1);
     assert_eq!(found.script_tools[0].name, "search");
     assert_eq!(found.resident.len(), 1, "the executable resident surfaces");
 
     // by declared tool name: the script tool is gone, the resident stays
-    let found = discover_in(std::slice::from_ref(&dir), &["search".to_string()]);
+    let found = discover_in(std::slice::from_ref(&dir), &["search".to_string()], 120);
     assert!(found.script_tools.is_empty(), "declared name disables");
     assert_eq!(found.resident.len(), 1);
 
     // by file stem: the script tool is gone too (the old spelling)
-    let found = discover_in(std::slice::from_ref(&dir), &["helper".to_string()]);
+    let found = discover_in(std::slice::from_ref(&dir), &["helper".to_string()], 120);
     assert!(found.script_tools.is_empty(), "stem still disables");
     assert_eq!(found.resident.len(), 1);
 
     // and the resident still falls to its own stem
-    let found = discover_in(std::slice::from_ref(&dir), &["other".to_string()]);
+    let found = discover_in(std::slice::from_ref(&dir), &["other".to_string()], 120);
     assert_eq!(found.script_tools.len(), 1);
     assert!(found.resident.is_empty());
 
@@ -64,21 +64,21 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
 
 #[test]
 fn plain_scripts_have_no_manifest() {
-    assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s")).is_none());
+    assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s"), 120).is_none());
 }
 
 #[test]
 fn manifest_tier_defaults_to_exec_and_parses_declarations() {
     let base = "#!/bin/sh\n# --- yak-tool: t\n";
-    let plain = parse_tool_manifest(base, Path::new("/x/t")).expect("manifest");
+    let plain = parse_tool_manifest(base, Path::new("/x/t"), 120).expect("manifest");
     assert_eq!(plain.tier, Tier::Exec, "absent tier stays exec");
-    let read =
-        parse_tool_manifest(&format!("{base}# tier: read\n"), Path::new("/x/t")).expect("manifest");
+    let read = parse_tool_manifest(&format!("{base}# tier: read\n"), Path::new("/x/t"), 120)
+        .expect("manifest");
     assert_eq!(read.tier, Tier::Read);
-    let write = parse_tool_manifest(&format!("{base}# tier: Write\n"), Path::new("/x/t"))
+    let write = parse_tool_manifest(&format!("{base}# tier: Write\n"), Path::new("/x/t"), 120)
         .expect("manifest");
     assert_eq!(write.tier, Tier::Write, "case-insensitive");
-    let bogus = parse_tool_manifest(&format!("{base}# tier: whatever\n"), Path::new("/x/t"))
+    let bogus = parse_tool_manifest(&format!("{base}# tier: whatever\n"), Path::new("/x/t"), 120)
         .expect("manifest");
     assert_eq!(
         bogus.tier,
@@ -594,7 +594,7 @@ fn a_reply_without_a_result_is_an_error() {
 #[test]
 fn argv_mode_picks_the_declared_argument_by_name() {
     let text = "# --- yak-tool: shout\n# description: shout a word\n# args: word (string) the word\n# arg-mode: argv\nimport sys\nprint(sys.argv[1])\n";
-    let spec = parse_tool_manifest(text, Path::new("/x/shout")).expect("manifest");
+    let spec = parse_tool_manifest(text, Path::new("/x/shout"), 120).expect("manifest");
     let tool = ScriptTool {
         spec,
         description: String::new(),
@@ -709,7 +709,7 @@ fn rust_tool_dir(tag: &str) -> std::path::PathBuf {
 }
 
 fn mount_rust(dir: &Path) -> ScriptTool {
-    let spec = parse_tool_manifest(RUST_SRC, &dir.join("rshout.rs")).expect("manifest");
+    let spec = parse_tool_manifest(RUST_SRC, &dir.join("rshout.rs"), 120).expect("manifest");
     ScriptTool {
         spec,
         description: String::new(),
@@ -783,7 +783,7 @@ fn a_rust_source_error_names_the_tool_and_shows_rustc_diagnostics() {
     let dir = crate::core::testutil::scratch_dir("rs-ext-err");
     let bad = RUST_SRC.replace("fn main() {", "fn main() { this is not rust");
     std::fs::write(dir.join("rshout.rs"), &bad).unwrap();
-    let spec = parse_tool_manifest(&bad, &dir.join("rshout.rs")).expect("manifest");
+    let spec = parse_tool_manifest(&bad, &dir.join("rshout.rs"), 120).expect("manifest");
     let tool = ScriptTool {
         spec,
         description: String::new(),

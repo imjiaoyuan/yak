@@ -12,11 +12,14 @@ pub struct Discovered {
 /// Scan the home directories for extension files. `extensions.disabled`
 /// matches a file's stem and a script tool's declared name alike: a
 /// package file whose stem says nothing about its tools (or two scripts
-/// declaring the same name) can be disabled by either spelling.
+/// declaring the same name) can be disabled by either spelling. The
+/// config-derived inputs (`disabled` names, the fallback tool timeout)
+/// read once here, not once per candidate script.
 pub fn discover(cwd: &Path) -> Discovered {
     discover_in(
         &discover_dirs(cwd),
         &crate::core::config::disabled_extensions(),
+        crate::core::config::extension_tool_timeout().as_secs(),
     )
 }
 
@@ -24,7 +27,11 @@ pub fn discover(cwd: &Path) -> Discovered {
 /// directory instead of the real `~/.yak` (the same seam `http.rs` gives
 /// its interrupt flag); `cwd` only picks the homes, it plays no part in
 /// matching.
-pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
+pub(super) fn discover_in(
+    dirs: &[PathBuf],
+    disabled: &[String],
+    default_timeout: u64,
+) -> Discovered {
     let is_disabled = |name: &str| disabled.iter().any(|d| d == name);
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Discovered {
@@ -49,7 +56,7 @@ pub(super) fn discover_in(dirs: &[PathBuf], disabled: &[String]) -> Discovered {
             // a `--- yak-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
-            if let Some(spec) = exec_tool_manifest(&path) {
+            if let Some(spec) = exec_tool_manifest(&path, default_timeout) {
                 if !is_disabled(&spec.name) {
                     out.script_tools.push(spec);
                 }
@@ -85,7 +92,7 @@ pub struct ExecToolSpec {
 /// Fields: `description:`, `args: name (type) desc` (repeatable),
 /// `arg-mode: argv`, `interpreter: <prog>`, `timeout: <secs>`,
 /// `tier: read|write|exec`.
-pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
+pub fn parse_tool_manifest(text: &str, path: &Path, default_timeout: u64) -> Option<ExecToolSpec> {
     let mut name: Option<String> = None;
     let mut description = String::new();
     let mut properties = serde_json::Map::new();
@@ -146,7 +153,7 @@ pub fn parse_tool_manifest(text: &str, path: &Path) -> Option<ExecToolSpec> {
         }),
         arg_mode_argv,
         interpreter,
-        timeout: timeout.unwrap_or_else(|| crate::core::config::extension_tool_timeout().as_secs()),
+        timeout: timeout.unwrap_or(default_timeout),
         tier,
     })
 }
@@ -187,13 +194,13 @@ pub(super) fn parse_arg_field(
 }
 
 /// Read a file's head and parse its manifest, if it carries one.
-pub(super) fn exec_tool_manifest(path: &Path) -> Option<ExecToolSpec> {
+pub(super) fn exec_tool_manifest(path: &Path, default_timeout: u64) -> Option<ExecToolSpec> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).ok()?;
     let mut head = vec![0u8; 4096];
     let n = f.read(&mut head).unwrap_or(0);
     let text = String::from_utf8_lossy(&head[..n]);
-    parse_tool_manifest(&text, path).filter(|s| !s.name.is_empty())
+    parse_tool_manifest(&text, path, default_timeout).filter(|s| !s.name.is_empty())
 }
 
 #[cfg(unix)]
