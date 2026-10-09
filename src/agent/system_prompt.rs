@@ -79,7 +79,6 @@ pub fn build_system_prompt(
                      - bash: Execute a shell command\n\
                      - grep: Search file contents for patterns (respects .gitignore)\n\
                      - glob: Find files by glob pattern (respects .gitignore)\n\
-                     - ls: List directory contents\n\
                      - webfetch: Fetch a URL and return its text content\n\
                      - update_plan: Track a multi-step plan\n\
                      - remember: Save one durable fact to the user's global memory\n\

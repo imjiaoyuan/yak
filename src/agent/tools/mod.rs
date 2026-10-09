@@ -14,7 +14,6 @@ use crate::providers::ToolError;
 use bash::BashTool;
 use edit::EditTool;
 use fetch::FetchTool;
-use fs::LsTool;
 use plan::PlanTool;
 use read::ReadTool;
 use remember::RememberTool;
@@ -146,7 +145,7 @@ impl ToolProgress {
     }
 }
 
-/// The built-in tool registry: nine handwritten tools.
+/// The built-in tool registry: the handwritten tools.
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(PlanTool),
@@ -156,7 +155,6 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(BashTool),
         Box::new(GrepTool),
         Box::new(GlobTool),
-        Box::new(LsTool),
         Box::new(FetchTool),
         Box::new(RememberTool),
     ]
@@ -660,7 +658,6 @@ pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
 mod bash;
 mod edit;
 mod fetch;
-mod fs;
 mod jq;
 mod plan;
 mod read;

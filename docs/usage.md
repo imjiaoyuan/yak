@@ -52,7 +52,7 @@ A blacklist ask shows a prompt with the matched pattern highlighted. Type `a` to
 
 ## Tools
 
-Nine built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `webfetch`, `remember`. The agent picks them itself; `--tools` narrows the set: plain names or `*` patterns (`read,grep`, `re*`) replace the default set wholesale, while `+name`/`-name` entries edit it in place (`-bash,-edit` runs with the write tools off; `+read` adds `read` back). A pattern must match a whole tool name, mixing the two forms is refused, and an unknown plain name is an error that lists what exists.
+Eight built-ins: `update_plan`, `read`, `write`, `edit`, `bash`, `grep`, `glob`, `webfetch`, `remember`. The agent picks them itself; `--tools` narrows the set: plain names or `*` patterns (`read,grep`, `re*`) replace the default set wholesale, while `+name`/`-name` entries edit it in place (`-bash,-edit` runs with the write tools off; `+read` adds `read` back). A pattern must match a whole tool name, mixing the two forms is refused, and an unknown plain name is an error that lists what exists. A `ls` listing tool ships as the [`examples/extensions/ls`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) extension — copy it into `~/.yak/extensions/` (or the project's `.yak/extensions/`) and it mounts read-tier like the built-ins.
 
 Tool calls are timed: the whole call's clock runs in the spinner row while it executes (streamed output beyond the first lines folds into that row as a `+N lines` phase, so the clock stays visible through chatty tools), and `--json` carries `durationMs` on each `tool_end`. Calls in the read-only batch share one clock: every concurrent call reports the batch's span.
 

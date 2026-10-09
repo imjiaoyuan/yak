@@ -61,7 +61,7 @@ The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.
 
 - [The interactive session](docs/usage.md#the-interactive-session): slash commands, `!cmd`, interrupting a running task
 - [Approvals and the blacklist](docs/usage.md#approvals-and-the-blacklist): what is hardcoded, what you configure
-- [Tools](docs/usage.md#tools): the nine built-ins and how they behave
+- [Tools](docs/usage.md#tools): the eight built-ins and how they behave
 - [Attachments](docs/usage.md#attachments): files, URLs, stdin, clipboard pastes
 - [Sessions](docs/usage.md#sessions): resume, fork, export, `--no-session`
 - [Session tree](docs/usage.md#session-tree): `/tree` jumps that branch instead of truncating

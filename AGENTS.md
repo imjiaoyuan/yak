@@ -16,7 +16,7 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 
 ## What this is
 
-`yak` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (nine built-in tools, approvals, skills, compaction, memory, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
+`yak` is a single-binary, terminal-first coding agent in Rust, the reference-shaped: one executable, one agent (eight built-in tools plus the `ls` listing tool shipped as an example extension, approvals, skills, compaction, memory, an interactive REPL), a thread-file session store, and an out-of-process extension host standing in for the reference's TypeScript extensions. On top sit kept extensions the reference lacks: multimodal input (`-a/--attachment` path/URL/stdin; in a session ctrl+v pastes the clipboard image (any image type the selection offers, else the path of a copied image *file*) as a temp-file path, and any local image path in a message auto-attaches).
 
 
 

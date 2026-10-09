@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""ls — the directory listing tool as a yak extension.
+
+The reference tool the host used to carry built in, kept byte-compatible:
+entries sorted alphabetically, directories suffixed `/`, dotfiles included,
+a limit that ends the listing with `... (N more)`. Read-tier, so it rides
+the read-only parallel batch like any other listing.
+
+Copy to ~/.yak/extensions/ls (or the project's .yak/extensions/), /reload.
+
+Protocol: newline-delimited JSON on stdio (docs/extensions.md).
+"""
+
+import json
+import os
+import sys
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def ls(args):
+    # defaults match the built-in: 500 entries, the working directory.
+    # a non-integer or negative limit falls back to 500 the way serde's
+    # as_u64 does (floats, strings, bools all give None); 0 is a real
+    # limit and truncates to just the count line
+    limit = args.get("limit")
+    limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0 else 500
+    raw = args.get("path") or "."
+    # the host spawned us in the session's cwd; ~ expands like resolve_path
+    if raw.startswith("~/"):
+        raw = os.path.join(os.path.expanduser("~"), raw[2:])
+    directory = raw if os.path.isabs(raw) else os.path.join(os.getcwd(), raw)
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return {"error": f"cannot list {directory}"}
+    names = [e + "/" if os.path.isdir(os.path.join(directory, e)) else e
+             for e in entries]
+    names.sort()
+    if len(names) > limit:
+        more = len(names) - limit
+        names = names[:limit] + [f"... ({more} more)"]
+    return {"result": "\n".join(names) + "\n"}
+
+
+TOOLS = [{
+    "name": "ls",
+    "description": "List directory contents. Returns entries sorted "
+    "alphabetically, with '/' suffix for directories. Includes dotfiles.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Directory to list (default .)"},
+            "limit": {"type": "integer", "description": "Maximum entries (default 500)"},
+        },
+    },
+    "tier": "read",
+}]
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind, mid = msg.get("type"), msg.get("id")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+        elif kind == "call_tool" and msg.get("name") == "ls":
+            reply(ls(msg.get("args") or {}))
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

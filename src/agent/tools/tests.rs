@@ -907,7 +907,7 @@ fn webfetch_is_exec_tier() {
 
 #[test]
 fn plain_names_and_patterns_pick_the_allowlist() {
-    let tools: Vec<String> = ["read", "grep", "glob", "ls", "bash"]
+    let tools: Vec<String> = ["read", "grep", "glob", "bash"]
         .iter()
         .map(|s| s.to_string())
         .collect();
