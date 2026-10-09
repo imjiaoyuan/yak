@@ -246,6 +246,11 @@ pub(crate) fn wizard() -> Result<(), String> {
             None => prompt("Base URL (e.g. https://api.deepseek.com/v1)").ok_or("cancelled")?,
         },
     };
+    // refuse a URL that cannot be requested here, at the prompt the user is
+    // looking at: otherwise the failure surfaces later as an opaque "invalid
+    // uri character" from the model fetch, and the wizard would happily write
+    // the broken base URL to config once a model id was typed
+    validate_base_url(&base_url)?;
 
     // step 2 — the key, hidden. Empty answer takes the detected env var as a
     // ${VAR} reference. esc aborts without writing anything.
@@ -329,6 +334,22 @@ pub(crate) fn wizard() -> Result<(), String> {
     Ok(())
 }
 
+/// A base URL the `/models` request can be built from: an http(s) scheme and
+/// no whitespace (ureq rejects a space with "http: invalid uri character").
+fn validate_base_url(base_url: &str) -> Result<(), String> {
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err(format!(
+            "invalid base URL (must start with http:// or https://): {base_url}"
+        ));
+    }
+    if base_url.contains(char::is_whitespace) {
+        return Err(format!(
+            "invalid base URL (contains whitespace): {base_url}"
+        ));
+    }
+    Ok(())
+}
+
 fn cancelled() -> Result<(), String> {
     eprintln!(
         "{}aborted — nothing written{}",
@@ -372,8 +393,22 @@ fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::next_free_name;
+    use super::{next_free_name, validate_base_url};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn base_url_validation_refuses_whitespace_and_missing_schemes() {
+        // the regression: the catalog shipped ".../aterminal coding/paas/v4"
+        // and the wizard accepted it, failing later as "invalid uri character"
+        assert_eq!(
+            validate_base_url("https://api.z.ai/aterminal coding/paas/v4").unwrap_err(),
+            "invalid base URL (contains whitespace): https://api.z.ai/aterminal coding/paas/v4"
+        );
+        assert!(validate_base_url("api.deepseek.com/v1").is_err());
+        assert!(validate_base_url("ftp://example.com").is_err());
+        assert!(validate_base_url("https://api.z.ai/api/coding/paas/v4").is_ok());
+        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+    }
 
     fn taken(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
