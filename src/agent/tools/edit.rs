@@ -23,10 +23,8 @@ impl Tool for EditTool {
         prepare_edit_args(args)
     }
     fn description(&self) -> &str {
-        "Edit a single file using exact text replacement. Every edits[].oldText must match a \
-         unique, non-overlapping region of the original file. If two changes affect the same \
-         block or nearby lines, merge them into one edit instead of emitting overlapping edits. \
-         Do not include large unchanged regions just to connect distant changes."
+        "Edit a single file using exact text replacement (all edits in one call are matched \
+         against the original file, not applied incrementally)."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -35,11 +33,11 @@ impl Tool for EditTool {
                 "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
                 "edits": {
                     "type": "array",
-                    "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+                    "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits, or large unchanged regions just to connect distant changes: merge edits that touch the same block or nearby lines into one edit instead.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "oldText": {"type": "string", "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},
+                            "oldText": {"type": "string", "description": "Exact text to replace: must match a unique, non-overlapping region of the original file."},
                             "newText": {"type": "string", "description": "Replacement text for this targeted edit."}
                         },
                         "required": ["oldText", "newText"]
