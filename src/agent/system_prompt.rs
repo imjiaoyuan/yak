@@ -6,8 +6,9 @@ use std::path::Path;
 /// First AGENTS.override.md/AGENTS.md/CLAUDE.md walking up from cwd, stopping
 /// at the git root. `AGENTS.override.md` wins (a local override), then
 /// `AGENTS.md`, then `CLAUDE.md`; both title-cases are tried for each (the
-/// candidate list).
-pub fn find_project_file(cwd: &Path) -> Option<std::path::PathBuf> {
+/// candidate list). Returns the path with the file's text — the read the
+/// emptiness check already paid, so the caller never reads it twice.
+fn find_project_doc(cwd: &Path) -> Option<(std::path::PathBuf, String)> {
     for d in crate::core::paths::ancestors(cwd) {
         for name in [
             "AGENTS.override.md",
@@ -21,7 +22,7 @@ pub fn find_project_file(cwd: &Path) -> Option<std::path::PathBuf> {
                 && let Ok(text) = std::fs::read_to_string(&p)
                 && !text.trim().is_empty()
             {
-                return Some(p);
+                return Some((p, text));
             }
         }
         if d.join(".git").exists() {
@@ -32,8 +33,7 @@ pub fn find_project_file(cwd: &Path) -> Option<std::path::PathBuf> {
 }
 
 pub fn project_context(cwd: &Path) -> Option<String> {
-    let p = find_project_file(cwd)?;
-    let text = std::fs::read_to_string(&p).ok()?;
+    let (p, text) = find_project_doc(cwd)?;
     Some(format!(
         "<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n</project_context>",
         p.display(),
@@ -231,7 +231,7 @@ mod tests {
         let dir = crate::core::testutil::scratch_dir("spctx");
         std::fs::write(dir.join("AGENTS.md"), "# base\n").unwrap();
         std::fs::write(dir.join("AGENTS.override.md"), "# override\n").unwrap();
-        let p = find_project_file(&dir).unwrap();
+        let p = find_project_doc(&dir).map(|(p, _)| p).unwrap();
         assert_eq!(p.file_name().unwrap(), "AGENTS.override.md");
         let ctx = project_context(&dir).unwrap();
         assert!(ctx.starts_with("<project_context>"), "{ctx}");
