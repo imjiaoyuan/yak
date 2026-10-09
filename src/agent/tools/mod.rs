@@ -15,7 +15,6 @@ use bash::BashTool;
 use edit::EditTool;
 use fetch::FetchTool;
 use read::ReadTool;
-use remember::RememberTool;
 use write::WriteTool;
 
 /// Shared truncation constants.
@@ -151,7 +150,6 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(EditTool),
         Box::new(BashTool),
         Box::new(FetchTool),
-        Box::new(RememberTool),
     ]
 }
 
@@ -655,7 +653,6 @@ mod edit;
 mod fetch;
 mod jq;
 mod read;
-mod remember;
 mod write;
 
 #[cfg(test)]

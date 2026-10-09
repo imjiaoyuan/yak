@@ -78,11 +78,10 @@ pub fn build_system_prompt(
                      - edit: Make precise file edits with exact text replacement\n\
                      - bash: Execute a shell command\n\
                      - webfetch: Fetch a URL and return its text content\n\
-                     - remember: Save one durable fact to the user's global memory\n\
                      \n\
                      In addition to the tools above, you may have access to other custom tools \
-                     depending on the project (update_plan, ls, grep and glob are ordinary \
-                     extensions in this setup).\n\
+                     depending on the project (update_plan, ls, grep, glob and remember \
+                     are ordinary extensions in this setup).\n\
                      \n\
                      Guidelines:\n\
                      - Use read to examine files instead of cat or sed.\n\

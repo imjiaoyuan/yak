@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""remember — a resident yak extension: one tool, one file.
+
+Copy to ~/.yak/extensions/remember, chmod +x, /reload. It mounts:
+
+  remember {text}    one dated line into the user's global memory
+
+This is the built-in remember moved onto the extension surface,
+byte-compatible with its former self. The memory file is <user_dir>/YAK.md
+(YAK_USER_PATH overrides the whole user dir, else ~/.yak) — the same file
+the system prompt's <user_memory> block reads, so a line added here rides
+every future session. Write-tier: it mutates that one file and runs
+nothing. Protocol: newline-delimited JSON on stdio, one reply per request
+id (docs/extensions.md has the reference).
+"""
+
+import json
+import os
+import sys
+import time
+
+DESCRIPTION = (
+    "Save one durable fact to the user's global memory (YAK.md), injected "
+    "into every future session. Use when the user asks you to remember or "
+    "note a preference, environment detail or long-term decision; not for "
+    "task-specific details."
+)
+
+TOOLS = [
+    {
+        "name": "remember",
+        "description": DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The fact to remember, one line",
+                }
+            },
+            "required": ["text"],
+        },
+        "tier": "write",
+    },
+]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def user_dir():
+    """config::user_dir(): YAK_USER_PATH wins, else ~/.yak (HOME else
+    USERPROFILE on Windows). The migration the Rust side runs is a one-time
+    startup rename, not a per-write concern."""
+    override = os.environ.get("YAK_USER_PATH")
+    if override:
+        return override
+    home = os.environ.get("HOME") or (
+        os.environ.get("USERPROFILE") if os.name == "nt" else None
+    )
+    return os.path.join(home, ".yak") if home else os.path.join(".yak")
+
+
+def rust_trim(s, chars=('"', ".")):
+    """str::trim_matches(['"', '.']): both characters, both ends,
+    repeatedly — and nothing else (spaces survive)."""
+    start, end = 0, len(s)
+    while start < end and s[start] in chars:
+        start += 1
+    while end > start and s[end - 1] in chars:
+        end -= 1
+    return s[start:end]
+
+
+def rust_lines(text):
+    """str::lines(): no trailing empty piece, "" has no lines."""
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines = lines[:-1]
+    return lines
+
+
+def remember_at(path, line):
+    """memory::remember_at. Returns (wrote, error): wrote is False when the
+    line dedups or trims away, error carries the io failure."""
+    line = rust_trim(line.strip())
+    if not line:
+        return False, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    lower = line.lower()
+    for l in rust_lines(text):
+        ll = l.lower()
+        if lower in ll or ll in lower:
+            return False, None
+    # a hand-edited file may lack the trailing newline; never glue lines
+    if text and not text.endswith("\n"):
+        text += "\n"
+    today = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
+    text += f"- [{today}] {line}\n"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        return None, f"{type(e).__name__}: {e}"
+    return True, None
+
+
+def io_error(e):
+    """io::Error's Display: the os-level message, no path prefix."""
+    return str(e)
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+        elif kind == "call_tool":
+            if msg.get("name") != "remember":
+                reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
+                continue
+            args = msg.get("args") or {}
+            # validation already ran host-side; a non-string still takes the
+            # built-in's None → "" path
+            text = args.get("text")
+            text = text if isinstance(text, str) else ""
+            if not text.strip():
+                reply({"id": mid, "error": "nothing to remember"})
+                continue
+            try:
+                wrote, err = remember_at(
+                    os.path.join(user_dir(), "YAK.md"), text
+                )
+            except Exception as e:  # parity with the Rust error path
+                reply({"id": mid, "error": f"cannot write memory: {e}"})
+                continue
+            if err is not None:
+                reply({"id": mid, "error": f"cannot write memory: {err}"})
+            elif wrote:
+                reply({"id": mid, "result": "noted — it will apply from the next session on"})
+            else:
+                reply({"id": mid, "result": "already in memory"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

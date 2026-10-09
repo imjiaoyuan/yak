@@ -60,10 +60,7 @@ pub fn project_section(cwd: &std::path::Path) -> Option<String> {
 /// deduped against what is already noted (containment either way,
 /// case-insensitive). `Ok(true)` means the line landed, `Ok(false)` that it
 /// was already there or empty.
-pub fn remember(line: &str) -> Result<bool, String> {
-    remember_at(&memory_path(), line)
-}
-
+#[cfg(test)]
 fn remember_at(path: &std::path::Path, line: &str) -> Result<bool, String> {
     let line = line.trim().trim_matches(['"', '.']);
     if line.is_empty() {
