@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -53,12 +53,6 @@ const TAIL_LINES: usize = 20;
 const PROGRESS_LINES: usize = 64;
 /// `recv_timeout` slice; keeps ctrl+c responsive while waiting.
 const POLL_SLICE: Duration = Duration::from_millis(100);
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 /// One tool advertised by the initialize handshake.
 #[derive(Clone)]
@@ -138,12 +132,12 @@ impl Conn {
     /// Take the progress lines written since the last call, draining the
     /// buffer (the caller discards them to start a call on a clean slate).
     fn take_progress(&self) -> Vec<String> {
-        lock(&self.progress).drain(..).collect()
+        crate::core::sync::lock(&self.progress).drain(..).collect()
     }
 
     /// Take the lane frames written since the last drain, same discipline.
     fn take_lanes(&self) -> Vec<(String, String)> {
-        lock(&self.lanes).drain(..).collect()
+        crate::core::sync::lock(&self.lanes).drain(..).collect()
     }
 }
 
@@ -172,14 +166,14 @@ impl Ext {
             return Err(format!("extension '{}' is not running", self.name));
         }
         self.respawn();
-        match &*lock(&self.state) {
+        match &*crate::core::sync::lock(&self.state) {
             Ok(_) => Ok(()),
             Err(reason) => Err(reason.clone()),
         }
     }
 
     fn is_alive(&self) -> bool {
-        let mut guard = lock(&self.conn);
+        let mut guard = crate::core::sync::lock(&self.conn);
         let Some(conn) = guard.as_mut() else {
             return false;
         };
@@ -200,7 +194,7 @@ impl Ext {
         let Some(path) = self.path.clone() else {
             return;
         };
-        let _serialize = lock(&self.respawn);
+        let _serialize = crate::core::sync::lock(&self.respawn);
         if !self.is_alive() {
             self.spawn_and_handshake(&path);
         }
@@ -229,7 +223,7 @@ impl Ext {
         match self.request_live(msg, timeout, log.as_deref_mut()) {
             Err(e) if self.should_retry(&e) => {
                 self.respawn();
-                match &*lock(&self.state) {
+                match &*crate::core::sync::lock(&self.state) {
                     Ok(_) => self.request_live(msg, timeout, log),
                     Err(reason) => Err(reason.clone()),
                 }
@@ -255,7 +249,7 @@ impl Ext {
         timeout: Duration,
         mut log: Option<&'a mut (dyn FnMut(crate::agent::tools::ToolProgress) + 'b)>,
     ) -> Result<Value, String> {
-        let mut guard = lock(&self.conn);
+        let mut guard = crate::core::sync::lock(&self.conn);
         let conn = guard
             .as_mut()
             .ok_or_else(|| format!("extension '{}' is not running", self.name))?;
@@ -267,7 +261,7 @@ impl Ext {
             .and_then(Value::as_u64)
             .expect("host messages always carry an id");
         let (tx, rx) = sync_channel(1);
-        lock(&conn.pending).insert(id, tx);
+        crate::core::sync::lock(&conn.pending).insert(id, tx);
         // a call starts on a clean slate: stderr or lanes from an earlier
         // call (or an idle chatty extension) must not replay as this call's
         // progress
@@ -279,7 +273,7 @@ impl Ext {
         let mut frame = serde_json::to_string(msg).expect("host-built frame serializes");
         frame.push('\n');
         if conn.writer.send(frame).is_err() {
-            lock(&conn.pending).remove(&id);
+            crate::core::sync::lock(&conn.pending).remove(&id);
             return Err(format!("extension '{}' pipe closed", self.name));
         }
         let deadline = Instant::now() + timeout;
@@ -310,7 +304,7 @@ impl Ext {
                         }
                     }
                     if crate::core::http::interrupted() {
-                        lock(&conn.pending).remove(&id);
+                        crate::core::sync::lock(&conn.pending).remove(&id);
                         // the caller is walking away from this call: say so,
                         // so an extension that owns long-lived work of its
                         // own (the subagent example's child processes) can
@@ -322,11 +316,11 @@ impl Ext {
                     // so yet: stop waiting, and let `request` respawn instead
                     // of burning the full timeout on a corpse
                     if conn.exited() {
-                        lock(&conn.pending).remove(&id);
+                        crate::core::sync::lock(&conn.pending).remove(&id);
                         return Err(format!("extension '{}' is not running", self.name));
                     }
                     if Instant::now() >= deadline {
-                        lock(&conn.pending).remove(&id);
+                        crate::core::sync::lock(&conn.pending).remove(&id);
                         return Err(format!(
                             "extension '{}' timed out after {}s",
                             self.name,
@@ -349,7 +343,7 @@ impl Ext {
         call_id: Option<&str>,
         log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
     ) -> Result<String, String> {
-        let timeout = match &*lock(&self.state) {
+        let timeout = match &*crate::core::sync::lock(&self.state) {
             Ok(state) => state.tool_timeout,
             Err(_) => TOOL_TIMEOUT,
         };
@@ -401,7 +395,7 @@ impl Ext {
     /// deny the call (`{"decision":"deny","reason":..}`) or rewrite its
     /// arguments (`{"args":{..}}`); every other event is fire-and-forget.
     pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
-        let subscribed = lock(&self.state)
+        let subscribed = crate::core::sync::lock(&self.state)
             .as_ref()
             .is_ok_and(|s| s.events.iter().any(|e| e == name));
         if !subscribed {
@@ -417,7 +411,7 @@ impl Ext {
 
     /// A dim diagnostics line (extension errors at event boundaries).
     fn note(&self, line: String) {
-        let mut tail = lock(&self.tail);
+        let mut tail = crate::core::sync::lock(&self.tail);
         if tail.len() >= TAIL_LINES {
             tail.pop_front();
         }
@@ -503,7 +497,7 @@ impl ExtensionsConnecting {
         // background connect they race the caller's own startup output
         // (banners, fork notices) on stderr and can tear a line in half
         for ext in &exts {
-            if let Err(reason) = &*lock(&ext.state) {
+            if let Err(reason) = &*crate::core::sync::lock(&ext.state) {
                 eprintln!(
                     "{}extension '{}' failed: {reason}{}",
                     crate::theme::err().dim,
@@ -598,7 +592,7 @@ impl Extensions {
             }));
         }
         for ext in &self.exts {
-            let Ok(state) = &*lock(&ext.state) else {
+            let Ok(state) = &*crate::core::sync::lock(&ext.state) else {
                 continue;
             };
             for meta in &state.tools {
@@ -625,7 +619,7 @@ impl Extensions {
     /// read it.
     pub fn subscribes(&self, name: &str) -> bool {
         self.exts.iter().any(|ext| {
-            lock(&ext.state)
+            crate::core::sync::lock(&ext.state)
                 .as_ref()
                 .is_ok_and(|s| s.events.iter().any(|e| e == name))
         })
@@ -706,7 +700,7 @@ impl Extensions {
         self.exts
             .iter()
             .find(|ext| {
-                lock(&ext.state)
+                crate::core::sync::lock(&ext.state)
                     .as_ref()
                     .is_ok_and(|s| s.commands.iter().any(|c| c == name))
             })
@@ -717,7 +711,12 @@ impl Extensions {
     pub fn command_names(&self) -> Vec<String> {
         self.exts
             .iter()
-            .filter_map(|ext| lock(&ext.state).as_ref().ok().map(|s| s.commands.clone()))
+            .filter_map(|ext| {
+                crate::core::sync::lock(&ext.state)
+                    .as_ref()
+                    .ok()
+                    .map(|s| s.commands.clone())
+            })
             .flatten()
             .collect()
     }
@@ -730,7 +729,7 @@ impl Extensions {
         let mut names: Vec<String> = self
             .exts
             .iter()
-            .map(|ext| match &*lock(&ext.state) {
+            .map(|ext| match &*crate::core::sync::lock(&ext.state) {
                 Ok(_) => ext.name.clone(),
                 Err(_) => format!("{} (failed)", ext.name),
             })
@@ -743,7 +742,7 @@ impl Extensions {
     pub fn rows(&self) -> Vec<(String, String, usize, usize, String)> {
         self.exts
             .iter()
-            .map(|ext| match &*lock(&ext.state) {
+            .map(|ext| match &*crate::core::sync::lock(&ext.state) {
                 Ok(state) => (
                     ext.name.clone(),
                     ext.target.clone(),
@@ -836,7 +835,7 @@ impl Ext {
     fn spawn_and_handshake(&self, path: &Path) {
         let outcome = (|| -> Result<(), String> {
             let conn = self.spawn_conn(path)?;
-            *lock(&self.conn) = Some(conn);
+            *crate::core::sync::lock(&self.conn) = Some(conn);
             let result = self.request_live(
                 &json!({
                     "id": next_id(),
@@ -882,7 +881,7 @@ impl Ext {
             // stays the default for extensions that do not
             let tool_timeout = parse_tool_timeout(result)
                 .unwrap_or_else(crate::core::config::extension_tool_timeout);
-            *lock(&self.state) = Ok(ExtState {
+            *crate::core::sync::lock(&self.state) = Ok(ExtState {
                 tools,
                 commands,
                 events,
@@ -891,8 +890,8 @@ impl Ext {
             Ok(())
         })();
         if let Err(reason) = outcome {
-            *lock(&self.conn) = None; // drop the child
-            *lock(&self.state) = Err(reason);
+            *crate::core::sync::lock(&self.conn) = None; // drop the child
+            *crate::core::sync::lock(&self.state) = Err(reason);
         }
     }
 
@@ -949,13 +948,13 @@ impl Ext {
             let mut buf = Vec::new();
             for line in lossy_lines(&mut reader, &mut buf) {
                 {
-                    let mut p = lock(&stderr_progress);
+                    let mut p = crate::core::sync::lock(&stderr_progress);
                     if p.len() >= PROGRESS_LINES {
                         p.pop_front();
                     }
                     p.push_back(line.clone());
                 }
-                let mut t = lock(&stderr_tail);
+                let mut t = crate::core::sync::lock(&stderr_tail);
                 if t.len() >= TAIL_LINES {
                     t.pop_front();
                 }

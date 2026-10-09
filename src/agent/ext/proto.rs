@@ -43,7 +43,7 @@ pub(super) fn reader_loop(
     let mut buf = Vec::new();
     for line in lossy_lines(&mut reader, &mut buf) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            let mut t = lock(tail);
+            let mut t = crate::core::sync::lock(tail);
             if t.len() >= TAIL_LINES {
                 t.pop_front();
             }
@@ -59,20 +59,20 @@ pub(super) fn reader_loop(
                     value.get("lane").and_then(Value::as_str),
                     value.get("text").and_then(Value::as_str),
                 ) else {
-                    let mut t = lock(tail);
+                    let mut t = crate::core::sync::lock(tail);
                     if t.len() >= TAIL_LINES {
                         t.pop_front();
                     }
                     t.push_back(line);
                     continue;
                 };
-                let mut q = lock(lanes);
+                let mut q = crate::core::sync::lock(lanes);
                 if q.len() >= PROGRESS_LINES {
                     q.pop_front();
                 }
                 q.push_back((lane.to_string(), text.to_string()));
             } else {
-                let mut t = lock(tail);
+                let mut t = crate::core::sync::lock(tail);
                 if t.len() >= TAIL_LINES {
                     t.pop_front();
                 }
@@ -80,7 +80,7 @@ pub(super) fn reader_loop(
             }
             continue;
         };
-        let sender = lock(pending).remove(&id);
+        let sender = crate::core::sync::lock(pending).remove(&id);
         if let Some(tx) = sender {
             if value.get("error").is_some() {
                 let _ = tx.send(Err(value["error"]
@@ -95,7 +95,7 @@ pub(super) fn reader_loop(
     // the process is gone: fail everything still waiting (the pending map
     // holds a sender clone, so waiters alone would never see a disconnect)
     dead.store(true, Ordering::Relaxed);
-    for (_, tx) in lock(pending).drain() {
+    for (_, tx) in crate::core::sync::lock(pending).drain() {
         let _ = tx.send(Err("extension closed its stdout".to_string()));
     }
 }

@@ -368,7 +368,7 @@ impl TaskView {
     /// Opt the answer stream into terminal-markdown rendering (the
     /// tty-gated the reference-style path).
     pub fn terminal_md(&self, indent: usize) {
-        self.renderer.lock().unwrap().terminal_md(indent);
+        crate::core::sync::lock(&self.renderer).terminal_md(indent);
     }
 
     /// Reclaim the renderer (accumulated output/reasoning/usage).
@@ -376,7 +376,7 @@ impl TaskView {
         self.stop_pacer();
         match std::sync::Arc::try_unwrap(self.renderer) {
             Ok(m) => m.into_inner().unwrap(),
-            Err(arc) => std::mem::take(&mut *arc.lock().unwrap()),
+            Err(arc) => std::mem::take(&mut *crate::core::sync::lock(&arc)),
         }
     }
 
@@ -390,7 +390,7 @@ impl TaskView {
     /// Start the typewriter heartbeat once a paced batch is open (never in
     /// plain-pipe mode, where pacing does not engage).
     fn ensure_pacer(&mut self) {
-        if self.pacer.is_none() && self.renderer.lock().unwrap().draining {
+        if self.pacer.is_none() && crate::core::sync::lock(&self.renderer).draining {
             self.pacer = Some(crate::term::ticker::DrainTicker::start(
                 std::sync::Arc::clone(&self.renderer),
             ));
@@ -411,14 +411,14 @@ impl TaskView {
     fn settle(&mut self) {
         let deadline = std::time::Instant::now() + SETTLE_GRACE;
         loop {
-            let more = self.renderer.lock().unwrap().pump_due();
+            let more = crate::core::sync::lock(&self.renderer).pump_due();
             if !more || std::time::Instant::now() > deadline {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
         self.stop_pacer();
-        self.renderer.lock().unwrap().finish_stream();
+        crate::core::sync::lock(&self.renderer).finish_stream();
     }
 
     pub(crate) fn relabel(&mut self, label: &str) {
@@ -432,7 +432,7 @@ impl TaskView {
         // `\r\x1b[2K` would retract live text, and settling (a newline)
         // would break the stream mid-word — the streaming text itself
         // already shows liveness
-        if self.live && !self.renderer.lock().unwrap().has_dangling() {
+        if self.live && !crate::core::sync::lock(&self.renderer).has_dangling() {
             self.ticker = Some(crate::term::ticker::Ticker::start(label));
         }
     }
@@ -468,7 +468,7 @@ impl TaskView {
         self.close_thinking();
         self.streamed_any = true;
         let open = {
-            let mut r = self.renderer.lock().unwrap();
+            let mut r = crate::core::sync::lock(&self.renderer);
             r.push_delta(text);
             r.draining
         };
@@ -482,7 +482,7 @@ impl TaskView {
     /// newline, no spinner start while a partial row is live (`relabel`
     /// guards the start; the label swap on a running ticker is row-safe).
     pub fn reasoning_delta(&mut self, text: &str) {
-        self.renderer.lock().unwrap().push_reasoning_buffered(text);
+        crate::core::sync::lock(&self.renderer).push_reasoning_buffered(text);
         if !self.thinking_announced {
             self.thinking_announced = true;
             self.relabel("thinking ...");
@@ -553,7 +553,7 @@ impl TaskView {
         self.stop_pacer();
         // do-not print the "thinking ... end" trace on an abnormal stop:
         // a force-interrupt must not read as thinking having finished
-        self.renderer.lock().unwrap().finish_stream();
+        crate::core::sync::lock(&self.renderer).finish_stream();
     }
 
     /// The `secs · this task: input N · output N · cache N%` line, right
@@ -713,7 +713,7 @@ mod tests {
         let mut v = TaskView::new(0, "", false);
         let text: String = "x".repeat(20_000);
         {
-            let mut r = v.renderer.lock().unwrap();
+            let mut r = crate::core::sync::lock(&v.renderer);
             r.backlog = text.clone();
             r.output = text.clone();
         }

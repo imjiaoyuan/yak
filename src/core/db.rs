@@ -57,7 +57,7 @@ const RANDOM_BITS: u128 = 1u128 << 80;
 
 pub fn ulid() -> String {
     let now_ms = now_ms();
-    let mut last = LAST_ULID.lock().unwrap();
+    let mut last = crate::core::sync::lock(&LAST_ULID);
     let state = advance(*last, now_ms, random_bits);
     *last = Some(state);
     encode_ulid(state.0, state.1)

@@ -199,9 +199,9 @@ done
 
     let ext = connect_stub(&script);
     assert!(
-        lock(&ext.state).is_ok(),
+        crate::core::sync::lock(&ext.state).is_ok(),
         "initial handshake must succeed; state says {:?}",
-        lock(&ext.state).as_ref().err()
+        crate::core::sync::lock(&ext.state).as_ref().err()
     );
     assert_eq!(
         ext.call_tool("ping", &json!({}), None, &mut |_| {})
@@ -249,9 +249,9 @@ done
 
     let ext = connect_stub(&script);
     assert!(
-        lock(&ext.state).is_ok(),
+        crate::core::sync::lock(&ext.state).is_ok(),
         "initial handshake must succeed; state says {:?}",
-        lock(&ext.state).as_ref().err()
+        crate::core::sync::lock(&ext.state).as_ref().err()
     );
     let mut log: Vec<String> = Vec::new();
     let out = ext
@@ -268,9 +268,11 @@ done
     );
     // and the diagnostics tail still carries them for /status
     assert!(
-        lock(&ext.tail).iter().any(|l| l.contains("step two")),
+        crate::core::sync::lock(&ext.tail)
+            .iter()
+            .any(|l| l.contains("step two")),
         "the tail must keep stderr too: {:?}",
-        *lock(&ext.tail)
+        *crate::core::sync::lock(&ext.tail)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -306,7 +308,7 @@ done
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let ext = connect_stub(&script);
-    assert!(lock(&ext.state).is_ok(), "handshake");
+    assert!(crate::core::sync::lock(&ext.state).is_ok(), "handshake");
     let mut lanes = Vec::new();
     let out = ext
         .call_tool("ping", &json!({}), None, &mut |p| {
@@ -324,7 +326,7 @@ done
         ],
         "both updates arrive in order"
     );
-    let tail = lock(&ext.tail);
+    let tail = crate::core::sync::lock(&ext.tail);
     assert!(
         tail.iter().any(|l| l.contains("missing the lane name"))
             && tail.iter().any(|l| l.contains("noise")),
@@ -429,7 +431,7 @@ done
 fn connect_stub(path: &Path) -> Arc<Ext> {
     let mut ext = connect_one(path);
     for _ in 0..20 {
-        let busy = matches!(lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));
+        let busy = matches!(crate::core::sync::lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));
         if !busy {
             break;
         }
@@ -449,7 +451,7 @@ fn a_tool_result_subscriber_can_replace_the_result() {
     assert!(
         host.subscribes("tool_result"),
         "handshake advertised it; state says {:?}",
-        lock(&host.exts[0].state).as_ref().err()
+        crate::core::sync::lock(&host.exts[0].state).as_ref().err()
     );
     assert!(!host.subscribes("turn_end"), "only the advertised event");
 
@@ -546,7 +548,10 @@ while IFS= read -r line; do
 done
 "#;
     let ext = connect_stub(&write_stub_extension("callid", body));
-    assert!(lock(&ext.state).is_ok(), "handshake must succeed");
+    assert!(
+        crate::core::sync::lock(&ext.state).is_ok(),
+        "handshake must succeed"
+    );
     let tool = ExtTool {
         ext,
         tool_name: "ping".into(),
@@ -577,7 +582,7 @@ fn a_reply_without_a_result_is_an_error() {
     // answers every request with a bare {"ok": true}: no result, no error
     let mute = "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  case \"$line\" in\n    *initialize*) printf '{\"id\":%s,\"result\":{\"tools\":[{\"name\":\"ping\",\"parameters\":{}}]}}\n' \"$id\" ;;\n    *) printf '{\"id\":%s,\"ok\":true}\n' \"$id\" ;;\n  esac\ndone\n";
     let ext = connect_stub(&write_stub_extension("mute", mute));
-    assert!(lock(&ext.state).is_ok());
+    assert!(crate::core::sync::lock(&ext.state).is_ok());
     let err = ext
         .call_tool("ping", &json!({}), None, &mut |_| {})
         .expect_err("a reply without result must fail");

@@ -16,6 +16,7 @@ pub mod fsx;
 pub mod http;
 pub mod paths;
 pub mod render_md;
+pub mod sync;
 pub mod templates;
 #[cfg(test)]
 pub mod testutil;
