@@ -88,14 +88,17 @@ pub(crate) fn cache_hit_tokens(usage: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// The model a command run resolves to — the one shared chain for every
-/// agent entry point: `-m` > `YAK_MODEL` > `context` (the conversation's
-/// last model, when one is resumed) > the stored default. A dangling
-/// default warns and drops out instead of erroring. Saved per-model
-/// options ride under CLI `-o` pairs.
-pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
+/// The shared tail of every model resolution: resolve the query against
+/// config, refuse a miss loudly, then attach the api key (the caller's
+/// policy: the stored key, or a CLI `--key` beating it) and the saved
+/// per-model options (by qualified id, falling back to the bare model id),
+/// and lift `context_window` out of them.
+fn resolve_model_tail(
+    cfg: &crate::core::config::Config,
+    query: &str,
+    key_of: impl FnOnce(&crate::core::config::Provider) -> Option<String>,
+) -> Result<ResolvedModel, String> {
     use crate::core::config;
-    let cfg = config::load();
     let (name, provider, model_id) = match cfg.resolve_model(query) {
         Ok(Some(v)) => v,
         Ok(None) => {
@@ -106,8 +109,7 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
         }
         Err(e) => return Err(e),
     };
-    let api_key = cfg.api_key(provider);
-    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
+    let mut model = ResolvedModel::from_config(&name, provider, &model_id, key_of(provider));
     let qualified = model.qualified_id();
     let saved = config::load_model_options();
     model.options = saved
@@ -117,6 +119,17 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
         .unwrap_or_default();
     model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
     Ok(model)
+}
+
+/// The model a command run resolves to — the one shared chain for every
+/// agent entry point: `-m` > `YAK_MODEL` > `context` (the conversation's
+/// last model, when one is resumed) > the stored default. A dangling
+/// default warns and drops out instead of erroring. Saved per-model
+/// options ride under CLI `-o` pairs.
+pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
+    use crate::core::config;
+    let cfg = config::load();
+    resolve_model_tail(&cfg, query, |p| cfg.api_key(p))
 }
 
 pub fn resolve_run_model(
@@ -144,43 +157,16 @@ pub fn resolve_run_model(
                 .to_string(),
         );
     };
-    let (name, provider, model_id) = match cfg.resolve_model(&query) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return Err(format!(
-                "Invalid model: {query}. Add it to {} or check spelling.",
-                config::config_path().display()
-            ));
-        }
-        Err(e) => return Err(e),
-    };
-    let api_key = args
-        .opt(&["key"])
-        .map(str::to_string)
-        .or_else(|| cfg.api_key(provider));
-    let mut model = ResolvedModel::from_config(&name, provider, &model_id, api_key);
-    let qualified = model.qualified_id();
-    let mut options: Vec<(String, String)> = Vec::new();
-    let saved = config::load_model_options();
-    for (k, v) in saved
-        .get(&qualified)
-        .or_else(|| saved.get(&model_id))
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-    {
-        if !options.iter().any(|(existing, _)| *existing == k) {
-            options.push((k, v));
-        }
-    }
+    let cli_key = args.opt(&["key"]).map(str::to_string);
+    let mut model =
+        resolve_model_tail(&cfg, &query, |p| cli_key.clone().or_else(|| cfg.api_key(p)))?;
+    // CLI `-o` pairs ride on top of whatever config stored, last write wins,
+    // and `context_window` is re-read after the merge: a CLI override can
+    // anchor compaction the same way a stored one does
     for (k, v) in crate::core::text::parse_kv(&args.multi(&["option"]))? {
-        options.retain(|(existing, _)| existing != &k);
-        options.push((k, v));
+        model.options.retain(|(existing, _)| existing != &k);
+        model.options.push((k, v));
     }
-    model.options = options;
     model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
     Ok(model)
 }
