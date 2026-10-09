@@ -18,7 +18,7 @@ It lands in `~/.local/bin`, no root needed, and adds that directory to your `PAT
 irm https://jiaoyuan.org/yak/install.ps1 | iex
 ```
 
-It lands in `%USERPROFILE%\.local\bin`, no admin needed, and appends that directory to the user `Path`. Re-running either line is the updater: it checks the latest GitHub release, prints `updating 0.2.1 -> 0.2.2` when it moves and leaves an unchanged version alone. `YAK_FORCE=1` reinstalls anyway; `YAK_VERSION` pins a release tag, `YAK_REPO` installs from a fork and `YAK_INSTALL_DIR` picks a different directory. On Linux the static musl build is used, so the same binary runs on any distribution; prebuilt targets today are x86_64 and aarch64 Linux, x86_64 and aarch64 macOS, and x86_64 Windows.
+It lands in `%USERPROFILE%\.local\bin`, no admin needed, and appends that directory to the user `Path`. Re-running either line is the updater: it checks the latest GitHub release, prints `updating 0.2.1 -> 0.2.2` when it moves and leaves an unchanged version alone. `YAK_FORCE=1` reinstalls anyway; `YAK_VERSION` pins a release tag, `YAK_REPO` installs from a fork and `YAK_INSTALL_DIR` picks a different directory. `YAK_GH_PROXY=1` routes every download through `https://gh-proxy.com/` for hosts where GitHub is slow or unreachable — any prefix-style proxy URL works as the value too, and behind a proxy the latest-version lookup switches from the releases redirect to the GitHub API, which such proxies pass through. On Linux the static musl build is used, so the same binary runs on any distribution; prebuilt targets today are x86_64 and aarch64 Linux, x86_64 and aarch64 macOS, and x86_64 Windows.
 
 Building from source works the same everywhere:
 

@@ -11,12 +11,27 @@
 #   $env:YAK_REPO = "owner/repo"         install from a fork
 #   $env:YAK_INSTALL_DIR = "C:\bin"      install directory (default: ~\.local\bin)
 #   $env:YAK_FORCE = "1"                 reinstall even when the version is unchanged
+#   $env:YAK_GH_PROXY = "1"              download via https://gh-proxy.com/ when
+#                                        GitHub is slow or unreachable, or set any
+#                                        prefix-style proxy URL ("0"/"false" = direct)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $Repo = if ($env:YAK_REPO) { $env:YAK_REPO } else { "imjiaoyuan/yak" }
 $InstallDir = if ($env:YAK_INSTALL_DIR) { $env:YAK_INSTALL_DIR } else { "$env:USERPROFILE\.local\bin" }
 $Force = $env:YAK_FORCE -eq "1"
+
+# Optional GitHub reverse proxy for hosts with unstable GitHub connectivity
+# (e.g. mainland China). Prefix-style proxies take the full GitHub URL after
+# them: "1" picks the default https://gh-proxy.com/, any other non-empty value
+# is used as the prefix itself (scheme added, trailing / normalized).
+$GhProxy = "$env:YAK_GH_PROXY"
+if ($GhProxy -in @("1", "true", "yes")) { $GhProxy = "https://gh-proxy.com/" }
+elseif ($GhProxy -notin @("", "0", "false")) {
+    if ($GhProxy -notmatch '^[a-z][a-z0-9+.\-]*://') { $GhProxy = "https://$GhProxy" }
+    $GhProxy = $GhProxy.TrimEnd("/") + "/"
+} else { $GhProxy = "" }
+function GhUrl([string]$Url) { "$GhProxy$Url" }
 
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
     Write-Error "unsupported architecture $($env:PROCESSOR_ARCHITECTURE) (only x86_64 builds exist today)"
@@ -26,14 +41,14 @@ $Target = "x86_64-pc-windows-msvc"
 if ($env:YAK_VERSION) {
     $Version = $env:YAK_VERSION
 } else {
-    $latest = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+    $latest = Invoke-RestMethod (GhUrl "https://api.github.com/repos/$Repo/releases/latest")
     $Version = $latest.tag_name
     if (-not $Version) { Write-Error "could not resolve the latest release (set `$env:YAK_VERSION to pin)" }
 }
 
 $Archive = "yak-$Target.zip"
 $Checksum = "yak-$Target.sha256"
-$Base = "https://github.com/$Repo/releases/download/$Version"
+$Base = GhUrl "https://github.com/$Repo/releases/download/$Version"
 
 Write-Host "==> $Repo $Version ($Target)"
 $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName()))

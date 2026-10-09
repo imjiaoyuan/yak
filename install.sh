@@ -13,10 +13,27 @@
 #   YAK_INSTALL_DIR=DIR       install directory (default: ~/.local/bin)
 #   YAK_FORCE=1               reinstall even when the version is unchanged
 #   YAK_INSTALL_ALLOW_SUDO=1  run under sudo despite the guard below
+#   YAK_GH_PROXY=1            download via https://gh-proxy.com/ when GitHub is
+#                             slow or unreachable, or set any prefix-style proxy
+#                             URL as the value (0/false = direct, the default)
 set -eu
 
 REPO="${YAK_REPO:-imjiaoyuan/yak}"
 INSTALL_DIR="${YAK_INSTALL_DIR:-$HOME/.local/bin}"
+
+# Optional GitHub reverse proxy for hosts with unstable GitHub connectivity
+# (e.g. mainland China). Prefix-style proxies take the full GitHub URL after
+# them: YAK_GH_PROXY=1 picks the default https://gh-proxy.com/, any other
+# non-empty value is used as the prefix itself (scheme added, trailing /
+# normalized).
+GH_PROXY="${YAK_GH_PROXY:-}"
+case "$GH_PROXY" in
+    ""|0|false) GH_PROXY="" ;;
+    1|true|yes) GH_PROXY="https://gh-proxy.com/" ;;
+    *://*) GH_PROXY="${GH_PROXY%/}/" ;;
+    *) GH_PROXY="https://${GH_PROXY%/}/" ;;
+esac
+gh_url() { printf '%s%s\n' "$GH_PROXY" "$1"; }
 
 say() { printf '%s\n' "$1"; }
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
@@ -61,10 +78,19 @@ fetch() {
     fi
 }
 
-# Resolve the latest tag from the releases/latest redirect instead of the GitHub
-# API, which is rate-limited to 60 req/hour unauthenticated.
+# Resolve the latest tag. Direct connections use the releases/latest redirect
+# instead of the GitHub API, which is rate-limited to 60 req/hour
+# unauthenticated; behind a reverse proxy the redirect is not forwarded (the
+# proxy answers 200 with the page itself), so the proxied path asks the API,
+# which prefix-style proxies pass through without the rate limit.
 latest_version() {
-    if command -v curl >/dev/null 2>&1; then
+    if [ -n "$GH_PROXY" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --max-time 30 "$(gh_url "https://api.github.com/repos/$REPO/releases/latest")"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO- --timeout=30 "$(gh_url "https://api.github.com/repos/$REPO/releases/latest")"
+        fi | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+    elif command -v curl >/dev/null 2>&1; then
         curl -fsSI --max-time 30 "https://github.com/$REPO/releases/latest" |
             sed -n 's/^[Ll]ocation:.*\/tag\///p' | tr -d '\r' | head -n 1
     elif command -v wget >/dev/null 2>&1; then
@@ -87,7 +113,7 @@ VERSION_NUM="${VERSION#v}"
 
 ARCHIVE="yak-$TARGET.tar.gz"
 CHECKSUM="yak-$TARGET.sha256"
-BASE="https://github.com/$REPO/releases/download/$VERSION"
+BASE=$(gh_url "https://github.com/$REPO/releases/download/$VERSION")
 
 # Already at the requested release? Skip the download entirely.
 if [ -x "$INSTALL_DIR/yak" ]; then
