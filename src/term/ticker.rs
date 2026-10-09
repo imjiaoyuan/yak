@@ -44,7 +44,8 @@ impl Ticker {
                     let phase = phase_text.lock().map(|p| p.clone()).unwrap_or_default();
                     let frame_text = format!("{spin} {secs:.0}s · {phase}");
                     let _guard = crate::theme::row_lock().lock();
-                    eprint!("\r\x1b[2K{}{frame_text}{}", p.gray, p.reset);
+                    let c = crate::theme::cursor();
+                    eprint!("{}{}{frame_text}{}", c.clear_line, p.gray, p.reset);
                     let _ = std::io::stderr().flush();
                     p2.store(true, std::sync::atomic::Ordering::Relaxed);
                     last_draw = std::time::Instant::now();
@@ -75,7 +76,7 @@ impl Ticker {
             // only retract a row this ticker actually wrote: an erase under a
             // settled answer, or on an empty row, is a redraw of its own
             if self.painted.load(std::sync::atomic::Ordering::Relaxed) {
-                eprint!("\r\x1b[2K");
+                eprint!("{}", crate::theme::cursor().clear_line);
                 let _ = std::io::stderr().flush();
             }
         }

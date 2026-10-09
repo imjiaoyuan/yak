@@ -209,6 +209,52 @@ impl Cursor {
     pub fn clear_below(&self) -> &'static str {
         if self.rows_live { "\x1b[J" } else { "" }
     }
+
+    /// Hide the cursor (`ESC [ ? 25 l`): a redraw loop that repaints a
+    /// region shows it steady instead of flickering between paints.
+    pub fn hide(&self) -> &'static str {
+        if self.rows_live { "\x1b[?25l" } else { "" }
+    }
+
+    /// Show the cursor again (`ESC [ ? 25 h`): the pair of [`Cursor::hide`],
+    /// for when the redraw loop ends.
+    pub fn show(&self) -> &'static str {
+        if self.rows_live { "\x1b[?25h" } else { "" }
+    }
+
+    /// Move to 1-based column `col` of the current row (`ESC [ n G`).
+    pub fn column(&self, col: usize) -> String {
+        if !self.rows_live {
+            return String::new();
+        }
+        format!("\x1b[{col}G")
+    }
+
+    /// Hold bracketed paste on for the duration of one read (`ESC [ ? 2004
+    /// h`): a multi-line paste then arrives as one guarded chunk. The
+    /// matching [`Cursor::paste_off`] releases it; the pair is scoped by the
+    /// caller (a guard type), never left on.
+    pub fn paste_on(&self) -> &'static str {
+        if self.rows_live { "\x1b[?2004h" } else { "" }
+    }
+
+    /// Release bracketed paste (`ESC [ ? 2004 l`).
+    pub fn paste_off(&self) -> &'static str {
+        if self.rows_live { "\x1b[?2004l" } else { "" }
+    }
+
+    /// Push the kitty keyboard protocol's disambiguate flag (`ESC [ > 1 u`)
+    /// so shift/ctrl+enter arrive as CSI-u keys. Terminals that never heard
+    /// of the protocol ignore the push — it is never queried. The matching
+    /// [`Cursor::kitty_pop`] pops exactly the flags pushed here.
+    pub fn kitty_push(&self) -> &'static str {
+        if self.rows_live { "\x1b[>1u" } else { "" }
+    }
+
+    /// Pop the kitty keyboard flags this cursor pushed (`ESC [ < u`).
+    pub fn kitty_pop(&self) -> &'static str {
+        if self.rows_live { "\x1b[<u" } else { "" }
+    }
 }
 
 static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {

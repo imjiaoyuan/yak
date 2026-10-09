@@ -991,7 +991,7 @@ struct PasteMode;
 impl PasteMode {
     fn new() -> PasteMode {
         let mut out = std::io::stderr();
-        let _ = write!(out, "\x1b[?2004h");
+        let _ = write!(out, "{}", crate::theme::cursor().paste_on());
         let _ = out.flush();
         PasteMode
     }
@@ -1000,7 +1000,7 @@ impl PasteMode {
 impl Drop for PasteMode {
     fn drop(&mut self) {
         let mut out = std::io::stderr();
-        let _ = write!(out, "\x1b[?2004l");
+        let _ = write!(out, "{}", crate::theme::cursor().paste_off());
         let _ = out.flush();
     }
 }
@@ -1015,7 +1015,7 @@ struct KittyKeys;
 impl KittyKeys {
     fn new() -> KittyKeys {
         let mut out = std::io::stderr();
-        let _ = write!(out, "\x1b[>1u");
+        let _ = write!(out, "{}", crate::theme::cursor().kitty_push());
         let _ = out.flush();
         KittyKeys
     }
@@ -1024,7 +1024,7 @@ impl KittyKeys {
 impl Drop for KittyKeys {
     fn drop(&mut self) {
         let mut out = std::io::stderr();
-        let _ = write!(out, "\x1b[<u"); // pop exactly the flags we pushed
+        let _ = write!(out, "{}", crate::theme::cursor().kitty_pop()); // pop exactly the flags we pushed
         let _ = out.flush();
     }
 }
@@ -1048,16 +1048,17 @@ impl InputLine {
             self.rows = 0;
         }
         self.width = cols;
+        let c = crate::theme::cursor();
         if self.rows > 0 {
-            let _ = write!(out, "\x1b[{}A", self.rows);
+            let _ = write!(out, "{}", c.up(self.rows));
         }
         let _ = write!(out, "\r");
         let (crow, ccol, last) = self.render(out, prompt, buf, cursor, is_command);
-        let _ = write!(out, "\x1b[J");
+        let _ = write!(out, "{}", c.clear_below());
         if last > crow {
-            let _ = write!(out, "\x1b[{}A", last - crow);
+            let _ = write!(out, "{}", c.up(last - crow));
         }
-        let _ = write!(out, "\x1b[{}G", ccol + 1);
+        let _ = write!(out, "{}", c.column(ccol + 1));
         let _ = out.flush();
         self.rows = crow;
     }
@@ -1071,7 +1072,7 @@ impl InputLine {
         is_command: &dyn Fn(&str) -> bool,
     ) {
         if self.rows > 0 {
-            let _ = write!(out, "\x1b[{}A", self.rows);
+            let _ = write!(out, "{}", crate::theme::cursor().up(self.rows));
         }
         let _ = write!(out, "\r");
         let _ = self.render(out, prompt, buf, buf.len(), is_command);
@@ -1409,15 +1410,16 @@ pub fn pick(title: &str, items: &[String], echo: bool) -> Option<usize> {
     let erase = |out: &mut std::io::Stderr, printed: usize, restore_cursor: bool| {
         // back above the menu, clear down; the cursor is only shown again on
         // exit so it never flickers/jumps between menu redraws
-        let _ = write!(out, "\x1b[{printed}A\r\x1b[J");
+        let c = crate::theme::cursor();
+        let _ = write!(out, "{}\r{}", c.up(printed), c.clear_below());
         if restore_cursor {
-            let _ = write!(out, "\x1b[?25h");
+            let _ = write!(out, "{}", c.show());
         }
         let _ = out.flush();
     };
 
     // hide the cursor for the whole menu, before the first paint
-    let _ = write!(out, "\x1b[?25l");
+    let _ = write!(out, "{}", crate::theme::cursor().hide());
     let _ = out.flush();
     let mut printed = draw(&mut out, &matched, sel, top, "");
     loop {
