@@ -38,7 +38,7 @@ const G: &str = "\x1b[38;5;244m"; // gray (quote/border/hr)
 const S: &str = "\x1b[9m"; // strike
 const R: &str = "\x1b[0m";
 
-// ---- replay: headings ------------------------------------------
+// replay: headings
 
 #[test]
 fn headings_render_styled_by_level() {
@@ -67,7 +67,7 @@ fn one_blank_survives_between_blocks() {
     assert_eq!(render("\n\na\n\n"), "a\n");
 }
 
-// ---- replay: inline --------------------------------------------
+// replay: inline
 
 #[test]
 fn inline_emphasis_code_and_strike() {
@@ -113,7 +113,7 @@ fn unterminated_markers_stay_literal() {
     assert_eq!(render("a **b *c* d\n"), format!("a **b {I}c{R} d\n"));
 }
 
-// ---- replay: fences, quotes, lists, rules ----------------------
+// replay: fences, quotes, lists, rules
 
 #[test]
 fn fence_shows_borders_and_indents_content() {
@@ -182,7 +182,7 @@ fn hr_renders_dim_rule_capped_at_80() {
     );
 }
 
-// ---- replay: tables ---------------------------------------------
+// replay: tables
 
 #[test]
 fn table_rows_pass_through_verbatim() {
@@ -190,7 +190,7 @@ fn table_rows_pass_through_verbatim() {
     assert_eq!(render(t), t);
 }
 
-// ---- replay: margins and wrapping --------------------------------
+// replay: margins and wrapping
 
 #[test]
 fn indented_margin_prefixes_content_not_blank_lines() {
@@ -219,7 +219,7 @@ fn wrapped_list_continuations_align_under_content() {
     );
 }
 
-// ---- StyleStream: live streaming ------------------------------------
+// StyleStream: live streaming
 
 #[test]
 fn live_plain_text_streams_verbatim_with_margin() {
@@ -772,7 +772,7 @@ fn live_tabs_count_real_cells() {
     assert_eq!(out, "  a\t\n  \tbb\n");
 }
 
-// ---- shared helpers -------------------------------------------------
+// shared helpers
 
 #[test]
 fn dbg_bare_hash() {

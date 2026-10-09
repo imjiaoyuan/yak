@@ -74,7 +74,7 @@ def log(msg):
     sys.stderr.flush()
 
 
-# -- caches ------------------------------------------------------------------
+# caches
 
 def load_token():
     """The cached access token, or None. A corrupt cache is deleted loudly
@@ -137,7 +137,7 @@ def save_cached_tools(tools):
     _save(TOOLS_CACHE, {"tools": tools, "cached_at": time.time()})
 
 
-# -- oauth: discovery, registration, the browser round ----------------------
+# oauth: discovery, registration, the browser round
 
 def http_json(url, method="GET", body=None, headers=None, form=False,
               tries=HTTP_TRIES):
@@ -325,7 +325,7 @@ def cmd_status():
     return 0
 
 
-# -- the mcp client ----------------------------------------------------------
+# the mcp client
 
 class McpSession:
     """Streamable HTTP: one POST per JSON-RPC message, the reply either a
@@ -448,7 +448,7 @@ def mount_now(token, budget=MOUNT_BUDGET):
     raise TimeoutError(f"handshake exceeded {budget:.0f}s")
 
 
-# -- the resident protocol loop ----------------------------------------------
+# the resident protocol loop
 
 def serve():
     token = load_token()

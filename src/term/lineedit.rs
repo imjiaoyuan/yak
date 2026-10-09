@@ -743,7 +743,7 @@ enum Esc {
     Mod(u8, u8),
 }
 
-// --- pure buffer helpers -----------------------------------------------------
+// pure buffer helpers
 
 /// Byte offset of the start of the logical line containing `cursor`.
 fn line_start(buf: &str, cursor: usize) -> usize {
@@ -900,7 +900,7 @@ fn token_span(buf: &str, pastes: &[(String, String)], pos: usize) -> Option<(usi
         })
 }
 
-// --- history persistence -----------------------------------------------------
+// history persistence
 
 fn history_path() -> std::path::PathBuf {
     crate::core::config::user_dir().join("history.jsonl")
@@ -964,7 +964,7 @@ fn append_history_to(path: &Path, text: &str) {
     }
 }
 
-// --- rendering ----------------------------------------------------------------
+// rendering
 
 /// Redraw the input row.
 /// The interactive input region (prompt + buffer), terminal-row aware so

@@ -63,7 +63,7 @@ def http_get_json(url, timeout=15):
     return json.loads(http_get(url, timeout))
 
 
-# ----------------------------------------------------------------- search --
+# search
 def _brave(query, limit):
     key = os.environ.get("BRAVE_API_KEY", "")
     if not key:
@@ -181,7 +181,7 @@ def web_search(query, limit=5):
     return f"no results for {query!r}{note}{hint}"
 
 
-# ------------------------------------------------------------------- main --
+# main
 TOOLS = [
     {
         "name": "web_search",

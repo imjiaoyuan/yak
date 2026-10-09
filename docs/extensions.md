@@ -66,6 +66,23 @@ Invocation contract:
 - cwd is the agent's working directory
 - script tools are exec-tier unless the manifest declares otherwise: the approval matrix applies (see below)
 
+### Rust script tools
+
+A `.rs` file with the same header is a script tool too — Rust has no interpreter, so the host compiles it instead: first call runs `rustc --edition 2021 -O` and caches the binary under `~/.yak/tmp/rs-cache/<stem>-<content-hash>` (rebuilt only when the source changes; the cache rides the weekly tmp sweep). The compile shares the tool's timeout and rustc's stderr reaches the tool log, so a broken tool fails with its diagnostics.
+
+```rust
+// --- yak-tool: rustgreet
+// description: greet a name
+// args: name (string) the name to greet
+// arg-mode: argv
+fn main() {
+    let name = std::env::args().nth(1).unwrap_or_default();
+    println!("hello, {name}");
+}
+```
+
+The stdlib is what a bare `rustc` gives you: no crates, no Cargo project — single-file sources only (the manifest header lines are comments, so they compile as-is). Crates need a real build; for that build a binary the normal way (`cargo build --release`) and drop the executable in as a resident extension instead. A missing rustc is an error with install instructions (rustup or a system package), never a silent fallback.
+
 ## Resident extensions
 
 For hooks, commands and multi-call tools: the process is spawned **once** per session and speaks one JSON message per line over stdio. stdout carries only the protocol: anything else goes to the diagnostics tail. stderr is the human channel, and while a call is in flight it is also **live progress**: every line the extension prints is shown in the session's tool log for that call (dim, same as a tool's own output) and none of it reaches the model: the tool result stays exactly the string your reply carries. Use it for "found 3 of 50 files" reporting from a long tool; the buffer is bounded (the last 64 lines per call) and drained when the next call starts, so stderr is progress, never a result channel.

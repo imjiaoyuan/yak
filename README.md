@@ -48,7 +48,7 @@ Piped output is plain text (no colours, no control codes) so it drops straight i
 
 The first run needs a model: type `/login`, pick a provider from the shipped catalog of 42 (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
 
-Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt. Ask \"把这个偏好记住：……\" and the `remember` tool files it in `~/.yak/YAK.md`, injected into every future session.
+Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt. Ask "remember this preference: ..." and the `remember` tool files it in `~/.yak/YAK.md`, injected into every future session.
 
 ```bash
 yak -a shot.png "what is wrong here?"
@@ -69,7 +69,7 @@ The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.
 - [Providers and models](docs/usage.md#providers-and-models): `/login`, hand-edited config, aliases
 - [Tuning the agent](docs/usage.md#tuning-the-agent): tool policies, request caps, cache TTL, compaction
 - [The --json interface](docs/usage.md#the---json-interface): drive `yak` from an editor, CI lane or another agent
-- [Plugins](docs/usage.md#plugins): script tools, resident extensions, subagents, MCP
+- [Plugins](docs/usage.md#plugins): script tools (Python, shell, Rust — `.rs` sources compile on first call), resident extensions, subagents, MCP
 
 The plugin wire protocol has its own full reference: [`docs/extensions.md`](docs/extensions.md).
 

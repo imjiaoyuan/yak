@@ -300,7 +300,7 @@ def main():
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
 
-    # -- multiline: ctrl+j, shift+enter bytes, submit ----------------------
+    # multiline: ctrl+j, shift+enter bytes, submit
     read_until(fd, rb"\x1b\[>1u")  # the kitty push ships with the prompt
     read_until(fd, rb">")
     send(fd, b"line one")
@@ -325,7 +325,7 @@ def main():
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line one\\nline two\\nline three" in hist, f"history: {hist!r}"
 
-    # -- the answer area is append-only: printed once, never retracted -----
+    # the answer area is append-only: printed once, never retracted
     # the wait spinner may own an empty row (its `\r\x1b[2K` frame lives and
     # dies before the first answer byte); from that byte on nothing may erase
     # and no printed text may be written twice. the stream is paced, so wait
@@ -343,7 +343,7 @@ def main():
             f"the settled answer was redrawn ({bad!r}): {screen[i:][:400]!r}"
         )
 
-    # -- history recall keeps the draft ------------------------------------
+    # history recall keeps the draft
     read_until(fd, rb">")
     send(fd, b"\x1b[A")          # up: empty buffer recalls history
     time.sleep(0.3)
@@ -353,7 +353,7 @@ def main():
     send(fd, b"\r")
     time.sleep(0.3)
 
-    # -- lone backslash + enter inserts a newline ---------------------------
+    # lone backslash + enter inserts a newline
     read_until(fd, rb">")
     send(fd, b"line four")
     send(fd, b"\\")
@@ -369,7 +369,7 @@ def main():
     hist = open(os.path.join(user, "history.jsonl")).read()
     assert "line four\\nline five" in hist, f"history: {hist!r}"
 
-    # -- tab completion on ! shell lines ------------------------------------
+    # tab completion on ! shell lines
     read_until(fd, rb">")
     send(fd, b"!he")
     time.sleep(0.2)
@@ -385,7 +385,7 @@ def main():
     send(fd, b"\x15")
     time.sleep(0.2)
 
-    # -- kitty CSI-u encoded keys fold back ---------------------------------
+    # kitty CSI-u encoded keys fold back
     # esc first, while the double-press window is certainly closed (the
     # last interaction was a successful submit)
     send(fd, b"\x1b[27u")        # kitty plain esc -> interrupt
@@ -405,7 +405,7 @@ def main():
     time.sleep(2.2)               # close the window before the editor lane
     OUT.clear()
 
-    # -- ctrl+g editor round-trip -------------------------------------------
+    # ctrl+g editor round-trip
     send(fd, b"scratch")
     time.sleep(0.2)
     send(fd, b"\x07")            # ctrl+g: into $EDITOR and back
@@ -417,7 +417,7 @@ def main():
     assert prompts and prompts[-1] == "from editor", \
         f"editor round-trip on the wire: {prompts!r}"
 
-    # -- /skill:<name> ships the skill's directory on the wire --------------
+    # /skill:<name> ships the skill's directory on the wire
     OUT.clear()
     send(fd, b"/skill:probe\r")
     time.sleep(1.0)
@@ -426,7 +426,7 @@ def main():
     assert prompts and want in prompts[-1], \
         f"skill prompt: {prompts[-1] if prompts else None!r} (wanted {want!r})"
 
-    # -- a commands-dir prompt ships its body and frontmatter system --------
+    # a commands-dir prompt ships its body and frontmatter system
     OUT.clear()
     send(fd, b"/review the-diff-arg\r")
     time.sleep(1.0)
@@ -439,7 +439,7 @@ def main():
     assert "update_plan" in system, \
         "a command's system must append to the agent prompt, not replace it"
 
-    # -- /resume lists this directory's conversations only -------------------
+    # /resume lists this directory's conversations only
     OUT.clear()
     send(fd, b"/resume")
     time.sleep(0.3)
@@ -453,7 +453,7 @@ def main():
     time.sleep(0.3)
     read_until(fd, rb">")
 
-    # -- /export writes the loaded conversation as markdown -----------------
+    # /export writes the loaded conversation as markdown
     OUT.clear()
     send(fd, b"/resume\r")          # the picker comes up
     read_until(fd, rb"enter select")
@@ -469,7 +469,7 @@ def main():
     assert md.startswith("# local session marker"), f"export: {md[:200]!r}"
     assert "**Assistant**" in md, f"export body: {md[:400]!r}"
 
-    # -- /tree branches instead of truncating ------------------------------
+    # /tree branches instead of truncating
     # a second child with a real store (the first runs --no-session),
     # resuming the same thread: two rounds, a /tree jump back to the first
     # turn, then a third. the file must hold the abandoned sibling, the
@@ -604,7 +604,7 @@ def main():
         os.kill(pid2, 9)
         os.waitpid(pid2, 0)
 
-    # -- exit: the kitty stack is popped ------------------------------------
+    # exit: the kitty stack is popped
     send(fd, b"\x03")
     time.sleep(0.2)
     send(fd, b"\x03")
@@ -615,7 +615,7 @@ def main():
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0, f"exit code {status}"
 
-    # -- install pickers: scope menu, then the checkbox item list -----------
+    # install pickers: scope menu, then the checkbox item list
     screen = install_lane(binary, work, env)
     assert b"skills: " in screen, f"layout not recapped: {screen[-500:]!r}"
 

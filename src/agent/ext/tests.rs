@@ -665,3 +665,135 @@ fn an_empty_segment_list_is_pretty_json() {
     use super::format_segments;
     assert_eq!(format_segments(&[]), "[]");
 }
+
+// Rust script tools: the source compiles once into the content-hash cache
+// and the binary is what runs — these need a real rustc, so they skip on
+// machines without one rather than failing the suite.
+
+fn rustc_available() -> bool {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// A manifest-carrying Rust source: stdin JSON in, one line out.
+const RUST_SRC: &str = r#"// --- yak-tool: rshout
+// description: shout a word
+// args: word (string) the word
+fn main() {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    let word = serde_hook(&line);
+    println!("{word}!");
+}
+fn serde_hook(line: &str) -> String {
+    // pull the value of "word" without a parser: find "word":"...". up to "
+    let key = "\"word\":\"";
+    if let Some(i) = line.find(key) {
+        let rest = &line[i + key.len()..];
+        if let Some(j) = rest.find('"') {
+            return rest[..j].to_string();
+        }
+    }
+    String::new()
+}
+"#;
+
+fn rust_tool_dir(tag: &str) -> std::path::PathBuf {
+    let dir = crate::core::testutil::scratch_dir(tag);
+    std::fs::write(dir.join("rshout.rs"), RUST_SRC).unwrap();
+    dir
+}
+
+fn mount_rust(dir: &Path) -> ScriptTool {
+    let spec = parse_tool_manifest(RUST_SRC, &dir.join("rshout.rs")).expect("manifest");
+    ScriptTool {
+        spec,
+        description: String::new(),
+        exposed: "rshout".to_string(),
+    }
+}
+
+#[test]
+fn a_rust_source_compiles_runs_and_caches() {
+    if !rustc_available() {
+        return;
+    }
+    let dir = rust_tool_dir("rs-ext");
+    let tool = mount_rust(&dir);
+    let mut lines = Vec::new();
+    let out = tool.execute(&json!({"word": "hi"}), &dir, &mut |p| {
+        if let crate::agent::tools::ToolProgress::Line(l) = p {
+            lines.push(l);
+        }
+    });
+    let text = &out.content;
+    assert!(
+        text.contains("hi!"),
+        "expected the compiled tool's output, got: {text}"
+    );
+    // the cache holds exactly one published binary for this source —
+    // scoped by stem, so unrelated cached tools cannot fail this test
+    let cache_dir = crate::core::config::user_dir().join("tmp").join("rs-cache");
+    let entries: Vec<String> = std::fs::read_dir(&cache_dir)
+        .expect("cache dir")
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("rshout-"))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one cache entry per source, got {entries:?}"
+    );
+}
+
+#[test]
+fn a_cache_hit_skips_the_compile() {
+    if !rustc_available() {
+        return;
+    }
+    let dir = rust_tool_dir("rs-ext-cache");
+    let tool = mount_rust(&dir);
+    let mut noop = |_p: crate::agent::tools::ToolProgress| {};
+    // first call compiles
+    tool.execute(&json!({"word": "a"}), &dir, &mut noop);
+    // second call must not log "compiling" — the cache hit runs silent
+    let mut lines = Vec::new();
+    let out = tool.execute(&json!({"word": "b"}), &dir, &mut |p| {
+        if let crate::agent::tools::ToolProgress::Line(l) = p {
+            lines.push(l);
+        }
+    });
+    let _ = out.content;
+    assert!(
+        !lines.iter().any(|l| l.contains("compiling")),
+        "second call reused the cache but logged: {lines:?}"
+    );
+}
+
+#[test]
+fn a_rust_source_error_names_the_tool_and_shows_rustc_diagnostics() {
+    if !rustc_available() {
+        return;
+    }
+    let dir = crate::core::testutil::scratch_dir("rs-ext-err");
+    let bad = RUST_SRC.replace("fn main() {", "fn main() { this is not rust");
+    std::fs::write(dir.join("rshout.rs"), &bad).unwrap();
+    let spec = parse_tool_manifest(&bad, &dir.join("rshout.rs")).expect("manifest");
+    let tool = ScriptTool {
+        spec,
+        description: String::new(),
+        exposed: "rshout".to_string(),
+    };
+    let mut noop = |_p: crate::agent::tools::ToolProgress| {};
+    let out = tool.execute(&json!({"word": "x"}), &dir, &mut noop);
+    let text = &out.content;
+    assert!(
+        text.contains("rustc failed") && text.contains("rshout.rs"),
+        "compile failure must name the tool and carry diagnostics, got: {text}"
+    );
+}

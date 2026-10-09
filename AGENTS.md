@@ -118,7 +118,7 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
   asks to note something durable; injected into the agent system prompt (`agent/memory.rs`).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories.
 - `pkg/`: packages installed with `yak install`.
-- `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers), swept of anything older than a week at every agent start (`core/tmp.rs`).
+- `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers) and the rustc compile cache for `.rs` script tools (`tmp/rs-cache/`), swept of anything older than a week at every agent start (`core/tmp.rs`).
 
 ## Workflow
 

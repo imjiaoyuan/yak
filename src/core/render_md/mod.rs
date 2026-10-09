@@ -39,7 +39,6 @@ fn within_hold(tail: &str) -> bool {
     cell_width(tail) <= HOLD_CAP
 }
 
-// ---------------------------------------------------------------------------
 fn is_setext(t: &str) -> bool {
     let Some(c) = t.chars().next() else {
         return false;
@@ -114,9 +113,7 @@ fn list_marker(t: &str) -> Option<(usize, bool)> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // Inline resolver — one decision layer, shared by the row emitters
-// ---------------------------------------------------------------------------
 
 /// The styled spans the resolver produces; each renderer maps a span to
 /// palette codes its own way (`span_codes`).
@@ -441,7 +438,7 @@ impl StyleStream {
         true
     }
 
-    // ---- line lifecycle ------------------------------------------------
+    // line lifecycle
 
     fn advance(&mut self, out: &mut String) {
         if matches!(self.st, St::Classify) {
@@ -627,7 +624,7 @@ impl StyleStream {
         self.marker_open = false;
     }
 
-    // ---- fenced code ---------------------------------------------------
+    // fenced code
 
     /// One content char inside a fence: everything streams in the code
     /// color under a two-space indent. A line that so far is only indent and
@@ -691,7 +688,7 @@ impl StyleStream {
         self.end_row(out);
     }
 
-    // ---- classification --------------------------------------------------
+    // classification
 
     fn decide(&self) -> Decision {
         let b = self.line.as_bytes();
@@ -955,7 +952,7 @@ impl StyleStream {
         }
     }
 
-    // ---- inline resolver (streaming emitter over the shared rules) -----
+    // inline resolver (streaming emitter over the shared rules)
 
     /// Resolve inline markup from `at` while it is settled: the matching
     /// rules live in `scan_inline_events`, shared with the one-shot
@@ -1010,7 +1007,7 @@ impl StyleStream {
         self.line = line;
     }
 
-    // ---- row emitter ----------------------------------------------------
+    // row emitter
 
     /// Write one character: lazy row start (margin + open codes), tab
     /// stops from the absolute column, hard wrap with the continuation
@@ -1067,7 +1064,7 @@ impl StyleStream {
                 return;
             }
             // over the edge, or an opening mark that would leave the row no
-            // room for what it opens (禁则処理): the scanner wraps by this
+            // room for what it opens (kinsoku): the scanner wraps by this
             // same rule, so a wrapped answer replays byte for byte
             if self.cells > 0
                 && (self.cells + w > budget || (moves_down(c) && self.cells + w >= budget))
@@ -1183,9 +1180,7 @@ fn may_be_hr(t: &str) -> bool {
     hr_markers(t).is_some()
 }
 
-// ---------------------------------------------------------------------------
 // shared wrapping / measuring
-// ---------------------------------------------------------------------------
 
 /// The one wrap scanner: writes `text` into `out` hard-wrapped at `width`
 /// terminal cells, preferring a break just after the last space that fit.
@@ -1228,7 +1223,7 @@ fn row_break(out: &mut String, row_prefix: &str, ansi: bool, active: &str) {
 /// ([`StyleStream::putc`]) — a space is taken as the break point only when
 /// it lands within [`WRAP_EARLY`] cells of the edge (a space further in
 /// fills the row instead: live cannot ask for printed bytes back), an
-/// opening mark moves down rather than ending a row (禁则処理), and a row
+/// opening mark moves down rather than ending a row (kinsoku), and a row
 /// never exceeds `width` (a wider row would soft-wrap and lose its margin).
 /// The first visual row starts with `first_prefix`, continuation rows with
 /// `row_prefix`; with `ansi`, an open SGR span is tracked and re-opened

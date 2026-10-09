@@ -129,9 +129,9 @@ pub fn repl(
 /// a whitespace token naming an existing image (always) or PDF (anthropic
 /// models support document blocks) loads as an attachment with a dim notice;
 /// ctrl+v pastes an image as exactly such a path. A pasted path is often
-/// glued to the words typed right after it with no space between (`…png这个
-/// 框要一样大`), so the longest existing-file prefix of the token is what
-/// counts, not the whole token.
+/// glued to the words typed right after it with no space between (like
+/// `…png make-it-this-big`), so the longest existing-file prefix of the
+/// token is what counts, not the whole token.
 fn attach_local_files(
     text: &str,
     queue: &mut Vec<crate::providers::Attachment>,
@@ -1222,7 +1222,7 @@ fn repl_command(
                 return false;
             }
             // not a builtin and not a commands-dir command: plain task text
-            // (covers path-looking words like "/home/me/shot.jpg 看看?").
+            // (covers path-looking words like "/home/me/shot.jpg see?").
             run_task_logged(session, text, &mut Vec::new());
             return false;
         }
@@ -1385,14 +1385,14 @@ mod tests {
         let shot = dir.join("shot.png");
         std::fs::write(&shot, [0x89, b'P', b'N', b'G', 0, 0]).unwrap();
         // ctrl+v drops the path in, then the user keeps typing with no space
-        let text = format!("{}这个框要一样大", shot.display());
+        let text = format!("{}make-it-this-big", shot.display());
         let mut queue = Vec::new();
         attach_local_files(&text, &mut queue, false);
         assert_eq!(queue.len(), 1, "the glued path attaches");
         assert_eq!(queue[0].filename.as_deref(), Some("shot.png"));
         // a plain word names no file and attaches nothing
         let mut none = Vec::new();
-        attach_local_files("no file here 这个框", &mut none, false);
+        attach_local_files("no file here make-it-this-big", &mut none, false);
         assert!(none.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1481,8 +1481,8 @@ mod tests {
         assert_eq!(turn_label(&tool_round), "read R/cli.R · grep \"theme\"");
         // a user round shows the text, a plain answer its first line
         assert_eq!(
-            turn_label(&stored("读一下 cli.R", "", Vec::new())),
-            "读一下 cli.R"
+            turn_label(&stored("read cli.R", "", Vec::new())),
+            "read cli.R"
         );
         assert_eq!(turn_label(&stored("", "all done", Vec::new())), "all done");
         // nothing to say stays the placeholder, not an empty quote

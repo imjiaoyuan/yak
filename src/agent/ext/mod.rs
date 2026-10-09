@@ -60,10 +60,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// ============================================================================
-// discovery
-// ============================================================================
-
 /// One tool advertised by the initialize handshake.
 #[derive(Clone)]
 pub struct ToolMeta {
@@ -480,10 +476,6 @@ fn format_segments(items: &[Value]) -> String {
     }
     out.join("\n")
 }
-
-// ============================================================================
-// the host
-// ============================================================================
 
 pub struct Extensions {
     exts: Vec<Arc<Ext>>,

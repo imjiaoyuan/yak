@@ -175,7 +175,7 @@ TOOL = {
     },
 }
 
-# --------------------------------------------------------------- progress --
+# progress
 # One lock: the stdout parser and the stderr pump both write progress, and a
 # half-written line would reach the parent as garbage.
 _note_lock = threading.Lock()
@@ -297,7 +297,7 @@ def stop_ticker(stop):
     stop.set()
 
 
-# ---------------------------------------------------------------- agents --
+# agents
 def user_dir():
     return os.environ.get("YAK_USER_PATH") or os.path.join(os.path.expanduser("~"), ".yak")
 
@@ -374,7 +374,7 @@ def yak_binary():
     return os.environ.get("YAK_BIN") or shutil.which("yak") or shutil.which("yak.exe")
 
 
-# ------------------------------------------------------- worktree isolation --
+# worktree isolation
 def _hostname():
     import socket
     try:
@@ -527,7 +527,7 @@ def drop_worktree(root, path):
         note("[subagent] warning: could not remove the worktree %s; it stays on disk" % path)
 
 
-# --------------------------------------------------------------- one child --
+# one child
 def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=None):
     """Run one child to completion. Returns (ok, text). With `isolate` the
     child runs in a fresh git worktree whose diff is committed and merged
@@ -754,7 +754,7 @@ def clamp(text):
     return text[:MAX_RESULT] + "\n…[%d more chars truncated]" % (len(text) - MAX_RESULT)
 
 
-# ------------------------------------------------------------------ modes --
+# modes
 def steps_of(raw, default_agent):
     """Normalize a batch entry list into [{agent, task}]; malformed entries
     become errors the model can fix rather than a crash."""
@@ -886,7 +886,7 @@ def run_chain(binary, agents, steps, depth, isolate=False):
     return clamp("\n\n".join(blocks[-1:]))
 
 
-# --------------------------------------------------------------- protocol --
+# protocol
 def agents_report():
     agents = load_agents()
     lines = []

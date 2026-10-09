@@ -99,7 +99,7 @@ class StdioTransport:
         self.pending = {}          # jsonrpc id -> (Event, reply-slot)
         self.plock = threading.Lock()
 
-    # -- lifecycle ----------------------------------------------------------
+    # lifecycle
 
     def open(self):
         cmd = expand_env(str(self.spec["command"]))
@@ -139,7 +139,7 @@ class StdioTransport:
             slot.append(None)
             ready.set()
 
-    # -- jsonrpc plumbing ---------------------------------------------------
+    # jsonrpc plumbing
 
     def _read_loop(self):
         for raw in self.proc.stdout:
@@ -215,7 +215,7 @@ class HttpTransport:
         self.session_id = None
         self.next_id = 0
 
-    # -- lifecycle ----------------------------------------------------------
+    # lifecycle
 
     def open(self):
         self.url = expand_env(str(self.spec["url"]))
@@ -237,7 +237,7 @@ class HttpTransport:
         except (urllib.error.URLError, OSError):
             pass
 
-    # -- jsonrpc plumbing ---------------------------------------------------
+    # jsonrpc plumbing
 
     def _post(self, frame, timeout, expect_reply):
         headers = dict(self.headers)

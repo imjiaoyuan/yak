@@ -73,7 +73,7 @@ pub fn build_body(
     // assistant message — never at the tail of the whole conversation: an
     // image user-message appended after the last tool result reads to the
     // model as a fresh screenshot every round, and it re-acknowledges it
-    // forever (the "图收到" loop)
+    // forever (the "image received" loop)
     let flush_images = |messages: &mut Vec<Value>, pending: &mut Vec<Value>| {
         if pending.is_empty() {
             return;

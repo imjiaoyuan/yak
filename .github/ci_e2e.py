@@ -179,6 +179,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.sse(chunks)
             return
         if seen.get("tools") and any(
+            t.get("function", {}).get("name") == "rsgreet"
+            for t in body.get("tools", [])
+        ) and body.get("model") == "m-wc":
+            messages = body.get("messages", [])
+            if any(m.get("role") == "tool" for m in messages):
+                seen["rs_result"] = messages
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "greeted"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_rs", "type": "function",
+                         "function": {"name": "rsgreet",
+                                      "arguments": '{"name": "dev"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.sse(chunks)
+            return
+        if seen.get("tools") and any(
             t.get("function", {}).get("name") == "wordcount"
             for t in body.get("tools", [])
         ) and body.get("model") == "m-wc":
@@ -459,12 +480,19 @@ def probe_examples(ex_dir, env):
             body = f.read()
         shebang = body.split("\n", 1)[0]
         if "yak-tool:" in body[:400]:
-            # a manifest script tool: argv in, stdout out, no protocol
-            out = subprocess.run(
-                [sys.executable, "-c",
-                 "import sys; compile(open(sys.argv[1], encoding='utf-8').read(),"
-                 " sys.argv[1], 'exec')", path],
-                capture_output=True, text=True)
+            # a manifest script tool: argv in, stdout out, no protocol.
+            # rust sources compile-check with rustc instead of python
+            if name.endswith(".rs"):
+                argv = ["rustc", "--edition", "2021", "--crate-type", "bin",
+                        "--emit", "metadata", "-o", "-", path]
+            else:
+                argv = [sys.executable, "-c",
+                        "import sys; compile(open(sys.argv[1], encoding='utf-8').read(),"
+                        " sys.argv[1], 'exec')", path]
+            if not shutil.which(argv[0]):
+                skipped.append(f"{name} ({argv[0]} is missing)")
+                continue
+            out = subprocess.run(argv, capture_output=True, text=True)
             assert out.returncode == 0, \
                 f"manifest tool {name} does not parse: {out.stderr[-300:]!r}"
             ran.append(name)
@@ -668,6 +696,32 @@ def main():
         f"script tool result missing: {json.dumps(round2)[-300:]!r}"
     assert "counted" in w.stdout + w.stderr, \
         f"final answer missing: {(w.stdout + w.stderr)[-300:]!r}"
+
+    # rust script tool lane: same manifest header, but the host compiles
+    # the source with rustc first (content-hash cached) and runs the binary
+    if shutil.which("rustc"):
+        rs_src = os.path.join(user, "extensions", "rsgreet.rs")
+        with open(rs_src, "w") as f:
+            f.write(
+                "// --- yak-tool: rsgreet\n"
+                "// description: greet a name\n"
+                "// args: name (string) the name\n"
+                "// arg-mode: argv\n"
+                "// interpreter: rust\n"
+                "fn main() {\n"
+                "    let name = std::env::args().nth(1).unwrap_or_default();\n"
+                "    println!(\"hello {name}\");\n"
+                "}\n"
+            )
+        r = run([binary, "--no-session", "-m", "mock-wc/m-wc",
+                 "greet dev"], env, cwd=work, stdin=subprocess.DEVNULL)
+        assert r.returncode == 0, f"rs agent rc={r.returncode} err={r.stderr[-800:]!r}"
+        assert "rsgreet" in (seen.get("tools") or []), \
+            f"rust manifest tool not mounted: {seen.get('tools')}"
+        round2 = seen.get("rs_result") or []
+        tool_msgs = [m for m in round2 if m.get("role") == "tool"]
+        assert tool_msgs and "hello dev" in tool_msgs[0].get("content", ""), \
+            f"rust tool result missing: {json.dumps(round2)[-300:]!r}"
 
     # the reference-template lane: the node template in examples/extensions speaks the
     # protocol natively (initialize -> advertised tools), so the reference-style

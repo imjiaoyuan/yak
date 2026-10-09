@@ -1128,7 +1128,7 @@ mod tests {
             .unwrap()
             .into_bytes();
         bytes.push(b'\n');
-        // the torn second line ends mid-character (the first two bytes of 中)
+        // the torn second line ends mid-character (the first two bytes of a 3-byte char)
         bytes.extend_from_slice(b"{\"v\":1,\"prompt\":\"\xe4\xb8");
         fs::write(store.thread_path(id), &bytes).unwrap();
         let summaries = store.summaries();

@@ -7,7 +7,7 @@ import json
 import os
 import sys
 
-# ---------------------------------------------------------------- protocol --
+# protocol
 TOOLS = {}       # name -> (description, schema, handler(args_dict) -> str)
 # seconds to ask the host for your own call deadline (it defaults to 120s);
 # raise it for a tool that runs a build or another agent
@@ -114,7 +114,7 @@ def run():
             break
 
 
-# ----------------------------- USER SECTION ---------------------------------
+# USER SECTION
 # Register tools, commands and event hooks here. Examples:
 
 @tool("now", "Current local time")

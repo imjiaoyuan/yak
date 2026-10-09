@@ -181,7 +181,7 @@ fn a_body_over_budget_without_attachments_says_so() {
 #[test]
 fn tool_result_images_flush_at_the_run_end_never_the_tail() {
     use testutil::att;
-    // the "图收到" loop: a screenshot rode a read result, the conversation
+    // the "image received" loop: a screenshot rode a read result, the conversation
     // moved on — later rounds must not re-meet the image as fresh input
     let img = Msg::ToolResult {
         call_id: "r".into(),

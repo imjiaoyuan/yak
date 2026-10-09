@@ -1,7 +1,7 @@
 use super::*;
 
 /// The global-memory writer: when the user asks to remember or note something
-/// durable ("记住我喜欢简洁回复"), it lands as one dated line in the user
+/// durable ("remember that I like concise replies"), it lands as one dated line in the user
 /// memory file named in the system prompt's `<user_memory>` block and is
 /// injected into every future session. Write-tier: it mutates that one file
 /// and runs no code.
