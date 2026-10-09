@@ -95,7 +95,10 @@ pub fn strip_ansi(text: &str) -> String {
 /// the input ends before a terminator arrives. CSI/C1: parameter and
 /// intermediate bytes then the one final byte; OSC: everything up to BEL
 /// or `ESC \`; the two-byte forms close at the byte after the introducer.
-fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
+/// The one escape parser for the whole tree: terminal width accounting
+/// (`render_md`) strips with the same rule the transcript cleaner
+/// (`strip_ansi`) does, so the two can never drift apart again.
+pub(crate) fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
     let n = bytes.len();
     match bytes[i] {
         // the C1 CSI introducer arrives as U+009B: two bytes in UTF-8
@@ -127,11 +130,13 @@ fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
 }
 
 /// End of a CSI body starting at `j` (the first byte after `ESC [` or the
-/// C1 introducer): parameter digits and separators, intermediate bytes
-/// (0x20..=0x2f), then the one final byte (0x40..=0x7e).
+/// C1 introducer): parameter bytes (0x30..=0x3f — digits and separators
+/// plus the private-parameter `<=>?` prefixes, so `ESC[?25l` and friends
+/// strip whole), intermediate bytes (0x20..=0x2f), then the one final byte
+/// (0x40..=0x7e).
 fn csi_end(bytes: &[u8], mut j: usize) -> Option<usize> {
     let n = bytes.len();
-    while j < n && (bytes[j].is_ascii_digit() || matches!(bytes[j], b';' | b':')) {
+    while j < n && (0x30..=0x3f).contains(&bytes[j]) {
         j += 1;
     }
     while j < n && (0x20..=0x2f).contains(&bytes[j]) {
@@ -223,5 +228,13 @@ mod tests {
         // eat it: the character survives whole
         assert_eq!(strip_ansi("a\u{1b}中b"), "a中b");
         assert_eq!(strip_ansi("中\u{1b}文"), "中文");
+        // private-parameter CSI (`?`/`>`/`=`/`<` prefixes: cursor visibility,
+        // alt-screen, bracketed paste, primary-device attributes) strips
+        // whole and never eats the tail that follows
+        assert_eq!(strip_ansi("before \x1b[?25l after"), "before  after");
+        assert_eq!(strip_ansi("\x1b[?1049halt\x1b[?1049l"), "alt");
+        assert_eq!(strip_ansi("\x1b[?2004h bp\x1b[?2004l"), " bp");
+        assert_eq!(strip_ansi("\x1b[>0;1;0c"), "");
+        assert_eq!(strip_ansi("m\x1b[=3hf"), "mf");
     }
 }
