@@ -747,17 +747,17 @@ fn persist_round(
     if messages.is_empty() {
         return;
     }
-    let mut new_messages: Vec<Msg> = messages.to_vec();
-    // a trailing no-tool assistant message doubles as the round response
+    // a trailing no-tool assistant message doubles as the round response;
+    // the stored slice drops it by index instead of cloning the round just
+    // to pop it back off
     let ends_plain =
         matches!(messages.last(), Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty());
-    let response = if ends_plain {
-        match new_messages.pop() {
-            Some(Msg::Assistant { text, .. }) => text,
-            _ => String::new(),
-        }
-    } else {
-        String::new()
+    let stored_len = messages.len() - usize::from(ends_plain);
+    let response = match messages.last() {
+        Some(Msg::Assistant {
+            text, tool_calls, ..
+        }) if tool_calls.is_empty() => text.clone(),
+        _ => String::new(),
     };
     // cwd rides in turn options as provenance so `yak logs` can show
     // and filter conversations by project directory
@@ -816,7 +816,7 @@ fn persist_round(
         usage: usage.map(crate::core::threads::TurnUsage::from),
         duration_ms: Some(started.elapsed().as_millis() as i64),
         options: turn_options,
-        messages: stored_messages(&new_messages),
+        messages: stored_messages(&messages[..stored_len]),
     };
     let thread_id = match store.append_turn(conversation_id.as_deref(), &turn) {
         Ok(id) => id,
