@@ -1,6 +1,6 @@
 [package]
 name = "yak"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."
 
