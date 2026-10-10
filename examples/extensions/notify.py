@@ -4,10 +4,14 @@
 # about the approval prompt (and the finished answer) wherever you are, not
 # just in the window yak runs in.
 #
-# Every payload carries the working directory of the session that raised it,
-# and the notification shows it: with more than one yak running, the path is
-# what tells the notifications apart (which project, which terminal to go
-# back to).
+# Every payload carries the working directory of the session that raised
+# it, and the notification shows it underneath the answer's first line:
+# with more than one yak running, that path is what tells the notifications
+# apart (which project, which terminal to go back to).
+#
+# Approval pings stay quiet for PING_QUIET_SECS after any ping for the same
+# directory: a run of prompts inside one task calls you over once, not once
+# per prompt — the prompts themselves still block in the terminal either way.
 #
 # Payloads reuse the shapes other agents' `notify` wrappers already speak, so an
 # existing notify-send/osascript script works unchanged:
@@ -19,14 +23,20 @@
 # watch it with /status. Delivery degrades silently: no notifier on $PATH, or
 # a failed one, costs nothing but a line on the extension's stderr.
 import json
-import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
 
 # how much of the answer's first line rides the notification
 SUMMARY_CHARS = 200
+
+# after an approval ping for one working directory, further approval pings
+# for it stay quiet this long (the prompt still blocks in the terminal)
+PING_QUIET_SECS = 120
+
+_last_ping = {}
 
 
 def first_line(text):
@@ -93,25 +103,32 @@ def handle(msg):
         return {"events": ["agent_end", "approval"]}
     if kind == "event":
         params = msg.get("params") or {}
-        # the session's working directory, in both the notification body and
-        # the title: the one field that says which conversation is talking
+        # the session's working directory rides under the notification's
+        # first line: the one field that says which conversation is talking
         cwd = (params.get("cwd") or "").strip()
-        title = "yak [{}]".format(cwd) if cwd else "yak"
+        now = time.monotonic()
         if msg.get("name") == "agent_end":
             if params.get("interrupted"):
                 return
+            # the answer's first line on top, the working path below it
             error = notify(
-                title,
                 first_line(params.get("final_text") or ""),
+                cwd or "yak",
             )
         elif msg.get("name") == "approval":
+            if now - _last_ping.get(cwd, float("-inf")) < PING_QUIET_SECS:
+                return
             error = notify(
-                title + " — approval requested",
-                "{}: {}".format(
-                    params.get("tool", "tool"),
-                    first_line(params.get("preview") or ""),
+                "yak — approval requested",
+                "{}\n{}".format(
+                    "{}: {}".format(
+                        params.get("tool", "tool"),
+                        first_line(params.get("preview") or ""),
+                    ),
+                    cwd,
                 ),
             )
+            _last_ping[cwd] = now
         else:
             return
         if error:
