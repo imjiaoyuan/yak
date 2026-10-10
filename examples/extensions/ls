@@ -70,8 +70,14 @@ def main():
         kind, mid = msg.get("type"), msg.get("id")
         if kind == "initialize":
             reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
-        elif kind == "call_tool" and msg.get("name") == "ls":
-            reply(ls(msg.get("args") or {}))
+        elif kind == "call_tool":
+            if msg.get("name") != "ls":
+                reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
+            else:
+                # every reply carries the request's id: the host correlates
+                # by it, and a reply without one is dropped unread, leaving
+                # the call to run out its whole timeout
+                reply({"id": mid, **ls(msg.get("args") or {})})
         elif kind == "shutdown":
             return
 
