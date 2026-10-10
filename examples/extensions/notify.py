@@ -7,7 +7,11 @@
 # Every payload carries the working directory of the session that raised
 # it, and the notification shows it underneath the answer's first line:
 # with more than one yak running, that path is what tells the notifications
-# apart (which project, which terminal to go back to).
+# apart (which project, which terminal to go back to). Both lines ride the
+# body, never the summary: Plasma and friends render the summary bold and
+# single-line, and a finished answer is not a headline. Anything past
+# SUMMARY_CHARS is cut and marked with an ellipsis rather than clipped
+# mid-glyph by the renderer.
 #
 # Approval pings stay quiet for PING_QUIET_SECS after any ping for the same
 # directory: a run of prompts inside one task calls you over once, not once
@@ -29,8 +33,9 @@ import subprocess
 import sys
 import time
 
-# how much of the answer's first line rides the notification
-SUMMARY_CHARS = 200
+# how much of the answer's first line rides the notification; longer
+# lines are cut and marked with an ellipsis
+SUMMARY_CHARS = 120
 
 # after an approval ping for one working directory, further approval pings
 # for it stay quiet this long (the prompt still blocks in the terminal)
@@ -40,12 +45,17 @@ _last_ping = {}
 
 
 def first_line(text):
-    """The answer's first non-empty line, capped."""
+    """The answer's first non-empty line, capped with an explicit ellipsis."""
     for line in (text or "").splitlines():
         line = line.strip()
         if line:
-            return line[:SUMMARY_CHARS]
+            return line[:SUMMARY_CHARS] + ("…" if len(line) > SUMMARY_CHARS else "")
     return "(no text)"
+
+
+def escape(text):
+    """Neutralize the limited markup notify-send bodies are parsed for."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def notify(title, body):
@@ -56,7 +66,7 @@ def notify(title, body):
             if not shutil.which("notify-send"):
                 return "notify-send not found"
             subprocess.Popen(
-                ["notify-send", title, body],
+                ["notify-send", escape(title), escape(body)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -110,10 +120,14 @@ def handle(msg):
         if msg.get("name") == "agent_end":
             if params.get("interrupted"):
                 return
-            # the answer's first line on top, the working path below it
+            # the answer's first line on top, the working path below it, both
+            # in the body where the renderer keeps them plain-weight
             error = notify(
-                first_line(params.get("final_text") or ""),
-                cwd or "yak",
+                "yak",
+                "{}\n{}".format(
+                    first_line(params.get("final_text") or ""),
+                    cwd or "yak",
+                ),
             )
         elif msg.get("name") == "approval":
             if now - _last_ping.get(cwd, float("-inf")) < PING_QUIET_SECS:
@@ -125,7 +139,7 @@ def handle(msg):
                         params.get("tool", "tool"),
                         first_line(params.get("preview") or ""),
                     ),
-                    cwd,
+                    cwd or "yak",
                 ),
             )
             _last_ping[cwd] = now
