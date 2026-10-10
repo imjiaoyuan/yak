@@ -29,6 +29,34 @@ pub fn scratch_path(tag: &str) -> PathBuf {
     dir
 }
 
+/// Read one mock-server request: past the request head plus its
+/// content-length body. The shared reader for every inline HTTP mock in
+/// the tree (the agent-loop SSE servers, the session persistence tests).
+#[cfg(test)]
+pub fn read_request(c: &mut std::net::TcpStream) {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        use std::io::Read;
+        if c.read(&mut byte).unwrap_or(0) == 0 {
+            break;
+        }
+        buf.push(byte[0]);
+        let head_end = buf.windows(4).rposition(|w| w == b"\r\n\r\n");
+        if let Some(i) = head_end {
+            let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if buf.len() - i - 4 >= len {
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
