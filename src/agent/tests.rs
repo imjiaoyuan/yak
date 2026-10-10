@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::ext::Extensions;
 use serde_json::json;
 
 /// A continuation names the anchor for its first request; an anchor the
@@ -772,4 +773,145 @@ fn the_usage_marker_total_reaches_the_compaction_gate() {
     assert_eq!(used, 7_000, "the marker's reported total must survive");
     assert!(compact::should_compact(used, 7_000));
     assert!(!compact::should_compact(used, 7_001));
+}
+
+/// A stub extension that records every `event` frame it is sent to a file
+/// (one JSON line each) and advertises the given event names at
+/// `initialize`. Sh so it needs nothing beyond the test host; the log path
+/// rides the script body.
+#[cfg(unix)]
+fn event_recorder(name: &str, events: &[&str], log: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let advertised = serde_json::to_string(events).unwrap();
+    let body = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{{"id":%s,"result":{{"events":{advertised}}}}}\n' "$id" ;;
+    *'"event"'*) printf '%s\n' "$line" >> '{log}' ; printf '{{"id":%s,"result":null}}\n' "$id" ;;
+    *) printf '{{"id":%s,"result":null}}\n' "$id" ;;
+  esac
+done
+"#,
+        advertised = advertised,
+        log = log.display()
+    );
+    let dir = crate::core::testutil::scratch_dir("approval-event");
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// A model that batches one read (auto-allowed) with one bash `rm` call
+/// (a seeded ask-list hit, so an ask) in round one, then answers "done".
+#[cfg(unix)]
+fn serve_read_then_rm_then_done(listener: std::net::TcpListener) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        for (n, conn) in listener.incoming().flatten().enumerate() {
+            let mut c = conn;
+            read_request(&mut c);
+            let body = if n == 0 {
+                let calls = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[
+                    {"index":0,"id":"c1","function":{"name":"read","arguments":"{\"path\":\"x\"}"}},
+                    {"index":1,"id":"c2","function":{"name":"bash","arguments":"{\"command\":\"rm /tmp/nowhere\"}"}}
+                ]}}]})
+                .to_string();
+                format!(
+                    "data: {calls}\n\n\
+                     data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                     data: [DONE]\n\n"
+                )
+            } else {
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
+                 data: [DONE]\n\n"
+                    .to_string()
+            };
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            if n >= 1 {
+                break;
+            }
+        }
+    })
+}
+
+/// A resident extension subscribed to `approval` hears every ask about to
+/// surface — tool, preview, matched pattern — before the prompt blocks (the
+/// desktop-notification enabler); the auto-allowed read in the same batch
+/// fires nothing.
+#[test]
+#[cfg(unix)]
+fn an_approval_ask_reaches_a_subscribed_extension_and_auto_allows_stay_silent() {
+    let dir = crate::core::testutil::scratch_dir("approval-event");
+    let log = dir.join("seen.jsonl");
+    let host = Extensions {
+        exts: vec![crate::agent::ext::tests::connect_stub(&event_recorder(
+            "approvals",
+            &["approval"],
+            &log,
+        ))],
+        script_tools: Vec::new(),
+    };
+    assert!(host.subscribes("approval"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = serve_read_then_rm_then_done(listener);
+    let model = mock_model(port);
+    let tools: Vec<Box<dyn tools::Tool>> = tools::builtin_tools();
+    let mut opts = test_opts();
+    opts.hooks = &host;
+    let mut approval = approval::ApprovalConfig {
+        blacklist: crate::agent::blacklist::Blacklist::parse("rm"),
+        ..approval::ApprovalConfig::default()
+    };
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        RunCallbacks {
+            on_update: &mut |_| {},
+            on_approval: &mut |_| ApprovalResponse::Allow,
+        },
+    )
+    .expect("the ask is answered by the callback");
+    server.join().unwrap();
+    assert_eq!(outcome.final_text, "done");
+
+    let seen = std::fs::read_to_string(&log).unwrap();
+    let events: Vec<serde_json::Value> = seen
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["params"].clone()
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "exactly the bash ask fired: {seen}");
+    assert_eq!(events[0]["tool"], "bash");
+    assert_eq!(events[0]["pattern"], "rm");
+    assert!(
+        events[0]["preview"].as_str().unwrap_or("").contains("rm"),
+        "the preview names the command"
+    );
+}
+
+/// A host with no `approval` subscriber sends no frame: `subscribes` gates
+/// the payload build, so the quiet path costs nothing.
+#[test]
+fn an_unsubscribed_host_never_builds_approval_frames() {
+    assert!(!empty_extensions().subscribes("approval"));
+    assert!(!empty_extensions().subscribes("agent_end"));
 }

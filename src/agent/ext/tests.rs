@@ -428,7 +428,7 @@ done
 /// alone, so a genuinely broken stub fails exactly as it would without
 /// it; the reason still rides the assertion below.
 #[cfg(unix)]
-fn connect_stub(path: &Path) -> Arc<Ext> {
+pub(crate) fn connect_stub(path: &Path) -> Arc<Ext> {
     let mut ext = connect_one(path);
     for _ in 0..20 {
         let busy = matches!(crate::core::sync::lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));

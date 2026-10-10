@@ -472,8 +472,8 @@ fn format_segments(items: &[Value]) -> String {
 }
 
 pub struct Extensions {
-    exts: Vec<Arc<Ext>>,
-    script_tools: Vec<ExecToolSpec>,
+    pub(crate) exts: Vec<Arc<Ext>>,
+    pub(crate) script_tools: Vec<ExecToolSpec>,
 }
 
 /// A background connect started by [`Extensions::connect_async`]: discovery
@@ -1092,4 +1092,4 @@ pub use manifest::{ExecToolSpec, discover};
 pub use roots::discover_dirs;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

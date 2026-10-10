@@ -1094,6 +1094,7 @@ fn gate_call<'a>(
     cwd: &std::path::Path,
     approval: &mut approval::ApprovalConfig,
     on_approval: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    hooks: &crate::agent::ext::Extensions,
     extension_allowed: bool,
 ) -> Result<ClearedCall<'a>, CallRefusal> {
     let denial = |message: String| CallRefusal {
@@ -1138,6 +1139,18 @@ fn gate_call<'a>(
     // a blacklist ask prompts even when an extension said allow:
     // gating every run of the pattern is the file's whole point
     if ask && (!extension_allowed || matched_pattern.is_some()) {
+        // the ask is about to surface to the user: name it for extensions
+        // (the desktop-notification enabler — see examples/extensions/notify.py)
+        if hooks.subscribes("approval") {
+            hooks.fire(
+                "approval",
+                &json!({
+                    "tool": tool.name(),
+                    "preview": preview,
+                    "pattern": matched_pattern,
+                }),
+            );
+        }
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),
             preview: &preview,
@@ -1234,7 +1247,15 @@ fn prepare_call<'a>(
     if let Some(tool) = tools.iter().find(|t| t.name() == call.name) {
         call.arguments = tool.prepare_arguments(&call.arguments);
     }
-    let cleared = gate_call(call, tools, cwd, approval, on_approval, extension_allowed)?;
+    let cleared = gate_call(
+        call,
+        tools,
+        cwd,
+        approval,
+        on_approval,
+        hooks,
+        extension_allowed,
+    )?;
     on_update(AgentUpdate::ToolStart {
         name: call.name.clone(),
         preview: cleared.preview.clone(),
