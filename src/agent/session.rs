@@ -12,6 +12,38 @@ use crate::agent::{
 use crate::core::threads::{self, StoredTurn};
 use crate::providers::{Msg, ResolvedModel};
 
+/// The one builder for the [`AgentOptions`] both `run_task` paths share.
+/// It takes fields, not the session: a `&Session` borrow would live as
+/// long as the returned hooks reference and lock out the `&mut self.seed`
+/// and `&mut self.approval` the same call still needs, while disjoint
+/// field borrows coexist with them.
+#[allow(clippy::too_many_arguments)] // the fields are AgentOptions' own
+fn agent_opts<'a>(
+    max_request_bytes: usize,
+    system: Option<&'a str>,
+    cwd: &std::path::Path,
+    stream: bool,
+    compact: &CompactConfig,
+    reasoning: Option<&str>,
+    hooks: &'a crate::agent::ext::Extensions,
+    cache_key: &'a str,
+    cache_anchor: Option<usize>,
+    cache_ttl: Option<crate::providers::CacheTtl>,
+) -> AgentOptions<'a> {
+    AgentOptions {
+        max_request_bytes,
+        system,
+        cwd: cwd.to_path_buf(),
+        stream,
+        compact: Some(compact.clone()),
+        reasoning: reasoning.map(str::to_string),
+        hooks,
+        cache_key: Some(cache_key),
+        cache_anchor,
+        cache_ttl,
+    }
+}
+
 /// Everything one agent task needs; the interactive REPL reuses this across
 /// tasks, evolving `seed`/`conversation_id`/`approval` as it goes.
 pub struct Session {
@@ -151,22 +183,18 @@ impl Session {
                     .to_string(),
             );
         };
-        // the same set `run_task_json` builds below, by hand because a `&self`
-        // method would borrow the whole session and lock out the
-        // `&mut self.seed` and `&mut self.approval` this same call needs:
-        // a field added here has to be added there too
-        let opts = AgentOptions {
-            max_request_bytes: self.max_request_bytes,
-            system: self.system.as_deref(),
-            cwd: self.cwd.clone(),
-            stream: self.stream,
-            compact: Some(self.compact.clone()),
-            reasoning: self.thinking.clone(),
-            hooks: &self.extensions,
-            cache_key: Some(self.cache_key.as_str()),
-            cache_anchor: self.cache_anchor(),
-            cache_ttl: self.cache_ttl,
-        };
+        let opts = agent_opts(
+            self.max_request_bytes,
+            self.system.as_deref(),
+            &self.cwd,
+            self.stream,
+            &self.compact,
+            self.thinking.as_deref(),
+            &self.extensions,
+            &self.cache_key,
+            self.cache_anchor(),
+            self.cache_ttl,
+        );
         let model_id = model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
         // trace and footer (indent 2); tool chrome stays local
@@ -546,20 +574,18 @@ impl Session {
                     .to_string(),
             );
         };
-        // the same set `run_task` builds above, by hand for the same borrow
-        // reason: keep the two in step
-        let opts = AgentOptions {
-            max_request_bytes: self.max_request_bytes,
-            system: self.system.as_deref(),
-            cwd: self.cwd.clone(),
-            stream: self.stream,
-            compact: Some(self.compact.clone()),
-            reasoning: self.thinking.clone(),
-            hooks: &self.extensions,
-            cache_key: Some(self.cache_key.as_str()),
-            cache_anchor: self.cache_anchor(),
-            cache_ttl: self.cache_ttl,
-        };
+        let opts = agent_opts(
+            self.max_request_bytes,
+            self.system.as_deref(),
+            &self.cwd,
+            self.stream,
+            &self.compact,
+            self.thinking.as_deref(),
+            &self.extensions,
+            &self.cache_key,
+            self.cache_anchor(),
+            self.cache_ttl,
+        );
         // the terminal path renders the reasoning trace through TaskView;
         // here it is only carried into the stored turn
         let mut reasoning = String::new();
