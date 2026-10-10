@@ -575,7 +575,11 @@ pub fn run_agent(
 
     opts.hooks.fire(
         "agent_end",
-        &json!({"final_text": final_text, "interrupted": interrupted}),
+        &json!({
+            "cwd": opts.cwd.display().to_string(),
+            "final_text": final_text,
+            "interrupted": interrupted,
+        }),
     );
     Ok(AgentOutcome {
         history,
@@ -1145,6 +1149,7 @@ fn gate_call<'a>(
             hooks.fire(
                 "approval",
                 &json!({
+                    "cwd": cwd.display().to_string(),
                     "tool": tool.name(),
                     "preview": preview,
                     "pattern": matched_pattern,

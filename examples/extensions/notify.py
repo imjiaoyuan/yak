@@ -4,6 +4,11 @@
 # about the approval prompt (and the finished answer) wherever you are, not
 # just in the window yak runs in.
 #
+# Every payload carries the working directory of the session that raised it,
+# and the notification shows it: with more than one yak running, the path is
+# what tells the notifications apart (which project, which terminal to go
+# back to).
+#
 # Payloads reuse the shapes other agents' `notify` wrappers already speak, so an
 # existing notify-send/osascript script works unchanged:
 #   {"type": "agent-turn-complete", "cwd": ..., "input-messages": [...],
@@ -88,16 +93,20 @@ def handle(msg):
         return {"events": ["agent_end", "approval"]}
     if kind == "event":
         params = msg.get("params") or {}
+        # the session's working directory, in both the notification body and
+        # the title: the one field that says which conversation is talking
+        cwd = (params.get("cwd") or "").strip()
+        title = "yak [{}]".format(cwd) if cwd else "yak"
         if msg.get("name") == "agent_end":
             if params.get("interrupted"):
                 return
             error = notify(
-                "yak",
+                title,
                 first_line(params.get("final_text") or ""),
             )
         elif msg.get("name") == "approval":
             error = notify(
-                "yak — approval requested",
+                title + " — approval requested",
                 "{}: {}".format(
                     params.get("tool", "tool"),
                     first_line(params.get("preview") or ""),

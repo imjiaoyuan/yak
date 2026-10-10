@@ -182,8 +182,8 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs: see gate semantics | `{tool, args}` |
 | `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}`: reply `{"content": ..}` to replace it, see below |
-| `approval` | an approval prompt is about to surface, before it blocks | `{tool, preview, pattern}`: `pattern` is the matched ask-list line for a bash ask, else null — the desktop-notification seam (see `notify.py`); fire-and-forget. Auto-allowed calls (read-tier, allow policies, `tool_call` pre-allow without a blacklist hit) never fire it |
-| `agent_end` | task finished or interrupted | `{final_text, interrupted}` |
+| `approval` | an approval prompt is about to surface, before it blocks | `{cwd, tool, preview, pattern}`: `pattern` is the matched ask-list line for a bash ask, else null — the desktop-notification seam (see `notify.py`); fire-and-forget. Auto-allowed calls (read-tier, allow policies, `tool_call` pre-allow without a blacklist hit) never fire it |
+| `agent_end` | task finished or interrupted | `{cwd, final_text, interrupted}`: `cwd` (on both events, and on `agent_start`) is the session's working directory — with more than one yak running it is what tells the notifications apart |
 | `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
 
 ### The `tool_call` gate
