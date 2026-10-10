@@ -155,16 +155,20 @@ impl Blacklist {
     /// words (already expanded past wrappers and `shell -c`) and `segments`
     /// the raw compound-command segments.
     pub fn evaluate(&self, segments: &[String], positions: &[String]) -> Match {
-        let segs: Vec<String> = segments.iter().map(|s| s.to_lowercase()).collect();
-        let words: Vec<String> = positions.iter().map(|s| s.to_lowercase()).collect();
         // last matching entry wins (gitignore semantics): scan all, keep
-        // the newest hit — an `!` allow line later in the file re-permits
+        // the newest hit — an `!` allow line later in the file re-permits.
+        // Patterns and command text compare case-insensitively without
+        // allocating lowered copies: char_cmp lowers both sides per char.
         let mut hit = Match::None;
         for entry in &self.entries {
             let matched = if entry.pattern.contains(char::is_whitespace) {
-                segs.iter().any(|s| self.matches(&entry.pattern, s))
+                segments
+                    .iter()
+                    .any(|s| seg_match(&entry.pattern, s, char_cmp))
             } else {
-                words.iter().any(|w| self.matches(&entry.pattern, w))
+                positions
+                    .iter()
+                    .any(|w| seg_match(&entry.pattern, w, char_cmp))
             };
             if matched {
                 hit = if entry.allow {
@@ -176,58 +180,62 @@ impl Blacklist {
         }
         hit
     }
-
-    /// Word-level glob match: `*` `?` `[...]`, no `**` (words have no
-    /// depth).
-    fn matches(&self, pattern: &str, word: &str) -> bool {
-        word_matches(pattern, word)
-    }
 }
 
-/// Word-level glob: `*` `?` `[...]`, no `**` (words have no depth).
-fn word_matches(pattern: &str, word: &str) -> bool {
-    seg_match(pattern, word)
+/// Single-char case fold (first lowercase char; the multi-char expansions
+/// like `ß`→`ss` cannot ride a char comparison and match as themselves).
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Case-insensitive char equality for [`seg_match`]: both sides folded
+/// per char, so no per-call `to_lowercase` allocations ride every command
+/// word against every pattern. Pattern text is already lowered at parse;
+/// the fold carries the command side.
+fn char_cmp(a: char, b: char) -> bool {
+    fold(a) == fold(b)
 }
 
 /// Segment matcher over `&str` slices: no per-call allocation (this runs for
-/// every command word against every pattern).
-fn seg_match(pat: &str, text: &str) -> bool {
+/// every command word against every pattern). `eq` is the char equality,
+/// injected so the matcher stays independent of case folding.
+fn seg_match(pat: &str, text: &str, eq: fn(char, char) -> bool) -> bool {
     let Some(p0) = pat.chars().next() else {
         return text.is_empty();
     };
     let rest_pat = &pat[p0.len_utf8()..];
     match p0 {
         '*' => {
-            seg_match(rest_pat, text)
+            seg_match(rest_pat, text, eq)
                 || match text.chars().next() {
-                    Some(t0) => seg_match(pat, &text[t0.len_utf8()..]),
+                    Some(t0) => seg_match(pat, &text[t0.len_utf8()..], eq),
                     None => false,
                 }
         }
         '?' => match text.chars().next() {
-            Some(t0) => seg_match(rest_pat, &text[t0.len_utf8()..]),
+            Some(t0) => seg_match(rest_pat, &text[t0.len_utf8()..], eq),
             None => false,
         },
         '\\' if !rest_pat.is_empty() => {
             let esc = rest_pat.chars().next().expect("checked non-empty");
             match text.chars().next() {
-                Some(t0) if t0 == esc => {
-                    seg_match(&rest_pat[esc.len_utf8()..], &text[t0.len_utf8()..])
+                Some(t0) if eq(t0, esc) => {
+                    seg_match(&rest_pat[esc.len_utf8()..], &text[t0.len_utf8()..], eq)
                 }
                 _ => false,
             }
         }
         '[' => {
-            let Some((hit, after_class)) = match_class(rest_pat, text) else {
+            let Some((hit, after_class)) = match_class(rest_pat, text, eq) else {
                 return false; // unterminated class
             };
             match (hit, text.chars().next()) {
-                (true, Some(t0)) => seg_match(after_class, &text[t0.len_utf8()..]),
+                (true, Some(t0)) => seg_match(after_class, &text[t0.len_utf8()..], eq),
                 _ => false,
             }
         }
         c => match text.chars().next() {
-            Some(t0) if t0 == c => seg_match(rest_pat, &text[t0.len_utf8()..]),
+            Some(t0) if eq(t0, c) => seg_match(rest_pat, &text[t0.len_utf8()..], eq),
             _ => false,
         },
     }
@@ -236,7 +244,11 @@ fn seg_match(pat: &str, text: &str) -> bool {
 /// Evaluate a `[...]` class (optional leading `!`/`^` negation, `a-z`
 /// ranges, `]` literal when first) against `text`'s first char. Returns
 /// (hit, pattern past the closing bracket), or None when it never closes.
-fn match_class<'p>(pat: &'p str, text: &str) -> Option<(bool, &'p str)> {
+fn match_class<'p>(
+    pat: &'p str,
+    text: &str,
+    eq: fn(char, char) -> bool,
+) -> Option<(bool, &'p str)> {
     let t0 = text.chars().next();
     let mut idx = 0usize;
     let mut negate = false;
@@ -262,7 +274,9 @@ fn match_class<'p>(pat: &'p str, text: &str) -> Option<(bool, &'p str)> {
             pat[after_lo + 1..].chars().next(),
         ) && hi != ']'
         {
-            if let Some(t) = t0
+            // ranges compare on the folded char: the pattern side is
+            // already lowered at parse, the command side folds here
+            if let Some(t) = t0.map(fold)
                 && t >= c
                 && t <= hi
             {
@@ -272,7 +286,7 @@ fn match_class<'p>(pat: &'p str, text: &str) -> Option<(bool, &'p str)> {
             continue;
         }
         if let Some(t) = t0
-            && t == c
+            && eq(t, c)
         {
             hit = true;
         }
@@ -354,22 +368,24 @@ mod tests {
 
     #[test]
     fn question_and_char_classes_match_within_a_word() {
-        assert!(word_matches("file?.txt", "file1.txt"));
-        assert!(!word_matches("file?.txt", "file12.txt"));
-        assert!(word_matches("[abc].txt", "b.txt"));
-        assert!(!word_matches("[abc].txt", "d.txt"));
-        assert!(word_matches("[a-c].txt", "c.txt"));
-        assert!(word_matches("rm", "rm"));
-        assert!(!word_matches("rm", "rmdir"));
+        let m = |p: &str, w: &str| seg_match(p, w, char_cmp);
+        assert!(m("file?.txt", "file1.txt"));
+        assert!(!m("file?.txt", "file12.txt"));
+        assert!(m("[abc].txt", "b.txt"));
+        assert!(!m("[abc].txt", "d.txt"));
+        assert!(m("[a-c].txt", "c.txt"));
+        assert!(m("rm", "rm"));
+        assert!(!m("rm", "rmdir"));
     }
 
     #[test]
-    fn case_insensitive() {
-        let b = bl("SUDO");
-        assert_eq!(
-            b.evaluate(&["sudo x".into()], &["sudo".into()]),
-            Match::Deny("sudo".into())
-        );
+    fn case_insensitive_across_unicode() {
+        // the per-char fold, not a lowered copy: turkish dotted I and the
+        // kelvin sign fold to their plain counterparts on both sides
+        let m = |p: &str, w: &str| seg_match(p, w, char_cmp);
+        assert!(m("rm", "RM"));
+        assert!(m("[a-z]", "Q"));
+        assert!(m("łatwo", "ŁATWO"));
     }
 
     #[test]
