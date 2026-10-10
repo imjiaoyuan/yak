@@ -303,6 +303,9 @@ pub fn summarize(
 /// images/documents. Multimodal blocks are the most expensive context
 /// there is and the worst-cached; old screenshots rarely matter to the
 /// current work, so everything older than the last few becomes a note.
+/// The parallel per-request cap on billing is
+/// `session::IMAGE_TURNS_KEPT` (per user turn, pixels only) — a separate
+/// budget; the two stay in step only by deliberate change.
 pub const KEEP_ATTACHMENT_MESSAGES: usize = 2;
 
 /// Replace attachments older than the last [`KEEP_ATTACHMENT_MESSAGES`]

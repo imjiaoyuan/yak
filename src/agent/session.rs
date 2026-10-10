@@ -1058,6 +1058,10 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
 /// image in the request is billed on every request, so a thread that once
 /// carried screenshots would keep paying for them; older turns keep their
 /// provenance and the adapters render the dropped payload as a note.
+/// A second, parallel cap ages attachments out of the context prefix at
+/// compaction time: `compact::KEEP_ATTACHMENT_MESSAGES` (per message, not
+/// per user turn) — the two are separate budgets and stay in step only
+/// by deliberate change, not by accident.
 const IMAGE_TURNS_KEPT: usize = 2;
 
 /// Drop the pixels from images older than the newest `IMAGE_TURNS_KEPT` user
@@ -1079,11 +1083,13 @@ pub(crate) fn budget_images(msgs: &mut [Msg]) {
 /// holds fewer user turns than the cap, so nothing is taken away.
 fn image_window_start(msgs: &[Msg]) -> Option<usize> {
     // walk from the end; the cap-th newest user turn is where the window
-    // opens, and fewer than `IMAGE_TURNS_KEPT` user turns keeps everything
+    // opens, and fewer than `IMAGE_TURNS_KEPT` user turns keeps everything.
+    // saturating, not `left -= 1`: a cap of 0 must mean "drop everything
+    // from the first user turn", not a usize underflow wrapping huge
     let mut left = IMAGE_TURNS_KEPT;
     for (i, m) in msgs.iter().enumerate().rev() {
         if matches!(m, Msg::User { .. }) {
-            left -= 1;
+            left = left.saturating_sub(1);
             if left == 0 {
                 return Some(i);
             }
