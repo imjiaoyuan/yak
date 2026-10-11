@@ -776,6 +776,13 @@ impl StallSink<'_> {
     }
 
     fn stalled(&mut self, reason: String) {
+        // an interrupt killed the summarizer stream: the user stopped the
+        // task, not compaction failing — the next round retries on its own,
+        // so this is not a stall and must not spend the once-per-run notice
+        // (nor print anything next to the task's own "interrupted" line)
+        if crate::core::http::interrupted() {
+            return;
+        }
         if !*self.warned {
             *self.warned = true;
             (self.on_update)(AgentUpdate::CompactStalled { reason });

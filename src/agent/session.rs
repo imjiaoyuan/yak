@@ -454,22 +454,13 @@ impl Session {
                     }
                     view.borrow_mut().resume_wait();
                 }
-                AgentUpdate::ToolResultsPruned { count } => {
-                    // settle the row, then say why the next request got
-                    // smaller; dim like the other automatic maintenance.
-                    // The stale-prefix pass keeps the head and tail, so
-                    // "full text stays in the session log" was never the
-                    // story — the middle was cut.
+                AgentUpdate::ToolResultsPruned { count: _ } => {
+                    // settle the row and stay quiet: like auto-compaction
+                    // itself, this is maintenance the session does on its
+                    // own (the --json event carries the count); the notice
+                    // printed here was noise next to a task the user is
+                    // watching anyway
                     view.borrow_mut().pause();
-                    let p = crate::theme::err();
-                    let s = if count == 1 { "" } else { "s" };
-                    eprintln!(
-                        "{}{}pruned {count} oversized tool result{s} from context (kept the head and tail; re-run the command for the middle){}",
-                        p.dim,
-                        crate::theme::NOTICE,
-                        p.reset
-                    );
-                    view.borrow_mut().resume_wait();
                 }
             }
         };
