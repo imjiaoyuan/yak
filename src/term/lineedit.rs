@@ -1050,18 +1050,26 @@ impl Drop for KittyKeys {
 
 /// Holds the focus-report mode for the duration of one reader's life, so
 /// `ESC[I`/`ESC[O` reports arrive and fold into `term::set_focused` —
-/// the state notification gating reads. Terminals that never heard of the
-/// mode ignore it, and reporting turns off with the reader: a child
-/// process (editor, pager) must not inherit focus reports on its stdin.
-/// Not re-entrant across threads: the watcher stops around approval
-/// prompts, which read the same stdin.
+/// the state notification gating reads. Enabling it also assumes the
+/// terminal is focused (terminals report only changes, never the state at
+/// mode-enable). Terminals that never heard of the mode ignore it, and
+/// reporting turns off with the reader: a child process (editor, pager)
+/// must not inherit focus reports on its stdin. Not re-entrant across
+/// threads: the watcher stops around approval prompts, which read the same
+/// stdin.
 struct FocusReport;
 
 impl FocusReport {
     fn new() -> FocusReport {
         let _guard = crate::theme::row_lock().lock();
+        let on = crate::theme::cursor().focus_on();
+        if !on.is_empty() {
+            // The mode is live on a real terminal: take the prompt we are
+            // about to draw as focused, and let an `ESC[O` correct it.
+            super::assume_focused();
+        }
         let mut out = std::io::stderr();
-        let _ = write!(out, "{}", crate::theme::cursor().focus_on());
+        let _ = write!(out, "{on}");
         let _ = out.flush();
         FocusReport
     }

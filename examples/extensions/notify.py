@@ -20,9 +20,10 @@
 # Both notifications respect the focus gate: while the terminal window is
 # focused you are already looking at it, so a notification is noise — quiet
 # then, loud once you look away. The payload's "focused" field carries the
-# state (present only when the terminal reports focus; an older yak or a
-# terminal that never reports it omits the field, which counts as unfocused
-# so notifications keep working). Set NOTIFY_WHEN = "always" to opt out.
+# state (an interactive yak assumes focused until the terminal reports a
+# change; an older yak or a non-interactive run omits the field, which
+# counts as unfocused so notifications keep working). A terminal that never
+# reports focus stays quiet — set NOTIFY_WHEN = "always" there.
 #
 # Payloads reuse the shapes other agents' `notify` wrappers already speak, so an
 # existing notify-send/osascript script works unchanged:
@@ -51,7 +52,8 @@ PING_QUIET_SECS = 120
 # when notifications may fire: "unfocused" stays quiet while the terminal
 # is focused (you are already looking at it), "always" fires regardless.
 # The "focused" field rides the event payload; an older yak without it
-# counts as unfocused, so notifications never silently stop.
+# counts as unfocused, so notifications never silently stop. A terminal
+# that never speaks focus reporting is assumed focused — use "always".
 NOTIFY_WHEN = "unfocused"
 
 _last_ping = {}
