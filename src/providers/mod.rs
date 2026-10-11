@@ -150,6 +150,7 @@ pub fn resolve_run_model(
         .map(str::to_string)
         .or_else(|| std::env::var("YAK_MODEL").ok())
         .or(context)
+        .or_else(|| project_default_model(&cfg))
         .or(stored_default);
     let Some(query) = query else {
         return Err(
@@ -169,6 +170,46 @@ pub fn resolve_run_model(
     }
     model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
     Ok(model)
+}
+
+/// The project-tier model override: `models.default` off the nearest
+/// `<project>/.yak/config.json` walking up from cwd (bounded by the git
+/// root, the same walk project memory and the project blacklist use). It
+/// sits between the session's own model and the user's global default: an
+/// ongoing conversation keeps its model, and `-m`/`YAK_MODEL` still beat
+/// everything. A file that fails to parse is a loud warning, not a silent
+/// skip; a `models.default` that does not resolve warns the same way the
+/// stored default does.
+fn project_default_model(cfg: &crate::core::config::Config) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    project_default_model_at(cfg, &cwd)
+}
+
+/// The testable body: an explicit cwd instead of the process's.
+fn project_default_model_at(
+    cfg: &crate::core::config::Config,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    let dir = crate::core::paths::nearest_dir_up(cwd, ".yak", true)?;
+    let path = dir.join("config.json");
+    if !path.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("Warning: cannot parse {}: {e}", path.display());
+        serde_json::Value::Null
+    });
+    let model = root.get("models")?.get("default")?.as_str()?;
+    let resolves = cfg.resolve_model(model).ok().flatten().is_some();
+    if !resolves {
+        eprintln!(
+            "Warning: models.default '{model}' in {} does not resolve, ignoring it",
+            path.display()
+        );
+        return None;
+    }
+    Some(model.to_string())
 }
 
 /// A user message body: plain text, or content parts when attachments

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""model_here — a resident yak extension: one slash command, one file.
+
+Copy to ~/.yak/extensions/model_here, chmod +x, /reload. It mounts:
+
+  /model-here [model]   pin this project's default model, or show the pin
+
+The pin is `models.default` in `<project>/.yak/config.json` (created on
+first use, siblings preserved on edit). yak's model resolution reads it at
+startup: -m > YAK_MODEL > the session's own model > this pin > the global
+default. Bare with no argument prints the current pin and where it lives.
+Removing the pin is /model-here off. The walk finds the nearest .yak up
+from cwd, bounded by the git root — the same rule the project memory and
+blacklist follow.
+"""
+
+import json
+import os
+import sys
+
+COMMANDS = ["model-here"]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def find_project_yak():
+    """core::paths::nearest_dir_up(cwd, ".yak", stop_at_git_root): the
+    nearest .yak directory walking up, never past a .git root."""
+    cwd = os.getcwd()
+    parts = cwd.split(os.sep)
+    for i in range(len(parts), 0, -1):
+        d = os.sep.join(parts[:i]) or os.sep
+        if os.path.isdir(os.path.join(d, ".yak")):
+            return os.path.join(d, ".yak")
+        if i < len(parts) and os.path.exists(os.path.join(d, ".git")):
+            return None
+        if d == os.sep:
+            break
+    return None
+
+
+def read_root(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return {}
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: {path} does not parse: {e}")
+
+
+def write_root(path, root):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(root, f, indent=2)
+        f.write("\n")
+
+
+def model_here(arg):
+    yak_dir = find_project_yak()
+    if not yak_dir:
+        return (
+            "no .yak directory up from cwd (bounded by the git root) — "
+            "create one first: mkdir .yak"
+        )
+    path = os.path.join(yak_dir, "config.json")
+    root = read_root(path)
+
+    def set_pin(value):
+        root.setdefault("models", {})["default"] = value
+        write_root(path, root)
+        return f"pinned {value} in {path} (applies to new sessions here)"
+
+    if arg.strip().lower() == "off":
+        models = root.get("models") or {}
+        if "default" in models:
+            del models["default"]
+            if models:
+                root["models"] = models
+            else:
+                del root["models"]
+            write_root(path, root)
+            return f"pin removed from {path}"
+        return f"no pin in {path}"
+
+    if arg.strip():
+        return set_pin(arg.strip())
+
+    current = (root.get("models") or {}).get("default")
+    if current:
+        return f"pinned: {current} ({path})"
+    return f"no pin yet ({path}); /model-here <provider/model> to set one"
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": [], "commands": COMMANDS, "events": []}})
+        elif kind == "run_command" and msg.get("name") == "model-here":
+            try:
+                reply({"id": mid, "result": model_here(str(msg.get("args") or ""))})
+            except SystemExit as e:
+                reply({"id": mid, "result": str(e)})
+            except Exception as e:
+                reply({"id": mid, "result": f"error: {e}"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

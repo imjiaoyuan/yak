@@ -140,6 +140,8 @@ If you prefer to edit config by hand, add a block like this to `config.json`:
 
 `/model` picks the model (live list, with your saved ones pinned on top of it) and its thinking depth, saved for future sessions; `/thinking` changes the depth alone. Both live in the `models` object of config.json. `-m` and `YAK_MODEL` override per run, and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning and a fallback.
 
+A project can carry its own default: `models.default` in `<project>/.yak/config.json` (nearest `.yak` up from cwd, bounded by the git root — the same walk project memory follows) beats the global default for new sessions started inside the project, and an ongoing session still keeps its own model. The [`model_here`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension mounts a `/model-here` slash command that reads and writes that pin (`/model-here zai/glm-5.3`, `/model-here` to show, `/model-here off` to remove). A pinned id that does not resolve is a loud warning, then the global default.
+
 ## Tuning the agent
 
 Under the `"agent"` key of `config.json`:

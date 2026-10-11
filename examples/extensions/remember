@@ -21,9 +21,12 @@ import time
 
 DESCRIPTION = (
     "Save one durable fact to the user's global memory (YAK.md), injected "
-    "into every future session. Use when the user asks you to remember or "
-    "note a preference, environment detail or long-term decision; not for "
-    "task-specific details."
+    "into every future session. Only when the user explicitly asks to "
+    "remember/note something, or a fact is clearly durable (a preference, "
+    "an environment constant, a way of working that future sessions must "
+    "obey). Test before writing: will the next session in a different "
+    "project still need this? One-off task facts (what was done, verified "
+    "or fixed just now) fail that test — never record them."
 )
 
 TOOLS = [

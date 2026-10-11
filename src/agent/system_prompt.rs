@@ -92,10 +92,15 @@ pub fn build_system_prompt(
                      - Show file paths clearly when working with files.\n\
                      \n\
                      Memory (user preferences)\n\
-                     - When the user asks you to remember or note a durable preference \n\
-                       (an environment detail, a long-term decision, a way of working), call \n\
-                       the `remember` tool with one concise line. It lands in the user memory \n\
-                       file named in the `<user_memory>` block below and applies from the \n\
+                     - Call the `remember` tool only when the user explicitly asks \n\
+                       to remember or note something, or a preference is clear and \n\
+                       durable enough that future sessions must obey it. Test before \n\
+                       writing: will a session in another project, weeks from now, \n\
+                       still need this line? One-off task facts (what was just done, \n\
+                       verified, fixed or rebuilt) fail that test - the transcript and \n\
+                       the repo already hold them; never record them.\n\
+                     - One concise line per fact; it lands in the user memory file \n\
+                       named in the `<user_memory>` block below and applies from the \n\
                        next session on; this session's prompt stays as it is.\n\
                      - Repo- or directory-scoped rules belong in the project's own memory \n\
                        file (<project>/.yak/YAK.md, shown as `<project_memory>` below when \n\

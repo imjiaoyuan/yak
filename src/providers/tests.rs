@@ -269,3 +269,78 @@ fn consecutive_tool_result_images_share_one_user_message() {
     assert_eq!(msgs[pos - 1]["role"], "tool");
     assert_eq!(msgs[pos + 1]["role"], "user");
 }
+
+#[test]
+fn project_default_beats_the_stored_default() {
+    let cfg = crate::core::config::Config {
+        providers: [(
+            "p".to_string(),
+            crate::core::config::Provider {
+                kind: "openai".to_string(),
+                base_url: "https://p.test/v1".to_string(),
+                api_key: None,
+                models: vec!["m1".to_string(), "m2".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let dir = crate::core::testutil::scratch_dir("proj-model");
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(proj.join(".yak")).unwrap();
+    std::fs::write(
+        proj.join(".yak/config.json"),
+        r#"{"models": {"default": "p/m2"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        project_default_model_at(&cfg, &proj),
+        Some("p/m2".to_string())
+    );
+    // outside the project: nothing
+    assert_eq!(project_default_model_at(&cfg, &dir), None);
+}
+
+#[test]
+fn an_unresolvable_project_default_is_dropped() {
+    let cfg = crate::core::config::Config {
+        providers: [(
+            "p".to_string(),
+            crate::core::config::Provider {
+                kind: "openai".to_string(),
+                base_url: "https://p.test/v1".to_string(),
+                api_key: None,
+                models: vec!["m1".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let dir = crate::core::testutil::scratch_dir("proj-model-bad");
+    std::fs::create_dir_all(dir.join(".yak")).unwrap();
+    std::fs::write(
+        dir.join(".yak/config.json"),
+        r#"{"models": {"default": "ghost/nope"}}"#,
+    )
+    .unwrap();
+    assert_eq!(project_default_model_at(&cfg, &dir), None);
+}
+
+#[test]
+fn a_git_root_bounds_the_project_walk() {
+    let cfg = crate::core::config::Config::default();
+    let dir = crate::core::testutil::scratch_dir("proj-model-bound");
+    // outer .yak with a default, inner git repo without one
+    std::fs::create_dir_all(dir.join(".yak")).unwrap();
+    std::fs::write(
+        dir.join(".yak/config.json"),
+        r#"{"models": {"default": "x"}}"#,
+    )
+    .unwrap();
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    assert_eq!(project_default_model_at(&cfg, &repo), None);
+}
