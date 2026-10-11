@@ -205,6 +205,9 @@ pub const ALL: &[Entry] = &[
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
         "QWEN_TOKEN_PLAN_API_KEY",
     ),
+    // the same endpoint as qwen-token-plan: the registry lists both the
+    // personal and the organization subscription under one alias each, so
+    // an id survives either spelling
     e(
         "qwen-token-plan-individual",
         "openai-compat",

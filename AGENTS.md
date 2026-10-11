@@ -71,7 +71,7 @@ Everything else is handwritten in-tree:
 | `b64.rs` | base64 |
 | `core/db.rs` | monotonic ULIDs and the turn-timestamp format |
 | `jsonfmt.rs` | reference-style JSON serialization |
-| `core/text.rs` | Damerau-Levenshtein and string helpers |
+| `core/text.rs` | string helpers (char boundaries, truncation, ANSI strip) |
 | `core/paths.rs` | directory walks (`ancestors`/`nearest_dir_up`/`dirs_up`, shared by skills, commands-dir and extension discovery) |
 | `term/render.rs` | ANSI rendering + the shared TaskView |
 | `core/render_md/` | terminal markdown incl. CJK cell widths (one streaming engine; replay resolves its setext lookahead up front) |
