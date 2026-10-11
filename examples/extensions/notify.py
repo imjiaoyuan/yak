@@ -17,6 +17,13 @@
 # directory: a run of prompts inside one task calls you over once, not once
 # per prompt — the prompts themselves still block in the terminal either way.
 #
+# Both notifications respect the focus gate: while the terminal window is
+# focused you are already looking at it, so a notification is noise — quiet
+# then, loud once you look away. The payload's "focused" field carries the
+# state (present only when the terminal reports focus; an older yak or a
+# terminal that never reports it omits the field, which counts as unfocused
+# so notifications keep working). Set NOTIFY_WHEN = "always" to opt out.
+#
 # Payloads reuse the shapes other agents' `notify` wrappers already speak, so an
 # existing notify-send/osascript script works unchanged:
 #   {"type": "agent-turn-complete", "cwd": ..., "input-messages": [...],
@@ -41,7 +48,20 @@ SUMMARY_CHARS = 120
 # for it stay quiet this long (the prompt still blocks in the terminal)
 PING_QUIET_SECS = 120
 
+# when notifications may fire: "unfocused" stays quiet while the terminal
+# is focused (you are already looking at it), "always" fires regardless.
+# The "focused" field rides the event payload; an older yak without it
+# counts as unfocused, so notifications never silently stop.
+NOTIFY_WHEN = "unfocused"
+
 _last_ping = {}
+
+
+def should_notify(params):
+    """The focus gate: quiet while the user is looking at the terminal."""
+    if NOTIFY_WHEN == "always":
+        return True
+    return not params.get("focused", False)
 
 
 def first_line(text):
@@ -116,6 +136,8 @@ def handle(msg):
         # the session's working directory rides under the notification's
         # first line: the one field that says which conversation is talking
         cwd = (params.get("cwd") or "").strip()
+        if not should_notify(params):
+            return
         now = time.monotonic()
         if msg.get("name") == "agent_end":
             if params.get("interrupted"):

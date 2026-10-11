@@ -27,6 +27,39 @@ pub fn screen() -> &'static Screen {
     })
 }
 
+/// Whether the terminal window is focused, as far as the focus-report mode
+/// (`ESC[?1004h`, held by the raw readers) can tell. Starts true — the
+/// optimistic default — and is updated by the `ESC[I`/`ESC[O` reports the
+/// readers swallow. A terminal that never reports focus leaves it true,
+/// which is the safe side for notification gating: better one notification
+/// too many than one missed.
+/// Focus state, as far as the focus-report mode (`ESC[?1004h`, held by
+/// the raw readers) can tell: updated by the `ESC[I`/`ESC[O` reports the
+/// readers swallow. `focused()` alone is meaningless until a report has
+/// actually arrived — until then the optimistic default is `true` and
+/// callers that report the state (`agent_end`, `approval` payloads) omit
+/// the field instead of guessing, so a notification gate treats a
+/// terminal that never reports focus (a pipe, a plain pty, one-shot mode)
+/// as unfocused: better one notification too many than one missed.
+static FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static FOCUS_KNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn focused() -> bool {
+    FOCUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether any focus report has arrived (the mode is on and the terminal
+/// speaks it).
+pub fn focus_known() -> bool {
+    FOCUS_KNOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record one focus report (`true` = gained, `false` = lost).
+pub fn set_focused(focused: bool) {
+    FOCUSED.store(focused, std::sync::atomic::Ordering::Relaxed);
+    FOCUS_KNOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Hidden input, backed by the platform console implementation. Falling back
 /// to visible input is preserved as a non-platform I/O mode.
 pub fn read_hidden(prompt: &str) -> std::io::Result<String> {

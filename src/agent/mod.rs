@@ -573,14 +573,15 @@ pub fn run_agent(
         }
     }
 
-    opts.hooks.fire(
-        "agent_end",
-        &json!({
-            "cwd": opts.cwd.display().to_string(),
-            "final_text": final_text,
-            "interrupted": interrupted,
-        }),
-    );
+    let mut end_payload = json!({
+        "cwd": opts.cwd.display().to_string(),
+        "final_text": final_text,
+        "interrupted": interrupted,
+    });
+    if crate::term::focus_known() {
+        end_payload["focused"] = json!(crate::term::focused());
+    }
+    opts.hooks.fire("agent_end", &end_payload);
     Ok(AgentOutcome {
         history,
         final_text,
@@ -1145,16 +1146,20 @@ fn gate_call<'a>(
     if ask && (!extension_allowed || matched_pattern.is_some()) {
         // the ask is about to surface to the user: name it for extensions
         // (the desktop-notification enabler — see examples/extensions/notify.py)
+        // a focus report has arrived at some point: the terminal speaks
+        // the mode, so the flag is real. Otherwise the field is omitted —
+        // a gate must not read a guess.
         if hooks.subscribes("approval") {
-            hooks.fire(
-                "approval",
-                &json!({
-                    "cwd": cwd.display().to_string(),
-                    "tool": tool.name(),
-                    "preview": preview,
-                    "pattern": matched_pattern,
-                }),
-            );
+            let mut payload = json!({
+                "cwd": cwd.display().to_string(),
+                "tool": tool.name(),
+                "preview": preview,
+                "pattern": matched_pattern,
+            });
+            if crate::term::focus_known() {
+                payload["focused"] = json!(crate::term::focused());
+            }
+            hooks.fire("approval", &payload);
         }
         let answer = on_approval(ApprovalRequest {
             tool: tool.name(),

@@ -243,6 +243,21 @@ impl Cursor {
         if self.rows_live { "\x1b[?2004l" } else { "" }
     }
 
+    /// Hold focus reporting on for the duration of one read (`ESC [ ?
+    /// 1004 h`): the terminal then reports focus gains and losses as
+    /// `ESC[I`/`ESC[O`, which the raw readers fold into
+    /// `term::set_focused`. Terminals that never heard of the mode ignore
+    /// it. The matching [`Cursor::focus_off`] releases it; the pair is
+    /// scoped by the caller (a guard type), never left on.
+    pub fn focus_on(&self) -> &'static str {
+        if self.rows_live { "\x1b[?1004h" } else { "" }
+    }
+
+    /// Release focus reporting (`ESC [ ? 1004 l`).
+    pub fn focus_off(&self) -> &'static str {
+        if self.rows_live { "\x1b[?1004l" } else { "" }
+    }
+
     /// Push the kitty keyboard protocol's disambiguate flag (`ESC [ > 1 u`)
     /// so shift/ctrl+enter arrive as CSI-u keys. Terminals that never heard
     /// of the protocol ignore the push — it is never queried. The matching

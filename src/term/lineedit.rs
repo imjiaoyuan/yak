@@ -93,6 +93,7 @@ impl LineEditor {
         };
         let mut paste_mode = Some(PasteMode::new());
         let mut kitty = Some(KittyKeys::new());
+        let mut focus_mode = Some(FocusReport::new());
         let mut out = std::io::stderr();
         let _ = write!(out, "{prompt}");
         let _ = out.flush();
@@ -150,6 +151,14 @@ impl LineEditor {
                         {
                             b = (cp - 96) as u8;
                         }
+                        Some(Esc::FocusIn) => {
+                            crate::term::set_focused(true);
+                            continue;
+                        }
+                        Some(Esc::FocusOut) => {
+                            crate::term::set_focused(false);
+                            continue;
+                        }
                         other => pending_esc = other,
                     },
                 }
@@ -195,6 +204,7 @@ impl LineEditor {
                     // hand the terminal back: guards off, cooked mode on
                     drop(kitty.take());
                     drop(paste_mode.take());
+                    drop(focus_mode.take());
                     drop(term);
                     let dir = crate::core::config::user_dir().join("tmp");
                     let _ = std::fs::create_dir_all(&dir);
@@ -226,6 +236,7 @@ impl LineEditor {
                     }
                     paste_mode = Some(PasteMode::new());
                     kitty = Some(KittyKeys::new());
+                    focus_mode = Some(FocusReport::new());
                     line.rows = 0; // the region restarts below the editor's output
                     line.draw(&mut out, prompt, &buf, cursor, is_command);
                 }
@@ -679,6 +690,10 @@ impl LineEditor {
                         line.settle(&mut out, prompt, "", is_command);
                         return LineResult::Interrupt;
                     }
+                    // focus reports are consumed at the escape_from call
+                    // above (they never reach pending_esc); listed so the
+                    // match stays exhaustive
+                    Some(Esc::FocusIn | Esc::FocusOut) => {}
                     None => {}
                 },
                 _ if b < 0x20 => {
@@ -734,6 +749,10 @@ enum Esc {
     PasteStart,
     /// bracketed-paste end marker (`ESC[201~`)
     PasteEnd,
+    /// focus gained report (`ESC[I`, the focus-report mode's first byte)
+    FocusIn,
+    /// focus lost report (`ESC[O`)
+    FocusOut,
     /// kitty CSI-u key: (codepoint, modifier value where 2=shift, 3=alt,
     /// 5=ctrl, 7=ctrl+alt). Legacy ESC-prefixed alt keys arrive here too,
     /// as (char, 3); modified delete as (127, m).
@@ -1029,6 +1048,34 @@ impl Drop for KittyKeys {
     }
 }
 
+/// Holds the focus-report mode for the duration of one reader's life, so
+/// `ESC[I`/`ESC[O` reports arrive and fold into `term::set_focused` —
+/// the state notification gating reads. Terminals that never heard of the
+/// mode ignore it, and reporting turns off with the reader: a child
+/// process (editor, pager) must not inherit focus reports on its stdin.
+/// Not re-entrant across threads: the watcher stops around approval
+/// prompts, which read the same stdin.
+struct FocusReport;
+
+impl FocusReport {
+    fn new() -> FocusReport {
+        let _guard = crate::theme::row_lock().lock();
+        let mut out = std::io::stderr();
+        let _ = write!(out, "{}", crate::theme::cursor().focus_on());
+        let _ = out.flush();
+        FocusReport
+    }
+}
+
+impl Drop for FocusReport {
+    fn drop(&mut self) {
+        let _guard = crate::theme::row_lock().lock();
+        let mut out = std::io::stderr();
+        let _ = write!(out, "{}", crate::theme::cursor().focus_off());
+        let _ = out.flush();
+    }
+}
+
 impl InputLine {
     fn new() -> InputLine {
         InputLine { rows: 0, width: 0 }
@@ -1292,25 +1339,36 @@ impl RawTermExt for RawTerm {
             }
         }
         let [n1, n2] = params;
-        match (final_byte, n2) {
-            (b'A', 0) => Some(Esc::Up),
-            (b'B', 0) => Some(Esc::Down),
-            (b'C', 0) => Some(Esc::Right),
-            (b'D', 0) => Some(Esc::Left),
-            (b'H', 0) => Some(Esc::Home),
-            (b'F', 0) => Some(Esc::End),
-            (b'C' | b'D', m) => Some(Esc::Mod(final_byte, m.clamp(1, 16) as u8)),
-            (b'u', _) => Some(Esc::Key(n1.max(1), n2.clamp(1, 16) as u8)),
-            (b'~', 0) => match n1 {
-                3 => Some(Esc::Delete),
-                200 => Some(Esc::PasteStart),
-                201 => Some(Esc::PasteEnd),
-                _ => None,
-            },
-            // modified delete (`3;m~`): treat as a modified backspace
-            (b'~', m) if n1 == 3 => Some(Esc::Key(127, m.clamp(1, 16) as u8)),
+        csi_final(final_byte, n1, n2)
+    }
+}
+
+/// Map one parsed CSI sequence's final byte and parameters to its meaning.
+/// Pure so the mapping is testable without a terminal.
+fn csi_final(final_byte: u8, n1: u32, n2: u32) -> Option<Esc> {
+    match (final_byte, n2) {
+        (b'A', 0) => Some(Esc::Up),
+        (b'B', 0) => Some(Esc::Down),
+        (b'C', 0) => Some(Esc::Right),
+        (b'D', 0) => Some(Esc::Left),
+        (b'H', 0) => Some(Esc::Home),
+        (b'F', 0) => Some(Esc::End),
+        // focus reports (no parameters): I gained, O lost. `O` as a
+        // final byte never collides with the SS3 keypad prefix (`ESC O
+        // P`): the `[` already took this branch.
+        (b'I', 0) => Some(Esc::FocusIn),
+        (b'O', 0) => Some(Esc::FocusOut),
+        (b'C' | b'D', m) => Some(Esc::Mod(final_byte, m.clamp(1, 16) as u8)),
+        (b'u', _) => Some(Esc::Key(n1.max(1), n2.clamp(1, 16) as u8)),
+        (b'~', 0) => match n1 {
+            3 => Some(Esc::Delete),
+            200 => Some(Esc::PasteStart),
+            201 => Some(Esc::PasteEnd),
             _ => None,
-        }
+        },
+        // modified delete (`3;m~`): treat as a modified backspace
+        (b'~', m) if n1 == 3 => Some(Esc::Key(127, m.clamp(1, 16) as u8)),
+        _ => None,
     }
 }
 
@@ -1549,6 +1607,10 @@ impl KeyWatcher {
         };
         let flag = stop.clone();
         let handle = std::thread::spawn(move || {
+            // focus reports ride the watcher's own stdin read: the mode is
+            // held exactly while this thread reads the terminal, never while
+            // a child process owns it
+            let _focus = FocusReport::new();
             loop {
                 if flag.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -1570,12 +1632,14 @@ impl KeyWatcher {
                             0x03 => crate::core::http::request_interrupt(),
                             // a lone ESC interrupts like ctrl-c, but arrow and
                             // edit keys also start with ESC — swallow whole
-                            // sequences so their tails cannot raise the flag
-                            0x1b => {
-                                if matches!(term.escape_seq(), None | Some(Esc::Alone)) {
-                                    crate::core::http::request_interrupt();
-                                }
-                            }
+                            // sequences so their tails cannot raise the flag;
+                            // focus reports update the flag instead
+                            0x1b => match term.escape_seq() {
+                                Some(Esc::FocusIn) => super::set_focused(true),
+                                Some(Esc::FocusOut) => super::set_focused(false),
+                                None | Some(Esc::Alone) => crate::core::http::request_interrupt(),
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
@@ -1628,6 +1692,15 @@ mod tests {
         assert!(enter_breaks_line("foo\nbar\\"));
         assert!(!enter_breaks_line("foo"));
         assert!(!enter_breaks_line("foo\\\\")); // doubled submits literally
+    }
+
+    #[test]
+    fn focus_reports_map_to_their_variants_and_stay_parameterless() {
+        assert!(matches!(csi_final(b'I', 0, 0), Some(Esc::FocusIn)));
+        assert!(matches!(csi_final(b'O', 0, 0), Some(Esc::FocusOut)));
+        // a parameterized I/O final byte is not a focus report
+        assert!(csi_final(b'I', 1, 5).is_none());
+        assert!(csi_final(b'O', 0, 5).is_none());
     }
 
     #[test]
