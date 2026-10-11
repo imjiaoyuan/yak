@@ -166,6 +166,24 @@ def send(fd, data):
     os.write(fd, data)
 
 
+def read_until_after(fd, first, second, timeout=30.0):
+    """Wait for `second` only past the first match of `first`. Typing a
+    whole line echoes the prompt glyph before the answer marker, so a bare
+    `read_until(glyph)` after `read_until(marker)` matches the echo, not
+    the round's prompt — anchoring on the marker restores the barrier."""
+    rx = re.compile(rb"%b.*%b" % (first, second), re.DOTALL)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if rx.search(out_bytes()):
+            return out_bytes()
+        if OUT_DONE.is_set():
+            break
+        time.sleep(0.05)
+    raise AssertionError(
+        f"pattern {second!r} not seen after {first!r}; "
+        f"tail: {out_bytes()[-400:]!r}")
+
+
 def install_lane(binary, work, env):
     """Drive `yak install` through both of its pickers on a pty: the scope
     menu and the checkbox selection. The e2e lane installs with flags (it has
@@ -504,7 +522,6 @@ def main():
                            "-m", "mock-ckpt/m-ckpt"], tree_env)
     fcntl.ioctl(fd2, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     threading.Thread(target=drain_reader, args=(fd2,), daemon=True).start()
-    read_until(fd2, rb"local session marker")
     # the resumed history echoes the stored "ok from mock" and a "> " row
     # of its own, so the boot is settled by the real prompt glyph (bold >
     # followed by reset+space; the history row's ">" carries no reset)
@@ -512,13 +529,12 @@ def main():
     # (footer, prompt redraw) lands; its stop() joins within ~100ms, so the
     # lane holds a beat after each round's prompt before typing the next
     # line — otherwise the first keystroke is swallowed by design
-    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    read_until_after(fd2, rb"local session marker", rb"\x1b\[1m>\x1b\[0m ")
     OUT.clear()
     for label in (b"second round on the tree", b"third round on the tree"):
         time.sleep(0.2)
         send(fd2, label + b"\r")
-        read_until(fd2, rb"checkpoint round done")
-        read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+        read_until_after(fd2, rb"checkpoint round done", rb"\x1b\[1m>\x1b\[0m ")
         OUT.clear()
     # the checkpoint extension must have snapshotted before each round; the
     # mock writes are real, so the file now holds the newest round's bytes
@@ -532,7 +548,7 @@ def main():
     # selection is the root — the turn this child resumed from
     send(fd2, b"\r")
     read_until(fd2, rb"jumped to an earlier turn")
-    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    read_until_after(fd2, rb"jumped to an earlier turn", rb"\x1b\[1m>\x1b\[0m ")
     # the checkpoint restore: two dropped rounds each rewrote hello.txt, so
     # by the time the prompt returns the workspace must hold the bytes the
     # first dropped round found — the pre-lane "from smoke" state, not any
@@ -557,15 +573,17 @@ def main():
     OUT.clear()
     time.sleep(0.2)
     send(fd2, b"after the jump\r")
-    read_until(fd2, rb"checkpoint round done")
     # the final round's answer record is appended at its RoundEnd, which the
     # agent loop emits only after the answer text has settled onto the
     # screen — so the marker can be visible while line 7 is still a
     # microsecond from the file. The prompt glyph is the true barrier: it
     # is printed by the REPL loop after run_task returned, and run_task
-    # returns only past every persist of the task. (The pre-jump loop above
-    # already had this discipline; the final read lacked it.)
-    read_until(fd2, rb"\x1b\[1m>\x1b\[0m ")
+    # returns only past every persist of the task. The glyph must be waited
+    # for past the marker: the line typed above echoed its own glyph into
+    # the buffer before the marker, and a plain read_until would match that
+    # echo instantly — the barrier would be a no-op and the file read
+    # below would race the append.
+    read_until_after(fd2, rb"checkpoint round done", rb"\x1b\[1m>\x1b\[0m ")
     # the rebuilt wire history: the abandoned siblings must be gone and
     # the root chain intact
     wire = json.dumps(seen.get("last_msgs") or [])
