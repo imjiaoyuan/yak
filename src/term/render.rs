@@ -350,7 +350,12 @@ impl TaskView {
             renderer: std::sync::Arc::new(std::sync::Mutex::new(Renderer::new())),
             pacer: None,
             ticker: if live {
-                Some(crate::term::ticker::Ticker::start(label))
+                // the opening label is the model id: the task's first wait is
+                // the provider's, so a slow prefill explains itself from the
+                // first frame that earns the hint
+                let t = crate::term::ticker::Ticker::start(label);
+                t.set_waiting(true);
+                Some(t)
             } else {
                 None
             },
@@ -422,6 +427,8 @@ impl TaskView {
     }
 
     pub(crate) fn relabel(&mut self, label: &str) {
+        // a relabel is a new phase; only the provider-wait paths re-flag it
+        self.waiting(false);
         // hot-swap the label when a ticker is already running; only a true
         // restart after a pause may reset the clock
         if let Some(ticker) = &self.ticker {
@@ -486,6 +493,9 @@ impl TaskView {
         if !self.thinking_announced {
             self.thinking_announced = true;
             self.relabel("thinking ...");
+        } else if let Some(ticker) = &self.ticker {
+            // tokens are flowing: whatever wait the hint described is over
+            ticker.set_waiting(false);
         }
     }
 
@@ -523,9 +533,19 @@ impl TaskView {
     }
 
     /// The tool chrome is done; spin again while the next model round is
-    /// awaited, so the time-to-first-token is not a silent dead window.
+    /// awaited, so the time-to-first-token is not a silent dead window. That
+    /// wait is the provider's (queueing + prefill), so a long one says so.
     pub fn resume_wait(&mut self) {
         self.relabel(&self.label.clone());
+        self.waiting(true);
+    }
+
+    /// Flag or clear the prefill hint on a live ticker: provider wait vs
+    /// local work is the only thing the long-wait frame needs to know.
+    fn waiting(&mut self, waiting: bool) {
+        if let Some(ticker) = &self.ticker {
+            ticker.set_waiting(waiting);
+        }
     }
 
     /// A model round ended: accumulate usage, close the trace, terminate a
