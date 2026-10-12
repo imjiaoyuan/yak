@@ -256,13 +256,15 @@ def http_get_text(url, timeout=30):
         return r.read().decode("utf-8", "replace")
 
 
-def tg_push(body, reply_to=None):
+def tg_push(body, reply_to=None, silent=False):
     """Send one Telegram message; returns the message id, or an error
     string (sendMessage's response carries the id the ack replies to)."""
     try:
         payload = {"chat_id": TG_CHAT, "text": body}
         if reply_to is not None:
             payload["reply_to_message_id"] = reply_to
+        if silent:
+            payload["disable_notification"] = True
         req = urllib.request.Request(
             f"{TG_API}/bot{TG_TOKEN}/sendMessage",
             data=json.dumps(payload).encode("utf-8"),
@@ -274,14 +276,14 @@ def tg_push(body, reply_to=None):
         return f"telegram: {e}"
 
 
-def tg_send(text):
+def tg_send(text, silent=False):
     """One logical message to Telegram: full text, chunked at the limit.
     Returns the id of the first chunk, or an error string."""
     chunks = [text[i:i + TG_CHARS] for i in range(0, len(text), TG_CHARS)] or [""]
     first_id = None
     for i, chunk in enumerate(chunks):
         r = tg_push(chunk if len(chunks) == 1
-                    else f"[{i + 1}/{len(chunks)}] {chunk}")
+                    else f"[{i + 1}/{len(chunks)}] {chunk}", silent=silent)
         if isinstance(r, str):
             return r
         if i == 0:
@@ -329,21 +331,24 @@ def bark_push(body):
         return f"bark: {e}"
 
 
-def _push_sync(body):
-    """Fire every configured channel; errors go to the diagnostics tail."""
+def _push_sync(body, silent=False):
+    """Fire every configured channel; errors go to the diagnostics tail.
+    A silent push carries no alert (mirror noise); Telegram takes the flag,
+    the other channels have no such notion and simply skip."""
     errors = []
     if TG_TOKEN and TG_CHAT:
-        r = tg_send(body)
+        r = tg_send(body, silent=silent)
         if isinstance(r, str):
             errors.append(r)
-    if EMAIL["ready"]:
-        errors.append(email_push(body))
-    if WECOM:
-        errors.append(wecom_push(body))
-    if SERVERCHAN:
-        errors.append(serverchan_push(body))
-    if BARK:
-        errors.append(bark_push(body))
+    if not silent:
+        if EMAIL["ready"]:
+            errors.append(email_push(body))
+        if WECOM:
+            errors.append(wecom_push(body))
+        if SERVERCHAN:
+            errors.append(serverchan_push(body))
+        if BARK:
+            errors.append(bark_push(body))
     if not any([TG_TOKEN and TG_CHAT, EMAIL["ready"], WECOM,
                 SERVERCHAN, BARK]):
         note("no push channel configured — edit remote.json "
@@ -353,10 +358,10 @@ def _push_sync(body):
             note(f"push failed: {e}")
 
 
-def push(body):
+def push(body, silent=False):
     """Push off the protocol thread: a slow channel must never hold back
     the 5s event-hook reply (the host times that out)."""
-    threading.Thread(target=_push_sync, args=(body,), daemon=True).start()
+    threading.Thread(target=_push_sync, args=(body, silent), daemon=True).start()
 
 
 def should_notify(params):
@@ -376,8 +381,13 @@ def first_line(text):
 
 def project_tag(cwd=None):
     """[basename] — tells two yak sessions' notifications apart."""
+    return f"[{project_name(cwd)}] " if project_name(cwd) else ""
+
+
+def project_name(cwd=None):
+    """The bare tag: the cwd's basename, no brackets."""
     name = os.path.basename((cwd or _event_cwd or _session_cwd or "").rstrip("/"))
-    return f"[{name}] " if name else ""
+    return name
 
 
 def pane_keys(text, key=None, pane=None):
@@ -409,8 +419,8 @@ def _reg_path():
 
 def reg_refresh():
     """Rewrite the pane registry: every live bridge lists its pane, project
-    name and pending-approval flag so one listener can route a reply to the
-    right session; panes that no longer exist drop out."""
+    name, busy flag and pending-approval flag so one listener can route a
+    reply to the right session; panes that no longer exist drop out."""
     if not TMUX_PANE:
         return
     try:
@@ -424,11 +434,25 @@ def reg_refresh():
             reg = json.load(f)
     except Exception:
         reg = {}
-    tag = project_tag().strip("[]")
     if TMUX_PANE in live:
-        reg[TMUX_PANE] = {"tag": tag, "ap": bool(_pending_approval)}
+        prev = reg.get(TMUX_PANE)
+        held = prev.get("inbox", []) if isinstance(prev, dict) else []
+        reg[TMUX_PANE] = {"tag": project_name(), "busy": bool(_busy),
+                          "ap": bool(_pending_approval), "inbox": held}
     reg = {p: e for p, e in reg.items()
            if p in live and isinstance(e, dict)}
+    _reg_write(reg)
+
+
+def reg_entry():
+    try:
+        with open(_reg_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _reg_write(reg):
     try:
         tmp = _reg_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -438,12 +462,29 @@ def reg_refresh():
         note(f"pane registry write failed: {e}")
 
 
-def reg_entry():
-    try:
-        with open(_reg_path(), encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def reg_queue(pane, text):
+    """Hold one instruction for a busy session's own bridge to type when
+    its answer finishes — the registry is the only state two bridge
+    processes share."""
+    reg = reg_entry()
+    e = reg.get(pane)
+    if not isinstance(e, dict):
+        return False
+    e["inbox"] = (e.get("inbox") or []) + [text]
+    _reg_write(reg)
+    return True
+
+
+def reg_pop_inbox(pane):
+    """Take the oldest held instruction for this pane, if any."""
+    reg = reg_entry()
+    e = reg.get(pane)
+    if not isinstance(e, dict) or not e.get("inbox"):
+        return None
+    text = e["inbox"][0]
+    e["inbox"] = e["inbox"][1:]
+    _reg_write(reg)
+    return text
 
 
 def reg_lookup(tag):
@@ -485,12 +526,17 @@ def deliver(text):
     if not text:
         return None
     cmd = text[1:].strip().lower() if text.startswith("/") else ""
-    if cmd in ("y", "n", "a") or (_pending_approval and not cmd
-                                  and text.lower() in ANSWERS):
-        letter = cmd or ANSWERS[text.lower()]
+    ap_pane = reg_approval_pane() or (TMUX_PANE if _pending_approval else None)
+    if cmd in ("y", "n", "a") and ap_pane:
+        letter = cmd
         _pending_approval = None
-        pane = reg_approval_pane() or TMUX_PANE
-        err = pane_keys(None, key=letter, pane=pane)
+        err = pane_keys(None, key=letter, pane=ap_pane)
+        note(err or f"answered the approval prompt with '{letter}'")
+        return err or f"✓ approval answered with {letter}"
+    if _pending_approval and not cmd and text.lower() in ANSWERS:
+        letter = ANSWERS[text.lower()]
+        _pending_approval = None
+        err = pane_keys(None, key=letter, pane=ap_pane or TMUX_PANE)
         note(err or f"answered the approval prompt with '{letter}'")
         return err or f"✓ approval answered with {letter}"
     if cmd == "stop":
@@ -516,9 +562,12 @@ def deliver(text):
     if m and reg_lookup(m.group(1)) != TMUX_PANE:
         tag, flat = m.group(1), m.group(2).strip()
     pane = reg_lookup(tag)
-    with _lock:
-        idle = not _busy
-    if idle and TYPING:
+    entry = reg_entry().get(pane) or {}
+    # the target session's own busy flag, not ours; when an old bridge
+    # wrote the entry without one, assume busy — queueing is safe, typing
+    # into a live editor is not
+    busy = entry.get("busy", _busy if pane == TMUX_PANE else True)
+    if not busy and TYPING:
         global _own_input
         _own_input = flat
         err = pane_keys(flat, pane=pane)
@@ -527,10 +576,16 @@ def deliver(text):
             whose = "this session" if pane == TMUX_PANE else f"session [{tag}]"
             return f"✓ typed into {whose}"
         note(err)
-    with _lock:
-        _inbox.append(flat)
-    note(f"held for the session: {flat[:80]}")
-    return "✓ queued (busy — typed in when the answer finishes)"
+    if pane == TMUX_PANE:
+        with _lock:
+            _inbox.append(flat)
+        note(f"held for the session: {flat[:80]}")
+        return "✓ queued (busy — typed in when the answer finishes)"
+    if reg_queue(pane, flat):
+        note(f"held for [{tag or entry.get('tag')}] {pane}: {flat[:80]}")
+        return f"✓ queued (busy — typed in when the answer finishes)"
+    note(f"could not queue for {pane}: no registry entry")
+    return "✗ target session unreachable (not in the pane registry)"
 
 
 def flush_one():
@@ -538,10 +593,14 @@ def flush_one():
     submissions into a live editor, and each typed instruction starts a run
     whose agent_end flushes the next."""
     global _own_input
+    text = None
     with _lock:
-        if not _inbox:
-            return
-        text = _inbox.pop(0)
+        if _inbox:
+            text = _inbox.pop(0)
+    if text is None:
+        text = reg_pop_inbox(TMUX_PANE)
+    if text is None:
+        return
     _own_input = text
     err = pane_keys(text)
     note(err or f"typed a held instruction: {text[:80]}")
@@ -728,6 +787,8 @@ def listener_plan():
 def start_listener():
     global _listener_how, _poll_lock_file
     _started[0] = True
+    solo = ""
+    running = False
     if TG_TOKEN:
         # single-flight: with several yak sessions each running this
         # extension, only the lock holder polls Telegram — concurrent
@@ -742,10 +803,11 @@ def start_listener():
             _poll_lock_file.close()
             _poll_lock_file = None
             solo = " (another bridge holds the poll lock)"
+        running = True
     elif EMAIL["ready"]:
         threading.Thread(target=email_listen, daemon=True).start()
-        solo = ""
-    _listener_how = listener_plan() + " (running)" + solo
+        running = True
+    _listener_how = listener_plan() + (" (running)" if running else "") + solo
 
 
 def start_awake():
@@ -916,7 +978,7 @@ def handle_event(msg):
         if not text or text == _own_input:
             _own_input = None
             return None
-        push("{}› {}".format(project_tag(), text))
+        push("PC input {}› {}".format(project_tag(), text), silent=True)
     elif name == "agent_end":
         _busy = False
         _pending_approval = None
@@ -930,9 +992,11 @@ def handle_event(msg):
         _pending_approval = "{}: {}".format(
             params.get("tool", "tool"), first_line(params.get("preview")))
         reg_refresh()
-        if should_notify(params):
-            push("{}approval requested\n{}\nreply /y /n /a".format(
-                project_tag(params.get("cwd")), _pending_approval))
+        # an approval always blocks the session waiting on a human — the
+        # focus gate must never swallow it (focused reports the pane the
+        # user last typed in, not whether they see *this* prompt)
+        push("{}approval requested\n{}\nreply /y /n /a".format(
+            project_tag(params.get("cwd")), _pending_approval), silent=True)
     return None
 
 
