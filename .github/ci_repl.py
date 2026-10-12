@@ -454,7 +454,9 @@ def main():
     system = seen.get("system") or ""
     assert "SYSTEM-MARKER about the-diff-arg" in system, \
         f"frontmatter system missing from the wire: {system[:300]!r}"
-    assert "update_plan" in system, \
+    # the slimmed base no longer lists tools by name; its persona line is
+    # the stable marker that the command's system appended to it
+    assert "expert coding assistant" in system, \
         "a command's system must append to the agent prompt, not replace it"
 
     # /resume lists this directory's conversations only

@@ -503,6 +503,7 @@ fn a_known_window_compacts_before_the_first_request() {
 /// A `compact` subscriber's replacement ends the task: the seed is rebuilt
 /// around the extension's summary, the flag round never calls the model, and
 /// the verdict is the final text.
+#[cfg(unix)]
 #[test]
 fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
     // n=0 would be the summarizer; it must never be hit because the
