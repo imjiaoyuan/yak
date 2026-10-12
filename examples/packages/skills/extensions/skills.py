@@ -163,7 +163,12 @@ def read_skill(args):
     except OSError as e:
         return {"error": f"cannot read {defn['path']}: {e}"}
     body = FRONT.sub("", text, count=1) if FRONT.match(text) else text
-    return {"result": body.strip() + "\n", "skill_dir": skill_root(defn)}
+    # segment list: the body plus a note naming the directory relative
+    # paths in the skill resolve against
+    return {"result": [
+        {"text": body.strip() + "\n"},
+        {"text": f"(skill_dir: {skill_root(defn)})"},
+    ]}
 
 
 TOOLS = [{
@@ -182,7 +187,7 @@ TOOLS = [{
     "name": "read_skill",
     "description": "Read one skill's full instructions by name. Use after "
     "discover_skills when a task matches a skill's description; the reply "
-    "also carries skill_dir, the directory relative paths in the body "
+    "ends with skill_dir, the directory relative paths in the body "
     "resolve against.",
     "parameters": {
         "type": "object",
