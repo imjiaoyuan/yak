@@ -150,7 +150,10 @@ def setting(key, env=None, default=""):
     v = CFG.get(key, default)
     if isinstance(v, bool):
         return "1" if v else "0"
-    return "" if v is None else str(v).strip()
+    # an empty value counts as unset: the init template ships empty
+    # strings for every optional key
+    v = "" if v is None else str(v).strip()
+    return v or default
 
 
 TG_TOKEN = setting("tg_token", "YAK_REMOTE_TG_TOKEN")
