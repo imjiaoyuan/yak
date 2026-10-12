@@ -360,8 +360,8 @@ mod pipe_tests {
     use super::*;
 
     /// Full-pipe check: the encoder's output must decode with a real zlib.
-    /// Writes the PNG to /tmp and lets the harness below verify it with
-    /// Python (PIL + zlib), the authoritative decoder pair.
+    /// Writes the PNG into a scratch dir and lets the harness below verify
+    /// it with Python (PIL + zlib), the authoritative decoder pair.
     #[test]
     fn writes_decoder_checkable_png() {
         let mut px = Vec::new();
@@ -370,20 +370,31 @@ mod pipe_tests {
             px.extend_from_slice(&[(x * 4) as u8, (y * 8) as u8, ((x + y) * 2) as u8, 255]);
         }
         let png = encode_rgba(64, 32, &px).unwrap();
-        std::fs::write("/tmp/yak_pngenc_check.png", &png).unwrap();
+        std::fs::write(
+            crate::core::testutil::scratch_dir("pngenc").join("check.png"),
+            &png,
+        )
+        .unwrap();
     }
 
+    /// Machine-local round trip against the BMP fixture this session was
+    /// developed with: runs only where that file exists, skipped
+    /// elsewhere (it is not a repo fixture).
     #[test]
     fn roundtrips_bmp_through_png() {
         let path =
             std::path::Path::new("/home/jiaoyuan/.yak/tmp/paste-01m4r4tajcs08ynzh37msvqzq7.png");
         if !path.exists() {
-            return; // machine-local check, not a fixture in the repo
+            return;
         }
         let b = std::fs::read(path).unwrap();
         let img = crate::core::bmp::decode(&b).unwrap();
         let png = encode_rgba(img.width, img.height, &img.rgba).unwrap();
-        std::fs::write("/tmp/yak_bmp2png_check.png", &png).unwrap();
+        std::fs::write(
+            crate::core::testutil::scratch_dir("pngenc-bmp").join("check.png"),
+            &png,
+        )
+        .unwrap();
     }
 }
 
