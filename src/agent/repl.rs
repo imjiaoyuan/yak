@@ -1009,11 +1009,38 @@ fn repl_command(
                 return false;
             }
             match crate::commands::login::wizard() {
-                Ok(()) => eprintln!(
-                    "{}run /model to pick its models{}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                ),
+                Ok(()) => {
+                    // the wizard writes the picked model as the stored
+                    // default: adopt it into the live session when none is
+                    // resolved yet, so a first-run /login flows straight
+                    // into talking. A session that already runs a model
+                    // keeps it — adding a provider must not switch the
+                    // running conversation.
+                    let mut adopted = false;
+                    if session.model.is_none() {
+                        let cfg = crate::core::config::load();
+                        if let Some(q) = cfg.default_model.clone()
+                            && let Ok(m) = crate::providers::resolve_model_by_id(&q)
+                        {
+                            session.model = Some(m);
+                            session.rebuild_tools();
+                            adopted = true;
+                            eprintln!(
+                                "{}model → {}{}",
+                                crate::theme::err().dim,
+                                model_label(session),
+                                crate::theme::err().reset
+                            );
+                        }
+                    }
+                    if !adopted {
+                        eprintln!(
+                            "{}run /model to pick its models{}",
+                            crate::theme::err().dim,
+                            crate::theme::err().reset
+                        );
+                    }
+                }
                 Err(e) => eprintln!("Error: {e}"),
             }
         }
