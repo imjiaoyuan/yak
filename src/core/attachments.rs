@@ -307,6 +307,11 @@ pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("image/jpeg");
     }
+    // BMP: the ctrl+v paste path re-encodes a decoded BMP to png instead of
+    // writing a file the model APIs would refuse
+    if bytes.starts_with(b"BM") && bytes.len() >= 54 {
+        return Some("image/bmp");
+    }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         return Some("image/gif");
     }

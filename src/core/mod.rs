@@ -8,6 +8,7 @@
 
 pub mod args;
 pub mod attachments;
+pub mod bmp;
 pub mod commands_md;
 pub mod config;
 pub mod db;
@@ -15,6 +16,7 @@ pub mod export;
 pub mod fsx;
 pub mod http;
 pub mod paths;
+pub mod pngenc;
 pub mod render_md;
 pub mod sync;
 pub mod templates;

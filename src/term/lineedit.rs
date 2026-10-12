@@ -250,33 +250,56 @@ impl LineEditor {
                         Ok(crate::platform::Clip::Bytes(bytes)) => {
                             match crate::core::attachments::sniff_mime(&bytes) {
                                 Some(mime) => {
-                                    let ext = match mime {
-                                        "image/jpeg" => "jpg",
-                                        "image/gif" => "gif",
-                                        "image/webp" => "webp",
-                                        _ => "png",
-                                    };
-                                    let dir = crate::core::config::user_dir().join("tmp");
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    let path = dir.join(format!(
-                                        "paste-{}.{}",
-                                        crate::core::db::ulid(),
-                                        ext
-                                    ));
-                                    if std::fs::write(&path, &bytes).is_ok() {
-                                        // the path still lands in the submitted
-                                        // text (auto-attach scans for it), but the
-                                        // buffer shows a short atomic token — the
-                                        // same placeholder big text pastes use
-                                        paste_seq += 1;
-                                        let token = format!("[paste #{paste_seq} image]");
-                                        pastes.push((token.clone(), path.display().to_string()));
-                                        buf.insert_str(cursor, &token);
-                                        cursor += token.len();
-                                        nav.reset(self.history.len());
-                                        line.draw(&mut out, prompt, &buf, cursor, is_command);
+                                    let paste = if mime == "image/bmp" {
+                                        // the APIs take png, not bmp: decode
+                                        // and re-encode losslessly before the
+                                        // paste ever lands on disk
+                                        match crate::core::bmp::decode(&bytes).and_then(|img| {
+                                            crate::core::pngenc::encode_rgba(
+                                                img.width, img.height, &img.rgba,
+                                            )
+                                        }) {
+                                            Ok(png) => Some(("png", png)),
+                                            Err(e) => {
+                                                notice =
+                                                    Some(format!("clipboard bmp rejected: {e}"));
+                                                None
+                                            }
+                                        }
                                     } else {
-                                        notice = Some(format!("cannot write {}", path.display()));
+                                        let ext = match mime {
+                                            "image/jpeg" => "jpg",
+                                            "image/gif" => "gif",
+                                            "image/webp" => "webp",
+                                            _ => "png",
+                                        };
+                                        Some((ext, bytes.clone()))
+                                    };
+                                    if let Some((ext, payload)) = paste {
+                                        let dir = crate::core::config::user_dir().join("tmp");
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        let path = dir.join(format!(
+                                            "paste-{}.{}",
+                                            crate::core::db::ulid(),
+                                            ext
+                                        ));
+                                        if std::fs::write(&path, &payload).is_ok() {
+                                            // the path still lands in the submitted
+                                            // text (auto-attach scans for it), but the
+                                            // buffer shows a short atomic token — the
+                                            // same placeholder big text pastes use
+                                            paste_seq += 1;
+                                            let token = format!("[paste #{paste_seq} image]");
+                                            pastes
+                                                .push((token.clone(), path.display().to_string()));
+                                            buf.insert_str(cursor, &token);
+                                            cursor += token.len();
+                                            nav.reset(self.history.len());
+                                            line.draw(&mut out, prompt, &buf, cursor, is_command);
+                                        } else {
+                                            notice =
+                                                Some(format!("cannot write {}", path.display()));
+                                        }
                                     }
                                 }
                                 None => notice = Some("no image on the clipboard".into()),

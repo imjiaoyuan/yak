@@ -82,18 +82,6 @@ impl Tool for ReadTool {
             }
         };
         if let Some(mime) = image_mime(&head[..head_len]) {
-            if mime == "image/bmp" {
-                // model APIs take png/jpeg/webp/gif; BMP arrives only through
-                // a processor we do not have (refused, with the local
-                // way past it)
-                return ToolOutput::ok(format!(
-                    "Read image file [image/bmp]\n[Image omitted: BMP is not accepted by model \
-                     APIs; convert it first, e.g. `python -c \"from PIL import Image; \
-                     im=Image.open('{}'); im.save('{}.png')\"`]",
-                    path.display(),
-                    path.display(),
-                ));
-            }
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => return ToolOutput::err(format!("cannot read {} ({e})", path.display())),
@@ -112,6 +100,12 @@ impl Tool for ReadTool {
                     path.display(),
                     path.display(),
                 ));
+            }
+            // model APIs take png/jpeg/webp/gif; a BMP rides only after a
+            // lossless re-encode to png (the pixels are unchanged, so the
+            // model sees what the file holds)
+            if mime == "image/bmp" {
+                return reencoded_bmp(&path, &bytes);
             }
             let mut out = ToolOutput::ok(format!(
                 "Read image file [{}; {}] — passed to the model as a vision attachment.",
@@ -279,6 +273,64 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// A BMP rides only as png: decode the pixels and re-encode them losslessly
+/// (hand-written codec, no image crate). The png lands in the user tmp dir
+/// so a resume rehydrates an image/png, not the BMP it came from; the tool
+/// result carries the png bytes, the tool text keeps the original path.
+fn reencoded_bmp(path: &std::path::Path, bytes: &[u8]) -> ToolOutput {
+    let img = match crate::core::bmp::decode(bytes) {
+        Ok(img) => img,
+        Err(e) => return ToolOutput::err(format!("{}: unreadable BMP ({e})", path.display())),
+    };
+    let png = match crate::core::pngenc::encode_rgba(img.width, img.height, &img.rgba) {
+        Ok(png) => png,
+        Err(e) => {
+            return ToolOutput::err(format!("{}: BMP re-encode failed ({e})", path.display()));
+        }
+    };
+    if png.len() > IMAGE_MAX_BYTES {
+        return ToolOutput::err(format!(
+            "{}: image is {} as png (over the {} limit); convert it first with e.g. \
+             `python -c \"from PIL import Image; im=Image.open('{}'); \
+             im.thumbnail((2000,2000)); im.save('{}.png')\"`",
+            path.display(),
+            crate::core::text::human_bytes(png.len() as u64),
+            crate::core::text::human_bytes(IMAGE_MAX_BYTES as u64),
+            path.display(),
+            path.display(),
+        ));
+    }
+    let stem = path
+        .file_name()
+        .map(|n| n.to_string_lossy().trim_end_matches(".bmp").to_owned())
+        .unwrap_or_else(|| "image".into());
+    let dir = crate::core::config::user_dir().join("tmp");
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::write(
+            dir.join(format!("{stem}-{}.png", crate::core::db::ulid())),
+            &png,
+        )
+    }) {
+        return ToolOutput::err(format!(
+            "cannot write the re-encoded png for {} ({e})",
+            path.display()
+        ));
+    }
+    let mut out = ToolOutput::ok(
+        "Read image file [image/bmp; re-encoded losslessly to png] — passed to the model as a \
+         vision attachment."
+            .to_string(),
+    );
+    out.attachments.push(crate::providers::Attachment {
+        mime_type: "image/png".to_string(),
+        base64_data: crate::b64::encode(&png),
+        filename: Some(format!("{stem}.png")),
+        path: Some(path.display().to_string()),
+        url: None,
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +366,31 @@ mod tests {
         assert_eq!(image_mime(b"# notes\n"), None);
         // a text file whose name lies is caught by nothing here — the tool
         // sniffs, so it reads as text regardless of extension
+    }
+
+    /// The BMP path: a real 24-bit BMP decodes, re-encodes losslessly and
+    /// comes back as an image/png attachment.
+    #[test]
+    fn a_bmp_rides_as_a_reencoded_png() {
+        if !std::path::Path::new("/home/jiaoyuan/util/t24.bmp").exists() {
+            return; // machine-local fixture, the pipeline has its own test
+        }
+        let bytes = std::fs::read("/home/jiaoyuan/util/t24.bmp").unwrap();
+        let out = reencoded_bmp(std::path::Path::new("/home/jiaoyuan/util/t24.bmp"), &bytes);
+        assert!(out.error.is_none(), "{}", out.content);
+        assert!(out.content.contains("re-encoded"), "{}", out.content);
+        assert_eq!(out.attachments.len(), 1);
+        assert_eq!(out.attachments[0].mime_type, "image/png");
+        // the png decodes with our own struct + the roundtrip holds
+        let png = crate::b64::decode(&out.attachments[0].base64_data).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+
+    /// A broken BMP surfaces loudly instead of riding as an empty image.
+    #[test]
+    fn a_broken_bmp_is_an_error_not_a_guess() {
+        let out = reencoded_bmp(std::path::Path::new("x.bmp"), b"BM\x00\x00short");
+        assert!(out.error.is_some(), "{}", out.content);
+        assert!(out.content.contains("unreadable BMP"), "{}", out.content);
     }
 }
