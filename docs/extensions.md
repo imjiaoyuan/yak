@@ -177,7 +177,7 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 | Event | Fired | `params` |
 |---|---|---|
 | `agent_start` | once per task, before the first model call | `{cwd, task}` |
-| `input` | the pending user message, before each model call | `{text, attachments: [{path, url, mime_type}]}` |
+| `input` | the pending user message, before each model call | `{text, attachments: [{path, url, mime_type}], cwd, focused?}`: same `cwd`/`focused` semantics as `agent_end` |
 | `turn_start` | each agent loop turn | `{turn}` |
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs: see gate semantics | `{tool, args}` |

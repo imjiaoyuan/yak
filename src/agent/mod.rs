@@ -282,15 +282,17 @@ pub fn run_agent(
         turn += 1;
         opts.hooks.fire("turn_start", &json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
-            opts.hooks.fire(
-                "input",
-                &json!({
-                    "text": text,
-                    "attachments": attachments.iter().map(|a| json!({
-                        "path": a.path, "url": a.url, "mime_type": a.mime_type,
-                    })).collect::<Vec<_>>(),
-                }),
-            );
+            let mut input_payload = json!({
+                "text": text,
+                "attachments": attachments.iter().map(|a| json!({
+                    "path": a.path, "url": a.url, "mime_type": a.mime_type,
+                })).collect::<Vec<_>>(),
+                "cwd": opts.cwd.display().to_string(),
+            });
+            if crate::term::focus_known() {
+                input_payload["focused"] = json!(crate::term::focused());
+            }
+            opts.hooks.fire("input", &input_payload);
         }
 
         let (pending_prompt, pending_attachments): (&str, &[crate::providers::Attachment]) =
