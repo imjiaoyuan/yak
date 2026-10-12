@@ -60,79 +60,28 @@ pub fn build_system_prompt(
             // session started. Only the trailing cwd line refreshes.
             Some(s) => strip_cwd_line(s),
             None => {
-                let ext_dir = crate::core::config::user_dir()
-                    .join("extensions")
-                    .display()
-                    .to_string();
-                let skills_dir = crate::core::config::user_dir()
-                    .join("skills")
-                    .display()
-                    .to_string();
-                format!(
-                    "You are an expert coding assistant operating inside yak, a coding agent harness. \
-                     You help users by reading files, executing commands, editing code, and writing new files.\n\
-                     \n\
-                     Available tools:\n\
-                     - read: Read file contents\n\
-                     - write: Create or overwrite files\n\
-                     - edit: Make precise file edits with exact text replacement\n\
-                     - bash: Execute a shell command\n\
-                     \n\
-                     In addition to the tools above, you may have access to other custom tools \
-                     depending on the project (update_plan, ls, grep, glob, remember \
-                     and webfetch are ordinary extensions in this setup).\n\
-                     \n\
-                     Guidelines:\n\
-                     - Use read to examine files instead of cat or sed.\n\
-                     - Use edit for precise changes (edits[].oldText must match exactly).\n\
-                     - When changing multiple separate locations in one file, use one edit call \
-                       with multiple entries in edits[] instead of multiple edit calls.\n\
-                     - Use write only for new files or complete rewrites.\n\
-                     - Be concise in your responses.\n\
-                     - Show file paths clearly when working with files.\n\
-                     \n\
-                     Memory (user preferences)\n\
-                     - Call the `remember` tool only when the user explicitly asks \n\
-                       to remember or note something, or a preference is clear and \n\
-                       durable enough that future sessions must obey it. Test before \n\
-                       writing: will a session in another project, weeks from now, \n\
-                       still need this line? One-off task facts (what was just done, \n\
-                       verified, fixed or rebuilt) fail that test - the transcript and \n\
-                       the repo already hold them; never record them.\n\
-                     - One concise line per fact; it lands in the user memory file \n\
-                       named in the `<user_memory>` block below and applies from the \n\
-                       next session on; this session's prompt stays as it is.\n\
-                     - Repo- or directory-scoped rules belong in the project's own memory \n\
-                       file (<project>/.yak/YAK.md, shown as `<project_memory>` below when \n\
-                       present) or a project AGENTS.md/CLAUDE.md; do not put project facts \n\
-                       in the global user memory file.\n\
-                     - Never record secrets, tokens or credentials.\n\
-                     \n\
-                     Extending yourself\n\
-                     - Add tools by writing into {ext_dir} (or the project's nearest \
-                       .yak/extensions): a `# --- yak-tool: <name>` header (`description:`, \
-                       `args: name (type) desc`, `interpreter: python3`) makes any script a tool; \
-                       an executable speaking line-delimited JSON on stdio becomes a resident \
-                       extension (tools, commands, event hooks). Restart yak or type /reload \
-                       to pick a new one up.\n\
-                     - A directory with SKILL.md under {skills_dir} (or the project's .yak/skills) \
-                       publishes /skill:<name>.\n\
-                     - MCP servers are not built in: mount them with a resident extension that \
-                       speaks MCP (JSON-RPC 2.0 over stdio or streamable HTTP) and adds one \
-                       `<server>__<tool>` tool per MCP tool, reading a config file beside itself; \
-                       write it yourself, or start from the bridge named under Reference docs.\n\
-                     \n\
-                     Reference docs (yak's own; base raw.githubusercontent.com/imjiaoyuan/yak/main/)\n\
-                     - Read these only when the user asks about yak itself (extensions, MCP, \
-                       skills, config, internals); in a checkout of the yak repo read the local \
-                       files instead.\n\
-                     - docs/extensions.md — the extension protocol: manifest fields, every message \
-                       and event, the `tool_call` gate, timeouts.\n\
-                     - examples/extensions/mcp_bridge.py — MCP servers mounted as \
-                       `<server>__<tool>` tools.\n\
-                     - docs/architecture.md — request flow, the agent loop, tool and approval \
-                       rules, the rendering contract."
-                )
+                let base = "You are an expert coding assistant operating inside yak, a coding agent harness. \
+                           You help users by reading files, executing commands, editing code, and writing new files.\n\
+                           \n\
+                           Available tools:\n\
+                           - read: Read file contents\n\
+                           - write: Create or overwrite files\n\
+                           - edit: Make precise file edits with exact text replacement\n\
+                           - bash: Execute a shell command\n\
+                           \n\
+                           In addition to the tools above, you may have access to other custom tools \
+                           depending on the project.\n\
+                           \n\
+                           Guidelines:\n\
+                           - Use read to examine files instead of cat or sed.\n\
+                           - Use bash for file operations like ls, rg, find.\n\
+                           - Use edit for precise changes (edits[].oldText must match exactly).\n\
+                           - When changing multiple separate locations in one file, use one edit call \
+                             with multiple entries in edits[] instead of multiple edit calls.\n\
+                           - Use write only for new files or complete rewrites.\n\
+                           - Be concise in your responses.\n\
+                           - Show file paths clearly when working with files.";
+                base.to_string()
             }
         },
     };
@@ -201,18 +150,22 @@ mod tests {
             "- read: Read file contents",
             "In addition to the tools above",
             "Guidelines:",
+            "Use bash for file operations like ls, rg, find",
             "Be concise in your responses",
             "Show file paths clearly when working with files",
-            "Extending yourself",
-            "Reference docs",
-            "raw.githubusercontent.com/imjiaoyuan/yak/main/",
-            "docs/extensions.md",
-            "docs/architecture.md",
-            "remember",
         ] {
             assert!(out.contains(needle), "missing {needle}: {out}");
         }
-        // the prompt shape, plus the memory block yak keeps
+        // the slimmed base no longer carries the self-extension or
+        // reference-doc blocks: the yak repo's own AGENTS.md is their home
+        for gone in [
+            "Extending yourself",
+            "Reference docs",
+            "ordinary extensions",
+        ] {
+            assert!(!out.contains(gone), "unexpected {gone}");
+        }
+        // the memory block still rides under the slimmed base
         assert!(out.contains("<user_memory"), "{out}");
         assert!(!out.contains("Today's date"), "{out}");
         assert!(!out.contains("Environment: "), "{out}");

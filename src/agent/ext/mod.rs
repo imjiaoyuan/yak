@@ -471,6 +471,7 @@ fn format_segments(items: &[Value]) -> String {
     out.join("\n")
 }
 
+#[derive(Clone)]
 pub struct Extensions {
     pub(crate) exts: Vec<Arc<Ext>>,
     pub(crate) script_tools: Vec<ExecToolSpec>,

@@ -12,12 +12,12 @@ pub fn memory_path() -> PathBuf {
     crate::core::config::user_dir().join("YAK.md")
 }
 
-/// The `<user_memory>` system-prompt section. Always present, even when the
-/// file does not exist yet: the agent has to know *where* durable preferences
-/// go before it can be asked to remember one (README/docs point users at the
-/// path, but that is no use mid-task). The empty-file shell costs a few
-/// tokens and keeps the prompt byte-identical across rounds (the prefix
-/// cache depends on it).
+/// The `<user_memory>` system-prompt section: two rules — when to write and
+/// where project facts go — and the file itself (placeholder when absent,
+/// capped on a char boundary). Always present: the agent has to know *where*
+/// durable preferences go before it can be asked to remember one. The
+/// placeholder shell costs a few tokens and keeps the prompt byte-identical
+/// across rounds (the prefix cache depends on it).
 pub fn section() -> String {
     section_at(&memory_path())
 }
@@ -40,7 +40,10 @@ fn section_tagged(path: &std::path::Path, tag: &str) -> String {
         body.truncate(end);
         body.push_str("\n[truncated]");
     }
-    format!("<{tag} path=\"{}\">\n{body}\n</{tag}>", path.display())
+    format!(
+        "Memory: durable, reusable facts about the user (preferences, environment, ways of working) live in the file below. Append with the `remember` tool only when the user asks or the fact is clearly durable — never secrets or one-off task details.\n<{tag} path=\"{}\">\n{body}\n</{tag}>",
+        path.display()
+    )
 }
 
 /// The `<project_memory>` section: the nearest `<project>/.yak/YAK.md`
@@ -164,9 +167,9 @@ mod tests {
         )
         .unwrap();
         let s = section_at(&file);
-        assert!(s.starts_with("<user_memory path="));
+        assert!(s.contains("<user_memory path="));
         assert!(s.contains("[truncated]"));
-        assert!(s.len() < 16 * 1024 + 200);
+        assert!(s.len() < 16 * 1024 + 400);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

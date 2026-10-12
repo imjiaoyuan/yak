@@ -1101,6 +1101,18 @@ fn drop_images(m: &mut Msg) {
     }
 }
 
+/// The extension host the session tests run under: an empty one, shared as a
+/// leaked static. `Extensions::connect` would discover and spawn the *real*
+/// `~/.yak/extensions` (discovery falls through to the user dir when the
+/// scratch cwd carries none), so every round a mock-server test finishes
+/// fires the user's actual desktop notifier. `agent/tests.rs` already runs
+/// its loop tests under `Extensions::empty()`; these do the same.
+#[cfg(test)]
+fn test_extensions() -> &'static crate::agent::ext::Extensions {
+    static E: std::sync::OnceLock<crate::agent::ext::Extensions> = std::sync::OnceLock::new();
+    E.get_or_init(crate::agent::ext::Extensions::empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,9 +1171,7 @@ mod tests {
             seed,
             branch_parent: None,
             thinking: None,
-            extensions: crate::agent::ext::Extensions::connect(std::path::Path::new(
-                "/nonexistent",
-            )),
+            extensions: test_extensions().clone(),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
@@ -1324,7 +1334,7 @@ mod tests {
             seed: Vec::new(),
             branch_parent: None,
             thinking: None,
-            extensions: crate::agent::ext::Extensions::connect(&dir),
+            extensions: test_extensions().clone(),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             // the --json driver: identical loop and persistence, without the
@@ -1527,7 +1537,7 @@ mod tests {
             seed: Vec::new(),
             branch_parent: None,
             thinking: None,
-            extensions: crate::agent::ext::Extensions::connect(&cwd),
+            extensions: test_extensions().clone(),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
@@ -1602,7 +1612,7 @@ mod tests {
             seed: Vec::new(),
             branch_parent: None,
             thinking: None,
-            extensions: crate::agent::ext::Extensions::connect(&cwd),
+            extensions: test_extensions().clone(),
             usage: crate::core::http::Usage::default(),
             last_usage: None,
             json: false,
