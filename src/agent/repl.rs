@@ -328,23 +328,23 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
     rows.push_str(&format!(
-        "work{pad}{} · context {context}\n",
+        "work:{pad}{} · context: {context}\n",
         abbrev_home(&session.cwd.display().to_string())
     ));
     if let Some(cid) = &session.conversation_id {
-        rows.push_str(&format!("session{pad}{cid}\n"));
+        rows.push_str(&format!("session:{pad}{cid}\n"));
     }
     // the plugin surface: what is actually mounted right now, so a
     // skill or extension that never loaded is visible here and not only in
     // /help and /status (a label is 7 cells, matching `session`)
     let plugins = session.extensions.plugin_names();
     let skills: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-    rows.push_str(&name_row("plugins", pad, &plugins));
-    rows.push_str(&name_row("skills ", pad, &skills));
+    rows.push_str(&name_row("plugins:", pad, &plugins));
+    rows.push_str(&name_row("skills:", pad, &skills));
     // sticky persistence failure: the run continues in memory only, and a
     // healthy-looking banner would hide lost work until /resume
     if let Some(e) = &session.persist_error {
-        rows.push_str(&format!("persist{pad}NOT SAVED — {e}\n"));
+        rows.push_str(&format!("persist:{pad}NOT SAVED — {e}\n"));
     }
     rows
 }
@@ -1241,21 +1241,21 @@ mod tests {
     #[test]
     fn name_row_lists_the_plugin_surface_and_caps_it() {
         // neither surface mounted: no row at all
-        assert_eq!(name_row("skills ", " ", &[]), "");
+        assert_eq!(name_row("skills:", " ", &[]), "");
         // the labels stay 7 cells wide, so the banner is one column
         assert_eq!(
-            name_row("skills ", " ", &["demo".into(), "probe".into()]),
-            "skills  demo, probe\n"
+            name_row("skills:", " ", &["demo".into(), "probe".into()]),
+            "skills: demo, probe\n"
         );
         assert_eq!(
-            name_row("plugins", "    ", &[("tool (failed)").into()]),
-            "plugins    tool (failed)\n"
+            name_row("plugins:", "    ", &[("tool (failed)").into()]),
+            "plugins:    tool (failed)\n"
         );
         // more than the cap: the extra count, never a second line
         let many: Vec<String> = (0..NAME_CAP + 3).map(|i| format!("s{i}")).collect();
         assert_eq!(
-            name_row("skills ", " ", &many),
-            "skills  s0, s1, s2, s3, s4, s5 +3 more\n"
+            name_row("skills:", " ", &many),
+            "skills: s0, s1, s2, s3, s4, s5 +3 more\n"
         );
     }
 
