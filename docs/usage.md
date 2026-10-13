@@ -199,7 +199,7 @@ Without a header, the file is started once per session and you talk to it in one
 → {"id":4,"type":"event","name":..,"params":{..}}      ← {"id":4,"result":{..}}
 ```
 
-At startup the host asks what the extension offers: tools (with JSON Schema parameters), slash commands, and events it wants to hear about. After that it calls back when the model uses a tool, when you type a matching `/command`, and at turn and tool boundaries. The `tool_call` event is the useful one for gating: your extension can deny a call or rewrite its arguments.
+At startup the host asks what the extension offers: tools (with JSON Schema parameters), slash commands, and events it wants to hear about. After that it calls back when the model uses a tool, when you type a matching `/command`, and at turn and tool boundaries. The `tool_call` event is the useful one for gating: your extension can deny a call or rewrite its arguments. Two other events carry decisions back: `tool_result` can replace what the model reads, and `compact` can replace a whole automatic compaction with your own summary (which then ends the task).
 
 Extension tools run freely like `bash`; a `[agent] tools` policy or the blacklist still gates them.
 

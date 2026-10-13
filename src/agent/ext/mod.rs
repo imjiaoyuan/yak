@@ -522,11 +522,17 @@ impl Extensions {
     /// the empty one.
     #[cfg(test)]
     pub fn empty() -> Extensions {
-        Extensions {
-            exts: Vec::new(),
-            script_tools: Vec::new(),
-        }
+        Self::EMPTY
     }
+
+    /// The host with no extensions: fires nothing, mounts nothing (the
+    /// const form of [`Extensions::empty`], usable where a `&'static` is
+    /// not needed).
+    #[cfg(test)]
+    pub(crate) const EMPTY: Extensions = Extensions {
+        exts: Vec::new(),
+        script_tools: Vec::new(),
+    };
 
     /// Discover everything, and spawn+handshake the resident extensions on
     /// a background thread while the caller keeps doing startup work
@@ -649,10 +655,42 @@ impl Extensions {
         replacement
     }
 
+    /// Fire `compact` across every subscriber and return the replacement
+    /// compaction when one extension offers it: the last reply shaped
+    /// `{"decision":"compact","summary":..,"keep_recent_tokens":n}` wins
+    /// (the token field is optional; without it the caller keeps its own
+    /// value). Every other event reply observes only, and the whole path is
+    /// fail-open: a dead, slow, silent or malformed extension returns
+    /// `None` and the caller runs its built-in compaction instead.
+    pub fn replace_compaction(&self, params: &Value) -> Option<(String, Option<u32>)> {
+        let mut replacement: Option<(String, Option<u32>)> = None;
+        for ext in &self.exts {
+            match ext.fire("compact", params) {
+                Ok(Some(reply)) => {
+                    if reply.get("decision").and_then(Value::as_str) == Some("compact")
+                        && let Some(summary) = reply.get("summary").and_then(Value::as_str)
+                    {
+                        replacement = Some((
+                            summary.to_string(),
+                            reply
+                                .get("keep_recent_tokens")
+                                .and_then(Value::as_u64)
+                                .and_then(|n| u32::try_from(n).ok()),
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => ext.note(e),
+            }
+        }
+        replacement
+    }
+
     /// Fire an event on every extension subscribed to it. Replies are
-    /// fire-and-forget: per the protocol only `tool_call` and `tool_result`
-    /// replies are interpreted (here via [`Extensions::gate_tool_call`] and
-    /// in `rewrite_tool_result`) — an extension answering any other event
+    /// fire-and-forget: per the protocol only `tool_call`, `tool_result` and
+    /// `compact` replies are interpreted (here via
+    /// [`Extensions::gate_tool_call`], in `rewrite_tool_result` and in
+    /// `replace_compaction`) — an extension answering any other event
     /// with a `decision` is out of contract and the reply is dropped, not
     /// acted on. Failures land in the extension's diagnostics tail.
     pub fn fire(&self, name: &str, params: &Value) {

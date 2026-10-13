@@ -14,6 +14,7 @@ pub mod skills;
 pub mod system_prompt;
 pub mod tools;
 
+use crate::agent::ext::Extensions;
 use crate::core::http::{StopReason, Usage};
 use crate::providers::{Msg, PromptInput, ToolCall, ToolCallAccumulator, ToolDef};
 use serde_json::json;
@@ -243,6 +244,9 @@ pub fn run_agent(
     // bounded, so a provider that refuses everything ends the run
     const MAX_OVERFLOW_COMPACTIONS: usize = 2;
     let mut overflow_compactions = 0usize;
+    // set when a replacement compaction (an extension's `compact` reply) ends
+    // the task: the loop emits the final RoundEnd and breaks without a round
+    let mut skip_round = false;
     // The auto-compaction trigger: `window - reserve` when the model's window
     // is known, else the configured fallback. It never changes
     // across the run. 0 switches it off; a provider that refuses a prompt
@@ -315,6 +319,10 @@ pub fn run_agent(
         // a check that only runs after a completed turn can.
         {
             let mut sink = StallSink::new(&mut compact_stalled, on_update);
+            let mut ch = CompactHooks {
+                hooks: opts.hooks,
+                skip_round: &mut skip_round,
+            };
             let after = maybe_compact(
                 model,
                 &mut history,
@@ -322,10 +330,25 @@ pub fn run_agent(
                 cfg_now.as_ref(),
                 cache_stable,
                 &mut sink,
+                &mut ch,
             );
             usage_marker = after.usage_marker;
             cache_stable = after.cache_stable;
             compact_trigger = after.trigger;
+        }
+        // a replacement compaction already ended the task: the summary is the
+        // last word, no model call follows it (the compaction ran before the
+        // round boundary was cut, so the slice starts at the history tip:
+        // exactly the summary message the replacement put there)
+        if let Some(Msg::Summary { text }) = history.first() {
+            final_text = text.clone();
+        }
+        if skip_round {
+            on_update(AgentUpdate::RoundEnd {
+                messages: history.split_off(history.len().saturating_sub(1)),
+                usage: None,
+            });
+            break;
         }
         // the round boundary: a compaction above may have rebuilt the
         // history, so the slice the next `RoundEnd` reports starts here
@@ -385,6 +408,10 @@ pub fn run_agent(
                 && let Some(cfg) = cfg_now.as_ref()
             {
                 let mut sink = StallSink::new(&mut compact_stalled, on_update);
+                let mut ch = CompactHooks {
+                    hooks: opts.hooks,
+                    skip_round: &mut skip_round,
+                };
                 if force_compact(
                     model,
                     &mut history,
@@ -392,6 +419,7 @@ pub fn run_agent(
                     &mut usage_marker,
                     &mut cache_stable,
                     &mut sink,
+                    &mut ch,
                 ) {
                     overflow_compactions += 1;
                     continue;
@@ -504,6 +532,10 @@ pub fn run_agent(
                     usage,
                 });
                 let mut sink = StallSink::new(&mut compact_stalled, on_update);
+                let mut ch = CompactHooks {
+                    hooks: opts.hooks,
+                    skip_round: &mut skip_round,
+                };
                 if force_compact(
                     model,
                     &mut history,
@@ -511,6 +543,7 @@ pub fn run_agent(
                     &mut usage_marker,
                     &mut cache_stable,
                     &mut sink,
+                    &mut ch,
                 ) {
                     overflow_compactions += 1;
                     continue;
@@ -718,6 +751,7 @@ fn maybe_compact(
     cfg: Option<&compact::CompactConfig>,
     cache_stable: Option<usize>,
     sink: &mut StallSink<'_>,
+    ch: &mut CompactHooks<'_>,
 ) -> AfterTurn {
     let mut after = AfterTurn {
         usage_marker,
@@ -749,7 +783,7 @@ fn maybe_compact(
     if compact::should_compact(estimate, cfg.trigger_tokens) {
         // the trigger is window-anchored, not a running count: it stays where
         // it is after a compaction
-        match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
+        match compact_now(model, history, cfg, &mut after, &mut *sink.on_update, ch) {
             Ok(()) => {}
             // The history is untouched either way: the run continues, but a
             // session that keeps growing past the trigger has to say why
@@ -790,6 +824,14 @@ impl StallSink<'_> {
     }
 }
 
+/// The per-run compaction handles threaded to the compact paths: the
+/// extension host (for the `compact` event) and the flag a replacement
+/// compaction sets to end the task.
+struct CompactHooks<'a> {
+    hooks: &'a Extensions,
+    skip_round: &'a mut bool,
+}
+
 /// Replace the prefix below the cut with a summary of it. `Err` names why the
 /// rebuild did not happen — the caller reports it, because a window that
 /// silently stays over its limit is the one failure compaction exists to
@@ -800,7 +842,34 @@ fn compact_now(
     cfg: &compact::CompactConfig,
     after: &mut AfterTurn,
     on_update: &mut dyn FnMut(AgentUpdate),
+    ch: &mut CompactHooks<'_>,
 ) -> Result<(), String> {
+    // an extension that answers the `compact` event with a
+    // `{"decision":"compact","summary":..}` reply replaces the built-in
+    // summarizer entirely; the whole path is fail-open, so a dead or silent
+    // extension falls back to the model call below. The replaced cut uses the
+    // configured keep-recent as-is: `effective_keep_recent`'s cap only
+    // protects the built-in budget math, not a policy an extension chose.
+    let hooks = ch.hooks;
+    if hooks.subscribes("compact") {
+        let keep = cfg.keep_recent_tokens;
+        if let Some(cut) = compact::find_cut(history, keep) {
+            let params = json!({
+                "reason": "trigger",
+                "trigger_tokens": cfg.trigger_tokens,
+                "keep_recent_tokens": keep,
+            });
+            if let Some((summary, ext_keep)) = hooks.replace_compaction(&params) {
+                let cut = ext_keep
+                    .and_then(|k| compact::find_cut(history, u64::from(k)))
+                    .unwrap_or(cut);
+                apply_replacement(history, cut, summary, after, on_update, ch.skip_round);
+                return Ok(());
+            }
+        }
+        // no cut or no replacement: fall through to the built-in path, which
+        // re-derives the cut and reports its own stall reason
+    }
     let Some(cut) = compact::find_cut(history, cfg.effective_keep_recent(cfg.trigger_tokens))
     else {
         return Err("no turn boundary can be dropped without orphaning a tool result".to_string());
@@ -822,6 +891,29 @@ fn compact_now(
     Ok(())
 }
 
+/// The one history rewrite all compaction paths share: everything below the
+/// cut becomes the summary message, the old prefix is gone. `skip_round` is
+/// set only by an extension replacement — the summary there is a verdict, not
+/// a recap, so the loop ends without another model round (the built-in
+/// summary always continues: its whole job is to keep the task going).
+fn apply_replacement(
+    history: &mut Vec<Msg>,
+    cut: usize,
+    summary: String,
+    after: &mut AfterTurn,
+    on_update: &mut dyn FnMut(AgentUpdate),
+    skip_round: &mut bool,
+) {
+    let tail = history.split_off(cut);
+    history.clear();
+    history.push(Msg::Summary { text: summary });
+    history.extend(tail);
+    *skip_round = true;
+    on_update(AgentUpdate::Compacted { removed: cut });
+    after.usage_marker = None;
+    after.cache_stable = None;
+}
+
 /// Force a compaction regardless of the trigger: a provider refused the prompt
 /// (400 overflow), or reported usage past the known window without one (silent
 /// overflow). The caller retries the round on success, bounded by
@@ -834,13 +926,14 @@ fn force_compact(
     usage_marker: &mut Option<(usize, Usage)>,
     cache_stable: &mut Option<usize>,
     sink: &mut StallSink<'_>,
+    ch: &mut CompactHooks<'_>,
 ) -> bool {
     let mut after = AfterTurn {
         usage_marker: *usage_marker,
         cache_stable: *cache_stable,
         trigger: cfg.trigger_tokens,
     };
-    match compact_now(model, history, cfg, &mut after, &mut *sink.on_update) {
+    match compact_now(model, history, cfg, &mut after, &mut *sink.on_update, ch) {
         Ok(()) => {
             *usage_marker = after.usage_marker;
             *cache_stable = after.cache_stable;

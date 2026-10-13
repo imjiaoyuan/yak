@@ -115,11 +115,24 @@ fn a_stalled_compaction_is_reported_once() {
     ));
     let mut history = vec![Msg::user("the task"), Msg::user("more")];
     let mut warned = false;
+    let mut no_skip = false;
     let mut updates: Vec<AgentUpdate> = Vec::new();
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), None, &mut sink);
+        let mut ch = CompactHooks {
+            hooks: &Extensions::EMPTY,
+            skip_round: &mut no_skip,
+        };
+        let _ = maybe_compact(
+            &model,
+            &mut history,
+            marker,
+            Some(&cfg),
+            None,
+            &mut sink,
+            &mut ch,
+        );
     }
     assert_eq!(
         history.len(),
@@ -137,7 +150,19 @@ fn a_stalled_compaction_is_reported_once() {
     {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
-        let _ = maybe_compact(&model, &mut history, marker, Some(&cfg), None, &mut sink);
+        let mut ch = CompactHooks {
+            hooks: &Extensions::EMPTY,
+            skip_round: &mut no_skip,
+        };
+        let _ = maybe_compact(
+            &model,
+            &mut history,
+            marker,
+            Some(&cfg),
+            None,
+            &mut sink,
+            &mut ch,
+        );
     }
     assert_eq!(stalled(&updates), 1);
 }
@@ -473,6 +498,65 @@ fn a_known_window_compacts_before_the_first_request() {
         "the over-window seed was summarized before the first request"
     );
     assert_eq!(outcome.final_text, "ok");
+}
+
+/// A `compact` subscriber's replacement ends the task: the seed is rebuilt
+/// around the extension's summary, the flag round never calls the model, and
+/// the verdict is the final text.
+#[test]
+fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
+    // n=0 would be the summarizer; it must never be hit because the
+    // extension answers the compact event instead
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            read_request(&mut c);
+            let _ =
+                c.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}");
+        }
+    });
+    let ext_host =
+        crate::agent::ext::tests::compact_stub_host("replacement summary\nverdict: done");
+    let tools: Vec<Box<dyn tools::Tool>> = vec![];
+    let mut opts = AgentOptions {
+        hooks: &ext_host,
+        ..test_opts()
+    };
+    opts.compact = Some(compact::CompactConfig {
+        trigger_tokens: 1000,
+        keep_recent_tokens: 500,
+    });
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &mock_model(port),
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![Msg::user("the task"), Msg::user("x".repeat(20_000))],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the extension compaction must succeed");
+    drop(server);
+    assert_eq!(
+        outcome.final_text, "replacement summary\nverdict: done",
+        "the replacement summary is the last word"
+    );
+    assert!(
+        matches!(outcome.history.first(), Some(Msg::Summary { text }) if text.contains("replacement summary"))
+    );
+    assert_eq!(
+        outcome.history.len(),
+        1,
+        "nothing survives beside the summary"
+    );
+    assert!(!outcome.interrupted);
 }
 
 /// A gateway that reports usage past the known window without a 400 (z.ai's

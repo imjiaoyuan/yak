@@ -406,6 +406,37 @@ fn write_stub_extension(name: &str, body: &str) -> std::path::PathBuf {
     path
 }
 
+/// A ready one-extension host whose resident answers every `compact` event
+/// with the given summary (plus a verdict line the agent test asserts on).
+#[cfg(unix)]
+pub(crate) fn compact_stub_host(summary: &str) -> Extensions {
+    // serde writes the escaped JSON string form, so any summary rides one
+    // protocol line regardless of newlines or quotes
+    // indent 0 still breaks lines between keys; the protocol is line-delimited
+    // and a literal newline inside a string is already the two-char \n escape,
+    // so flattening is just the pretty newlines going away
+    let compact_reply =
+        crate::jsonfmt::dumps_indent(&json!({"decision": "compact", "summary": summary}), 0)
+            .replace('\n', "");
+    let body = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{{"id":%s,"result":{{"events":["compact"]}}}}\n' "$id" ;;
+    *compact*) printf '{{"id":%s,"result":%s}}\n' "$id" '{}' ;;
+    *) printf '{{"id":%s,"result":null}}\n' "$id" ;;
+  esac
+done
+"#,
+        compact_reply,
+    );
+    Extensions {
+        exts: vec![connect_stub(&write_stub_extension("compactor", &body))],
+        script_tools: Vec::new(),
+    }
+}
+
 /// A resident extension that answers protocol lines: it advertises
 /// `tool_result` and rewrites any result containing ORIGINAL, answering
 /// `null` (observe only) otherwise.
@@ -483,6 +514,74 @@ fn a_dead_extension_cannot_swallow_a_tool_result() {
         host.rewrite_tool_result(&params),
         None,
         "a crashed extension falls back to the tool's own result"
+    );
+}
+
+/// A `compact` subscriber answers with a decision and a summary: that reply
+/// becomes the host's replacement compaction. Without a summary the reply
+/// observes only; a dead extension leaves `None` (fail-open).
+#[test]
+#[cfg(unix)]
+fn a_compact_subscriber_can_replace_the_compaction() {
+    let compact_stub = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{"id":%s,"result":{"events":["compact"]}}\n' "$id" ;;
+    *compact*) printf '{"id":%s,"result":{"decision":"compact","summary":"replacement summary","keep_recent_tokens":4000}}\n' "$id" ;;
+    *) printf '{"id":%s,"result":null}\n' "$id" ;;
+  esac
+done
+"#;
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension(
+            "compactor",
+            compact_stub,
+        ))],
+        script_tools: Vec::new(),
+    };
+    assert!(host.subscribes("compact"));
+    let params = json!({"reason": "trigger", "trigger_tokens": 64000, "keep_recent_tokens": 20000});
+    let (summary, keep) = host
+        .replace_compaction(&params)
+        .expect("a decision reply is the replacement");
+    assert_eq!(summary, "replacement summary");
+    assert_eq!(keep, Some(4000));
+
+    let observer = compact_stub.replace(
+        r#""decision":"compact","summary":"replacement summary","keep_recent_tokens":4000"#,
+        r#""note":"observed""#,
+    );
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension("observer", &observer))],
+        script_tools: Vec::new(),
+    };
+    assert_eq!(host.replace_compaction(&params), None);
+}
+
+/// A compact subscriber that dies on the event falls open: the host returns
+/// no replacement and the built-in summarizer runs instead.
+#[test]
+#[cfg(unix)]
+fn a_dead_extension_cannot_swallow_a_compaction() {
+    let crashes = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{"id":%s,"result":{"events":["compact"]}}\n' "$id" ;;
+    *compact*) exit 1 ;;
+  esac
+done
+"#;
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension("crashy", crashes))],
+        script_tools: Vec::new(),
+    };
+    let params = json!({"reason": "trigger", "trigger_tokens": 64000, "keep_recent_tokens": 20000});
+    assert_eq!(
+        host.replace_compaction(&params),
+        None,
+        "a crashed extension falls back to the built-in compaction"
     );
 }
 
