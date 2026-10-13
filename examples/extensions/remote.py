@@ -99,7 +99,6 @@
 # /reload, and check /status. Without a channel configured the tools still
 # mount and remote_status says what is missing.
 
-import fcntl
 import email as email_lib
 import imaplib
 import json
@@ -116,6 +115,11 @@ import sys
 import threading
 import time
 import urllib.request
+
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import fcntl
 from email.header import decode_header, make_header
 from email.mime.text import MIMEText
 
@@ -792,14 +796,24 @@ def start_listener():
     if TG_TOKEN:
         # single-flight: with several yak sessions each running this
         # extension, only the lock holder polls Telegram — concurrent
-        # getUpdates pollers swallow each other's updates
+        # getUpdates pollers swallow each other's updates; the lock is
+        # taken the platform's way so it holds on windows too
         _poll_lock_file = open(
-            os.path.join(user_dir(), "remote-poll.lock"), "w")
+            os.path.join(user_dir(), "remote-poll.lock"), "a+b")
+        locked = True
         try:
-            fcntl.flock(_poll_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if platform.system() == "Windows":
+                msvcrt.locking(_poll_lock_file.fileno(),
+                               msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(_poll_lock_file,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            locked = False
+        if locked:
             threading.Thread(target=tg_listen, daemon=True).start()
             solo = " (solo poller)"
-        except OSError:
+        else:
             _poll_lock_file.close()
             _poll_lock_file = None
             solo = " (another bridge holds the poll lock)"
