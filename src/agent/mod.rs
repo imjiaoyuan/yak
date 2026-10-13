@@ -277,9 +277,27 @@ pub fn run_agent(
         "agent_start",
         &json!({"cwd": opts.cwd.display().to_string(), "task": prompt}),
     );
+    // the hard cap on model rounds: enough for any real task, small enough
+    // that a model stuck repeating itself cannot burn tokens forever
+    const MAX_ROUNDS: usize = 500;
     let mut turn = 0;
     loop {
         turn += 1;
+        if turn > MAX_ROUNDS {
+            // every completed round was already persisted at its RoundEnd;
+            // the empty slice from here persists nothing on top
+            let round_start = history.len();
+            return Err(AgentFailure {
+                message: format!(
+                    "run stopped at the {MAX_ROUNDS}-round limit without finishing; the model \
+                     appears to be looping. Every completed round is saved — resume the \
+                     thread with a sharper instruction, or split the task"
+                ),
+                history,
+                final_text,
+                round_start,
+            });
+        }
         opts.hooks.fire("turn_start", &json!({"turn": turn}));
         if let Some(Msg::User { text, attachments }) = pending.as_ref() {
             let mut input_payload = json!({
