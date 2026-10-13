@@ -254,6 +254,21 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
     out
 }
 
+/// The last update_plan checklist in the dropped prefix, verbatim. The plan
+/// tool is an extension, but its result rides the history this module already
+/// owns, and compaction is the one moment the plan's authoritative copy is
+/// about to be replaced by a summary that may compress it into prose. The
+/// model re-reads the checklist from the summary afterwards; keeping the exact
+/// list (not a paraphrase) is what lets it keep stepping through it.
+/// Deliberate coupling to the tool's name, same as the loop knows its other
+/// tools' names.
+pub(crate) fn preserved_plan(prefix: &[Msg]) -> Option<String> {
+    prefix.iter().rev().find_map(|msg| match msg {
+        Msg::ToolResult { name, content, .. } if name == "update_plan" => Some(content.clone()),
+        _ => None,
+    })
+}
+
 /// Run the summarization call: streaming, no tools. A prefix that already
 /// starts with a summary is an incremental update (the
 /// `UPDATE_SUMMARIZATION_PROMPT`), not a from-scratch re-summary.
@@ -834,5 +849,25 @@ mod tests {
             "char-count bounded: {}",
             content.chars().count()
         );
+    }
+
+    #[test]
+    fn preserved_plan_takes_the_last_checklist_verbatim() {
+        let plan = "[x] read the file\n[>] edit the file\n[ ] test";
+        // the prefix being dropped: two plan updates, the older one stale
+        let prefix = vec![
+            user("task"),
+            Msg::tool_result("1", "update_plan", "[ ] read the file"),
+            Msg::tool_result("2", "update_plan", plan),
+            // other tools' results never answer the question
+            Msg::tool_result("3", "read", "file contents"),
+        ];
+        assert_eq!(preserved_plan(&prefix).as_deref(), Some(plan));
+        // no plan anywhere: nothing to preserve, nothing to append
+        assert_eq!(
+            preserved_plan(&[user("task"), Msg::tool_result("4", "bash", "ok")]),
+            None
+        );
+        assert_eq!(preserved_plan(&[]), None);
     }
 }

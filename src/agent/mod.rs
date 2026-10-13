@@ -898,6 +898,16 @@ fn compact_now(
     if summary.trim().is_empty() {
         return Err("the summarizer returned nothing".to_string());
     }
+    // the model's active plan lives in the prefix being dropped; re-attach it
+    // to the summary that replaces it, so the checklist survives compaction
+    // as the exact list the model last wrote (not a paraphrase the
+    // summarizer may compress or drop)
+    let summary = match compact::preserved_plan(&history[..cut]) {
+        Some(plan) => format!(
+            "{summary}\n\n[Your active task list was preserved across context compression]\n{plan}"
+        ),
+        None => summary,
+    };
     let tail = history.split_off(cut);
     history.clear();
     history.push(Msg::Summary { text: summary });
