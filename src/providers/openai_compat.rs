@@ -248,6 +248,27 @@ fn map_stop(reason: &str) -> StopReason {
     }
 }
 
+/// A reasoning delta that opens a bolded heading can arrive glued to the
+/// previous one — `…done**Analyzing**` — because some gateways (seen on Nous
+/// Portal `openai/gpt-5.6-sol`) emit consecutive reasoning blocks without the
+/// separator the model wrote. The delta itself starts with a closed bold
+/// pair, and the text before it did not end its line: re-insert the paragraph
+/// break the model intended, so headings render as headings instead of
+/// colliding with the sentence above.
+pub(crate) fn split_glued_reasoning(previous: &str, delta: &str) -> bool {
+    if delta.len() < 4 {
+        return false;
+    }
+    let bytes = delta.as_bytes();
+    if !delta.starts_with("**") || !bytes[2..].contains(&b'*') {
+        return false;
+    }
+    previous
+        .chars()
+        .last()
+        .is_some_and(|last| !last.is_whitespace())
+}
+
 /// Feed one streaming data-chunk (already parsed) through the request state.
 pub(crate) fn feed_chunk(
     chunk: &Value,
@@ -366,6 +387,21 @@ pub fn run(
     headers.extend(super::gateway_headers(&url));
     let body = build_body(m, input, stream)?.to_string();
     super::check_request_body(&body, input)?;
+    // reasoning streams as a sequence of ReasoningDelta events; the glued-
+    // heading repair needs the accumulated trace so far, which the stateless
+    // feed_chunk cannot see, so the sink here tracks it and prepends the
+    // paragraph break the gateway dropped
+    let mut reasoning_so_far = String::new();
+    let mut sink = |e: Event| match e {
+        Event::ReasoningDelta { text, meta } => {
+            if split_glued_reasoning(&reasoning_so_far, &text) {
+                reasoning_so_far.push_str("\n\n");
+            }
+            reasoning_so_far.push_str(&text);
+            on_event(Event::ReasoningDelta { text, meta });
+        }
+        other => on_event(other),
+    };
     super::dispatch(
         HttpRequest { url, headers, body },
         stream,
@@ -373,7 +409,7 @@ pub fn run(
         |value, on_event| {
             feed_complete(value, on_event);
         },
-        on_event,
+        &mut sink,
     )
 }
 
@@ -919,5 +955,24 @@ mod tests {
             .cache_percent(),
             75
         );
+    }
+
+    #[test]
+    fn glued_heading_delta_opens_a_paragraph() {
+        // the shape seen live: a reasoning block ends mid-sentence, the next
+        // opens a bolded heading without the separator the model wrote
+        assert!(split_glued_reasoning(
+            "Examining the file, it looks fine",
+            "**Next step**\nread it again"
+        ));
+        // previous ended its line: the heading renders fine as-is
+        assert!(!split_glued_reasoning("Examining:\n", "**Next step** more"));
+        assert!(!split_glued_reasoning("", "**Next step** more"));
+        // not a closed bold pair: an inline emphasis or a bare asterisk pair
+        assert!(!split_glued_reasoning("mid-sentence", "**"));
+        assert!(!split_glued_reasoning("mid-sentence", "**unclosed"));
+        assert!(!split_glued_reasoning("mid-sentence", "plain continuation"));
+        // more bold later in the delta still counts: the heading is at the head
+        assert!(split_glued_reasoning("mid-sentence", "**Bold**x**Bold**"));
     }
 }
