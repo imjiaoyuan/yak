@@ -1,6 +1,3 @@
 /target
-.reference
 .yak/
-.claude/
-docs/notes-*.md
 __pycache__/

@@ -59,9 +59,6 @@ def reply(obj):
     sys.stdout.flush()
 
 
-# ---- core.text / truncate helpers, ported ----------------------------------
-
-
 def char_width(ch):
     # render_md::char_width: wide chars count 2 cells. The exact East Asian
     # width table lives in the Rust side's unicode-width; for the token
@@ -177,9 +174,6 @@ def human_bytes(n):
     return f"{size:.1f} {units[unit]}"
 
 
-# ---- http::fetch_page, ported ----------------------------------------------
-
-
 class BodyTooLarge(Exception):
     pass
 
@@ -220,9 +214,6 @@ def fetch(url):
             f"Failed to read {url}: non-UTF-8 body (content-type: {content_type})"
         ) from None
     return final_url, content_type, body
-
-
-# ---- fetch.rs's html handling, ported --------------------------------------
 
 
 def extract_title(html):

@@ -100,9 +100,6 @@ def reply(obj):
     sys.stdout.flush()
 
 
-# ---- core.text / truncate helpers, ported ----------------------------------
-
-
 def char_width(ch):
     # render_md::char_width: wide chars count 2 cells. The exact East Asian
     # width table lives in the Rust side's unicode-width; for the token

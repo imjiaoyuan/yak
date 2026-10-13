@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-PORT = 8123
+PORT = int(os.environ.get("YAK_E2E_PORT", "8123"))
 seen = {}
 
 # one extension: the host protocol (initialize handshake, one tool)

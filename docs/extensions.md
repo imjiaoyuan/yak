@@ -1,8 +1,33 @@
 # Extension API
 
-Extensions are the plugin system: anything the core skips, you build yourself as an executable dropped into `~/.yak/extensions/` or the project's `.yak/extensions/`; drop a file in, restart or `/reload`. This page is the full reference; runnable examples live in [`examples/extensions/`](../examples/extensions/) (`wordcount`, `websearch`, `ls` the directory-listing tool, `update_plan` the checklist tool, `search` the grep/glob pair, `remember` the memory tool and `webfetch` the page fetcher, all five migrated off the built-in registry onto this surface, byte-compatible with their built-in former selves, `subagent.py` a tool that runs another `yak` in its own context window, `repeat_guard.py` a `tool_call` deny gate for stuck loops, `fold_repeats.py` a `tool_result` rewriter that folds repeated log lines, `workspace_checkpoint.py` a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree`, `notify.py` an `approval`/`agent_end` subscriber that raises a desktop notification (approval prompts and finished answers reach you outside the terminal), `remote.py` the phone bridge (notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or handed to a blocking `remote_wait` tool, with a keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init`), `jev.js` a JS resident exposing TypeSafe's System One model as a `jev` tool (typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback, `model_here` the project-model pin (`/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, which startup model resolution honors inside the project), plus the `template.js`/`template.py` starter templates). `template.js` runs as-is under node >= 23.6 (native type stripping); bun and deno work too.
+Extensions are the plugin system: anything the core skips, you build yourself as an executable dropped into `~/.yak/extensions/` or the project's `.yak/extensions/`; drop a file in, restart or `/reload`. This page is the full reference; runnable examples live in [`examples/extensions/`](../examples/extensions/), one row each in the table below. Copy what you need; nothing mounts unless you install it.
 
 Extensions run with your full user permissions and inherit your environment. Only install or write code you would run yourself.
+
+## The examples
+
+Every runnable example in [`examples/extensions/`](../examples/extensions/), one row each. The six tools migrated off the built-in registry (`ls`, `update_plan`, `grep`+`glob` riding the one `search` extension, `remember`, `webfetch`) are byte-compatible with their built-in former selves.
+
+| Example | Kind | What it does |
+|---|---|---|
+| `ls` | script tool | directory listing; the reference tool the host used to carry built in, kept byte-compatible |
+| `update_plan` | script tool | the checklist: a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
+| `search` | script tool | the `grep`/`glob` pair over ripgrep, read-only over the tree; read-tier, never prompts |
+| `remember` | script tool | memory: one dated deduped line into `~/.yak/YAK.md`; write-tier |
+| `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier |
+| `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
+| `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
+| `mcp_bridge.py` | resident | mounts an MCP server (stdio or streamable HTTP) as one `<server>__<tool>` per MCP tool; config in `mcp.json` |
+| `mcp_notion.py` | resident | Notion's remote MCP endpoint, OAuth-only; the login runs by the human, not the agent (§ Notion below) |
+| `subagent.py` | resident | runs another `yak` in its own context window against an agent definition from `~/.yak/agents/` or `.yak/agents/` |
+| `repeat_guard.py` | resident | a `tool_call` deny gate for stuck loops |
+| `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |
+| `workspace_checkpoint.py` | resident | a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree` |
+| `notify.py` | resident | an `approval`/`agent_end` subscriber that raises a desktop notification; approval prompts and finished answers reach you outside the terminal |
+| `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or handed to a blocking `remote_wait` tool; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
+| `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
+| `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
+| `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 
 ## Discovery
 
