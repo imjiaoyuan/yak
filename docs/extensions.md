@@ -24,7 +24,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |
 | `workspace_checkpoint.py` | resident | a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree` |
 | `notify.py` | resident | an `approval`/`agent_end` subscriber that raises a desktop notification; approval prompts and finished answers reach you outside the terminal |
-| `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or handed to a blocking `remote_wait` tool; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
+| `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or held in an inbox until the session is free; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
 | `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |

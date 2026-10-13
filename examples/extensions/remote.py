@@ -18,8 +18,8 @@
 #            reply may open with "[project]" to route to that session's
 #            pane; only one bridge polls Telegram (a flock), so concurrent
 #            pollers never swallow each other's updates. Outside tmux (or
-#            with delivery disabled) replies wait in an inbox the agent
-#            reads through the remote_wait tool.
+#            with delivery disabled) replies wait in an inbox that is typed
+#            in when a session is free.
 #
 # While it lives the extension also holds the machine awake: systemd-inhibit
 # (sleep:idle plus the lid switch) on Linux, caffeinate anchored to the host
@@ -33,12 +33,6 @@
 #   yak
 #   ... work, approval prompt pushes to the phone, reply "/y" ...
 #   ... answer pushes to the phone, reply "next: run the tests" ...
-#
-# Outside tmux the cooperation flips to the agent's side: tell it to call
-# remote_wait at milestones ("finish part 1, then remote_wait for my next
-# instruction") — the call pushes the note to the phone and blocks until a
-# reply arrives or the timeout passes, and the reply text becomes the tool
-# result the model continues from.
 #
 # Configuration lives in a JSON file — `remote.json` beside this script,
 # or `<user_dir>/remote.json` (~/.yak, YAK_USER_PATH honored). The same
@@ -221,8 +215,6 @@ SUMMARY_CHARS = 200
 TG_CHARS = 3900
 # WeCom text messages cap at 2048 bytes; stay under in characters
 WECOM_CHARS = 1400
-# remote_wait's own ceiling; the host clamps tool timeouts to one hour anyway
-WAIT_CAP = 3500
 # IMAP IDLE has to be re-issued now and then; 29 minutes is inside every
 # server's limit
 IDLE_MAX = 29 * 60
@@ -233,7 +225,6 @@ _lock = threading.Lock()
 _busy = False              # between agent_start and agent_end
 _pending_approval = None   # the approval prompt currently blocking, if any
 _inbox = []                # replies that could not be delivered yet
-_waiters = []              # remote_wait calls blocked on a reply
 _awake_child = None
 _awake_how = "not started"
 _session_cwd = ""
@@ -242,7 +233,6 @@ _own_input = None          # the reply this bridge itself typed/held, so the
                            # input mirror never echoes it back to the phone
 _poll_lock_file = None     # held open while this bridge polls Telegram
 _started = [False]
-_cancelled = set()
 _seen_uids = set()         # mails already routed, so a read-on-the-phone
                            # reply still arrives exactly once
 
@@ -516,15 +506,9 @@ ANSWERS = {"y": "y", "yes": "y", "allow": "y",
            "a": "a", "always": "a"}
 
 
-def take_waiter():
-    with _lock:
-        return _waiters.pop(0) if _waiters else None
-
-
 def deliver(text):
-    """Route one phone reply: approval answer, waiter wake-up, typed
-    prompt, or inbox hold — in that order. Returns a one-line outcome for
-    the sender's ack."""
+    """Route one phone reply: approval answer, typed prompt, or inbox
+    hold. Returns a one-line outcome for the sender's ack."""
     global _pending_approval
     text = text.strip()
     if not text:
@@ -555,11 +539,6 @@ def deliver(text):
              "instruction; /y /n /a answer an approval, /stop interrupts, "
              "/status reports".format(text))
         return None
-    waiter = take_waiter()
-    if waiter is not None:
-        waiter["result"] = text
-        waiter["event"].set()
-        return "✓ delivered to the waiting model"
     flat = " ".join(text.split())  # the line editor takes one line per submit
     tag = ""
     m = re.match(r"\[([^\[\]]+)\]\s*(.*)", flat, re.S)
@@ -877,7 +856,6 @@ def stop_awake():
 def status_text():
     with _lock:
         inbox = list(_inbox)
-        waiting = len(_waiters)
     channels = []
     if TG_TOKEN and TG_CHAT:
         channels.append("telegram push+listen")
@@ -897,34 +875,8 @@ def status_text():
         f"tmux pane: {TMUX_PANE or 'not under tmux'}",
         f"session: {_session_cwd or '?'}, {'busy' if _busy else 'idle'}, "
         f"approval {'pending' if _pending_approval else 'clear'}",
-        f"waiting remote_wait calls: {waiting}, held replies: {len(inbox)}",
+        f"held replies: {len(inbox)}",
     ] + ([f"held: {t[:60]}" for t in inbox] or []))
-
-
-def wait_for_reply(call_id, timeout):
-    """Block until deliver() hands us a reply, the deadline passes, or the
-    host interrupts the call."""
-    waiter = {"event": threading.Event(), "result": None}
-    with _lock:
-        if _inbox:  # replies that arrived before anyone waited
-            return _inbox.pop(0)
-        _waiters.append(waiter)
-    deadline = time.monotonic() + timeout
-    while True:
-        if waiter["event"].wait(0.25):
-            return waiter["result"]
-        with _lock:
-            cancelled = call_id in _cancelled
-        if cancelled:
-            with _lock:
-                if waiter in _waiters:
-                    _waiters.remove(waiter)
-            return "(interrupted)"
-        if time.monotonic() >= deadline:
-            with _lock:
-                if waiter in _waiters:
-                    _waiters.remove(waiter)
-            return None
 
 
 TOOLS = [
@@ -935,15 +887,6 @@ TOOLS = [
      "parameters": {"type": "object",
                     "properties": {"body": {"type": "string"}},
                     "required": ["body"]}},
-    {"name": "remote_wait", "tier": "read",
-     "description": "Push a note to the user's phone and block until they "
-                    "reply (or the timeout). The reply text is the result. "
-                    "Call this at a milestone when the next instruction must "
-                    "come from the user.",
-     "parameters": {"type": "object",
-                    "properties": {"note": {"type": "string"},
-                                   "timeout_secs": {"type": "integer"}},
-                    "required": ["note"]}},
     {"name": "remote_status", "tier": "read",
      "description": "Report the phone bridge state: channels, listener, "
                     "keep-awake hold, pending replies.",
@@ -954,24 +897,11 @@ TOOLS = [
 def handle_call(msg):
     name = msg.get("name")
     args = msg.get("args") or {}
-    mid = msg.get("id")
     if name == "remote_notify":
         push(str(args.get("body", "")))
         return "sent to every configured channel"
     if name == "remote_status":
         return status_text()
-    if name == "remote_wait":
-        # `cancelled` in an interrupt names the request id, so that is the
-        # key a blocked wait watches
-        timeout = min(max(int(args.get("timeout_secs") or 1800), 10), WAIT_CAP)
-        push("{}waiting for you: {}\nreply with your next instruction".format(
-            project_tag(),
-            " ".join(str(args.get("note", "")).split())[:SUMMARY_CHARS] or "(no note)"))
-        reply = wait_for_reply(mid, timeout)
-        if reply is None:
-            return f"no reply within {timeout}s — continue with what you " \
-                   "have, or ask again"
-        return reply
     return f"unknown tool {name}"
 
 
@@ -1024,13 +954,6 @@ def main():
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
-                continue
-            if msg.get("type") == "interrupt":
-                # answered out of band: a blocked remote_wait must see it now
-                cancelled = msg.get("cancelled")
-                with _lock:
-                    if cancelled is not None:
-                        _cancelled.add(cancelled)
                 continue
             inbox.put(msg)
         inbox.put(None)
