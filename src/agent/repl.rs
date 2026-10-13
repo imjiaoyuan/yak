@@ -38,6 +38,9 @@ pub fn repl(
         let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
         let cwd = session.cwd.display().to_string();
         let command_names = session.extensions.command_names();
+        // commands-dir prompts are discovered lazily at submit time, so the
+        // editor needs their names handed to it or a `/init` line never lights
+        let prompt_names = crate::core::commands_md::names();
         // the echo highlight rides this predicate: registered names only, so
         // a `/`-prefixed path (`/home/you/shot.png`) stays plain task text
         let command_set = {
@@ -46,6 +49,7 @@ pub fn repl(
                 .map(|c| c.strip_prefix('/').unwrap_or(c).to_string())
                 .collect();
             names.extend(command_names.clone());
+            names.extend(prompt_names.clone());
             names.sort();
             names
         };
@@ -55,7 +59,7 @@ pub fn repl(
             if let Some(arg) = buf.strip_prefix('/')
                 && !arg.contains(' ')
             {
-                for name in &command_names {
+                for name in command_names.iter().chain(prompt_names.iter()) {
                     if name.starts_with(arg) {
                         out.push(format!("/{name}"));
                     }

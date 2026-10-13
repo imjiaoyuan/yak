@@ -59,7 +59,7 @@ yak -a https://example.com/page "summarise this"
 
 The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.md):
 
-- [The interactive session](docs/usage.md#the-interactive-session): slash commands, `!cmd`, interrupting a running task
+- [The interactive session](docs/usage.md#the-interactive-session): slash commands, tab completion, `!cmd`, interrupting a running task
 - [Approvals and the blacklist](docs/usage.md#approvals-and-the-blacklist): what is hardcoded, what you configure
 - [Tools](docs/usage.md#tools): the surviving built-ins and the example-extension tools migrated off the registry
 - [Attachments](docs/usage.md#attachments): files, URLs, stdin, clipboard pastes

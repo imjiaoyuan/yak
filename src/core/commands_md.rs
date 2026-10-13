@@ -5,6 +5,7 @@
 //! `$input` receives the trailing args).
 
 use crate::core::config::user_dir;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct CommandMd {
@@ -33,34 +34,82 @@ pub fn valid_name(name: &str) -> bool {
     crate::core::text::valid_plugin_name(name, 64) && !name.starts_with('-')
 }
 
-/// Look up one command by name: nearest `.yak/commands/<name>.md` walking
-/// up from `cwd`, then `user_dir/commands/<name>.md`. A path probe, not a
-/// directory walk, so the bare-prompt fast path never pays for it.
+/// Every directory a command file can live in, in lookup order: package
+/// command dirs (project pkg before user pkg), the nearest
+/// `.yak/commands`/`.llm/commands` walking up from `cwd`, then the user
+/// dir. Shared by `find` (a probe) and `names` (an enumeration) so the two
+/// can never disagree about where a command lives.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    out.extend(crate::commands::pkg::command_dirs(true));
+    out.extend(crate::commands::pkg::command_dirs(false));
+    if let Ok(cwd) = std::env::current_dir() {
+        for d in crate::core::paths::ancestors(&cwd) {
+            for proj in [".yak/commands", ".llm/commands"] {
+                out.push(d.join(proj));
+            }
+        }
+    }
+    out.push(user_dir().join("commands"));
+    out
+}
+
+/// Look up one command by name: the first `search_dirs()` entry holding
+/// `<name>.md`. A path probe, not a directory walk, so the bare-prompt fast
+/// path never pays for it.
 pub fn find(name: &str) -> Option<CommandMd> {
     if !valid_name(name) {
         return None;
     }
-    let cwd = std::env::current_dir().ok()?;
     let file = format!("{name}.md");
-    for dir in crate::commands::pkg::command_dirs(true)
-        .into_iter()
-        .chain(crate::commands::pkg::command_dirs(false))
-    {
+    for dir in search_dirs() {
         if let Ok(text) = std::fs::read_to_string(dir.join(&file)) {
             return Some(parse(&text));
         }
     }
-    for d in crate::core::paths::ancestors(&cwd) {
-        for proj in [".yak/commands", ".llm/commands"] {
-            let candidate = d.join(proj).join(&file);
-            if let Ok(text) = std::fs::read_to_string(&candidate) {
-                return Some(parse(&text));
+    None
+}
+
+/// Every command name visible from `cwd`, deduped and sorted. The REPL
+/// discovers a command file lazily at submit time, but the *name* has to be
+/// known up front or the editor cannot highlight or complete it.
+pub fn names() -> Vec<String> {
+    names_from(&search_dirs())
+}
+
+fn names_from(dirs: &[PathBuf]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for dir in dirs {
+        for name in dir_names(dir) {
+            if !out.contains(&name) {
+                out.push(name);
             }
         }
     }
-    std::fs::read_to_string(user_dir().join("commands").join(&file))
-        .ok()
-        .map(|text| parse(&text))
+    out.sort();
+    out
+}
+
+/// The valid `.md` stems in one directory, name rules applied (so a stray
+/// `../` or a leading `-` never reaches the completer).
+fn dir_names(dir: &std::path::Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if valid_name(stem) {
+            out.push(stem.to_string());
+        }
+    }
+    out
 }
 
 /// Build the substitution template from a command file: the body is the
@@ -142,6 +191,38 @@ mod tests {
         let (prompt, _) = expand(&cmd, "the diff");
         assert!(prompt.ends_with("the diff"), "{prompt}");
         assert!(prompt.contains("$HOME"), "{prompt}");
+    }
+
+    #[test]
+    fn dir_names_lists_only_valid_markdown_stems() {
+        let dir = crate::core::testutil::scratch_dir("cmd-names");
+        std::fs::write(dir.join("review.md"), "x").unwrap();
+        std::fs::write(dir.join("init.md"), "x").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        std::fs::write(dir.join("-flag.md"), "x").unwrap();
+        std::fs::create_dir(dir.join("sub.md")).unwrap();
+        let mut got = dir_names(&dir);
+        got.sort();
+        assert_eq!(got, vec!["init", "review"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_collects_and_dedupes_across_dirs() {
+        let root = crate::core::testutil::scratch_dir("cmd-visible");
+        // the local project dir wins by search order, so its copy shadows the
+        // user one; the union still surfaces both distinct names
+        let project = root.join("proj/commands");
+        let user = root.join("user/commands");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(project.join("init.md"), "x").unwrap();
+        std::fs::write(project.join("review.md"), "x").unwrap();
+        std::fs::write(user.join("init.md"), "x").unwrap();
+        std::fs::write(user.join("deploy.md"), "x").unwrap();
+        let got = names_from(&[project, user]);
+        assert_eq!(got, vec!["deploy", "init", "review"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
