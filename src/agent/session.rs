@@ -240,32 +240,40 @@ impl Session {
             if rows.is_empty() {
                 return;
             }
+            // one row-lock guard, one write, one flush per frame: an erase
+            // pass followed by a repaint pass left a blank gap (and a window
+            // where the spinner painted inside it), which read as flicker
             let _guard = crate::theme::row_lock().lock();
             let p = crate::theme::err();
             let c = crate::theme::cursor();
-            // the region rewrite: back up over the previous lane block (if
-            // any), wipe it and everything below (the spinner's stale frame
-            // included), then print the rows fresh. The cursor ends one row
-            // below the block — exactly where a live ticker paints its next
-            // frame, so the spinner rides below the lanes, never over them
+            // home over the previous block and repaint in place; each row
+            // wipes itself whole before writing (a shorter row must not
+            // leave the old tail on screen), and only a block that shrank
+            // wipes the rows below it, so the spinner row under a stable
+            // block is never cleared. The cursor ends one row below the
+            // block — exactly where a live ticker paints its next frame
             let painted_before = lanes_painted.get();
-            // `up` alone keeps the column (mid-row after a spinner frame);
-            // the clear_line's \r homes it so the wipe covers the whole row
-            eprint!(
-                "{}{}{}",
-                c.up(painted_before),
-                c.clear_line,
-                c.clear_below()
-            );
             let width = crate::term::columns().max(20).saturating_sub(2);
+            let mut out = String::new();
+            out.push_str(c.hide());
+            out.push_str(&c.up(painted_before));
             let mut painted = 0usize;
             for (lane, text) in rows {
                 let row = crate::core::render_md::wrap_block(&format!("{lane}: {text}"), width, 2);
                 // a wrapped row spans several terminal lines; the erase
                 // count below must match what was printed, not the lane count
                 painted += row.matches('\n').count() + 1;
-                eprintln!("{}{row}{}", p.gray, p.reset);
+                out.push_str(c.clear_line);
+                out.push_str(&p.gray);
+                out.push_str(&row);
+                out.push_str(&p.reset);
+                out.push('\n');
             }
+            if painted < painted_before {
+                out.push_str(c.clear_below());
+            }
+            out.push_str(c.show());
+            eprint!("{out}");
             use std::io::Write;
             let _ = std::io::stderr().flush();
             lanes_painted.set(painted);
@@ -332,16 +340,14 @@ impl Session {
                 }
                 AgentUpdate::Lane { lane, text } => {
                     // one row per lane name: an update rewrites its row in
-                    // place; a new lane appends below the block
-                    erase_lanes(&lanes_painted);
-                    {
-                        let mut rows = lane_rows.borrow_mut();
-                        match rows.iter_mut().find(|(l, _)| l == &lane) {
-                            Some(slot) => slot.1 = text,
-                            None => rows.push((lane, text)),
-                        }
-                        draw_lanes(&rows, &lanes_painted);
+                    // place; a new lane appends below the block. One
+                    // single-pass repaint per frame, no erase first
+                    let mut rows = lane_rows.borrow_mut();
+                    match rows.iter_mut().find(|(l, _)| l == &lane) {
+                        Some(slot) => slot.1 = text,
+                        None => rows.push((lane, text)),
                     }
+                    draw_lanes(&rows, &lanes_painted);
                 }
                 AgentUpdate::ToolReceiving => {
                     // show a plain "running" status; the live argument

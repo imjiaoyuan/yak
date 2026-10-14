@@ -237,7 +237,8 @@ _out_lock = threading.RLock()
 _LIVE = {}
 _LIVE_LOCK = threading.Lock()
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_TICK_MS = 0.9
+_TICK_MS = 0.125  # ~8fps: a lane's spinner and elapsed clock must move as
+                 # smoothly as the host's own 16fps frame, not once a second
 
 
 def _send_lane(name, text):
@@ -285,10 +286,11 @@ def _tick_loop(stop):
     frame = 0
     while not stop.wait(_TICK_MS):
         frame += 1
+        spin = _SPINNER[frame % len(_SPINNER)]
         with _LIVE_LOCK:
             labels = [l for l, s in _LIVE.items() if s["state"] == "run"]
         for l in labels:
-            _send_lane(l, _render_lane(l, frame=_SPINNER[frame % len(_SPINNER)]))
+            _send_lane(l, _render_lane(l, frame=spin))
 
 
 def start_ticker():
