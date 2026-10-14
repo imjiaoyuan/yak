@@ -1,6 +1,6 @@
 # yak
 
-A coding agent that lives in your terminal: `yak "fix the failing test"` runs one task with tools (reading, editing, searching, running commands) and bare `yak` opens an interactive session. Sessions are stored as thread files and can be resumed anytime.
+A plugin-based harness for LLMs in Rust that lives in your terminal: `yak "fix the failing test"` runs one task with tools (reading, editing, searching, running commands) and bare `yak` opens an interactive session. Sessions are stored as thread files and can be resumed anytime.
 
 One binary, ~3 dependencies (`ureq`, `serde_json`, `unicode-width`), no async runtime, every other piece handwritten in-tree. Linux, macOS and Windows.
 
@@ -94,13 +94,13 @@ yak remove yak-deploy
 ## Help
 
 ```
-Access Large Language Models from the command-line
+A plugin-based harness for LLMs in Rust
 
 Usage:
   yak [flags] [PROMPT]
 
-Bare `yak` opens an interactive agent session; `yak "task"` runs the
-agent once with tools.
+Bare `yak` opens an interactive session; `yak "task"` runs one
+agentic task with tools.
 
 Available commands:
   export     Export a conversation as markdown (also: /export)

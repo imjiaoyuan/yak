@@ -60,7 +60,7 @@ pub fn build_system_prompt(
             // session started. Only the trailing cwd line refreshes.
             Some(s) => strip_cwd_line(s),
             None => {
-                let base = "You are an expert coding assistant operating inside yak, a coding agent harness. \
+                let base = "You are an expert coding assistant operating inside yak, a plugin-based harness for LLMs. \
                            You help users by reading files, executing commands, editing code, and writing new files.\n\
                            \n\
                            Available tools:\n\

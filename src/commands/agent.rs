@@ -1,4 +1,4 @@
-//! `yak agent` — interactive CLI agent plus its one-shot
+//! `yak agent` — the interactive CLI session plus its one-shot
 //! (`yak agent "task"`) form.
 
 use std::io::IsTerminal;
@@ -60,11 +60,7 @@ const SPECS: &[OptSpec] = &[
         None,
         "Don't log the conversation to the thread store"
     ),
-    flag_spec!(
-        "continue",
-        Some('c'),
-        "Continue the most recent agent session"
-    ),
+    flag_spec!("continue", Some('c'), "Continue the most recent session"),
     value_spec!(
         "session",
         None,

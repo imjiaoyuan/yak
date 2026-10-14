@@ -1,4 +1,4 @@
-//! yak — a minimal terminal coding harness in Rust (a minimal terminal-first harness).
+//! yak — a plugin-based harness for LLMs in Rust.
 
 mod agent;
 mod b64;
@@ -15,13 +15,13 @@ mod yaml;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const ABOUT: &str = "\
-Access Large Language Models from the command-line
+A plugin-based harness for LLMs in Rust
 
 Usage:
   yak [flags] [PROMPT]
 
-Bare `yak` opens an interactive agent session; `yak \"task\"` runs the
-agent once with tools.
+Bare `yak` opens an interactive session; `yak \"task\"` runs one
+agentic task with tools.
 
 Available commands:
   export     Export a conversation as markdown (also: /export)

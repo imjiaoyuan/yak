@@ -2,7 +2,7 @@
 name = "yak"
 version = "0.4.4"
 edition = "2024"
-description = "A terminal coding agent with tools, resumable sessions, prompt templates and plugins."
+description = "A plugin-based harness for LLMs in Rust."
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
