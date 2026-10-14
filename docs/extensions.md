@@ -28,6 +28,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
 | `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
+| `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 
 ## Discovery
 
