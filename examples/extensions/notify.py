@@ -35,6 +35,7 @@
 # watch it with /status. Delivery degrades silently: no notifier on $PATH, or
 # a failed one, costs nothing but a line on the extension's stderr.
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -57,6 +58,13 @@ PING_QUIET_SECS = 120
 NOTIFY_WHEN = "unfocused"
 
 _last_ping = {}
+
+# a subagent child (`yak --json` spawned by subagent.py) inherits the user
+# extension dir, so this extension runs inside it too: its events are a
+# child agent's machinery, not work the user submitted, and notifying for
+# them doubles every notification with one whose cwd is a temp worktree
+# under /tmp. The child carries YAK_SUBAGENT_DEPTH; a hand-run yak has none.
+_child = bool(os.environ.get("YAK_SUBAGENT_DEPTH"))
 
 
 def should_notify(params):
@@ -138,7 +146,7 @@ def handle(msg):
         # the session's working directory rides under the notification's
         # first line: the one field that says which conversation is talking
         cwd = (params.get("cwd") or "").strip()
-        if not should_notify(params):
+        if _child or not should_notify(params):
             return
         now = time.monotonic()
         if msg.get("name") == "agent_end":

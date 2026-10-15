@@ -175,6 +175,12 @@ AWAKE = setting("awake", "YAK_REMOTE_AWAKE", "1") != "0"
 TYPING = setting("deliver", "YAK_REMOTE_DELIVER", "1") != "0"
 NOTIFY_WHEN = setting("notify", "YAK_REMOTE_NOTIFY", "unfocused")
 TMUX_PANE = os.environ.get("TMUX_PANE", "")
+# a subagent child (subagent.py's `yak --json`) inherits the user extension
+# dir and so this bridge: its events belong to a child agent, not the user's
+# session — pushing them would double every notification and every input
+# mirror, and the child's cwd is a temp worktree no tag resolves. It carries
+# YAK_SUBAGENT_DEPTH; a hand-run yak has none.
+_CHILD = bool(os.environ.get("YAK_SUBAGENT_DEPTH"))
 
 
 def _email_cfg():
@@ -909,6 +915,8 @@ def handle_event(msg):
     global _busy, _pending_approval, _event_cwd, _own_input
     params = msg.get("params") or {}
     name = msg.get("name")
+    if _CHILD:
+        return None
     if params.get("cwd"):
         _event_cwd = params["cwd"]
     if name == "agent_start":
