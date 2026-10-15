@@ -68,7 +68,8 @@ fn later_id_and_name_do_not_clobber_earlier() {
 }
 
 /// A mock openai-compat model served on `port`: every test server below
-/// speaks its dialect.
+/// speaks its dialect. The window is set: the compaction trigger is
+/// window-anchored, and an unknown window would leave nothing to anchor.
 fn mock_model(port: u16) -> crate::providers::ResolvedModel {
     crate::providers::ResolvedModel {
         provider_name: "mock".into(),
@@ -76,7 +77,7 @@ fn mock_model(port: u16) -> crate::providers::ResolvedModel {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         api_key: Some("sk-x".into()),
         model_id: "m".into(),
-        context_window: None,
+        context_window: Some(2_000_000),
         options: vec![],
     }
 }
@@ -101,7 +102,7 @@ fn a_stalled_compaction_is_reported_once() {
     });
     let model = mock_model(port);
     let cfg = compact::CompactConfig {
-        trigger_tokens: 1_000,
+        trigger_tokens: Some(1_000),
         keep_recent_tokens: 0,
     };
     let marker = Some((
@@ -123,6 +124,8 @@ fn a_stalled_compaction_is_reported_once() {
         let mut ch = CompactHooks {
             hooks: &Extensions::EMPTY,
             skip_round: &mut no_skip,
+            reason: "trigger",
+            focus: None,
         };
         let _ = maybe_compact(
             &model,
@@ -153,6 +156,8 @@ fn a_stalled_compaction_is_reported_once() {
         let mut ch = CompactHooks {
             hooks: &Extensions::EMPTY,
             skip_round: &mut no_skip,
+            reason: "trigger",
+            focus: None,
         };
         let _ = maybe_compact(
             &model,
@@ -400,7 +405,7 @@ fn a_refused_prompt_forces_a_compaction_and_the_round_is_retried() {
     let mut opts = test_opts();
     // the window is exactly what is not known here: nothing is configured
     opts.compact = Some(compact::CompactConfig {
-        trigger_tokens: 0,
+        trigger_tokens: Some(0),
         keep_recent_tokens: 0,
     });
     let mut approval = approval::ApprovalConfig::default();
@@ -468,7 +473,7 @@ fn a_known_window_compacts_before_the_first_request() {
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
     let mut opts = test_opts();
     opts.compact = Some(compact::CompactConfig {
-        trigger_tokens: 64_000,
+        trigger_tokens: Some(64_000),
         keep_recent_tokens: 0,
     });
     let mut approval = approval::ApprovalConfig::default();
@@ -527,7 +532,7 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         ..test_opts()
     };
     opts.compact = Some(compact::CompactConfig {
-        trigger_tokens: 1000,
+        trigger_tokens: Some(1000),
         keep_recent_tokens: 500,
     });
     let mut approval = approval::ApprovalConfig::default();
@@ -611,7 +616,7 @@ fn a_silent_overflow_forces_a_compaction_and_the_round_is_retried() {
     let tools: Vec<Box<dyn tools::Tool>> = vec![];
     let mut opts = test_opts();
     opts.compact = Some(compact::CompactConfig {
-        trigger_tokens: 64_000,
+        trigger_tokens: Some(64_000),
         keep_recent_tokens: 0,
     });
     let mut approval = approval::ApprovalConfig::default();
@@ -979,4 +984,167 @@ fn an_approval_ask_reaches_a_subscribed_extension_and_auto_allows_stay_silent() 
 fn an_unsubscribed_host_never_builds_approval_frames() {
     assert!(!empty_extensions().subscribes("approval"));
     assert!(!empty_extensions().subscribes("agent_end"));
+}
+
+/// `/compact` folds the seed on demand: the summarizer is called whatever the
+/// trigger says, and the instructions ride into its prompt as the focus.
+#[test]
+fn manual_compaction_folds_the_seed_with_the_focus() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            let mut reader = BufReader::new(c.try_clone().unwrap());
+            let mut head = String::new();
+            let mut length = 0usize;
+            for _ in 0..16 {
+                head.clear();
+                if reader.read_line(&mut head).unwrap() == 0 {
+                    break;
+                }
+                if let Some(v) = head
+                    .strip_prefix("content-length:")
+                    .map(str::trim)
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    length = v;
+                }
+                if head == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0u8; length];
+            use std::io::Read as _;
+            let _ = reader.read_exact(&mut body);
+            seen2
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&body).to_string());
+            let out = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the summary\"}}]}\n\n\
+                       data: [DONE]\n\n";
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{out}",
+                    out.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    let model = mock_model(port);
+    let opts = test_opts();
+    let cfg = compact::CompactConfig {
+        trigger_tokens: Some(0),
+        keep_recent_tokens: 0,
+    };
+    let mut history = vec![Msg::user("the task"), Msg::user("x".repeat(20))];
+    let mut updates = Vec::new();
+    {
+        let mut push = |u: AgentUpdate| updates.push(u);
+        let removed = crate::agent::compact_manual(
+            &model,
+            &mut history,
+            &cfg,
+            Some("keep the file names"),
+            &opts,
+            &mut push,
+        )
+        .expect("the manual compaction runs");
+        assert_eq!(removed, 1, "the prefix folded below the summary");
+    }
+    assert!(
+        matches!(history.first(), Some(Msg::Summary { text }) if text.contains("the summary")),
+        "the prefix became the summary"
+    );
+    assert_eq!(history.len(), 2, "the summary plus the kept tail");
+    let bodies = seen.lock().unwrap();
+    assert!(
+        bodies[0].contains("Additional focus: keep the file names"),
+        "the focus rode into the summarizer prompt"
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|u| matches!(u, AgentUpdate::Compacted { .. })),
+        "the fold reported itself"
+    );
+}
+
+/// A seed that is only a summary is already compacted: a second fold would
+/// summarize the summary, so it refuses instead.
+#[test]
+fn manual_compaction_refuses_an_already_compacted_seed() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            read_request(&mut c);
+            let _ = std::io::Write::write_all(
+                &mut c,
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}",
+            );
+        }
+    });
+    let model = mock_model(port);
+    let opts = test_opts();
+    let cfg = compact::CompactConfig {
+        trigger_tokens: None,
+        keep_recent_tokens: 0,
+    };
+    let mut history = vec![Msg::Summary {
+        text: "already folded".to_string(),
+    }];
+    let err = crate::agent::compact_manual(&model, &mut history, &cfg, None, &opts, &mut |_| {})
+        .expect_err("nothing is left to fold");
+    assert_eq!(
+        err,
+        "no turn boundary can be dropped without orphaning a tool result"
+    );
+}
+
+/// The extension `compact` event carries the manual reason and the
+/// instructions, so a replacement compaction covers `/compact` too.
+#[cfg(unix)]
+#[test]
+fn manual_compaction_reaches_the_extension_with_instructions() {
+    let ext_host = crate::agent::ext::tests::compact_stub_host("focused replacement");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            read_request(&mut c);
+            let _ = std::io::Write::write_all(
+                &mut c,
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}",
+            );
+        }
+    });
+    let model = mock_model(port);
+    let mut opts = test_opts();
+    opts.hooks = &ext_host;
+    let cfg = compact::CompactConfig {
+        trigger_tokens: Some(0),
+        keep_recent_tokens: 0,
+    };
+    let mut history = vec![Msg::user("the task"), Msg::user("y".repeat(20))];
+    let removed = crate::agent::compact_manual(
+        &model,
+        &mut history,
+        &cfg,
+        Some("keep the error codes"),
+        &opts,
+        &mut |_| {},
+    )
+    .expect("the extension answered the compact event");
+    assert_eq!(removed, 1);
+    assert!(
+        matches!(history.first(), Some(Msg::Summary { text }) if text == "focused replacement"),
+        "the extension's summary replaced the prefix"
+    );
 }

@@ -383,6 +383,7 @@ fn name_row(label: &str, pad: &str, names: &[String]) -> String {
 const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/clear",
+    "/compact",
     "/status",
     "/exit",
     "/model",
@@ -921,6 +922,7 @@ fn repl_command(
                 "/resume        load a past session",
                 "/tree          jump between branches of this session",
                 "/export [PATH] write this conversation to markdown",
+                "/compact [TEXT] fold the context now, with optional focus",
                 "/clear         fresh session",
                 "/status        usage, context and plugins",
                 "/reload        reload skills/extensions",
@@ -1082,6 +1084,11 @@ fn repl_command(
                 &settings.disabled_skills,
             );
             print_banner(session, skills);
+        }
+        "/compact" => {
+            if let Err(e) = session.compact_manual((!arg.is_empty()).then_some(arg)) {
+                eprintln!("Error: {e}");
+            }
         }
         "/status" => {
             let p = crate::theme::err();
@@ -1440,13 +1447,12 @@ mod tests {
             .collect();
         for gone in [
             "memory", "init", "settings", "tools", "ask", "quit", "mcp", "trust", "skills",
-            "compact",
         ] {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
             "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "tree",
-            "export", "help", "exit",
+            "export", "compact", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }

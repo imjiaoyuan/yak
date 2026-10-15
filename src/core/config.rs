@@ -179,7 +179,46 @@ impl Config {
             .map(str::to_string);
         self.model_options = models
             .get("options")
-            .and_then(|o| serde_json::from_value(o.clone()).ok())
+            .map(|o| {
+                let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+                // values are strings by convention, but a bare number is a
+                // legal token count too — anything else (nested objects,
+                // arrays, null) fails loudly instead of vanishing through
+                // a from_value().ok() that would also eat a typo
+                let Some(table) = o.as_object() else {
+                    eprintln!(
+                        "Warning: models.options in {} is not an object; ignoring it",
+                        config_path().display()
+                    );
+                    return out;
+                };
+                for (model, pairs) in table {
+                    let Some(pairs) = pairs.as_object() else {
+                        eprintln!(
+                            "Warning: models.options[{model}] in {} is not an object; ignoring it",
+                            config_path().display()
+                        );
+                        continue;
+                    };
+                    let entry = out.entry(model.clone()).or_default();
+                    for (k, v) in pairs {
+                        match v {
+                            serde_json::Value::String(s) => {
+                                entry.insert(k.clone(), s.clone());
+                            }
+                            serde_json::Value::Number(n) => {
+                                entry.insert(k.clone(), n.to_string());
+                            }
+                            other => eprintln!(
+                                "Warning: models.options[{model}].{k} in {} is {} (want a string or number); ignoring it",
+                                config_path().display(),
+                                other
+                            ),
+                        }
+                    }
+                }
+                out
+            })
             .unwrap_or_default();
     }
 }
@@ -571,6 +610,27 @@ mod default_model_tests {
         bare.apply_models_side_tables(&serde_json::json!({}));
         assert_eq!(bare.default_model, None);
         assert!(bare.model_options.is_empty());
+    }
+
+    #[test]
+    fn a_numbered_option_value_is_carried_as_its_string() {
+        let root = serde_json::json!({
+            "models": {
+                "default": "a/x",
+                "options": {"a/x": {"context_window": 20000}}
+            }
+        });
+        let mut config = Config::default();
+        config.apply_models_side_tables(&root);
+        assert_eq!(
+            config
+                .model_options
+                .get("a/x")
+                .and_then(|o| o.get("context_window"))
+                .map(String::as_str),
+            Some("20000"),
+            "a bare token count is as legal as a quoted one"
+        );
     }
 
     #[test]

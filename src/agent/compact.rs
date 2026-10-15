@@ -8,12 +8,14 @@ use crate::providers::PromptInput;
 
 #[derive(Clone)]
 pub struct CompactConfig {
-    /// The auto-compaction trigger in tokens (`agent.compact_at_tokens`), used
-    /// only when the model's context window is unknown: a known window anchors
-    /// the trigger at `window - reserve` and this value is ignored.
-    /// `0` switches automatic compaction off; a provider that refuses a prompt
-    /// still forces one, so a session that ran into a wall is not left there.
-    pub trigger_tokens: u64,
+    /// The auto-compaction trigger in tokens (`agent.compact_at_tokens`).
+    /// `None` leaves it unconfigured — a known window then anchors the
+    /// trigger at `window - reserve`, an unknown one turns auto-compaction
+    /// off. `Some(0)` switches it off explicitly; `Some(n)` can only tighten
+    /// below `window - reserve` (the compaction module).
+    /// A provider that refuses a prompt still forces one, so a session that
+    /// ran into a wall is not left there.
+    pub trigger_tokens: Option<u64>,
     /// The tail compaction keeps (20k by default).
     pub keep_recent_tokens: u64,
 }
@@ -21,7 +23,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> CompactConfig {
         CompactConfig {
-            trigger_tokens: 64_000,
+            trigger_tokens: None,
             keep_recent_tokens: 20_000,
         }
     }
@@ -117,11 +119,26 @@ pub fn should_compact(estimate: u64, trigger: u64) -> bool {
 /// (the compaction module).
 pub const RESERVE_TOKENS: u64 = 16_384;
 
-/// The auto-compaction trigger: `window - reserve` when the model's window is
-/// known, else the configured fallback. There
-/// is no ladder — the trigger is anchored to the window, not a running count.
-pub fn effective_trigger(configured: u64, window: Option<u64>) -> u64 {
-    window.map_or(configured, |w| w.saturating_sub(RESERVE_TOKENS))
+/// The auto-compaction trigger. Unconfigured (`None`) with a known window
+/// means `window - reserve` — auto-compaction is on by default, anchored to
+/// the window, never to a running count. Unconfigured with an unknown window
+/// (or one that cannot fit the reserve) turns it off: no invented fallback
+/// threshold. An explicit `Some(0)` also turns it off. A configured value can
+/// only tighten: it is capped at `window - reserve` when the window is known,
+/// and ignored (off) when it is not — a number larger than the window is not
+/// a trigger the run could ever usefully cross.
+pub fn effective_trigger(configured: Option<u64>, window: Option<u64>) -> u64 {
+    let ceiling = window.map(|w| w.saturating_sub(RESERVE_TOKENS));
+    match (configured, ceiling) {
+        // off is off, whatever the window says
+        (Some(0), _) => 0,
+        // no window to anchor to: this side never invents a threshold
+        (_, None) | (None, Some(0)) => 0,
+        // unconfigured with a window that has room: on by default
+        (None, Some(c)) => c,
+        // a configured value can only tighten below the ceiling
+        (Some(n), Some(c)) => n.min(c),
+    }
 }
 
 /// Should this round rewrite the conversation prefix (trim old attachments,
@@ -275,6 +292,7 @@ pub(crate) fn preserved_plan(prefix: &[Msg]) -> Option<String> {
 pub fn summarize(
     model: &crate::providers::ResolvedModel,
     prefix: &[Msg],
+    focus: Option<&str>,
 ) -> Result<String, String> {
     let (template, conversation) = match prefix.first() {
         Some(Msg::Summary { text }) => (
@@ -292,7 +310,15 @@ pub fn summarize(
             ),
         ),
     };
-    let prompt = format!("{template}\n{SECTIONS}\n\n{conversation}");
+    // a manual compaction can carry user instructions for what the summary
+    // must keep; they extend the template before the section list so the
+    // summarizer reads them as emphasis, not as part of the conversation
+    let prompt = match focus {
+        Some(focus) if !focus.trim().is_empty() => {
+            format!("{template}\n\nAdditional focus: {focus}\n{SECTIONS}\n\n{conversation}")
+        }
+        _ => format!("{template}\n{SECTIONS}\n\n{conversation}"),
+    };
     let input = PromptInput {
         max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
         system: Some(SUMMARIZER_SYSTEM),
@@ -497,10 +523,10 @@ mod tests {
     #[test]
     fn rewrite_gate_fires_before_compaction() {
         let cfg = CompactConfig {
-            trigger_tokens: 100_000,
+            trigger_tokens: Some(100_000),
             keep_recent_tokens: 0,
         };
-        let trigger = cfg.trigger_tokens;
+        let trigger = cfg.trigger_tokens.unwrap_or(0);
         assert!(
             !rewrite_prefix(49_999, trigger),
             "just under half: no rewrite"
@@ -636,18 +662,21 @@ mod tests {
     fn keep_recent_never_outgrows_the_trigger_it_guards() {
         // the default trigger honors the full configured tail (the 20k)
         let big = CompactConfig::default();
-        assert_eq!(big.effective_keep_recent(big.trigger_tokens), 20_000);
+        assert_eq!(
+            big.effective_keep_recent(big.trigger_tokens.unwrap_or(0)),
+            20_000
+        );
         // a small trigger clamps it to half, so a cut always exists once
         // compaction is due (before the clamp, find_cut returned None forever
         // and the run died on a provider context error)
         let small = CompactConfig {
-            trigger_tokens: 12_000,
+            trigger_tokens: Some(12_000),
             keep_recent_tokens: 32_000,
         };
         assert_eq!(small.effective_keep_recent(12_000), 6_000);
         // a small configured value is left alone
         let tiny = CompactConfig {
-            trigger_tokens: 16_000,
+            trigger_tokens: Some(16_000),
             keep_recent_tokens: 1_000,
         };
         assert_eq!(tiny.effective_keep_recent(16_000), 1_000);
@@ -669,18 +698,32 @@ mod tests {
         assert!(!should_compact(u64::MAX, 0));
     }
 
-    /// A known window anchors the trigger at `window - reserve` ;
-    /// the configured value is only the fallback for an unknown window.
+    /// A known window anchors the trigger at `window - reserve`; an unknown
+    /// one leaves nothing to anchor to, so auto-compaction is off unless the
+    /// config says otherwise. A configured value can only tighten.
     #[test]
     fn a_known_window_anchors_the_trigger() {
-        // no window: the configured fallback stands
-        assert_eq!(effective_trigger(64_000, None), 64_000);
-        // a known window wins outright
+        // unconfigured + known window: on by default, anchored to the window
         let w = Some(200_000u64);
-        assert_eq!(effective_trigger(64_000, w), 200_000 - RESERVE_TOKENS);
-        assert_eq!(effective_trigger(20_000, w), 200_000 - RESERVE_TOKENS);
-        // a small window saturates at 0 rather than underflowing
-        assert_eq!(effective_trigger(64_000, Some(8_000)), 0);
+        assert_eq!(effective_trigger(None, w), 200_000 - RESERVE_TOKENS);
+        // unconfigured + unknown window: never auto-compact — no invented
+        // fallback threshold
+        assert_eq!(effective_trigger(None, None), 0);
+        // explicit off stays off even with a known window
+        assert_eq!(effective_trigger(Some(0), w), 0);
+        assert_eq!(effective_trigger(Some(0), None), 0);
+        // a configured value can only tighten below `window - reserve`
+        assert_eq!(effective_trigger(Some(150_000), w), 150_000);
+        assert_eq!(effective_trigger(Some(20_000), w), 20_000);
+        assert_eq!(
+            effective_trigger(Some(250_000), w),
+            200_000 - RESERVE_TOKENS
+        );
+        // configured + unknown window: nothing anchors the number to, off
+        assert_eq!(effective_trigger(Some(64_000), None), 0);
+        // a window that cannot fit the reserve has no room to compact into
+        assert_eq!(effective_trigger(None, Some(8_000)), 0);
+        assert_eq!(effective_trigger(Some(4_000), Some(8_000)), 0);
     }
 
     #[test]

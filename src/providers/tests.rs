@@ -344,3 +344,41 @@ fn a_git_root_bounds_the_project_walk() {
     std::fs::create_dir(repo.join(".git")).unwrap();
     assert_eq!(project_default_model_at(&cfg, &repo), None);
 }
+
+#[test]
+fn a_stored_context_window_survives_the_cli_option_merge() {
+    let mut cfg = crate::core::config::Config::default();
+    cfg.providers.insert(
+        "p".to_string(),
+        crate::core::config::Provider {
+            kind: "openai".to_string(),
+            base_url: "https://p.test/v1".to_string(),
+            api_key: None,
+            models: vec!["m1".to_string()],
+        },
+    );
+    cfg.model_options.insert(
+        "p/m1".to_string(),
+        [("context_window".to_string(), "20000".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    // the tail resolve lifts the stored window into the model
+    let model = resolve_model_tail(&cfg, "p/m1", |_| None).expect("resolves");
+    assert_eq!(model.context_window, Some(20000));
+    assert!(model.options.is_empty(), "metadata never rides the wire");
+    // re-running the lift (what the CLI -o merge path does when no pair
+    // names it) must not erase what the stored table set
+    let mut again = ResolvedModel::from_config("p", cfg.providers.get("p").unwrap(), "m1", None);
+    again.context_window = model.context_window;
+    if again.options.iter().any(|(k, _)| k == "context_window") {
+        again.context_window = ResolvedModel::take_context_window(&mut again.options).unwrap();
+    }
+    assert_eq!(again.context_window, Some(20000));
+    // a CLI pair replaces it, not layers under it
+    let mut cli = ResolvedModel::from_config("p", cfg.providers.get("p").unwrap(), "m1", None);
+    cli.options
+        .push(("context_window".to_string(), "999".to_string()));
+    cli.context_window = ResolvedModel::take_context_window(&mut cli.options).unwrap();
+    assert_eq!(cli.context_window, Some(999));
+}

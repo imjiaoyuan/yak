@@ -163,12 +163,17 @@ pub fn resolve_run_model(
         resolve_model_tail(&cfg, &query, |p| cli_key.clone().or_else(|| cfg.api_key(p)))?;
     // CLI `-o` pairs ride on top of whatever config stored, last write wins,
     // and `context_window` is re-read after the merge: a CLI override can
-    // anchor compaction the same way a stored one does
+    // anchor compaction the same way a stored one does. A merge with no
+    // `context_window` pair keeps what the stored table already lifted —
+    // a second take would report the key "absent" only because the first
+    // one consumed it
     for (k, v) in crate::core::text::parse_kv(&args.multi(&["option"]))? {
         model.options.retain(|(existing, _)| existing != &k);
         model.options.push((k, v));
     }
-    model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
+    if model.options.iter().any(|(k, _)| k == "context_window") {
+        model.context_window = ResolvedModel::take_context_window(&mut model.options)?;
+    }
     Ok(model)
 }
 

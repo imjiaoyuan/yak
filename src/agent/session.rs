@@ -568,6 +568,96 @@ impl Session {
         }
     }
 
+    /// `/compact [instructions]`: fold the conversation now, on the user's
+    /// word, not the window's. Runs only from an idle prompt (the REPL checks
+    /// before calling); the instructions, when given, steer what the summary
+    /// keeps. Refuses: nothing yet to compact, or a prefix that
+    /// is already a summary. The compacted turn lands in the thread file as
+    /// its own line, so a resume rebuilds the folded history, not the
+    /// unfolded one.
+    pub fn compact_manual(&mut self, focus: Option<&str>) -> Result<(), String> {
+        let Some(model) = self.model.as_ref() else {
+            return Err(
+                "No model configured. Run /login to add a provider, then /model to pick one."
+                    .to_string(),
+            );
+        };
+        if self.seed.is_empty() {
+            return Err("nothing to compact (session too small)".to_string());
+        }
+        if matches!(self.seed.first(), Some(Msg::Summary { .. })) && self.seed.len() == 1 {
+            return Err("already compacted".to_string());
+        }
+        let opts = agent_opts(
+            self.max_request_bytes,
+            self.system.as_deref(),
+            &self.cwd,
+            self.stream,
+            &self.compact,
+            self.thinking.as_deref(),
+            &self.extensions,
+            &self.cache_key,
+            self.cache_anchor(),
+            self.cache_ttl,
+        );
+        let model_id = model.model_id.clone();
+        let view = std::cell::RefCell::new(crate::term::render::TaskView::new(2, &model_id, true));
+        view.borrow_mut().terminal_md(2);
+        let started = std::time::Instant::now();
+        let identity = TaskIdentity {
+            model,
+            cwd: &self.cwd,
+            system: self.system.as_deref(),
+        };
+        let mut on_update = |u: AgentUpdate| match u {
+            AgentUpdate::Compacting => {
+                view.borrow_mut().relabel("compacting context");
+            }
+            AgentUpdate::Compacted { .. } => {
+                view.borrow_mut().pause();
+            }
+            AgentUpdate::CompactStalled { reason } => {
+                view.borrow_mut().pause();
+                let p = crate::theme::err();
+                eprintln!(
+                    "{}! compaction stalled: {reason} — the context stays over the window{}",
+                    p.red, p.reset
+                );
+            }
+            _ => {}
+        };
+        let result = crate::agent::compact_manual(
+            model,
+            &mut self.seed,
+            &self.compact,
+            focus,
+            &opts,
+            &mut on_update,
+        );
+        view.borrow_mut().abort();
+        crate::core::http::clear_interrupt();
+        result.map(|removed| {
+            // the folded conversation is one round: the summary message plus
+            // the kept tail, exactly the slice a resume rebuilds from
+            persist_round(
+                self.store.as_ref(),
+                &mut self.conversation_id,
+                &mut self.branch_parent,
+                &mut self.persist_error,
+                &identity,
+                &self.seed,
+                None,
+                "",
+                started,
+            );
+            let p = crate::theme::err();
+            eprintln!(
+                "{}compacted — {} messages folded into a summary{}",
+                p.dim, removed, p.reset
+            );
+        })
+    }
+
     /// `--json`: the same task, with a line-delimited JSON event stream as
     /// the output surface instead of the terminal UI. Every [`AgentUpdate`]
     /// becomes one object and the closing `result` object carries the final
@@ -1035,6 +1125,15 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
         if let Some(u) = turn.usage {
             usage.add(u.into());
         }
+        // a turn whose messages open on a compaction summary folds the
+        // replay: the summary replaces everything replayed before it (the
+        // dropped messages stay archived in their earlier lines — the file
+        // is append-only, the *context* is what shrinks). The summary's own
+        // turn carries the kept tail after it, so the replay continues from
+        // it exactly where the conversation stood when the fold ran
+        if matches!(turn.messages.first(), Some(Msg::Summary { .. })) && !turn.messages.is_empty() {
+            msgs.clear();
+        }
         for m in &turn.messages {
             // a user turn with neither text nor attachments carries nothing
             // into the request, so it never enters the replay
@@ -1168,7 +1267,7 @@ mod tests {
         Session {
             max_request_bytes: crate::core::http::MAX_REQUEST_BYTES,
             compact: CompactConfig {
-                trigger_tokens: 4_000,
+                trigger_tokens: Some(4_000),
                 keep_recent_tokens: 100,
             },
             cache_ttl: None,
@@ -1178,7 +1277,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
-                context_window: None,
+                context_window: Some(40_000),
                 options: vec![],
             }),
             tools: Vec::new(),
@@ -1266,7 +1365,7 @@ mod tests {
         ];
         let mut session = tight_session(seed.clone());
         session.compact = CompactConfig {
-            trigger_tokens: 128_000,
+            trigger_tokens: Some(128_000),
             keep_recent_tokens: 32_000,
         };
         session.prune_seed_to_fit();
@@ -1341,7 +1440,7 @@ mod tests {
                 base_url: format!("http://127.0.0.1:{port}/v1"),
                 api_key: None,
                 model_id: "m".into(),
-                context_window: None,
+                context_window: Some(40_000),
                 options: vec![],
             }),
             tools: vec![],
@@ -1526,6 +1625,69 @@ mod tests {
         assert_eq!(texts, vec!["one", "again"]);
     }
 
+    /// A turn whose messages open on a `Summary` folds the replay: the
+    /// dropped prefix stays archived in its earlier lines, and the context
+    /// resumes from the summary plus the tail that turn carries.
+    #[test]
+    fn a_summary_turn_folds_the_replayed_context() {
+        let turn = |id: &str, prompt: &str, messages: Vec<Msg>| StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: id.into(),
+            parent: None,
+            ts: "2026-08-23T01:00:00+00:00".into(),
+            mode: "agent".into(),
+            model: "prov/m".into(),
+            cwd: None,
+            system: Some("sys".into()),
+            prompt: prompt.into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages,
+        };
+        let user = |t: &str| Msg::User {
+            text: t.into(),
+            attachments: Vec::new(),
+        };
+        // two ordinary rounds, then a manual compaction line whose messages
+        // are the summary plus the kept tail, then a round after it
+        let turns = vec![
+            turn("t1", "one", vec![user("one")]),
+            turn("t2", "two", vec![user("two")]),
+            turn(
+                "t3",
+                "",
+                vec![
+                    Msg::Summary {
+                        text: "the fold".into(),
+                    },
+                    user("two"),
+                ],
+            ),
+            turn("t4", "three", vec![user("three")]),
+        ];
+        let rebuilt = rebuild_turns(&turns).expect("the chain holds");
+        let texts: Vec<&str> = rebuilt
+            .messages
+            .iter()
+            .map(|m| match m {
+                Msg::User { text, .. } => text.as_str(),
+                Msg::Summary { .. } => "<summary>",
+                _ => "",
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["<summary>", "two", "three"],
+            "the folded prefix dropped off the replay, the tail survived"
+        );
+        // usage sums along the whole chain: a fold does not retract billing
+        // already recorded on the dropped rounds
+        assert_eq!(rebuilt.system.as_deref(), Some("sys"));
+    }
+
     /// A round that failed late (stream drop after tool rounds) must still
     /// reach the thread file: `/resume` sees the work either way.
     #[test]
@@ -1544,7 +1706,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
-                context_window: None,
+                context_window: Some(40_000),
                 options: vec![],
             }),
             tools: Vec::new(),
@@ -1619,7 +1781,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: None,
                 model_id: "m".into(),
-                context_window: None,
+                context_window: Some(40_000),
                 options: vec![],
             }),
             tools: Vec::new(),

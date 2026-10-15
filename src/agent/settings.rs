@@ -41,13 +41,14 @@ impl AgentSettings {
         self.cache_ttl.as_deref().and_then(CacheTtl::parse)
     }
 
-    /// Compaction limits for a run. `compact_at_tokens` is the fallback
-    /// trigger for an unknown window (64k by default); a known window anchors
-    /// the trigger at `window - reserve` instead. `keep_recent_tokens` is the
-    /// tail each compaction keeps (20k by default, the value).
+    /// Compaction limits for a run. `compact_at_tokens` (`None` =
+    /// unconfigured) is only ever a tightening cap on the window-anchored
+    /// `window - reserve` trigger, never a fallback invented when the window
+    /// is unknown (the compaction module). `keep_recent_tokens` is the
+    /// dropped-prefix floor.
     pub fn compact_config(&self) -> CompactConfig {
         CompactConfig {
-            trigger_tokens: self.compact_at_tokens.unwrap_or(64_000),
+            trigger_tokens: self.compact_at_tokens,
             keep_recent_tokens: self.keep_recent_tokens.unwrap_or(20_000),
         }
     }
