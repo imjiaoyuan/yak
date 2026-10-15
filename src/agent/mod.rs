@@ -53,6 +53,10 @@ pub enum AgentUpdate {
     TurnEnd {
         usage: Option<Usage>,
     },
+    /// history prefix is about to be replaced by a compaction summary: the
+    /// summarize call that follows is model work the task waits out, so the
+    /// wait surfaces instead of reading as a hung terminal
+    Compacting,
     /// history prefix was replaced by a compaction summary
     Compacted {
         removed: usize,
@@ -801,6 +805,11 @@ fn maybe_compact(
         }
     }
     if compact::should_compact(estimate, cfg.trigger_tokens) {
+        // the summarize call below replays the whole dropped prefix to the
+        // model and is the task's own work (not a provider prefill the next
+        // round waits out): say so before it starts, or a long fold reads
+        // as a hung terminal
+        (sink.on_update)(AgentUpdate::Compacting);
         // the trigger is window-anchored, not a running count: it stays where
         // it is after a compaction
         match compact_now(model, history, cfg, &mut after, &mut *sink.on_update, ch) {
@@ -963,6 +972,7 @@ fn force_compact(
         cache_stable: *cache_stable,
         trigger: cfg.trigger_tokens,
     };
+    (*sink.on_update)(AgentUpdate::Compacting);
     match compact_now(model, history, cfg, &mut after, &mut *sink.on_update, ch) {
         Ok(()) => {
             *usage_marker = after.usage_marker;

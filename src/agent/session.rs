@@ -418,10 +418,20 @@ impl Session {
                     }
                     view.borrow_mut().turn_end(usage);
                 }
+                AgentUpdate::Compacting => {
+                    // maintenance the session runs on its own: swap the label
+                    // and keep the clock, so a fold that takes minutes still
+                    // reads as work in progress, not a dead terminal — the
+                    // summarizer's output is folded silently
+                    view.borrow_mut().relabel("compacting context");
+                }
                 AgentUpdate::Compacted { .. } => {
                     // settle the streaming partial line; auto-compaction is
                     // silent on the terminal
                     view.borrow_mut().pause();
+                    // the next model round is awaited right after: spin, or
+                    // the post-fold prefill reads as a hang
+                    view.borrow_mut().resume_wait();
                 }
                 AgentUpdate::CompactStalled { reason } => {
                     // compaction is due and cannot run: the session keeps
@@ -467,6 +477,10 @@ impl Session {
                     // printed here was noise next to a task the user is
                     // watching anyway
                     view.borrow_mut().pause();
+                    // a compaction may follow immediately (the prune freed
+                    // too little): the spinner must be live for it and for
+                    // the next round's prefill
+                    view.borrow_mut().resume_wait();
                 }
             }
         };
@@ -874,6 +888,7 @@ fn event_json(u: &AgentUpdate) -> serde_json::Value {
         AgentUpdate::Compacted { removed } => {
             serde_json::json!({"type": "compacted", "removed": removed})
         }
+        AgentUpdate::Compacting => serde_json::json!({"type": "compacting"}),
         AgentUpdate::CompactStalled { reason } => {
             serde_json::json!({"type": "compact_stalled", "reason": reason})
         }
@@ -2197,6 +2212,7 @@ mod tests {
                 AgentUpdate::TurnEnd { usage: None },
                 json!({"type": "turn_end", "usage": null}),
             ),
+            (AgentUpdate::Compacting, json!({"type": "compacting"})),
             (
                 AgentUpdate::Compacted { removed: 12 },
                 json!({"type": "compacted", "removed": 12}),
