@@ -208,7 +208,7 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs: see gate semantics | `{tool, args}` |
 | `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}`: reply `{"content": ..}` to replace it, see below |
-| `compact` | an automatic compaction is due (pre-request check, overflow refusal, silent overflow), before the built-in summarizer runs | `{reason: "trigger"\|"overflow"\|"stalled", trigger_tokens, keep_recent_tokens}`: reply `{"decision": "compact", "summary": .., "keep_recent_tokens": n}` to replace it, see below |
+| `compact` | a compaction is due — the pre-request check, an overflow refusal, a silent overflow, or the manual `/compact` — before the built-in summarizer runs | `{reason: "trigger"\|"overflow"\|"stalled"\|"manual", trigger_tokens, keep_recent_tokens, instructions?}`: `instructions` rides only a manual `/compact [text]`; reply `{"decision": "compact", "summary": .., "keep_recent_tokens": n}` to replace it, see below |
 | `approval` | an approval prompt is about to surface, before it blocks | `{cwd, tool, preview, pattern, focused?}`: `pattern` is the matched ask-list line for a bash ask, else null — the desktop-notification seam (see `notify.py`); fire-and-forget. Auto-allowed calls (read-tier, allow policies, `tool_call` pre-allow without a blacklist hit) never fire it |
 | `agent_end` | task finished or interrupted | `{cwd, final_text, interrupted, focused?}`: `cwd` (on both events, and on `agent_start`) is the session's working directory — with more than one yak running it is what tells the notifications apart. `focused` (on both events) is present only when the terminal reports focus (`ESC[I`/`ESC[O`, the focus-report mode held while yak reads input): true means the window is focused, so the user is already looking and a notification is noise — `notify.py` stays quiet then (its `NOTIFY_WHEN = "always"` opts out); absent means focus is unknown, and a gate must not guess |
 | `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
@@ -243,7 +243,7 @@ Reply without a `content` field (or `null`) to observe only. The replacement is 
 
 ### Replacing a compaction
 
-A `compact` subscriber sees that a compaction is due and may replace the built-in summarize-the-prefix step with its own summary — the seam a privacy filter, a domain-specific distiller or a side-model call plugs into. The event tells you why it fired: `trigger` (the token estimate crossed the trigger), `overflow` (the provider refused the prompt as too large), `stalled` (a previous attempt failed; this is the retry):
+A `compact` subscriber sees that a compaction is due and may replace the built-in summarize-the-prefix step with its own summary — the seam a privacy filter, a domain-specific distiller or a side-model call plugs into. The event tells you why it fired: `trigger` (the token estimate crossed the trigger), `overflow` (the provider refused the prompt as too large), `stalled` (a previous attempt failed; this is the retry), `manual` (the user ran `/compact`; `instructions` carries its optional focus text):
 
 ```json
 → {"id": 7, "type": "event", "v": 1, "name": "compact",
@@ -251,7 +251,9 @@ A `compact` subscriber sees that a compaction is due and may replace the built-i
 ← {"id": 7, "result": {"decision": "compact", "summary": "<the new context prefix>", "keep_recent_tokens": 8000}}
 ```
 
-A reply carrying `decision: "compact"` and a non-empty `summary` replaces the whole compaction: your summary becomes the context prefix (a `Summary` message the model reads as ``<summary>``-wrapped history) and the task **ends** — the summary is a verdict, not a recap, so no model round follows it and the summary text is the task's final answer. `keep_recent_tokens` is optional: it re-derives how much recent history stays readable beside the summary (omit it to keep the configured cut). Replying anything else observes only, and the built-in summarizer runs. Like every hook the path is **fail-open**: a timeout, a crash or a malformed reply falls back to the built-in compaction, never to a dropped compaction. With no subscriber at all the event costs nothing.
+`trigger_tokens` is the resolved trigger (0 when automatic compaction is off — a `manual` event can still arrive then, because `/compact` is never gated on it).
+
+A reply carrying `decision: "compact"` and a non-empty `summary` replaces the whole compaction: your summary becomes the context prefix (a `Summary` message the model reads as ``<summary>``-wrapped history). During a task the replacement **ends** the task — the summary is a verdict, not a recap, so no model round follows it and the summary text is the task's final answer; a manual `/compact` folds the idle session and returns to the prompt instead. `keep_recent_tokens` is optional: it re-derives how much recent history stays readable beside the summary (omit it to keep the configured cut). Replying anything else observes only, and the built-in summarizer runs. Like every hook the path is **fail-open**: a timeout, a crash or a malformed reply falls back to the built-in compaction, never to a dropped compaction. With no subscriber at all the event costs nothing.
 
 ## Approval, tiers and policies
 
