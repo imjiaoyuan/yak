@@ -13,7 +13,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `ls` | script tool | directory listing; the reference tool the host used to carry built in, kept byte-compatible |
 | `update_plan` | script tool | the checklist: a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
 | `search` | script tool | the `grep`/`glob` pair over ripgrep, read-only over the tree; read-tier, never prompts |
-| `remember` | script tool | memory: one dated deduped line into `~/.yak/YAK.md`; write-tier |
+| `remember` | script tool | memory: one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
 | `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier |
 | `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
@@ -27,6 +27,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or held in an inbox until the session is free; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
+| `model_pin` | resident | the per-directory model pin: `/model-pin` reads and writes `<user_dir>/model-pins.json`, the nearest pinned ancestor of cwd wins at startup |
 | `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 

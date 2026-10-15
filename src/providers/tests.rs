@@ -346,6 +346,78 @@ fn a_git_root_bounds_the_project_walk() {
 }
 
 #[test]
+fn the_closest_path_pin_wins() {
+    let cfg = crate::core::config::Config {
+        providers: [(
+            "p".to_string(),
+            crate::core::config::Provider {
+                kind: "openai".to_string(),
+                base_url: "https://p.test/v1".to_string(),
+                api_key: None,
+                models: vec!["m1".to_string(), "m2".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let dir = crate::core::testutil::scratch_dir("pins-closest");
+    let pins = dir.join("model-pins.json");
+    std::fs::write(
+        &pins,
+        serde_json::json!({
+            dir.join("work").display().to_string(): "p/m1",
+            dir.join("work/a/deep").display().to_string(): "p/m2",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        path_pinned_model_at(&cfg, &pins, &dir.join("work/a/deep/src")),
+        Some("p/m2".to_string())
+    );
+    assert_eq!(
+        path_pinned_model_at(&cfg, &pins, &dir.join("work/b")),
+        Some("p/m1".to_string())
+    );
+    // outside every pin: nothing
+    assert_eq!(
+        path_pinned_model_at(&cfg, &pins, &dir.join("elsewhere")),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn path_pins_match_by_component_not_bytes() {
+    let cfg = crate::core::config::Config::default();
+    let dir = crate::core::testutil::scratch_dir("pins-bytes");
+    let pins = dir.join("model-pins.json");
+    std::fs::write(
+        &pins,
+        serde_json::json!({dir.join("a/b").display().to_string(): "p/m1"}).to_string(),
+    )
+    .unwrap();
+    // /a/bc is a sibling, not a child, of /a/b
+    assert_eq!(path_pinned_model_at(&cfg, &pins, &dir.join("a/bc")), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unresolvable_path_pin_is_dropped() {
+    let cfg = crate::core::config::Config::default();
+    let dir = crate::core::testutil::scratch_dir("pins-bad");
+    let pins = dir.join("model-pins.json");
+    std::fs::write(
+        &pins,
+        serde_json::json!({dir.display().to_string(): "ghost/nope"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(path_pinned_model_at(&cfg, &pins, &dir), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_stored_context_window_survives_the_cli_option_merge() {
     let mut cfg = crate::core::config::Config::default();
     cfg.providers.insert(

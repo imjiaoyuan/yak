@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""model_pin — a resident yak extension: one slash command, one file.
+
+Copy to ~/.yak/extensions/model_pin, chmod +x, /reload. It mounts:
+
+  /model-pin [model]   pin a model for this directory, or show the table
+  /model-pin off       remove the pin for this directory (or one below it)
+
+The pins live in <user_dir>/model-pins.json ({"<absolute dir>":
+"provider/model"}), and yak's startup model resolution reads them: -m >
+YAK_MODEL > the session's own model > the nearest pinned path > the
+project pin (models.default in <project>/.yak/config.json) > the global
+default. The nearest ancestor wins: a pin on ~/work/a covers ~/work/a/sub;
+a deeper pin shadows it. Pins apply to *new* sessions — an ongoing session
+keeps the model it started with (switch with /model). Bare with no
+argument lists every pin. The pin is remembered per path, so cd-ing around
+picks the right model without editing config.json per project.
+"""
+
+import json
+import os
+import sys
+
+COMMANDS = ["model-pin"]
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def user_dir():
+    """config::user_dir(): YAK_USER_PATH wins, else ~/.yak."""
+    override = os.environ.get("YAK_USER_PATH")
+    if override:
+        return override
+    home = os.environ.get("HOME") or (
+        os.environ.get("USERPROFILE") if os.name == "nt" else None
+    )
+    return os.path.join(home, ".yak") if home else os.path.join(".yak")
+
+
+def pins_path():
+    return os.path.join(user_dir(), "model-pins.json")
+
+
+def read_pins():
+    """A missing file is an empty table; a malformed one is a loud error —
+    the core reads the same file and would warn on it too."""
+    path = pins_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return {}
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: {path} does not parse: {e}")
+
+
+def write_pins(pins):
+    path = pins_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pins, f, indent=2)
+        f.write("\n")
+
+
+def matching_pin(pins, cwd):
+    """The core's rule: the longest matching prefix, by component."""
+    hit = None
+    for d, model in pins.items():
+        base = os.path.normpath(d)
+        if not cwd.startswith(base + os.sep) and cwd != base:
+            continue
+        depth = len(base.rstrip(os.sep).split(os.sep))
+        if hit is None or depth > hit[0]:
+            hit = (depth, d, model)
+    return hit
+
+
+def model_pin(arg):
+    pins = read_pins()
+    cwd = os.path.normpath(os.getcwd())
+
+    if arg.strip().lower() == "off":
+        # remove the pin governing this directory: the exact cwd first,
+        # else the nearest ancestor carrying one
+        if cwd in pins:
+            del pins[cwd]
+            write_pins(pins)
+            return f"pin removed for {cwd}"
+        hit = matching_pin(pins, cwd)
+        if hit:
+            del pins[hit[1]]
+            write_pins(pins)
+            return f"pin removed for {hit[1]} (governed {cwd})"
+        return f"no pin governs {cwd}"
+
+    if arg.strip():
+        model = arg.strip()
+        pins[cwd] = model
+        write_pins(pins)
+        return f"pinned {model} for {cwd} (new sessions here start on it)"
+
+    if not pins:
+        return f"no pins yet ({pins_path()}); /model-pin <provider/model> to set one"
+    hit = matching_pin(pins, cwd)
+    rows = []
+    for d in sorted(pins):
+        mark = " <- governs cwd" if hit and d == hit[1] else ""
+        rows.append(f"{d}: {pins[d]}{mark}")
+    return "\n".join(rows) + f"\n({pins_path()})"
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid, kind = msg.get("id"), msg.get("type")
+        if kind == "initialize":
+            reply({"id": mid, "result": {"tools": [], "commands": COMMANDS, "events": []}})
+        elif kind == "run_command" and msg.get("name") == "model-pin":
+            try:
+                reply({"id": mid, "result": model_pin(str(msg.get("args") or ""))})
+            except SystemExit as e:
+                reply({"id": mid, "result": str(e)})
+            except Exception as e:
+                reply({"id": mid, "result": f"error: {e}"})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

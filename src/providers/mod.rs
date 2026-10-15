@@ -132,6 +132,64 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
     resolve_model_tail(&cfg, query, |p| cfg.api_key(p))
 }
 
+/// The per-path model pin: `~/.yak/model-pins.json`, `{"<dir>":
+/// "provider/model"}` with absolute paths as keys. The longest matching
+/// prefix of cwd wins (a pin on `~/work/a` covers `~/work/a/sub`); the
+/// model itself must still resolve, and one that does not is dropped with
+/// a warning — a stale pin must not dead-end every yak started under its
+/// path. Managed by the `model_pin` example extension.
+pub(crate) fn path_pinned_model(cfg: &crate::core::config::Config) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    path_pinned_model_at(cfg, &user_pins_path(), &cwd)
+}
+
+fn user_pins_path() -> std::path::PathBuf {
+    crate::core::config::user_dir().join("model-pins.json")
+}
+
+/// The testable body: an explicit pins file and cwd instead of the
+/// process's. Reads one flat `{dir: model}` object; a malformed file warns
+/// and reads as empty rather than dead-ending every start under it.
+fn path_pinned_model_at(
+    cfg: &crate::core::config::Config,
+    pins_path: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    let text = std::fs::read_to_string(pins_path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("Warning: cannot parse {}: {e}", pins_path.display());
+        serde_json::Value::Null
+    });
+    let pins = root.as_object()?;
+    // longest matching prefix: the closest pin to cwd wins. Prefix match is
+    // by component, so /a/bc never matches a pin on /a/b
+    let mut hit: Option<(usize, String)> = None;
+    for (dir, model) in pins {
+        let Some(model) = model.as_str() else {
+            continue;
+        };
+        let base = std::path::Path::new(dir);
+        if !cwd.starts_with(base) {
+            continue;
+        }
+        let depth = base.components().count();
+        if hit.as_ref().is_none_or(|(best, _)| depth > *best) {
+            hit = Some((depth, model.to_string()));
+        }
+    }
+    let (_, model) = hit?;
+    let resolves = cfg.resolve_model(&model).ok().flatten().is_some();
+    if !resolves {
+        eprintln!(
+            "Warning: pinned model '{model}' for {} in {} does not resolve, ignoring it",
+            cwd.display(),
+            pins_path.display()
+        );
+        return None;
+    }
+    Some(model)
+}
+
 pub fn resolve_run_model(
     args: &crate::core::args::ParsedArgs,
     context: Option<String>,
@@ -150,6 +208,7 @@ pub fn resolve_run_model(
         .map(str::to_string)
         .or_else(|| std::env::var("YAK_MODEL").ok())
         .or(context)
+        .or_else(|| path_pinned_model(&cfg))
         .or_else(|| project_default_model(&cfg))
         .or(stored_default);
     let Some(query) = query else {

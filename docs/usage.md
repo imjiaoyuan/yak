@@ -66,7 +66,7 @@ For JSON and JSONL, append `?q=<filter>` to the path and the file is queried ins
 
 `edit` applies one or more exact-match replacements in one call; `write` creates or overwrites a file. Under context pressure an oversized tool result is cut to its head and tail with a note naming what was dropped: the full text stays in the session log, and the model can re-run the command or re-read the file when it needs the middle back.
 
-`remember` saves one durable fact to `~/.yak/YAK.md` (`- [date] one line`): ask \"记住我喜欢简洁回复\" and the agent calls it. The line is deduped (a fact already noted, either way round, is not repeated) and injected into every future session's system prompt; a hand edit to the file works the same way. Project-scoped rules belong in an `AGENTS.md` in the repo, not here.
+`remember` saves one durable fact to `~/.yak/YAK.md` (`- [date] one line`): ask \"记住我喜欢简洁回复\" and the agent calls it. The line is deduped (a fact already noted, either way round, is not repeated) and injected into every future session's system prompt; a hand edit to the file works the same way. For a fact only one project's sessions need, ask "记住(仅本项目)…" and the agent passes `project: true`: the line lands in `<project>/.yak/YAK.md` and rides the `<project_memory>` block inside that project. Project-scoped rules belong in an `AGENTS.md` in the repo when they must steer the agent's own behavior; project memory is for environment facts and preferences.
 
 ## Attachments
 
@@ -141,6 +141,8 @@ If you prefer to edit config by hand, add a block like this to `config.json`:
 `/model` picks the model (live list, with your saved ones pinned on top of it) and its thinking depth, saved for future sessions; `/thinking` changes the depth alone. Both live in the `models` object of config.json. `-m` and `YAK_MODEL` override per run, and `--thinking` beats the stored depth. If the saved model no longer resolves, you get a warning and a fallback.
 
 A project can carry its own default: `models.default` in `<project>/.yak/config.json` (nearest `.yak` up from cwd, bounded by the git root — the same walk project memory follows) beats the global default for new sessions started inside the project, and an ongoing session still keeps its own model. The [`model_here`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension mounts a `/model-here` slash command that reads and writes that pin (`/model-here zai/glm-5.3`, `/model-here` to show, `/model-here off` to remove). A pinned id that does not resolve is a loud warning, then the global default.
+
+Before the project pin sits a per-directory one: `model-pins.json` in the user dir (`{"/abs/dir": "provider/model"}`), where the nearest pinned ancestor of cwd wins — a pin on `~/work` covers everything under it until a deeper pin shadows it, so cd-ing around picks the right model without editing per-project config. The [`model_pin`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension mounts `/model-pin <model>` to set, `/model-pin` to list, `/model-pin off` to remove the pin governing the cwd. Pins apply to new sessions; an ongoing session keeps its model (`/model` switches live). The full chain at startup: `-m` > `YAK_MODEL` > the session's own model > the directory pin > the project pin > the global default.
 
 ## Tuning the agent
 

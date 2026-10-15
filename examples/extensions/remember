@@ -3,15 +3,19 @@
 
 Copy to ~/.yak/extensions/remember, chmod +x, /reload. It mounts:
 
-  remember {text}    one dated line into the user's global memory
+  remember {text}              one dated line into the user's global memory
+  remember {text} project=yes  the same line into the project's memory
 
-This is the built-in remember moved onto the extension surface,
-byte-compatible with its former self. The memory file is <user_dir>/YAK.md
-(YAK_USER_PATH overrides the whole user dir, else ~/.yak) — the same file
-the system prompt's <user_memory> block reads, so a line added here rides
-every future session. Write-tier: it mutates that one file and runs
-nothing. Protocol: newline-delimited JSON on stdio, one reply per request
-id (docs/extensions.md has the reference).
+Global memory is <user_dir>/YAK.md (YAK_USER_PATH overrides the whole user
+dir, else ~/.yak); project memory is <project>/.yak/YAK.md — the nearest
+.yak walking up from cwd, bounded by the git root, the same walk the
+project's config and blacklist follow. Both files are injected into the
+system prompt (the <user_memory> and <project_memory> blocks), so a line
+added here rides every future session — global ones everywhere, project
+ones inside that project. This is the built-in remember moved onto the
+extension surface, byte-compatible with its former self. Write-tier: it
+mutates one file and runs nothing. Protocol: newline-delimited JSON on
+stdio, one reply per request id (docs/extensions.md has the reference).
 """
 
 import json
@@ -20,13 +24,15 @@ import sys
 import time
 
 DESCRIPTION = (
-    "Save one durable fact to the user's global memory (YAK.md), injected "
-    "into every future session. Only when the user explicitly asks to "
-    "remember/note something, or a fact is clearly durable (a preference, "
-    "an environment constant, a way of working that future sessions must "
-    "obey). Test before writing: will the next session in a different "
-    "project still need this? One-off task facts (what was done, verified "
-    "or fixed just now) fail that test — never record them."
+    "Save one durable fact to memory, injected into every future session. "
+    "Global by default (the user's YAK.md, all projects); pass project=true "
+    "for a fact only this project's sessions need (its .yak/YAK.md). Only "
+    "when the user explicitly asks to remember/note something, or a fact is "
+    "clearly durable (a preference, an environment constant, a way of "
+    "working that future sessions must obey). Test before writing: will the "
+    "next session in a different project still need this? One-off task "
+    "facts (what was done, verified or fixed just now) fail that test — "
+    "never record them."
 )
 
 TOOLS = [
@@ -39,7 +45,14 @@ TOOLS = [
                 "text": {
                     "type": "string",
                     "description": "The fact to remember, one line",
-                }
+                },
+                "project": {
+                    "type": "boolean",
+                    "description": (
+                        "Write to this project's .yak/YAK.md instead of the "
+                        "global memory (default false)"
+                    ),
+                },
             },
             "required": ["text"],
         },
@@ -64,6 +77,23 @@ def user_dir():
         os.environ.get("USERPROFILE") if os.name == "nt" else None
     )
     return os.path.join(home, ".yak") if home else os.path.join(".yak")
+
+
+def project_yak_dir():
+    """paths::nearest_dir_up(cwd, ".yak", stop_at_git_root): the nearest
+    .yak walking up from the process cwd (the host spawns extensions in the
+    agent's working directory), never past a .git root."""
+    cwd = os.getcwd()
+    parts = cwd.split(os.sep)
+    for i in range(len(parts), 0, -1):
+        d = os.sep.join(parts[:i]) or os.sep
+        if os.path.isdir(os.path.join(d, ".yak")):
+            return os.path.join(d, ".yak")
+        if os.path.exists(os.path.join(d, ".git")):
+            return None
+        if d == os.sep:
+            break
+    return None
 
 
 def rust_trim(s, chars=('"', ".")):
@@ -117,11 +147,6 @@ def remember_at(path, line):
     return True, None
 
 
-def io_error(e):
-    """io::Error's Display: the os-level message, no path prefix."""
-    return str(e)
-
-
 def main():
     for line in sys.stdin:
         try:
@@ -143,17 +168,41 @@ def main():
             if not text.strip():
                 reply({"id": mid, "error": "nothing to remember"})
                 continue
+            if args.get("project"):
+                yak_dir = project_yak_dir()
+                if not yak_dir:
+                    reply(
+                        {
+                            "id": mid,
+                            "error": (
+                                "no .yak directory up from cwd (bounded by "
+                                "the git root) — create one first: mkdir .yak"
+                            ),
+                        }
+                    )
+                    continue
+                path = os.path.join(yak_dir, "YAK.md")
+                scope = f"project memory ({path})"
+            else:
+                path = os.path.join(user_dir(), "YAK.md")
+                scope = "memory"
             try:
-                wrote, err = remember_at(
-                    os.path.join(user_dir(), "YAK.md"), text
-                )
+                wrote, err = remember_at(path, text)
             except Exception as e:  # parity with the Rust error path
-                reply({"id": mid, "error": f"cannot write memory: {e}"})
+                reply({"id": mid, "error": f"cannot write {scope}: {e}"})
                 continue
             if err is not None:
-                reply({"id": mid, "error": f"cannot write memory: {err}"})
+                reply({"id": mid, "error": f"cannot write {scope}: {err}"})
             elif wrote:
-                reply({"id": mid, "result": "noted — it will apply from the next session on"})
+                reply(
+                    {
+                        "id": mid,
+                        "result": (
+                            f"noted in {scope} — it will apply from the "
+                            "next session on"
+                        ),
+                    }
+                )
             else:
                 reply({"id": mid, "result": "already in memory"})
         elif kind == "shutdown":
