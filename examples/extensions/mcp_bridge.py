@@ -66,7 +66,10 @@ INIT_TIMEOUT = 10.0     # seconds: a server's initialize handshake
 CALL_TIMEOUT = 30.0     # seconds: one tools/call round
 CONFIG_NAME = "mcp.json"
 PROTOCOL_VERSION = "2025-06-18"
-DEFAULT_TIMEOUT_HEADER = "MCP-Protocol-Version"
+PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
+# CDN firewalls (Cloudflare's own, error 1010) drop the python-urllib
+# default user agent, so every request carries a real one.
+USER_AGENT = "yak-mcp-bridge/1 (https://github.com/imjiaoyuan/yak)"
 
 
 def log(msg):
@@ -231,7 +234,8 @@ class HttpTransport:
             return
         req = urllib.request.Request(
             self.url, method="DELETE",
-            headers={**self.headers, "Mcp-Session-Id": self.session_id})
+            headers={**self.headers, "Mcp-Session-Id": self.session_id,
+                     "User-Agent": USER_AGENT})
         try:
             urllib.request.urlopen(req, timeout=5).close()
         except (urllib.error.URLError, OSError):
@@ -243,7 +247,8 @@ class HttpTransport:
         headers = dict(self.headers)
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "application/json, text/event-stream"
-        headers[DEFAULT_TIMEOUT_HEADER] = PROTOCOL_VERSION
+        headers["User-Agent"] = USER_AGENT
+        headers[PROTOCOL_VERSION_HEADER] = PROTOCOL_VERSION
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(

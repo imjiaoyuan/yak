@@ -297,7 +297,9 @@ The MCP support lives here rather than in the binary: `examples/extensions/mcp_b
 }
 ```
 
-The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session). Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of scope: a server that fails its handshake is skipped with a dim warning on stderr and the rest stay up.
+The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session). Requests carry a real `User-Agent` (CDN firewalls drop the python-urllib default — Cloudflare's own edge answers it with error 1010). Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of scope: a server that fails its handshake is skipped with a dim warning on stderr and the rest stay up.
+
+The token-cost shape of a server is the server's own choice. Notion's endpoint advertises every workspace action with a long usage guide per tool; Cloudflare went the other way: its API server (2,500+ endpoints behind OAuth) exposes two tools — `search` and `execute` (the search-and-execute Code Mode pattern, ~1k tokens where full schemas would cost ~1.17M) — and its docs server at `https://docs.mcp.cloudflare.com/mcp` needs no auth at all, two tools, under 1k tokens of schema. Pick servers that respect the injection; disable the rest per session with `extensions.disabled`.
 
 ## Notion in one file: the `mcp_notion.py` example
 
