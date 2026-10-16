@@ -1075,9 +1075,8 @@ def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     skills_ext = os.path.join(here, "examples", "extensions", "skills")
     if os.path.isfile(skills_ext):
-        shutil.copyfile(skills_ext, os.path.join(user, "extensions", "skills"))
-        if sys.platform != "win32":
-            os.chmod(os.path.join(user, "extensions", "skills"), 0o755)
+        with open(skills_ext, encoding="utf-8") as f:
+            write_extension(os.path.join(user, "extensions"), "skills", f.read())
         skills_src = os.path.join(here, "examples", "skills")
         if os.path.isdir(skills_src):
             for entry in sorted(os.listdir(skills_src)):
