@@ -520,6 +520,76 @@ def probe_examples(ex_dir, env):
     return ran, skipped
 
 
+def check_plugin_regressions():
+    import runpy
+
+    extensions = os.path.join(os.path.dirname(__file__), "..", "examples", "extensions")
+    with tempfile.TemporaryDirectory(prefix="yak-plugin-ci-") as root:
+        checkpoint = runpy.run_path(os.path.join(extensions, "workspace_checkpoint.py"))
+        work = os.path.join(root, "work")
+        os.mkdir(work)
+        original = os.path.join(work, "large.txt")
+        with open(original, "w") as f:
+            f.write("a" * ((1 << 20) + 1))
+        before = os.environ.get("YAK_CHECKPOINT_DIR")
+        os.environ["YAK_CHECKPOINT_DIR"] = os.path.join(root, "checkpoints")
+        try:
+            checkpoint["take_snapshot"](work, checkpoint["stamp_now"]())
+            with open(original, "w") as f:
+                f.write("b" * ((1 << 20) + 1))
+            checkpoint["restore"](work, 1)
+            with open(original) as f:
+                assert f.read(1) == "a", "large snapshot must not alias the live file"
+            os.unlink(os.path.join(checkpoint["project_root"](work),
+                                   os.listdir(checkpoint["project_root"](work))[0], "large.txt"))
+            try:
+                checkpoint["restore"](work, 1)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("a missing snapshot file must fail loudly")
+        finally:
+            if before is None:
+                os.environ.pop("YAK_CHECKPOINT_DIR", None)
+            else:
+                os.environ["YAK_CHECKPOINT_DIR"] = before
+
+        config = os.path.join(root, "config.json")
+        skills = runpy.run_path(os.path.join(extensions, "skills"))
+        assert skills["disabled_names"](config) == []
+        with open(config, "w") as f:
+            f.write("[]")
+        try:
+            skills["disabled_names"](config)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("skills config must be an object")
+
+        class Pages:
+            def __init__(self, data):
+                self.data = data
+            def request(self, method, params, timeout):
+                assert method == "tools/list"
+                return self.data[params.get("cursor")]
+        pages = {None: {"tools": [{"name": "first"}], "nextCursor": "more"},
+                 "more": {"tools": [{"name": "second"}]}}
+        bridge = runpy.run_path(os.path.join(extensions, "mcp_bridge.py"))["Server"]("mock", {})
+        bridge.transport = Pages(pages)
+        assert [t["name"] for t in bridge.list_tools()] == ["first", "second"]
+        bridge.transport = Pages({None: None})
+        try:
+            bridge.list_tools()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("failed tools/list must not look like an empty catalog")
+        notion = runpy.run_path(os.path.join(extensions, "mcp_notion.py"))
+        assert [t["name"] for t in notion["mount"](Pages(pages))[0]] == [
+            "notion__first", "notion__second"]
+    print("plugin regressions passed")
+
+
 def check_codex(binary):
     """Exercise the real binary through reasoning, extension and built-in
     tool rounds, replay, persistence and both output presentation modes."""
@@ -1220,6 +1290,7 @@ def main():
     assert named, f"no default-named export in {os.listdir(here)}"
 
     check_codex(binary)
+    check_plugin_regressions()
     print("e2e smoke passed")
     return 0
 

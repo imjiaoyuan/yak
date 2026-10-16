@@ -227,10 +227,17 @@ def disabled_names(config_path):
     try:
         with open(config_path, encoding="utf-8") as f:
             root = json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return []
-    names = (root.get("agent") or {}).get("disabled_skills") or []
-    return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+    if not isinstance(root, dict):
+        raise ValueError(f"{config_path}: expected a JSON object")
+    agent = root.get("agent", {})
+    if not isinstance(agent, dict):
+        raise ValueError(f"{config_path}: agent must be an object")
+    names = agent.get("disabled_skills", [])
+    if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+        raise ValueError(f"{config_path}: agent.disabled_skills must be an array of strings")
+    return names
 
 
 class Skills:

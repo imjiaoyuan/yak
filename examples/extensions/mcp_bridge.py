@@ -376,14 +376,15 @@ class Server:
         for _ in range(1000):
             params = {} if cursor is None else {"cursor": cursor}
             page = self.transport.request("tools/list", params, INIT_TIMEOUT)
-            if not page:
-                break
-            tools.extend(page.get("tools") or [])
+            if not isinstance(page, dict) or not isinstance(page.get("tools"), list):
+                raise RuntimeError("tools/list returned a malformed page")
+            tools.extend(page["tools"])
             cursor = page.get("nextCursor")
+            if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                raise RuntimeError("tools/list returned a malformed nextCursor")
             if not cursor:
                 return tools
-        log(f"{self.name}: tools/list pagination did not end; kept {len(tools)}")
-        return tools
+        raise RuntimeError(f"{self.name}: tools/list pagination did not end")
 
     def request(self, method, params, timeout):
         if self.transport is None:

@@ -132,6 +132,10 @@ fn install(argv: &[String]) -> i32 {
         eprintln!("Error: Usage: yak install git:github.com/user/repo[@ref]");
         return 2;
     };
+    if args.positionals.len() != 1 {
+        eprintln!("Error: install accepts exactly one source");
+        return 2;
+    }
     let Some((url, ref_)) = parse_source(raw) else {
         eprintln!(
             "Error: '{raw}' is not a git source (git:github.com/user/repo[@ref] or an https URL)"
@@ -380,6 +384,10 @@ fn remove(argv: &[String]) -> i32 {
         eprintln!("Error: Usage: yak remove NAME");
         return 2;
     };
+    if args.positionals.len() != 1 {
+        eprintln!("Error: remove accepts exactly one name");
+        return 2;
+    }
     let mut removed = false;
     let mut failed = false;
     for local in [true, false] {
@@ -424,7 +432,11 @@ fn list(argv: &[String]) -> i32 {
             &[],
         )
     });
-    let Some(_) = args else { return code };
+    let Some(args) = args else { return code };
+    if !args.positionals.is_empty() {
+        eprintln!("Error: yak list takes no arguments");
+        return 2;
+    }
     let mut any = false;
     for (local, root) in [(false, pkg_root(false)), (true, pkg_root(true))] {
         let Ok(rd) = std::fs::read_dir(&root) else {
@@ -467,8 +479,31 @@ fn list(argv: &[String]) -> i32 {
     0
 }
 
-pub fn extension_dirs(local: bool) -> Vec<PathBuf> {
-    pkg_dirs(local, "extensions")
+pub fn extension_dirs(local: bool) -> Result<Vec<PathBuf>, String> {
+    let root = pkg_root(local);
+    let rd = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "cannot scan package directory {}: {e}",
+                root.display()
+            ));
+        }
+    };
+    let mut dirs = Vec::new();
+    for entry in rd {
+        let entry = entry.map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
+        let path = entry.path().join("extensions");
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => dirs.push(path),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot inspect {}: {e}", path.display())),
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
 }
 
 pub fn command_dirs(local: bool) -> Vec<PathBuf> {
@@ -492,7 +527,14 @@ fn pkg_dirs(local: bool, sub: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Carried, carried, notes, parse_source};
+    use super::{Carried, carried, install, list, notes, parse_source, remove};
+
+    #[test]
+    fn package_commands_reject_extra_positionals() {
+        assert_eq!(install(&["source".into(), "unexpected".into()]), 2);
+        assert_eq!(remove(&["name".into(), "unexpected".into()]), 2);
+        assert_eq!(list(&["unexpected".into()]), 2);
+    }
 
     #[test]
     fn carried_recognizes_every_layout() {

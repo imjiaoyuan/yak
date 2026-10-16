@@ -409,9 +409,22 @@ def open_session(token, timeout=INIT_TIMEOUT):
 
 def mount(session):
     """tools/list → the resident tool list for the host."""
-    listing = session.request("tools/list", {}, INIT_TIMEOUT)
-    tools = []
-    for t in listing.get("tools") or []:
+    tools, cursor = [], None
+    for _ in range(1000):
+        params = {} if cursor is None else {"cursor": cursor}
+        listing = session.request("tools/list", params, INIT_TIMEOUT)
+        if not isinstance(listing, dict) or not isinstance(listing.get("tools"), list):
+            raise RuntimeError("tools/list returned a malformed page")
+        tools.extend(listing["tools"])
+        cursor = listing.get("nextCursor")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise RuntimeError("tools/list returned a malformed nextCursor")
+        if not cursor:
+            break
+    else:
+        raise RuntimeError("tools/list pagination did not end")
+    mounted = []
+    for t in tools:
         name = t.get("name")
         if not isinstance(name, str) or not name:
             continue
@@ -419,13 +432,13 @@ def mount(session):
         if not (isinstance(schema, dict) and schema.get("type") == "object"):
             schema = {"type": "object", "properties": {},
                       "additionalProperties": True}
-        tools.append({"name": f"notion__{name}",
+        mounted.append({"name": f"notion__{name}",
                       "description": t.get("description") or f"notion tool {name}",
                       "parameters": schema,
                       # MCP tools act on the user's Notion workspace out of
                       # process: exec tier, gated by the approval matrix
                       "tier": "exec"})
-    return tools, session
+    return mounted, session
 
 
 def mount_now(token, budget=MOUNT_BUDGET):
