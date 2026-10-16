@@ -139,7 +139,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     // a few readdirs (synchronous), but the spawn+handshake is slow — the
     // attachments, thread store and system prompt below load while the
     // children boot. The join settles the handshake before the tool registry
-    let extensions_connecting = crate::agent::ext::Extensions::connect_async(&cwd);
+    let extensions_connecting = crate::agent::ext::Extensions::connect_async(&cwd)?;
 
     let settings = crate::agent::settings::load();
 

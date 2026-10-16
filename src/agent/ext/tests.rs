@@ -2,6 +2,55 @@ use super::manifest::{discover_in, parse_tool_manifest};
 use super::*;
 
 #[test]
+fn resident_frames_are_bounded_and_oversized_lines_are_drained() {
+    let input = format!("{}\n{{\"id\":1}}\n", "x".repeat(1024 * 1024 + 1));
+    let mut reader = std::io::BufReader::new(input.as_bytes());
+    let mut buf = Vec::new();
+    let mut lines = lossy_lines(&mut reader, &mut buf);
+    assert_eq!(
+        lines.next().as_deref(),
+        Some("[oversized extension frame discarded]")
+    );
+    assert_eq!(lines.next().as_deref(), Some("{\"id\":1}"));
+    assert!(lines.next().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_timed_out_extension_cannot_finish_its_abandoned_write() {
+    let dir = crate::core::testutil::scratch_dir("ext-timeout-write");
+    let script = dir.join("slow");
+    let marker = dir.join("written");
+    std::fs::write(&script, format!(r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{{"id":%s,"result":{{"tools":[{{"name":"slow","parameters":{{}}}}]}}}}\n' "$id" ;;
+    *call_tool*) (sleep 0.4; echo done > "{}") & wait; printf '{{"id":%s,"result":"done"}}\n' "$id" ;;
+  esac
+done
+"#, marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ext = connect_stub(&script);
+    let error = ext
+        .request(
+            &json!({"id": next_id(), "type": "call_tool", "name": "slow", "args": {}}),
+            Duration::from_millis(60),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    std::thread::sleep(Duration::from_millis(550));
+    assert!(
+        !marker.exists(),
+        "the abandoned call must not write after timeout"
+    );
+    assert!(!ext.is_alive(), "the timed-out connection must be retired");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn parses_a_python_manifest_header() {
     let text = "#!/usr/bin/env python3\n# --- yak-tool: wordcount\n# description: count characters\n# args: text (string) the text\n# arg-mode: argv\n# interpreter: python\nimport sys\n";
     let spec = parse_tool_manifest(text, Path::new("/x/wordcount"), 120).expect("manifest");
@@ -39,23 +88,23 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
     }
 
     // nothing disabled: both surface
-    let found = discover_in(std::slice::from_ref(&dir), &[], 120);
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
     assert_eq!(found.script_tools.len(), 1);
     assert_eq!(found.script_tools[0].name, "search");
     assert_eq!(found.resident.len(), 1, "the executable resident surfaces");
 
     // by declared tool name: the script tool is gone, the resident stays
-    let found = discover_in(std::slice::from_ref(&dir), &["search".to_string()], 120);
+    let found = discover_in(std::slice::from_ref(&dir), &["search".to_string()], 120).unwrap();
     assert!(found.script_tools.is_empty(), "declared name disables");
     assert_eq!(found.resident.len(), 1);
 
     // by file stem: the script tool is gone too (the old spelling)
-    let found = discover_in(std::slice::from_ref(&dir), &["helper".to_string()], 120);
+    let found = discover_in(std::slice::from_ref(&dir), &["helper".to_string()], 120).unwrap();
     assert!(found.script_tools.is_empty(), "stem still disables");
     assert_eq!(found.resident.len(), 1);
 
     // and the resident still falls to its own stem
-    let found = discover_in(std::slice::from_ref(&dir), &["other".to_string()], 120);
+    let found = discover_in(std::slice::from_ref(&dir), &["other".to_string()], 120).unwrap();
     assert_eq!(found.script_tools.len(), 1);
     assert!(found.resident.is_empty());
 
@@ -85,7 +134,7 @@ fn an_inert_file_does_not_shadow_a_lower_extension() {
         std::fs::set_permissions(&user_ext, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let found = discover_in(&[project.clone(), user.clone()], &[], 120);
+    let found = discover_in(&[project.clone(), user.clone()], &[], 120).unwrap();
     assert_eq!(
         found.resident.len(),
         1,
@@ -94,6 +143,36 @@ fn an_inert_file_does_not_shadow_a_lower_extension() {
     assert_eq!(found.resident[0], user_ext);
     let _ = std::fs::remove_dir_all(&project);
     let _ = std::fs::remove_dir_all(&user);
+}
+
+#[test]
+fn discovery_skips_missing_homes_but_reports_unreadable_entries() {
+    let dir = crate::core::testutil::scratch_dir("ext-homes");
+    let missing = dir.join("absent");
+    assert!(
+        discover_in(&[missing], &[], 120)
+            .unwrap()
+            .resident
+            .is_empty()
+    );
+    let not_directory = dir.join("file");
+    std::fs::write(&not_directory, "not a directory").unwrap();
+    let error = discover_in(std::slice::from_ref(&not_directory), &[], 120)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains(&not_directory.display().to_string()),
+        "{error}"
+    );
+    let invalid = dir.join("broken.py");
+    std::fs::write(&invalid,
+        "# --- yak-tool: broken\n# arg-mode: argv\n# args: a (string) first\n# args: b (string) second\n")
+        .unwrap();
+    let error = discover_in(std::slice::from_ref(&dir), &[], 120)
+        .err()
+        .unwrap();
+    assert!(error.contains("argv mode requires exactly one"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -617,6 +696,29 @@ done
         None,
         "a crashed extension falls back to the built-in compaction"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_failed_workspace_restore_blocks_the_tree_jump() {
+    let stub = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{"id":%s,"result":{"events":["session_before_tree"]}}\n' "$id" ;;
+    *session_before_tree*) printf '{"id":%s,"error":"snapshot missing"}\n' "$id" ;;
+  esac
+done
+"#;
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension(
+            "missing_snapshot",
+            stub,
+        ))],
+        script_tools: Vec::new(),
+    };
+    let error = host.before_tree(&json!({"dropped_turns": 1})).unwrap_err();
+    assert!(error.contains("snapshot missing"), "{error}");
 }
 
 /// A `session_before_tree` subscriber receives the turn ids about to be cut

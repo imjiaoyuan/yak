@@ -17,10 +17,9 @@
 # The merge is additive by design: files the dropped turns edited come back
 # as they were at the oldest selected snapshot (the moment the first dropped
 # turn began), files untouched since the cut point stay as they are now, and
-# nothing is ever deleted — files the dropped turns created stay behind. One
-# assumption is stated rather than hidden: the snapshots of a project's
-# dropped turns are the newest ones on disk (a second yak session in the
-# same directory interleaves its own; close it before you jump).
+# nothing is ever deleted — files the dropped turns created stay behind. This
+# example assumes the project's dropped turns own the newest snapshots; do not
+# run two sessions against the same workspace if you need reliable /tree restore.
 #
 # Install into ~/.yak/extensions/ (or .yak/extensions/), chmod +x, /reload.
 # The shadow root lives in the system temp dir; override with
@@ -36,9 +35,8 @@ import time
 # the shadow dir itself if it sits under the project
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__",
              ".venv", "venv", "target", "dist", "build", ".yak"}
-# files over this many bytes are referenced, not copied (symlink)
-BIG_FILE = 1 << 20
 KEEP_DAYS = 7
+MANIFEST = ".yak-checkpoint-files.json"
 
 # a snapshot stamp is the wall clock in ULID time-ordering: 10 Crockford
 # base32 chars encoding the millisecond (the first half of every ULID yak
@@ -113,9 +111,8 @@ def prune(root, keep_seconds=KEEP_DAYS * 86400):
 
 
 def mirror(src, dst):
-    """Copy src's tree into dst. Every file is an independent copy (or a
-    symlink for oversized ones): a hardlink would alias the live file, so
-    restoring it would "restore" whatever the working tree holds now."""
+    """Copy src's tree into dst. Every file is an independent copy; symlinks
+    and hardlinks to the live file would not preserve its former contents."""
     os.makedirs(dst, exist_ok=True)
     for dirpath, dirnames, filenames in os.walk(src):
         dirnames[:] = [d for d in dirnames
@@ -129,24 +126,27 @@ def mirror(src, dst):
             d = os.path.join(target, name)
             if os.path.islink(s):
                 continue  # never follow out-of-tree links
-            try:
-                st = os.stat(s)
-                if st.st_size > BIG_FILE:
-                    os.symlink(os.path.abspath(s), d)
-                else:
-                    shutil.copy2(s, d)  # an independent copy: a hardlink
-                    # would alias the live file and break the snapshot
-            except OSError:
-                try:
-                    shutil.copy2(s, d)
-                except OSError:
-                    pass  # vanished mid-walk: it will not be in the snapshot
-
+            shutil.copy2(s, d)
 
 def take_snapshot(cwd, stamp):
     root = project_root(cwd)
     prune(root)
-    mirror(cwd, snapshot_dir(root, stamp))
+    final = snapshot_dir(root, stamp)
+    staging = tempfile.mkdtemp(prefix=".snapshot-", dir=root)
+    try:
+        mirror(cwd, staging)
+        if os.path.exists(os.path.join(staging, MANIFEST)):
+            raise ValueError(f"workspace contains reserved checkpoint name: {MANIFEST}")
+        files = []
+        for dirpath, _, filenames in os.walk(staging):
+            for name in filenames:
+                files.append(os.path.relpath(os.path.join(dirpath, name), staging))
+        with open(os.path.join(staging, MANIFEST), "w", encoding="utf-8") as f:
+            json.dump(sorted(files), f)
+        os.replace(staging, final)
+    except BaseException:
+        shutil.rmtree(staging)
+        raise
 
 
 def restore(cwd, dropped_count):
@@ -157,26 +157,42 @@ def restore(cwd, dropped_count):
     which is the state the jump returns the workspace to."""
     root = project_root(cwd)
     stamps = sorted(s for s in os.listdir(root) if is_stamp(s))
+    if dropped_count > len(stamps):
+        raise FileNotFoundError(
+            f"cannot restore {dropped_count} turns: only {len(stamps)} checkpoints remain")
     selected = stamps[-dropped_count:] if dropped_count > 0 else []
-    merged = set()
+    merged = {}
     for stamp in selected:
         snap = snapshot_dir(root, stamp)
-        for dirpath, _, filenames in os.walk(snap):
-            rel = os.path.relpath(dirpath, snap)
-            target = cwd if rel == "." else os.path.join(cwd, rel)
-            os.makedirs(target, exist_ok=True)
-            for name in filenames:
-                src = os.path.join(dirpath, name)
-                dst = os.path.join(target, name)
-                if dst in merged or os.path.islink(src):
-                    continue
-                merged.add(dst)
-                if os.path.islink(dst):
-                    os.remove(dst)
-                try:
-                    shutil.copy2(src, dst)
-                except OSError:
-                    pass
+        with open(os.path.join(snap, MANIFEST), encoding="utf-8") as f:
+            files = json.load(f)
+        if not isinstance(files, list) or any(not isinstance(p, str) for p in files):
+            raise ValueError(f"invalid checkpoint manifest: {snap}")
+        for rel in files:
+            src = os.path.join(snap, rel)
+            if not os.path.isfile(src):
+                raise FileNotFoundError(f"checkpoint file missing: {src}")
+            if (os.path.islink(src) or os.path.commonpath(
+                    (os.path.realpath(src), os.path.realpath(snap))) != os.path.realpath(snap)):
+                raise ValueError(f"checkpoint file is unsafe: {src}")
+            dst = os.path.join(cwd, rel)
+            if dst not in merged:
+                merged[dst] = src
+    staging = tempfile.mkdtemp(prefix=".restore-", dir=cwd)
+    try:
+        staged = {}
+        for dst, src in merged.items():
+            path = os.path.join(staging, str(len(staged)))
+            shutil.copy2(src, path)
+            staged[dst] = path
+        for dst, path in staged.items():
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.commonpath((os.path.realpath(os.path.dirname(dst)),
+                                   os.path.realpath(cwd))) != os.path.realpath(cwd):
+                raise ValueError(f"restore path escapes the workspace: {dst}")
+            os.replace(path, dst)
+    finally:
+        shutil.rmtree(staging)
 
 
 def handle(msg):
@@ -210,4 +226,7 @@ for line in sys.stdin:
     msg = json.loads(line)
     if msg.get("type") == "shutdown":
         break
-    print(json.dumps({"id": msg.get("id"), "result": handle(msg)}), flush=True)
+    try:
+        print(json.dumps({"id": msg.get("id"), "result": handle(msg)}), flush=True)
+    except Exception as e:
+        print(json.dumps({"id": msg.get("id"), "error": str(e)}), flush=True)

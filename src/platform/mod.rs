@@ -60,6 +60,12 @@ pub use unix::*;
 #[cfg(target_os = "windows")]
 pub use windows::*;
 
+/// Keep a resident extension and its child processes in a separate group so
+/// a timed-out call can stop the whole tree, not only the protocol parent.
+pub fn configure_extension_command(command: &mut Command) {
+    configure_shell_command(command);
+}
+
 /// Like run_shell, but complete stdout lines stream to the callback live.
 /// (Lives here because it has no platform content — each backend only picks
 /// the shell spec and process-group details.)

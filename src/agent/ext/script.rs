@@ -73,8 +73,10 @@ impl Tool for ScriptTool {
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     other => crate::jsonfmt::dumps_indent(other, 0),
-                })
-                .unwrap_or_default();
+                });
+            let Some(value) = value else {
+                return ToolOutput::err("argv-mode script tool requires its declared argument");
+            };
             command.arg(value);
             None
         } else {

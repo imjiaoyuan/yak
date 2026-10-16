@@ -551,14 +551,12 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     // sibling branch — the chain that ends at that turn is its own walk
     // to the root, which is exactly the conversation the jump replays
     let landed = crate::core::threads::chain_indices(&turns, picked)?;
-    // before the conversation moves, extensions get one chance to snapshot
-    // or restore the workspace (the git-checkpoint shape): the event names
-    // the turns leaving the active branch. Fail-open — a broken extension
-    // never blocks the jump; its error lands in the diagnostics tail.
-    session.extensions.fire(
-        "session_before_tree",
-        &tree_event_params(&cid, &turns, &active, &landed),
-    );
+    // A workspace restore must succeed before the transcript moves. Other
+    // event hooks stay fail-open; this one cannot silently leave code and
+    // conversation on different branches.
+    session
+        .extensions
+        .before_tree(&tree_event_params(&cid, &turns, &active, &landed))?;
     // rebuild the seed from the chain that ends at the picked turn, then
     // arm the branch: the next persisted round lands with the picked
     // turn's id as its parent and the thread grows a branch instead of a
@@ -1195,16 +1193,19 @@ fn repl_command(
                 crate::theme::err().reset
             ),
         },
-        "/reload" => {
-            *settings = crate::agent::settings::load();
-            session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
-            session.rebuild_tools();
-            eprintln!(
-                "{}reloaded plugin tools and settings{}",
-                crate::theme::err().dim,
-                crate::theme::err().reset
-            );
-        }
+        "/reload" => match crate::agent::ext::Extensions::connect(&session.cwd) {
+            Ok(extensions) => {
+                *settings = crate::agent::settings::load();
+                session.extensions = extensions;
+                session.rebuild_tools();
+                eprintln!(
+                    "{}reloaded plugin tools and settings{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
+            }
+            Err(e) => eprintln!("plugin reload failed: {e}"),
+        },
         "/exit" => return true,
         other => {
             let name = other.strip_prefix('/').unwrap_or(other);

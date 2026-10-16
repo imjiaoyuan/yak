@@ -133,6 +133,7 @@ impl Drop for Conn {
                 }
             }
         }
+        crate::platform::kill_process_tree(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -255,7 +256,10 @@ impl Ext {
     /// came *because* the process had exited. A live-but-slow extension keeps
     /// its single timeout instead, so a slow tool is never run twice.
     fn should_retry(&self, error: &str) -> bool {
-        self.path.is_some() && (Self::recoverable(error) || !self.is_alive())
+        !error.contains(" timed out after ")
+            && !error.contains("frame exceeded")
+            && self.path.is_some()
+            && (Self::recoverable(error) || !self.is_alive())
     }
 
     /// The transport half of `request`, for callers that already hold a
@@ -339,6 +343,13 @@ impl Ext {
                     }
                     if Instant::now() >= deadline {
                         crate::core::sync::lock(&conn.pending).remove(&id);
+                        // A timeout abandons the connection, not just its waiter:
+                        // the resident may still be mutating state for this call.
+                        // Kill and reap it before allowing a later request to respawn.
+                        crate::platform::kill_process_tree(conn.child.id());
+                        let _ = conn.child.kill();
+                        let _ = conn.child.wait();
+                        conn.dead.store(true, Ordering::Relaxed);
                         return Err(format!(
                             "extension '{}' timed out after {}s",
                             self.name,
@@ -632,8 +643,8 @@ impl Extensions {
     /// see stdin EOF when this process dies and exit per the protocol —
     /// the same contract a crash or kill -9 already relies on. `Drop` must
     /// not join instead: a flag error would then block on a slow handshake.
-    pub fn connect_async(cwd: &Path) -> ExtensionsConnecting {
-        let found = discover(cwd);
+    pub fn connect_async(cwd: &Path) -> Result<ExtensionsConnecting, String> {
+        let found = discover(cwd)?;
         let resident = found.resident;
         let handle = std::thread::spawn(move || {
             std::thread::scope(|scope| {
@@ -651,15 +662,15 @@ impl Extensions {
                     .collect::<Vec<_>>()
             })
         });
-        ExtensionsConnecting {
+        Ok(ExtensionsConnecting {
             handle: Some(handle),
             script_tools: found.script_tools,
-        }
+        })
     }
 
     /// The synchronous form: discovery plus handshake, all on this thread.
-    pub fn connect(cwd: &Path) -> Extensions {
-        Self::connect_async(cwd).join()
+    pub fn connect(cwd: &Path) -> Result<Extensions, String> {
+        Ok(Self::connect_async(cwd)?.join())
     }
 
     /// Append one `ExtTool` per tool of every ready extension, plus one
@@ -786,6 +797,17 @@ impl Extensions {
                 ext.note(e);
             }
         }
+    }
+
+    /// A workspace rollback must complete before a `/tree` jump can move the
+    /// conversation. Unlike observational events, report failures to the
+    /// caller so the transcript cannot silently diverge from the workspace.
+    pub fn before_tree(&self, params: &Value) -> Result<(), String> {
+        for ext in &self.exts {
+            ext.fire("session_before_tree", params)
+                .map_err(|e| format!("workspace restore via '{}' failed: {e}", ext.name))?;
+        }
+        Ok(())
     }
 
     /// The `tool_call` gate across every subscriber: `Err` carries the deny
@@ -1055,6 +1077,7 @@ impl Ext {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::platform::configure_extension_command(&mut command);
         let mut child = command
             .spawn()
             .map_err(|e| format!("cannot spawn {}: {e}", path.display()))?;

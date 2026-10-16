@@ -15,9 +15,9 @@ pub struct Discovered {
 /// declaring the same name) can be disabled by either spelling. The
 /// config-derived inputs (`disabled` names, the fallback tool timeout)
 /// read once here, not once per candidate script.
-pub fn discover(cwd: &Path) -> Discovered {
+pub fn discover(cwd: &Path) -> Result<Discovered, String> {
     discover_in(
-        &discover_dirs(cwd),
+        &discover_dirs(cwd)?,
         &crate::core::config::disabled_extensions(),
         crate::core::config::extension_tool_timeout().as_secs(),
     )
@@ -31,7 +31,7 @@ pub(super) fn discover_in(
     dirs: &[PathBuf],
     disabled: &[String],
     default_timeout: u64,
-) -> Discovered {
+) -> Result<Discovered, String> {
     let is_disabled = |name: &str| disabled.iter().any(|d| d == name);
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Discovered {
@@ -39,10 +39,19 @@ pub(super) fn discover_in(
         script_tools: Vec::new(),
     };
     for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            continue;
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "cannot read extension directory {}: {e}",
+                    dir.display()
+                ));
+            }
         };
-        for entry in rd.flatten() {
+        for entry in rd {
+            let entry =
+                entry.map_err(|e| format!("cannot read entry in {}: {e}", dir.display()))?;
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -56,7 +65,7 @@ pub(super) fn discover_in(
             // a `--- yak-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
-            let spec = exec_tool_manifest(&path, default_timeout);
+            let spec = exec_tool_manifest(&path, default_timeout)?;
             if spec.is_none() && !is_executable(&path) {
                 // neither a manifest script tool nor an executable: not an
                 // extension, so it must not claim the stem and shadow a
@@ -73,7 +82,7 @@ pub(super) fn discover_in(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// A `--- yak-tool:` manifest parsed from a script's leading comment block.
@@ -150,6 +159,9 @@ pub fn parse_tool_manifest(text: &str, path: &Path, default_timeout: u64) -> Opt
             tier = Tier::parse(rest).unwrap_or(Tier::Exec);
         }
     }
+    if arg_mode_argv && properties.len() != 1 {
+        return None;
+    }
     Some(ExecToolSpec {
         path: path.to_path_buf(),
         name: name?,
@@ -202,13 +214,26 @@ pub(super) fn parse_arg_field(
 }
 
 /// Read a file's head and parse its manifest, if it carries one.
-pub(super) fn exec_tool_manifest(path: &Path, default_timeout: u64) -> Option<ExecToolSpec> {
+pub(super) fn exec_tool_manifest(
+    path: &Path,
+    default_timeout: u64,
+) -> Result<Option<ExecToolSpec>, String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path).ok()?;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read extension {}: {e}", path.display()))?;
     let mut head = vec![0u8; 4096];
-    let n = f.read(&mut head).unwrap_or(0);
+    let n = f
+        .read(&mut head)
+        .map_err(|e| format!("cannot read extension {}: {e}", path.display()))?;
     let text = String::from_utf8_lossy(&head[..n]);
-    parse_tool_manifest(&text, path, default_timeout).filter(|s| !s.name.is_empty())
+    let spec = parse_tool_manifest(&text, path, default_timeout).filter(|s| !s.name.is_empty());
+    if spec.is_none() && text.contains("--- yak-tool:") {
+        return Err(format!(
+            "invalid tool manifest in {} (argv mode requires exactly one declared argument)",
+            path.display()
+        ));
+    }
+    Ok(spec)
 }
 
 #[cfg(unix)]

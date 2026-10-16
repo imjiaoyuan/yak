@@ -40,7 +40,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `yak install` packages |
 | `~/.yak/extensions/` | user-global |
 
-Every file (not directory) in these homes is scanned. Same stem name in two homes: the project copy wins. A file is either a **script tool** (it carries a manifest header, see below) or a **resident extension** (anything else, but it must be executable: the exec bit on unix, one of `.exe`/`.bat`/`.cmd`/`.ps1` on Windows). Config keys:
+Every file (not directory) in these homes is scanned. Project extensions take precedence over installed packages, then project packages over user packages and user extensions. Package directories at the same level are scanned by name. An absent home is ignored; an unreadable home or invalid manifest fails discovery with its path. A file is either a **script tool** (it carries a manifest header, see below) or a **resident extension** (anything else, but it must be executable: the exec bit on unix, one of `.exe`/`.bat`/`.cmd`/`.ps1` on Windows). Config keys:
 
 ```json
 {
@@ -79,7 +79,7 @@ Manifest fields (lines of `#` or `//` comments after the `--- yak-tool:` marker,
 | `--- yak-tool: <name>` | the marker + tool name (required) |
 | `description: <text>` | shown to the model in the tool list |
 | `args: <name> (<type>) <desc>` | one schema property; repeatable. Types: `string`, `int`/`integer`, `number`/`float`, `bool`/`boolean`, `list`/`array`. Every declared arg is required |
-| `arg-mode: argv` | single declared argument arrives as plain `argv[1]` instead of stdin JSON |
+| `arg-mode: argv` | exactly one declared argument (required); its value arrives as plain `argv[1]` instead of stdin JSON |
 | `interpreter: <prog>` | run the file through this program (`${ENV}` expanded); without it the file runs itself |
 | `timeout: <secs>` | per-call timeout; default `extensions.tool_timeout` (120s) |
 | `tier: read\|write\|exec` | trust tier the approval matrix sees; default `exec` |
@@ -87,7 +87,7 @@ Manifest fields (lines of `#` or `//` comments after the `--- yak-tool:` marker,
 Invocation contract:
 
 - default mode: the arguments object arrives as **one JSON line on stdin** (`{"text": "..."}`)
-- `arg-mode: argv`: the single declared argument arrives as `argv[1]` as plain text: shell scripts never parse JSON
+- `arg-mode: argv`: requires exactly one declared argument, delivered as `argv[1]` as plain text; an absent value fails the call rather than being replaced with an empty string
 - stdout is the tool result (stderr is appended when non-empty; both are capped)
 - exit code `0` → normal result, anything else → error result (the exit code is appended)
 - timeout → the call is interrupted and returned as an error result
@@ -223,7 +223,7 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 | `compact` | a compaction is due — the pre-request check, an overflow refusal, a silent overflow, or the manual `/compact` — before the built-in summarizer runs | `{reason: "trigger"\|"overflow"\|"stalled"\|"manual", trigger_tokens, keep_recent_tokens, instructions?}`: `instructions` rides only a manual `/compact [text]`; reply `{"decision": "compact", "summary": .., "keep_recent_tokens": n}` to replace it, see below |
 | `approval` | an approval prompt is about to surface, before it blocks | `{cwd, tool, preview, pattern, focused?}`: `pattern` is the matched ask-list line for a bash ask, else null — the desktop-notification seam (see `notify.py`); fire-and-forget. Auto-allowed calls (read-tier, allow policies, `tool_call` pre-allow without a blacklist hit) never fire it |
 | `agent_end` | task finished or interrupted | `{cwd, final_text, interrupted, focused?}`: `cwd` (on both events, and on `agent_start`) is the session's working directory — with more than one yak running it is what tells the notifications apart. `focused` (on both events) is present only when the terminal reports focus (`ESC[I`/`ESC[O`, the focus-report mode held while yak reads input): true means the window is focused, so the user is already looking and a notification is noise — `notify.py` stays quiet then (its `NOTIFY_WHEN = "always"` opts out); absent means focus is unknown, and a gate must not guess |
-| `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — snapshot or restore the workspace here (see the checkpoint example); fire-and-forget, the jump proceeds either way |
+| `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — restore the workspace here (see the checkpoint example); a hook error or timeout aborts the jump before the transcript moves |
 
 ### The `tool_call` gate
 
@@ -282,9 +282,10 @@ Every extension tool is **exec-tier** by default and runs free like `bash`. A to
 | Phase | Limit | Override |
 |---|---|---|
 | spawn + initialize | 10s |; |
-| tool call (resident) | 120s | the extension's `tool_timeout` in its `initialize` reply (≤ 1h), else `extensions.tool_timeout` |
+| tool call (resident) | 120s | the extension's `tool_timeout` in its `initialize` reply (≤ 1h), else `extensions.tool_timeout`; timeout kills the resident process before another call may respawn it |
 | script-tool call | `timeout:` manifest field | defaults to the same config value |
 | event hook | 5s |; |
+| resident stdout/stderr frame | 1 MiB per newline-delimited line; an oversized stdout frame closes the connection and fails pending calls |; |
 | tool output | capped like the bash tool (lines + 50KB + a 12k-token estimate), the cut marked in the text |; |
 
 ## Host API compatibility
