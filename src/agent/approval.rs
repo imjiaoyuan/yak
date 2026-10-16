@@ -79,7 +79,7 @@ pub fn blacklist_hit(cfg: &ApprovalConfig, cmd: &str) -> Option<String> {
     let segments = split_compound(cmd);
     let positions = segments
         .iter()
-        .flat_map(|seg| command_positions(seg, 0))
+        .flat_map(|seg| command_positions(seg))
         .collect::<Vec<_>>();
     match cfg.blacklist.evaluate(&segments, &positions) {
         crate::agent::blacklist::Match::Deny(pattern) => Some(pattern),
@@ -204,58 +204,104 @@ const WRAPPERS: &[&str] = &[
 /// Shells whose `-c` argument is a full command line of its own.
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
 
-/// Every command start in a segment as the tokens from that word on: the
-/// first word (past any leading env assignments), whatever a wrapper runs
-/// next, and `shell -c` payloads recursed. Each tail's first word is a
-/// command position; the rest are that command's own flags and arguments,
-/// which is what ties an `rm` to the words it targets. `xargs rm`,
-/// `env git push` and `bash -c 'git status'` all surface their inner
-/// command; a bare argument like the `rm` in `grep rm notes.txt` never does.
-fn command_tails(seg: &str, depth: usize) -> Vec<Vec<String>> {
-    let toks = tokens(seg);
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < toks.len() && toks[i].contains('=') {
-        i += 1;
+/// The program name of a command word: the last path component, so
+/// `/bin/bash`, `/usr/bin/sudo` and `bash` all name the same program. A
+/// trailing separator leaves an empty name, which matches nothing.
+fn program_name(word: &str) -> &str {
+    word.rsplit(['/', '\\']).next().unwrap_or(word)
+}
+
+/// When `toks[i]` names a shell invoked with a command string (`sh -c '…'`,
+/// `bash -ec '…'`, `zsh -lc …`), return that payload joined back into a
+/// command line. Any leading single-dash option cluster containing `c`
+/// selects the command-string form (`-c`, `-lc`, `-ec`, `-euxc`); long
+/// options and other flags are skipped. The first non-option word ends the
+/// search: it is a script file or an argument, not a `-c` payload.
+fn shell_c_payload(toks: &[String], i: usize) -> Option<String> {
+    if !SHELLS.contains(&program_name(&toks[i])) {
+        return None;
     }
-    while i < toks.len() {
-        let t = toks[i].as_str();
-        if SHELLS.contains(&t)
-            && matches!(
-                toks.get(i + 1).map(String::as_str),
-                Some("-c") | Some("-lc")
-            )
-            && i + 2 < toks.len()
-        {
-            if depth < 2 {
-                out.extend(command_tails(&toks[i + 2..].join(" "), depth + 1));
-            }
-            return out;
+    let mut j = i + 1;
+    while j < toks.len() {
+        let opt = toks[j].as_str();
+        if opt == "--" {
+            return None; // end of options: what follows is a file
         }
-        out.push(toks[i..].to_vec());
-        if WRAPPERS.contains(&t) {
-            i += 1;
-            while i < toks.len()
-                && (toks[i].starts_with('-')
-                    // `env NAME=VALUE cmd`: the assignments are env's own
-                    // arguments, not the command it runs
-                    || (t == "env" && toks[i].contains('=')))
-            {
-                i += 1;
+        if opt.len() > 1 && opt.starts_with('-') {
+            if !opt.starts_with("--") && opt[1..].contains('c') {
+                return (j + 1 < toks.len()).then(|| toks[j + 1..].join(" "));
             }
-            if t == "timeout" && i < toks.len() && !toks[i].contains('=') {
-                i += 1; // the duration word
-            }
+            j += 1;
             continue;
         }
-        return out;
+        return None;
     }
-    out
+    None
+}
+
+/// Every command start in a segment as the tokens from that word on: the
+/// first word (past any leading env assignments), whatever a wrapper runs
+/// next, and `shell -c` payloads recursed to any depth. Each tail's first
+/// word is a command position; the rest are that command's own flags and
+/// arguments, which is what ties an `rm` to the words it targets. `xargs rm`,
+/// `env git push` and `bash -c 'git status'` all surface their inner command;
+/// a bare argument like the `rm` in `grep rm notes.txt` never does.
+///
+/// The nested walk is a loop, not recursion, so a payload wrapped in any
+/// number of further shells cannot hide behind a depth cap. It is still
+/// tokenization, not shell parsing: what a shell builds at runtime is
+/// invisible here. Command substitution (`$(…)`, backticks), variable
+/// expansion (`sh -c "$CMD"`), `eval`/`source`, here-docs, aliases and
+/// functions, `find -exec … {} +`, and anything decoded after the fact
+/// (`base64 -d | sh`) are beyond a word-level scan — an adversarial command
+/// can always name its real target at runtime. The walk is conservative the
+/// other way too: it surfaces only words in command position, so
+/// `grep rm …` and `rm -rf ./build` are not refused.
+fn command_tails(seg: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let mut current = seg.to_string();
+    loop {
+        let toks = tokens(&current);
+        let mut i = 0;
+        while i < toks.len() && toks[i].contains('=') {
+            i += 1;
+        }
+        let mut nested: Option<String> = None;
+        while i < toks.len() {
+            let t = toks[i].as_str();
+            if let Some(payload) = shell_c_payload(&toks, i) {
+                nested = Some(payload);
+                break;
+            }
+            out.push(toks[i..].to_vec());
+            let name = program_name(t);
+            if WRAPPERS.contains(&name) {
+                i += 1;
+                while i < toks.len()
+                    && (toks[i].starts_with('-')
+                        // `env NAME=VALUE cmd`: the assignments are env's own
+                        // arguments, not the command it runs
+                        || (name == "env" && toks[i].contains('=')))
+                {
+                    i += 1;
+                }
+                if name == "timeout" && i < toks.len() && !toks[i].contains('=') {
+                    i += 1; // the duration word
+                }
+                continue;
+            }
+            break;
+        }
+        match nested {
+            Some(payload) => current = payload,
+            None => return out,
+        }
+    }
 }
 
 /// The command words of a segment, in order — every tail's first word.
-fn command_positions(seg: &str, depth: usize) -> Vec<String> {
-    command_tails(seg, depth)
+fn command_positions(seg: &str) -> Vec<String> {
+    command_tails(seg)
         .into_iter()
         .map(|tail| tail[0].clone())
         .collect()
@@ -308,9 +354,9 @@ fn forbidden_command(command: &str) -> Option<String> {
         // every command position, not just the first: a wrapper (`nohup`,
         // `xargs`, `env`, `timeout`) or a `shell -c` payload would otherwise
         // hide the very word this list exists to catch
-        for tail in command_tails(&seg, 0) {
+        for tail in command_tails(&seg) {
             if let Some(word) = tail.first()
-                && FORBIDDEN_COMMANDS.contains(&word.as_str())
+                && FORBIDDEN_COMMANDS.contains(&program_name(word))
             {
                 return Some(format!("'{word}' is never allowed"));
             }
@@ -330,8 +376,8 @@ fn forbidden_command(command: &str) -> Option<String> {
 /// whole word, so `rm -rf /tmp/build` stays the ordinary cleanup it is and
 /// only the whole-filesystem case is refused.
 fn deletes_the_root(segment: &str) -> bool {
-    for tail in command_tails(segment, 0) {
-        if tail.first().map(String::as_str) != Some("rm") {
+    for tail in command_tails(segment) {
+        if tail.first().map(|w| program_name(w)) != Some("rm") {
             continue;
         }
         let refuses_root = tail[1..]
@@ -526,6 +572,93 @@ mod tests {
                 &cfg(&[]),
                 Some("timeout --preserve-status 5 ls")
             ),
+            Decision::Auto
+        );
+    }
+
+    #[test]
+    fn absolute_paths_name_the_same_program() {
+        // a shell reached by path must still expose its `-c` payload, and a
+        // forbidden program reached by path must still refuse: the basename
+        // is what names the program
+        for cmd in [
+            "/bin/bash -c 'sudo -i'",
+            "/usr/bin/sh -lc 'mkfs.ext4 /dev/sda1'",
+            "/bin/zsh -ec 'dd if=img of=/dev/sdb'",
+            "/usr/local/bin/bash -c 'doas rm x'",
+            "env /usr/bin/sudo id",
+            "/usr/bin/dd if=img of=/dev/sdb",
+            "/sbin/shutdown now",
+            "/bin/rm -rf /",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert!(
+                matches!(d, Decision::Deny(_)),
+                "{cmd} must be denied, got {d:?}"
+            );
+        }
+        // an absolute path to an ordinary program stays ordinary
+        for cmd in [
+            "/bin/ls -la",
+            "/usr/bin/git status",
+            "/bin/bash -c 'ls -la'",
+            "/usr/bin/env FOO=1 ls",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} should run free");
+        }
+    }
+
+    #[test]
+    fn shell_flags_are_read_past_their_combinations() {
+        // `-c` may ride inside a combined short cluster or follow other
+        // flags; the payload after it is still a command line
+        for cmd in [
+            "bash -ec 'sudo -i'",
+            "bash -e -c 'sudo -i'",
+            "bash -euxc 'doas rm x'",
+            "sh -lc 'mkfs.ext4 /dev/sda1'",
+            "zsh --noprofile -c 'reboot'",
+            "dash -x -c 'shutdown now'",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert!(
+                matches!(d, Decision::Deny(_)),
+                "{cmd} must be denied, got {d:?}"
+            );
+        }
+        // a script file or a flag without `c` is not a command-string
+        // payload: no false positive from every `bash -x script.sh`
+        for cmd in [
+            "bash script.sh",
+            "bash -x script.sh",
+            "sh -eu script.sh",
+            "bash --version",
+        ] {
+            let d = resolve("bash", Tier::Exec, &cfg(&[]), Some(cmd));
+            assert_eq!(d, Decision::Auto, "{cmd} should run free");
+        }
+    }
+
+    #[test]
+    fn nesting_depth_does_not_hide_a_forbidden_command() {
+        // wrap a forbidden command in more shells than the old fixed cap:
+        // the payload is still a command line however deep it goes
+        let mut buried = "sudo id".to_string();
+        for _ in 0..12 {
+            buried = format!("sh -c '{buried}'");
+        }
+        assert_eq!(
+            resolve("bash", Tier::Exec, &cfg(&[]), Some(&buried)),
+            Decision::Deny("'sudo' is never allowed".into())
+        );
+        // the same nesting around ordinary work is not refused
+        let mut benign = "echo hi".to_string();
+        for _ in 0..12 {
+            benign = format!("sh -c '{benign}'");
+        }
+        assert_eq!(
+            resolve("bash", Tier::Exec, &cfg(&[]), Some(&benign)),
             Decision::Auto
         );
     }

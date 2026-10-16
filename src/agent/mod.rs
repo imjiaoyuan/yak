@@ -356,15 +356,16 @@ pub fn run_agent(
             cache_stable = after.cache_stable;
         }
         // a replacement compaction already ended the task: the summary is the
-        // last word, no model call follows it (the compaction ran before the
-        // round boundary was cut, so the slice starts at the history tip:
-        // exactly the summary message the replacement put there)
-        if let Some(Msg::Summary { text }) = history.first() {
-            final_text = text.clone();
-        }
+        // last word, no model call follows it. The rebuilt history — the
+        // summary plus the kept tail — is the turn's own content, so it all
+        // persists: a resume folds the replay at the summary, and the history
+        // the session carries into the next task stays whole.
         if skip_round {
+            if let Some(Msg::Summary { text }) = history.first() {
+                final_text = text.clone();
+            }
             on_update(AgentUpdate::RoundEnd {
-                messages: history.split_off(history.len().saturating_sub(1)),
+                messages: history.clone(),
                 usage: None,
             });
             break;
@@ -520,11 +521,10 @@ pub fn run_agent(
         });
         final_text = text;
         last_usage = usage;
-        // the assistant just pushed is the only message the report does not
-        // name as input: mark everything up to and including it as covered
-        // by u.input + u.output (the tail estimate prices it again at
-        // chars/4, matching the compaction gate's conservative math)
-        usage_marker = usage.map(|u| (history.len().saturating_sub(1), u));
+        // u.input covers the request's prompt and u.output the assistant just
+        // pushed, so the report covers the whole history: everything the next
+        // round appends is the only part left to price at chars/4
+        usage_marker = usage.map(|u| (history.len(), u));
         // the round is complete: this request's whole conversation is what
         // the next one will extend, so it is the next request's cache anchor
         cache_stable = Some(history.len());

@@ -536,6 +536,15 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         keep_recent_tokens: 500,
     });
     let mut approval = approval::ApprovalConfig::default();
+    // the ending RoundEnd is the turn persistence writes, so it must carry
+    // the whole rebuilt history (the summary plus the kept tail), not just
+    // its last message
+    let mut rounds: Vec<Vec<Msg>> = Vec::new();
+    let mut on_update = |u: AgentUpdate| {
+        if let AgentUpdate::RoundEnd { messages, .. } = u {
+            rounds.push(messages);
+        }
+    };
     let outcome = run_agent(
         RunRequest {
             model: &mock_model(port),
@@ -546,7 +555,10 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
             opts: &opts,
         },
         &mut approval,
-        deny_callbacks(),
+        RunCallbacks {
+            on_update: &mut on_update,
+            on_approval: &mut |_| ApprovalResponse::Deny,
+        },
     )
     .expect("the extension compaction must succeed");
     drop(server);
@@ -557,11 +569,18 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
     assert!(
         matches!(outcome.history.first(), Some(Msg::Summary { text }) if text.contains("replacement summary"))
     );
-    assert_eq!(
-        outcome.history.len(),
-        1,
-        "nothing survives beside the summary"
+    assert_eq!(outcome.history.len(), 2, "the summary plus the kept tail");
+    assert!(
+        matches!(&outcome.history[1], Msg::User { text, .. } if text.starts_with('x')),
+        "the kept tail survives the fold in memory"
     );
+    let stored = rounds.last().expect("the ending RoundEnd");
+    assert_eq!(
+        stored.len(),
+        2,
+        "the ending RoundEnd carries the whole rebuilt history"
+    );
+    assert!(matches!(stored.first(), Some(Msg::Summary { .. })));
     assert!(!outcome.interrupted);
 }
 
@@ -843,6 +862,83 @@ fn the_usage_marker_total_reaches_the_compaction_gate() {
     assert_eq!(used, 7_000, "the marker's reported total must survive");
     assert!(compact::should_compact(used, 7_000));
     assert!(!compact::should_compact(used, 7_001));
+}
+
+/// The marker must cover the assistant the round just pushed: the provider
+/// already billed its output tokens, so pricing the same message again at
+/// chars/4 inflates the estimate and folds a session that still fits. The
+/// marker is only observable through the gate, so a tool round is the shortest
+/// run that reaches a second gate carrying a large assistant message.
+#[test]
+fn the_usage_marker_does_not_reprice_the_assistant_it_just_counted() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write as _;
+        for conn in listener.incoming().flatten() {
+            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut c = conn;
+            read_request(&mut c);
+            let body = if n == 0 {
+                // one long assistant text plus a read call; the usage report
+                // (500 tokens) covers all of it, so the next gate must not
+                // add the text back at chars/4
+                let text = "a".repeat(3_000);
+                format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n\
+data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c1\",\"function\":{{\"name\":\"read\",\"arguments\":\"{{\\\"path\\\":\\\"/nonexistent-yak\\\"}}\"}}}}]}}}}]}}\n\n\
+data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+data: {{\"usage\":{{\"prompt_tokens\":400,\"completion_tokens\":100}}}}\n\n\
+data: [DONE]\n\n"
+                )
+            } else {
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n\
+data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: [DONE]\n\n"
+                    .to_string()
+            };
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    let model = mock_model(port);
+    let tools = tools::builtin_tools();
+    let mut opts = test_opts();
+    opts.compact = Some(compact::CompactConfig {
+        trigger_tokens: Some(1_000),
+        keep_recent_tokens: 0,
+    });
+    let mut approval = approval::ApprovalConfig::default();
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    )
+    .expect("the run completes without a spurious compaction");
+    drop(server);
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the tool round then the answer; an off-by-one marker folds in between"
+    );
+    assert!(
+        !matches!(outcome.history.first(), Some(Msg::Summary { .. })),
+        "the session still fit its trigger, so nothing folded"
+    );
 }
 
 /// A stub extension that records every `event` frame it is sent to a file
