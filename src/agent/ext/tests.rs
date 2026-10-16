@@ -924,6 +924,7 @@ fn a_reply_without_a_result_is_an_error() {
 /// list: the host hands both to the agent surfaces (the system prompt embeds
 /// the section, the REPL lists the skills).
 #[test]
+#[cfg(unix)]
 fn initialize_reply_contributes_a_system_section_and_skills() {
     let dir = crate::core::testutil::scratch_dir("ext-contrib");
     let py = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n  msg = json.loads(line)\n  if msg.get('type') == 'initialize':\n    print(json.dumps({\n      'id': msg['id'], 'result': {\n        'commands': ['run'],\n        'system': 'some section',\n        'skills': [\n          {'name': 'pdf', 'description': 'extract tables',\n           'model_invocation': False},\n          {'name': 'gitflow', 'description': 'release flow'},\n          {'description': 'no name: dropped'},\n        ],\n      },\n    }), flush=True)\n".to_string();
@@ -943,6 +944,7 @@ fn initialize_reply_contributes_a_system_section_and_skills() {
 /// `Ext::system_section` and `Ext::skills` expose one connection's own
 /// contribution (the `Extensions` aggregators compose them).
 #[test]
+#[cfg(unix)]
 fn one_extension_exposes_its_own_section_and_skills() {
     let dir = crate::core::testutil::scratch_dir("ext-one");
     let py = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n  msg = json.loads(line)\n  if msg.get('type') == 'initialize':\n    print(json.dumps({'id': msg['id'], 'result': {\n      'system': 'sec', 'skills': [{'name': 'a', 'description': 'd'}]}}), flush=True)\n";
