@@ -143,8 +143,46 @@ pub(crate) fn path_pinned_model(cfg: &crate::core::config::Config) -> Option<Str
     path_pinned_model_at(cfg, &user_pins_path(), &cwd)
 }
 
-fn user_pins_path() -> std::path::PathBuf {
+pub(crate) fn user_pins_path() -> std::path::PathBuf {
     crate::core::config::user_dir().join("model-pins.json")
+}
+
+/// Write (or, on None, remove) the pin for one directory: the write side
+/// of `path_pinned_model`, ridden by `/model` (auto-pin the cwd) and the
+/// `model_pin` extension. A malformed pins file is refused, not rewritten
+/// by guesswork — the loud path matches the read side's warning.
+pub(crate) fn set_path_pin(dir: &str, model: Option<&str>) -> Result<(), String> {
+    set_path_pin_at(&user_pins_path(), dir, model)
+}
+
+fn set_path_pin_at(
+    pins_path: &std::path::Path,
+    dir: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let path = pins_path.to_path_buf();
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} does not parse: {e}", path.display()))?,
+        Err(_) => serde_json::Value::Object(Default::default()),
+    };
+    let Some(map) = root.as_object_mut() else {
+        return Err(format!("{} is not a pin table", path.display()));
+    };
+    match model {
+        Some(m) => {
+            map.insert(dir.to_string(), serde_json::Value::String(m.to_string()));
+        }
+        None => {
+            map.remove(dir);
+        }
+    }
+    if let Some(dir_parent) = path.parent() {
+        std::fs::create_dir_all(dir_parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, crate::jsonfmt::dumps_indent(&root, 2) + "\n")
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// The testable body: an explicit pins file and cwd instead of the

@@ -960,6 +960,27 @@ fn repl_command(
             if let Err(e) = crate::core::config::try_set_default_model(&choice.model) {
                 eprintln!("Warning: could not save the default: {e}");
             }
+            // switching also pins the cwd: the next session in this
+            // directory starts on the picked model even though the stored
+            // default moved (the pin outranks it). `/model-pin off` lifts it
+            match crate::providers::set_path_pin(
+                &session.cwd.display().to_string(),
+                Some(&choice.model),
+            ) {
+                Ok(()) => {
+                    let p = crate::theme::err();
+                    eprintln!(
+                        "{}pinned for {} (new sessions here start on it){}",
+                        p.dim,
+                        abbrev_home(&session.cwd.display().to_string()),
+                        p.reset
+                    );
+                }
+                Err(e) => eprintln!(
+                    "Warning: could not pin {} for this directory: {e}",
+                    session.cwd.display()
+                ),
+            }
         }
         "/thinking" => {
             if let Some(level) =

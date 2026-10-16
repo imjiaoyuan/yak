@@ -418,6 +418,64 @@ fn an_unresolvable_path_pin_is_dropped() {
 }
 
 #[test]
+fn set_path_pin_round_trips_and_removes() {
+    let cfg = crate::core::config::Config {
+        providers: [(
+            "p".to_string(),
+            crate::core::config::Provider {
+                kind: "openai".to_string(),
+                base_url: "https://p.test/v1".to_string(),
+                api_key: None,
+                models: vec!["m1".to_string(), "m2".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let dir = crate::core::testutil::scratch_dir("pins-write");
+    let pins = dir.join("model-pins.json");
+    set_path_pin_at(&pins, &dir.join("work").display().to_string(), Some("p/m1")).unwrap();
+    set_path_pin_at(
+        &pins,
+        &dir.join("work/a").display().to_string(),
+        Some("p/m2"),
+    )
+    .unwrap();
+    // insertion order holds and both pins read back by prefix
+    let expected = format!(
+        "{{\n  \"{}\": \"p/m1\",\n  \"{}\": \"p/m2\"\n}}\n",
+        dir.join("work").display(),
+        dir.join("work/a").display()
+    );
+    assert_eq!(std::fs::read_to_string(&pins).unwrap(), expected);
+    assert_eq!(
+        path_pinned_model_at(&cfg, &pins, &dir.join("work/a/src")),
+        Some("p/m2".to_string())
+    );
+    set_path_pin_at(&pins, &dir.join("work/a").display().to_string(), None).unwrap();
+    assert_eq!(
+        path_pinned_model_at(&cfg, &pins, &dir.join("work/a/src")),
+        Some("p/m1".to_string())
+    );
+    // removing the last pin leaves an empty table, not a missing file
+    set_path_pin_at(&pins, &dir.join("work").display().to_string(), None).unwrap();
+    assert_eq!(std::fs::read_to_string(&pins).unwrap(), "{}\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn set_path_pin_refuses_a_malformed_table() {
+    let dir = crate::core::testutil::scratch_dir("pins-malformed");
+    let pins = dir.join("model-pins.json");
+    std::fs::write(&pins, "[1, 2]").unwrap();
+    assert!(set_path_pin_at(&pins, "/tmp/whatever", Some("p/m1")).is_err());
+    // the file is untouched, not rewritten by guesswork
+    assert_eq!(std::fs::read_to_string(&pins).unwrap(), "[1, 2]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_stored_context_window_survives_the_cli_option_merge() {
     let mut cfg = crate::core::config::Config::default();
     cfg.providers.insert(

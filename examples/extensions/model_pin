@@ -11,8 +11,11 @@ The pins live in <user_dir>/model-pins.json ({"<absolute dir>":
 YAK_MODEL > the session's own model > the nearest pinned path > the
 project pin (models.default in <project>/.yak/config.json) > the global
 default. The nearest ancestor wins: a pin on ~/work/a covers ~/work/a/sub;
-a deeper pin shadows it. Pins apply to *new* sessions — an ongoing session
-keeps the model it started with (switch with /model). Bare with no
+a deeper pin shadows it. /model pins automatically — a successful switch
+writes the picked model in for the cwd, so the next session there starts
+on it; this command manages the table by hand. Pins apply to *new*
+sessions — an ongoing session keeps the model it started with (switch
+with /model, which pins for the next one). Bare with no
 argument lists every pin. The pin is remembered per path, so cd-ing around
 picks the right model without editing config.json per project.
 """
