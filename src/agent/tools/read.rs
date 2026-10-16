@@ -194,6 +194,31 @@ impl Tool for ReadTool {
             out.push_str(line);
             kept += 1;
         }
+        // The raw cap is not the wire cap: the result rides the request as a
+        // JSON string value (newlines and quotes double, control chars cost
+        // six bytes) and is re-billed every round, so hold the body to the
+        // shared escaped-byte and token budgets too. Whole trailing lines are
+        // dropped, keeping the resume offset truthful.
+        if json_escaped_len(&out) > MAX_BYTES
+            || crate::agent::compact::text_tokens(&out) > MAX_TOKENS
+        {
+            let fits = |n: usize| {
+                let body = w.lines[..n].join("\n");
+                json_escaped_len(&body) <= MAX_BYTES
+                    && crate::agent::compact::text_tokens(&body) <= MAX_TOKENS
+            };
+            let (mut lo, mut hi) = (0usize, kept);
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            out = w.lines[..lo].join("\n");
+            kept = lo;
+        }
         let byte_cut = kept < w.lines.len();
         let last = w.start + kept.saturating_sub(1);
         if !w.eof || byte_cut {
@@ -201,7 +226,7 @@ impl Tool for ReadTool {
             // and the model needs the resume offset in both
             if byte_cut {
                 out.push_str(&format!(
-                    "\n\n[Showing lines {}-{} of {} (50KB limit). Use offset={} to continue.]",
+                    "\n\n[Showing lines {}-{} of {} (output limit). Use offset={} to continue.]",
                     w.start,
                     last,
                     w.total.describe(),
@@ -353,6 +378,50 @@ mod tests {
             p(json!({"path": "R/x.R", "offset": 0, "limit": 5})),
             "R/x.R:1-5"
         );
+    }
+
+    /// The raw byte cap is not the wire cost: a body of control characters
+    /// escapes six bytes each, so the read must hold the assembled body to
+    /// the shared escaped-byte budget even while under the raw one.
+    #[test]
+    fn a_read_body_is_capped_by_the_json_escaped_bytes() {
+        let dir = crate::core::testutil::scratch_dir("read-escaped");
+        // 10 lines of 2000 control chars: 20 KB raw, but 6x that escaped
+        let line = "\u{1}".repeat(crate::read::LINE_CHAR_CAP);
+        let body: Vec<String> = (0..10).map(|_| line.clone()).collect();
+        std::fs::write(dir.join("ctl.txt"), body.join("\n")).unwrap();
+        let out = ReadTool.execute(&json!({"path": "ctl.txt"}), &dir, &mut |_| {});
+        assert!(!out.is_error(), "{}", out.content);
+        let shown_text = out.content.split("\n\n[").next().unwrap();
+        assert!(
+            shown_text.lines().count() < 10,
+            "the escaped-byte budget must cut: {}",
+            shown_text.lines().count()
+        );
+        assert!(
+            json_escaped_len(shown_text) <= MAX_BYTES,
+            "escaped body {}",
+            json_escaped_len(shown_text)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dense CJK sits under the byte cap but over the token estimate: the
+    /// read must stop there and point the resume offset at the first unseen
+    /// line.
+    #[test]
+    fn a_read_body_is_capped_by_the_token_estimate() {
+        let dir = crate::core::testutil::scratch_dir("read-tokens");
+        let line = "汉字汉字汉字汉"; // 7 wide chars
+        let body: Vec<String> = (0..MAX_LINES).map(|_| line.to_string()).collect();
+        std::fs::write(dir.join("cjk.txt"), body.join("\n")).unwrap();
+        let out = ReadTool.execute(&json!({"path": "cjk.txt"}), &dir, &mut |_| {});
+        assert!(!out.is_error(), "{}", out.content);
+        let shown = out.content.split("\n\n[").next().unwrap().lines().count();
+        assert!(shown < MAX_LINES, "the token budget must cut: {shown}");
+        assert!(shown > 1000, "and not over-cut: {shown}");
+        assert!(out.content.contains("Use offset="), "{}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

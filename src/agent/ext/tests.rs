@@ -62,6 +62,40 @@ fn disabled_matches_a_script_tool_by_declared_name_too() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Discovery shadowing is by stem, project over user — but only a real
+/// extension entry (a manifest script tool or an executable resident)
+/// claims the stem. An inert file in a higher-priority home must not
+/// shadow a real extension of the same stem below it.
+#[test]
+fn an_inert_file_does_not_shadow_a_lower_extension() {
+    let project = crate::core::testutil::scratch_dir("ext-shadow-proj");
+    let user = crate::core::testutil::scratch_dir("ext-shadow-user");
+    // project: a plain text file named `search` — no manifest, and not an
+    // executable (unix needs the exec bit; Windows a recognized extension)
+    std::fs::write(project.join("search"), "not an extension\n").unwrap();
+    // user: a real resident with the same stem
+    #[cfg(unix)]
+    let user_ext = user.join("search");
+    #[cfg(windows)]
+    let user_ext = user.join("search.bat");
+    std::fs::write(&user_ext, b"#!/bin/sh\n:").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&user_ext, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let found = discover_in(&[project.clone(), user.clone()], &[], 120);
+    assert_eq!(
+        found.resident.len(),
+        1,
+        "the user copy must surface: the inert project file is not an extension"
+    );
+    assert_eq!(found.resident[0], user_ext);
+    let _ = std::fs::remove_dir_all(&project);
+    let _ = std::fs::remove_dir_all(&user);
+}
+
 #[test]
 fn plain_scripts_have_no_manifest() {
     assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s"), 120).is_none());
@@ -667,6 +701,54 @@ done
         out.content
             .contains("[output truncated to fit the context window]"),
         "the cut is marked"
+    );
+}
+
+/// A result under the byte cap can still overrun the line cap: the shared
+/// caps apply whatever the raw size says, and the cut is marked.
+#[cfg(unix)]
+#[test]
+fn a_line_heavy_extension_result_is_cut_under_the_byte_cap() {
+    let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      printf '{"id":%s,"result":"' "$id"
+      # 2500 short lines: ~5 KB raw, under the byte cap, over the line cap
+      i=0
+      while [ "$i" -lt 2500 ]; do
+        printf 'x\\n'
+        i=$((i+1))
+      done
+      printf '"}\n'
+      ;;
+  esac
+done
+"#;
+    let ext = connect_stub(&write_stub_extension("lines", body));
+    let tool = ExtTool {
+        ext,
+        tool_name: "ping".into(),
+        exposed: "ping".into(),
+        description: String::new(),
+        schema: json!({"type": "object", "properties": {}}),
+        tier: Tier::Exec,
+    };
+    let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
+    assert!(!out.is_error());
+    assert!(
+        out.content
+            .contains("[output truncated to fit the context window]"),
+        "the cut is marked: {}",
+        out.content
+    );
+    assert!(
+        out.content.lines().count() < 2500,
+        "the line cap must cut a result the byte cap alone would keep"
     );
 }
 

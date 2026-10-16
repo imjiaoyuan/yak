@@ -17,6 +17,8 @@
 
 use serde_json::Value;
 
+use super::{MAX_BYTES, MAX_LINES, MAX_TOKENS, json_escaped_len, truncate_marked_budgeted};
+
 /// A parsed filter: a pipeline of stages, each stage producing zero or more
 /// values from one input value.
 #[derive(Debug, Clone, PartialEq)]
@@ -488,8 +490,29 @@ pub(super) fn run_file_query(
         .clamp(1, 1000);
     let total = results.len();
     let window: Vec<Value> = results.into_iter().skip(offset - 1).take(limit).collect();
-    let last = offset + window.len().saturating_sub(1);
-    let mut out = render(&window);
+    // A `?q=` result rides the request like any tool output: cap it by the
+    // shared escaped-byte and token budgets, not just the result count, so a
+    // few huge values cannot flood the context. Take the longest prefix that
+    // fits, so the offset continuation stays truthful.
+    let mut out = String::new();
+    let mut shown = 0usize;
+    while shown < window.len() {
+        let candidate = render(&window[..=shown]);
+        if json_escaped_len(&candidate) > MAX_BYTES
+            || crate::agent::compact::text_tokens(&candidate) > MAX_TOKENS
+        {
+            break;
+        }
+        out = candidate;
+        shown += 1;
+    }
+    if shown == 0 && !window.is_empty() {
+        // one result alone dwarfs the budget: cut and mark it, the shared
+        // shape for an oversized tool result, rather than shipping nothing
+        out = truncate_marked_budgeted(&window[0].to_string(), MAX_LINES, MAX_BYTES, MAX_TOKENS);
+        shown = 1;
+    }
+    let last = offset + shown.saturating_sub(1);
     // a continuation note only when results remain unseen — the same rule
     // as the line-window note above
     if last < total {
@@ -709,5 +732,50 @@ mod file_tests {
         let out = run_file_query(&absent, "nope.json?q=.", ".", &json!({}));
         assert!(out.is_error());
         assert!(out.content.starts_with("cannot read"), "{}", out.content);
+    }
+
+    /// One value can dwarf the whole cap: it is cut and marked rather than
+    /// shipped whole, and the cut holds the token estimate.
+    #[test]
+    fn a_single_result_over_the_token_budget_is_cut_and_marked() {
+        let dir = crate::core::testutil::scratch_dir("jq_tokens");
+        let p = dir.join("data.json");
+        std::fs::write(&p, format!("{{\"s\":\"{}\"}}", "汉".repeat(13_000))).unwrap();
+        let out = run_file_query(&p, "data.json?q=.s", ".s", &json!({}));
+        assert!(!out.is_error(), "{}", out.content);
+        assert!(
+            out.content
+                .contains("[output truncated to fit the context window]"),
+            "the cut is marked: {}",
+            out.content
+        );
+        assert!(
+            crate::agent::compact::text_tokens(&out.content) < 13_000,
+            "the cut holds the estimate"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Many results under the value cap still cannot exceed the shared byte
+    /// budget in total: the output keeps the longest prefix and the note
+    /// names the first unseen result.
+    #[test]
+    fn a_many_result_output_is_capped_by_the_shared_byte_budget() {
+        let dir = crate::core::testutil::scratch_dir("jq_bytes");
+        let p = dir.join("data.json");
+        let items: Vec<String> = (0..100)
+            .map(|i| format!("{{\"i\":{i},\"s\":\"{}\"}}", "x".repeat(1000)))
+            .collect();
+        std::fs::write(&p, format!("[{}]", items.join(","))).unwrap();
+        let out = run_file_query(&p, "data.json?q=.[]", ".[]", &json!({}));
+        assert!(!out.is_error(), "{}", out.content);
+        let body = out.content.split("\n\n[").next().unwrap();
+        assert!(
+            json_escaped_len(body) <= MAX_BYTES,
+            "escaped body {}",
+            json_escaped_len(body)
+        );
+        assert!(out.content.contains("Use offset="), "{}", out.content);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1252,17 +1252,16 @@ impl ExtTool {
     ) -> ToolOutput {
         match self.ext.call_tool(&self.tool_name, args, call_id, log) {
             Ok(text) => {
-                if text.len() > MAX_BYTES {
-                    // Same cap shape as the builtin tools (lines, then
-                    // bytes, then the token estimate), but marked: a
-                    // silent cut would leave the model arguing with a
-                    // tool that never said its answer was incomplete.
-                    ToolOutput::ok(truncate_marked_budgeted(
-                        &text, MAX_LINES, MAX_BYTES, MAX_TOKENS,
-                    ))
-                } else {
-                    ToolOutput::ok(text)
-                }
+                // Always route through the shared caps, not only when the
+                // raw bytes overflow: a short-line result can overrun the
+                // line cap and a dense CJK one the token estimate while
+                // sitting under 50 KB. Same cap shape as the builtin tools
+                // (lines, then bytes, then the token estimate), but marked:
+                // a silent cut would leave the model arguing with a tool
+                // that never said its answer was incomplete.
+                ToolOutput::ok(truncate_marked_budgeted(
+                    &text, MAX_LINES, MAX_BYTES, MAX_TOKENS,
+                ))
             }
             Err(e) => ToolOutput::err(e),
         }

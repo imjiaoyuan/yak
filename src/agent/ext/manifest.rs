@@ -50,17 +50,25 @@ pub(super) fn discover_in(
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if is_disabled(stem) || !seen.insert(stem.to_string()) {
+            if is_disabled(stem) || seen.contains(stem) {
                 continue;
             }
             // a `--- yak-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
-            if let Some(spec) = exec_tool_manifest(&path, default_timeout) {
+            let spec = exec_tool_manifest(&path, default_timeout);
+            if spec.is_none() && !is_executable(&path) {
+                // neither a manifest script tool nor an executable: not an
+                // extension, so it must not claim the stem and shadow a
+                // real one in a lower-priority home
+                continue;
+            }
+            seen.insert(stem.to_string());
+            if let Some(spec) = spec {
                 if !is_disabled(&spec.name) {
                     out.script_tools.push(spec);
                 }
-            } else if is_executable(&path) {
+            } else {
                 out.resident.push(path);
             }
         }
