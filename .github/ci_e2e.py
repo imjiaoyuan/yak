@@ -1099,7 +1099,7 @@ def main():
             f"skills lane rc={sk.returncode} err={sk.stderr[-300:]!r}"
         system = seen.get("system") or ""
         assert "<available_skills>" in system, \
-            f"the skills block never reached the system prompt: {system[-400:]!r}"
+            f"the skills block never reached the system prompt: {system[-400:]!r}; extension diagnostics: {sk.stderr[-1500:]!r}"
         for name in ("pkg-skill-audit", "release-checklist"):
             assert f"<name>{name}</name>" in system, \
                 f"the shipped skill {name} must be listed: {system[-400:]!r}"
