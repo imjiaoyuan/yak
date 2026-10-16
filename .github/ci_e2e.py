@@ -1077,6 +1077,15 @@ def main():
     if os.path.isfile(skills_ext):
         with open(skills_ext, encoding="utf-8") as f:
             write_extension(os.path.join(user, "extensions"), "skills", f.read())
+        if sys.platform == "win32":
+            probe = subprocess.run(
+                [sys.executable, os.path.join(user, "extensions", "skills.py")],
+                input=json.dumps({"id": 1, "type": "initialize", "params": {
+                    "cwd": work, "user_dir": user}}) + "\n",
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=work, env=env, timeout=30)
+            assert probe.returncode == 0 and '"skills"' in probe.stdout, \
+                f"skills plugin standalone failed: {probe.stderr[-1200:]!r} {probe.stdout[-400:]!r}"
         skills_src = os.path.join(here, "examples", "skills")
         if os.path.isdir(skills_src):
             for entry in sorted(os.listdir(skills_src)):
