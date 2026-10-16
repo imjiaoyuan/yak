@@ -53,21 +53,26 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
         let (pname, provider) = cfg.providers.iter().nth(i).expect("picked in range");
         (pname.clone(), provider)
     };
-    // step 2: the provider's configured models merged with its live list
-    eprintln!(
-        "{}fetching models from {pname} …{}",
-        crate::theme::err().dim,
-        crate::theme::err().reset
-    );
-    let key = cfg.api_key(provider).unwrap_or_default();
-    // a failed fetch is worth saying out loud: the configured list may carry
-    // the picker alone, and a rejected key then looks like a provider that
-    // simply has fewer models
-    let (live, live_error) =
+    // step 2: the provider's configured models merged with its live list.
+    // The codex channel serves no /models endpoint (and needs the OAuth
+    // header set, not an api key): its configured list is the catalog.
+    let (live, live_error) = if provider.kind == "codex" {
+        (Vec::new(), None)
+    } else {
+        eprintln!(
+            "{}fetching models from {pname} …{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
+        let key = cfg.api_key(provider).unwrap_or_default();
+        // a failed fetch is worth saying out loud: the configured list may
+        // carry the picker alone, and a rejected key then looks like a
+        // provider that simply has fewer models
         match crate::providers::catalog::fetch_models(&provider.kind, &provider.base_url, &key) {
             Ok(ids) => (ids, None),
             Err(e) => (Vec::new(), Some(e)),
-        };
+        }
+    };
     if let Some(e) = &live_error {
         eprintln!(
             "{}could not list models from {pname}: {e}{}",

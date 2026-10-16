@@ -82,7 +82,7 @@ fn advance(last: Option<(u64, u128)>, now_ms: u64, fresh: impl FnOnce() -> u128)
 
 fn random_bits() -> u128 {
     let mut buf = [0u8; 10];
-    getrandom_fill(&mut buf);
+    fill_random(&mut buf);
     let mut v: u128 = 0;
     for b in buf {
         v = (v << 8) | b as u128;
@@ -112,7 +112,7 @@ fn encode_ulid(ts: u64, rand: u128) -> String {
     String::from_utf8(chars.to_vec()).unwrap()
 }
 
-fn getrandom_fill(buf: &mut [u8]) {
+pub fn fill_random(buf: &mut [u8]) {
     #[cfg(unix)]
     {
         use std::io::Read;

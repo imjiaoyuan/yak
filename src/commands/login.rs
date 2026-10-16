@@ -13,6 +13,19 @@ use crate::core::config::{self, Provider};
 /// warns without rolling back the removal.
 fn remove_provider(cfg: &mut config::Config, name: &str) -> Result<(), String> {
     config::save(cfg).map_err(|e| e.to_string())?;
+    // a codex provider carries its token in auth.json, not api_key: the
+    // logout must drop both or the dead entry keeps refreshing a login the
+    // user believes is gone
+    if cfg.providers.get(name).map(|p| p.kind.as_str()) == Some("codex")
+        && let Err(e) = crate::providers::chatgpt_oauth::remove_token(name)
+    {
+        eprintln!(
+            "{}Warning: could not remove the saved login from {}: {e}{}",
+            crate::theme::err().dim,
+            crate::providers::chatgpt_oauth::auth_file_display().display(),
+            crate::theme::err().reset
+        );
+    }
     eprintln!(
         "{}removed provider '{name}' (and its key) from {}{}",
         crate::theme::err().dim,
@@ -252,6 +265,12 @@ pub(crate) fn wizard() -> Result<(), String> {
     // the broken base URL to config once a model id was typed
     validate_base_url(&base_url)?;
 
+    // step 2 — a ChatGPT subscription login (kind codex) takes no API key:
+    // the OAuth browser flow owns every step from here
+    if kind == "codex" {
+        return chatgpt_login(&name, &base_url);
+    }
+
     // step 2 — the key, hidden. Empty answer takes the detected env var as a
     // ${VAR} reference. esc aborts without writing anything.
     let detected = preset
@@ -355,6 +374,70 @@ fn cancelled() -> Result<(), String> {
         "{}aborted — nothing written{}",
         crate::theme::err().dim,
         crate::theme::err().reset
+    );
+    Ok(())
+}
+
+/// The ChatGPT subscription login: start the local callback server, open
+/// the browser, exchange the token, write auth.json, then write the
+/// kind=codex provider entry (the models list is the Codex channel's
+/// public catalog; /model switches later).
+fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err("ChatGPT login needs a terminal (the browser callback flow)".into());
+    }
+    let flow = crate::providers::chatgpt_oauth::start_login()?;
+    let (callback, port) = crate::providers::chatgpt_oauth::spawn_callback_server()?;
+    eprintln!(
+        "{}opening the browser to sign in with ChatGPT …{}",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
+    eprintln!(
+        "{}(no browser? open this URL manually:) {}{}",
+        crate::theme::err().dim,
+        flow.url,
+        crate::theme::err().reset
+    );
+    crate::platform::open_url(&flow.url);
+    eprintln!(
+        "{}waiting for the login callback on http://127.0.0.1:{port}/auth/callback — or paste the redirect URL here{}",
+        crate::theme::err().dim,
+        crate::theme::err().reset
+    );
+    let pasted = prompt("Redirect URL (empty = keep waiting for the browser)");
+    let url = match pasted {
+        Some(u) => u,
+        None => callback
+            .recv_timeout(std::time::Duration::from_secs(600))
+            .map_err(|_| "login timed out (10 min) — run /login again".to_string())?,
+    };
+    let token = crate::providers::chatgpt_oauth::manual_complete(flow, &url)?;
+    let models = crate::providers::codex::CHANNEL_MODELS;
+    crate::providers::chatgpt_oauth::write_token(name, &token)?;
+    let mut cfg = config::load();
+    cfg.providers.insert(
+        name.to_string(),
+        Provider {
+            kind: "codex".into(),
+            base_url: base_url.to_string(),
+            api_key: None,
+            models: models.iter().map(|s| s.to_string()).collect(),
+        },
+    );
+    config::save(&cfg).map_err(|e| e.to_string())?;
+    config::try_set_default_model(&format!("{name}/{}", models[0]))
+        .map_err(|e| format!("provider saved but the default model was not: {e}"))?;
+    eprintln!(
+        "{}default model: {name}/{}{}",
+        crate::theme::err().dim,
+        models[0],
+        crate::theme::err().reset
+    );
+    println!(
+        "ChatGPT login saved to {}",
+        crate::providers::chatgpt_oauth::auth_file_display().display()
     );
     Ok(())
 }

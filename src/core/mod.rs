@@ -18,6 +18,7 @@ pub mod http;
 pub mod paths;
 pub mod pngenc;
 pub mod render_md;
+pub mod sha256;
 pub mod sync;
 pub mod templates;
 #[cfg(test)]

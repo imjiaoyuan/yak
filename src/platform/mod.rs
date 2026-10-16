@@ -79,6 +79,29 @@ pub fn run_shell_interactive(cmd: &str, cwd: &Path) -> std::io::Result<std::proc
     build_shell_command(&shell_spec(), cmd, cwd).status()
 }
 
+/// Open a URL in the user's browser, best-effort: the platform opener,
+/// detached, its output swallowed. A failure is not fatal — the caller
+/// prints the URL, so the user can always open it by hand.
+pub fn open_url(url: &str) {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "xdg-open"
+    };
+    let args: Vec<&str> = if cfg!(target_os = "windows") {
+        vec!["/C", "start", "", url]
+    } else {
+        vec![url]
+    };
+    let _ = std::process::Command::new(program)
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("yak supports Linux, macOS and Windows only");
 

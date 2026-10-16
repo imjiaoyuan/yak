@@ -2,6 +2,8 @@
 
 pub mod anthropic;
 pub mod catalog;
+pub mod chatgpt_oauth;
+pub mod codex;
 pub mod message;
 pub mod openai_compat;
 
@@ -859,6 +861,7 @@ impl ResolvedModel {
         match self.kind.as_str() {
             "openai-compat" => openai_compat::run(self, input, stream, on_event),
             "anthropic" => anthropic::run(self, input, stream, on_event),
+            "codex" => codex::run(self, input, stream, on_event),
             other => Err(format!("Unknown provider kind: {other}")),
         }
     }
