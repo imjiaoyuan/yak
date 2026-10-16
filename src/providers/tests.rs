@@ -444,9 +444,9 @@ fn set_path_pin_round_trips_and_removes() {
     .unwrap();
     // insertion order holds and both pins read back by prefix
     let expected = format!(
-        "{{\n  \"{}\": \"p/m1\",\n  \"{}\": \"p/m2\"\n}}\n",
-        dir.join("work").display(),
-        dir.join("work/a").display()
+        "{{\n  {}: \"p/m1\",\n  {}: \"p/m2\"\n}}\n",
+        serde_json::to_string(&dir.join("work").display().to_string()).unwrap(),
+        serde_json::to_string(&dir.join("work/a").display().to_string()).unwrap()
     );
     assert_eq!(std::fs::read_to_string(&pins).unwrap(), expected);
     assert_eq!(
