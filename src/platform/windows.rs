@@ -216,6 +216,9 @@ pub fn read_hidden(prompt: &str) -> std::io::Result<String> {
                 let _ = unsafe { SetConsoleMode(handle, saved_mode) };
                 if let Some(line) = line {
                     eprintln!();
+                    if line.trim() == "\u{1b}" {
+                        return Err(std::io::ErrorKind::Interrupted.into());
+                    }
                     return Ok(line);
                 }
             }
@@ -224,7 +227,12 @@ pub fn read_hidden(prompt: &str) -> std::io::Result<String> {
 
     // Visible fallback, matching the pre-platform behavior.
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    if std::io::stdin().lock().read_line(&mut line)? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    if line.trim() == "\u{1b}" {
+        return Err(std::io::ErrorKind::Interrupted.into());
+    }
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 

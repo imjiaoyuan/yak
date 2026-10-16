@@ -868,7 +868,7 @@ impl ResolvedModel {
             "gpt-3.5",
             "gpt-4.1-mini",
             "gpt-4.1-nano",
-            "lamma-3.1",
+            "llama-3.1",
             "llama-3.3",
             "qwen2.5-",
             "glm-4.5-",

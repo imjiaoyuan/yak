@@ -1,5 +1,5 @@
 //! Global user memory: a single hand-editable `~/.yak/YAK.md` injected into
-//! the agent system prompt. The `remember` tool appends one dated line when
+//! the agent system prompt. The `memory` extension appends one dated line when
 //! the user asks to note something down; everything else is hand-edited by
 //! the user who owns the file.
 
@@ -41,7 +41,7 @@ fn section_tagged(path: &std::path::Path, tag: &str) -> String {
         body.push_str("\n[truncated]");
     }
     format!(
-        "Memory: durable, reusable facts about the user (preferences, environment, ways of working) live in the file below. Append with the `remember` tool only when the user asks or the fact is clearly durable — never secrets or one-off task details.\n<{tag} path=\"{}\">\n{body}\n</{tag}>",
+        "Memory: durable, reusable facts about the user (preferences, environment, ways of working) live in the file below. Append with the `memory` tool only when the user asks or the fact is clearly durable — never secrets or one-off task details.\n<{tag} path=\"{}\">\n{body}\n</{tag}>",
         path.display()
     )
 }
@@ -59,81 +59,9 @@ pub fn project_section(cwd: &std::path::Path) -> Option<String> {
     Some(section_tagged(&path, "project_memory"))
 }
 
-/// The agent-facing `remember`: one dated line appended to the memory file,
-/// deduped against what is already noted (containment either way,
-/// case-insensitive). `Ok(true)` means the line landed, `Ok(false)` that it
-/// was already there or empty.
-#[cfg(test)]
-fn remember_at(path: &std::path::Path, line: &str) -> Result<bool, String> {
-    let line = line.trim().trim_matches(['"', '.']);
-    if line.is_empty() {
-        return Ok(false);
-    }
-    let mut text = std::fs::read_to_string(path).unwrap_or_default();
-    let lower = line.to_lowercase();
-    let dup = text
-        .lines()
-        .map(str::to_lowercase)
-        .any(|l| l.contains(&lower) || lower.contains(&l));
-    if dup {
-        return Ok(false);
-    }
-    // a hand-edited file may lack the trailing newline; never glue lines
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    let today = crate::core::db::now_turn_datetime();
-    let today = today.get(..10).unwrap_or("");
-    text.push_str(&format!("- [{today}] {line}\n"));
-    std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(|e| e.to_string())?;
-    std::fs::write(path, text)
-        .map_err(|e| e.to_string())
-        .map(|_| true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn remember_appends_one_dated_line() {
-        let dir = crate::core::testutil::scratch_dir("memory-add");
-        let file = dir.join("YAK.md");
-        // no trailing newline: the new line must not glue onto it
-        std::fs::write(&file, "- [2026-01-01] likes concise replies").unwrap();
-        assert!(remember_at(&file, "prefers vim over emacs").unwrap());
-        let out = std::fs::read_to_string(&file).unwrap();
-        let today = crate::core::db::now_turn_datetime();
-        let today = &today[..10];
-        assert_eq!(
-            out,
-            format!("- [2026-01-01] likes concise replies\n- [{today}] prefers vim over emacs\n")
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn remember_dedups_by_containment_either_way() {
-        let dir = crate::core::testutil::scratch_dir("memory-dup");
-        let file = dir.join("YAK.md");
-        std::fs::write(&file, "- [2026-01-01] likes concise replies\n").unwrap();
-        // a noted line contains the new one (case-insensitive)
-        assert!(!remember_at(&file, "LIKES CONCISE REPLIES").unwrap());
-        // the new one contains a noted line
-        assert!(!remember_at(&file, "likes concise").unwrap());
-        // whitespace-only is a no-op, quotes and dots trimmed
-        assert!(!remember_at(&file, "  ").unwrap());
-        let before = std::fs::read_to_string(&file).unwrap();
-        assert!(remember_at(&file, "\"prefers teal.\"\n").unwrap());
-        let after = std::fs::read_to_string(&file).unwrap();
-        let today = &crate::core::db::now_turn_datetime()[..10];
-        assert!(
-            after.contains(&format!("- [{today}] prefers teal\n")),
-            "{after}"
-        );
-        assert!(after.len() > before.len());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn a_missing_or_empty_file_still_names_the_path() {
@@ -150,8 +78,7 @@ mod tests {
             );
             assert!(s.contains("empty"), "{s}");
         }
-        // and remember bootstraps the file itself
-        assert!(remember_at(&file, "first fact").unwrap());
+        std::fs::write(&file, "first fact").unwrap();
         let s = section_at(&file);
         assert!(s.contains("first fact"), "{s}");
         let _ = std::fs::remove_dir_all(&dir);

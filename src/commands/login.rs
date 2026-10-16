@@ -149,7 +149,7 @@ fn prompt(label: &str) -> Option<String> {
         return None;
     }
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed == "\u{1b}" {
         None
     } else {
         Some(trimmed.to_string())
@@ -159,7 +159,21 @@ fn prompt(label: &str) -> Option<String> {
 /// `prompt` with a shown default: enter (empty answer) takes it, esc/EOF
 /// cancels.
 fn prompt_with_default(label: &str, default: &str) -> Option<String> {
-    prompt(&format!("{label} (default {default})")).or_else(|| Some(default.to_string()))
+    eprint!("{label} (default {default}): ");
+    std::io::stderr().flush().ok()?;
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    default_answer(&line, default)
+}
+
+fn default_answer(line: &str, default: &str) -> Option<String> {
+    match line.trim() {
+        "" => Some(default.to_string()),
+        "\u{1b}" => None,
+        value => Some(value.to_string()),
+    }
 }
 
 pub(crate) fn wizard() -> Result<(), String> {
@@ -218,13 +232,9 @@ pub(crate) fn wizard() -> Result<(), String> {
     let kind = match &preset {
         Some(p) => p.kind.clone(),
         None => loop {
-            let Some(k) = prompt("Kind [openai-compat/anthropic] (default openai-compat)") else {
+            let Some(k) = prompt_with_default("Kind [openai-compat/anthropic]", "openai-compat")
+            else {
                 return cancelled();
-            };
-            let k = if k.is_empty() {
-                "openai-compat".to_string()
-            } else {
-                k
             };
             if k == "openai-compat" || k == "anthropic" {
                 break k;
@@ -289,10 +299,11 @@ pub(crate) fn wizard() -> Result<(), String> {
         Some(var) => format!("API key (empty = use ${{{var}}}, esc cancels): "),
         None => "API key (esc cancels): ".to_string(),
     };
-    let typed = crate::term::read_hidden(&hint)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let typed = match crate::term::read_hidden(&hint) {
+        Ok(value) => value.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return cancelled(),
+        Err(e) => return Err(format!("cannot read API key: {e}")),
+    };
     if typed.is_empty() && detected.is_none() {
         return Err("no API key entered".into());
     }
@@ -476,7 +487,7 @@ fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_free_name, validate_base_url};
+    use super::{default_answer, next_free_name, validate_base_url};
     use std::collections::BTreeSet;
 
     #[test]
@@ -491,6 +502,13 @@ mod tests {
         assert!(validate_base_url("ftp://example.com").is_err());
         assert!(validate_base_url("https://api.z.ai/api/coding/paas/v4").is_ok());
         assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+    }
+
+    #[test]
+    fn a_default_prompt_distinguishes_enter_from_escape() {
+        assert_eq!(default_answer("\n", "preset"), Some("preset".into()));
+        assert_eq!(default_answer("\u{1b}\n", "preset"), None);
+        assert_eq!(default_answer("custom\n", "preset"), Some("custom".into()));
     }
 
     fn taken(names: &[&str]) -> BTreeSet<String> {

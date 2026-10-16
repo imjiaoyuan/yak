@@ -214,17 +214,19 @@ pub fn read_hidden(prompt: &str) -> std::io::Result<String> {
         let _ = unsafe { ffi::tcsetattr(0, 0, ptr(&mut quiet)) };
         // Raw bytes so a lone ESC (cancel) is distinguishable from the escape
         // sequences an interactive keypad sends — cooked mode would swallow it
-        // into a failed \x1b[… read. ISIG stays on (only echo is cleared), so
-        // ctrl+c still interrupts the process the usual way. Backspace edits,
-        // UTF-8 accumulates byte by byte; a lone ESC returns an empty line,
-        // which callers treat as "keep the default / cancel".
-        let mut line = String::new();
+        // into a failed \x1b[… read. RawTerm disables ISIG, so handle ctrl+c
+        // explicitly. Keep UTF-8 as bytes until the line is complete.
+        let mut line = Vec::new();
         match RawTerm::acquire(1, 0) {
             Some(mut term) => {
                 let mut esc = false;
                 loop {
                     let b = match term.next_byte() {
                         RawByte::Key(b) => b,
+                        RawByte::Timeout if esc => {
+                            eprintln!();
+                            return Err(std::io::ErrorKind::Interrupted.into());
+                        }
                         RawByte::Timeout => continue,
                     };
                     match b {
@@ -232,39 +234,51 @@ pub fn read_hidden(prompt: &str) -> std::io::Result<String> {
                         // a keypad sequence (ESC [ … / ESC O …) arrives as
                         // ordinary bytes; keep line empty for its duration so
                         // the lone-ESC rule below stays a prefix test
-                        0x1b if line.is_empty() => esc = true,
-                        b'[' | b'O' if esc && line.is_empty() => {}
-                        0x08 | 0x7f => {
-                            let mut bytes: Vec<u8> = line.clone().into_bytes();
-                            crate::core::text::pop_utf8_char(&mut bytes);
-                            line = String::from_utf8(bytes).unwrap_or_default();
+                        0x03 => {
+                            eprintln!();
+                            return Err(std::io::ErrorKind::Interrupted.into());
                         }
-                        b if b >= 0x20 => line.push(b as char),
+                        0x1b => esc = true,
+                        b'[' | b'O' if esc => esc = false,
+                        0x08 | 0x7f => crate::core::text::pop_utf8_char(&mut line),
+                        b if b >= 0x20 => {
+                            esc = false;
+                            line.push(b);
+                        }
                         _ => {}
                     }
                 }
-                // an empty line whose last keystroke was ESC: cancel
-                if line.is_empty() && esc {
+                if esc {
                     eprintln!();
-                    return Ok(String::new());
+                    return Err(std::io::ErrorKind::Interrupted.into());
                 }
+                eprintln!();
+                return String::from_utf8(line)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
             None => {
                 // no raw terminal: read a line the cooked way
-                let n = std::io::stdin().lock().read_line(&mut line)?;
-                if n == 0 {
-                    eprintln!();
-                    return Ok(String::new());
+                let mut line = String::new();
+                if std::io::stdin().lock().read_line(&mut line)? == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
                 }
+                eprintln!();
+                if line.trim() == "\u{1b}" {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                return Ok(line.trim_end_matches(['\r', '\n']).to_string());
             }
         }
-        eprintln!();
-        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
     }
 
     // Visible fallback, matching the pre-platform behavior.
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    if std::io::stdin().lock().read_line(&mut line)? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    if line.trim() == "\u{1b}" {
+        return Err(std::io::ErrorKind::Interrupted.into());
+    }
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 

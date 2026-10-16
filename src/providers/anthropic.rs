@@ -415,7 +415,9 @@ pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> O
                 if let Some(text) = block["thinking"].as_str() {
                     on_event(Event::ReasoningDelta {
                         text: text.to_string(),
-                        meta: None,
+                        meta: block["signature"]
+                            .as_str()
+                            .map(|signature| json!({"signature": signature})),
                     });
                 }
             }
@@ -1126,6 +1128,46 @@ mod tests {
         assert_eq!(calls[0].id, "toolu_1");
         assert_eq!(calls[0].name, "read");
         assert_eq!(calls[0].arguments, json!({"path": "a"}));
+    }
+
+    #[test]
+    fn buffered_thinking_signature_is_replayed_with_tool_calls() {
+        let response = json!({
+            "content": [
+                {"type": "thinking", "thinking": "reason", "signature": "signed"},
+                {"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a"}}
+            ],
+            "stop_reason": "tool_use"
+        });
+        let mut reasoning = None;
+        let mut meta = None;
+        feed_complete(&response, &mut |event| {
+            if let Event::ReasoningDelta {
+                text,
+                meta: signature,
+            } = event
+            {
+                reasoning = Some(text);
+                meta = signature;
+            }
+        });
+        let history = vec![Msg::Assistant {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "t1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "a"}),
+            }],
+            reasoning,
+            reasoning_meta: meta,
+        }];
+        let body = build_body(&model("anthropic"), &input(&history, &[]), false).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({
+                "type": "thinking", "thinking": "reason", "signature": "signed"
+            })
+        );
     }
 
     #[test]

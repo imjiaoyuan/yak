@@ -35,7 +35,7 @@ def find_project_yak():
         d = os.sep.join(parts[:i]) or os.sep
         if os.path.isdir(os.path.join(d, ".yak")):
             return os.path.join(d, ".yak")
-        if i < len(parts) and os.path.exists(os.path.join(d, ".git")):
+        if os.path.exists(os.path.join(d, ".git")):
             return None
         if d == os.sep:
             break
