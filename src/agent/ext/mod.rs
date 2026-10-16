@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::approval::Tier;
-use super::tools::{MAX_BYTES, MAX_LINES, Tool, ToolOutput, truncate_tail};
+use super::tools::{MAX_BYTES, MAX_LINES, MAX_TOKENS, Tool, ToolOutput, truncate_marked_budgeted};
 use proto::{lossy_lines, reader_loop, writer_loop};
 use script::ScriptTool;
 
@@ -1111,8 +1111,13 @@ impl ExtTool {
         match self.ext.call_tool(&self.tool_name, args, call_id, log) {
             Ok(text) => {
                 if text.len() > MAX_BYTES {
-                    let (capped, _) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
-                    ToolOutput::ok(capped)
+                    // Same cap shape as the builtin tools (lines, then
+                    // bytes, then the token estimate), but marked: a
+                    // silent cut would leave the model arguing with a
+                    // tool that never said its answer was incomplete.
+                    ToolOutput::ok(truncate_marked_budgeted(
+                        &text, MAX_LINES, MAX_BYTES, MAX_TOKENS,
+                    ))
                 } else {
                     ToolOutput::ok(text)
                 }

@@ -110,11 +110,11 @@ fn truncate_tail_caps_lines_and_bytes() {
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
+    let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(truncated);
     assert!(tail.lines().next().unwrap().parse::<usize>().unwrap() > 1000);
     let wide = vec!["x".repeat(300); 3000].join("\n");
-    let (tail, truncated) = truncate_tail(&wide, MAX_LINES, MAX_BYTES);
+    let (tail, truncated) = truncate_tail(&wide, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(truncated);
     assert!(tail.len() <= MAX_BYTES + 300);
 }
@@ -717,7 +717,7 @@ fn truncate_tail_counts_the_json_escaped_form() {
     // form doubles every byte — the tail must shrink until the escaped
     // form fits, not just the raw one
     let text = "\n".repeat(40 * 1024);
-    let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES);
+    let (tail, truncated) = truncate_tail(&text, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(truncated);
     assert!(
         json_escaped_len(&tail) <= MAX_BYTES,
@@ -726,16 +726,16 @@ fn truncate_tail_counts_the_json_escaped_form() {
     );
     // quotes and backslashes double too
     let quotes = "\"".repeat(40 * 1024);
-    let (tail, _) = truncate_tail(&quotes, MAX_LINES, MAX_BYTES);
+    let (tail, _) = truncate_tail(&quotes, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(json_escaped_len(&tail) <= MAX_BYTES);
     // control characters become 6-byte escapes
     let ctl = "\u{1}".repeat(10 * 1024);
-    let (tail, truncated) = truncate_tail(&ctl, MAX_LINES, MAX_BYTES);
+    let (tail, truncated) = truncate_tail(&ctl, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(truncated);
     assert!(json_escaped_len(&tail) <= MAX_BYTES);
     // plain ASCII with no escapes: the cap is the raw len, unchanged
     let plain = "a".repeat(MAX_BYTES + 5000);
-    let (tail, _) = truncate_tail(&plain, MAX_LINES, MAX_BYTES);
+    let (tail, _) = truncate_tail(&plain, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     assert!(tail.len() <= MAX_BYTES);
     assert!(json_escaped_len(&tail) <= MAX_BYTES + 2);
 }

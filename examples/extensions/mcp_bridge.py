@@ -44,6 +44,11 @@ Honest limits, by design:
   - Tool schemas pass through as-is (inputSchema → parameters); a server
     shipping a non-object schema is exposed as a no-argument tool rather
     than dropping the server.
+  - `tools` in an entry filters its tools before they mount:
+    `{"only": ["search*"], "except": ["*_admin"]}` (fnmatch against the
+    MCP-side name). A tool the filter dropped errors at call time like any
+    unknown tool; schemas cost tokens every round, so the cut belongs at
+    the mount.
   - `tool_timeout` is not per tool: the bridge asks for none, so the
     config `extensions.tool_timeout` (120s default) bounds every call.
 
@@ -53,6 +58,7 @@ server may ignore it — the id has left the pending map either way, so a
 late reply is dropped as unknown).
 """
 
+import fnmatch
 import json
 import os
 import re
@@ -360,7 +366,24 @@ class Server:
         if result is None:
             raise RuntimeError("initialize handshake timed out")
         self.transport.notify("notifications/initialized", {})
-        return self.transport.request("tools/list", {}, INIT_TIMEOUT) or {}
+        return self.list_tools()
+
+    def list_tools(self):
+        """tools/list following the pagination cursor: a server with more
+        tools than fit one page advertises the rest under `nextCursor`, and
+        a page that stops early would silently hide them."""
+        tools, cursor = [], None
+        for _ in range(1000):
+            params = {} if cursor is None else {"cursor": cursor}
+            page = self.transport.request("tools/list", params, INIT_TIMEOUT)
+            if not page:
+                break
+            tools.extend(page.get("tools") or [])
+            cursor = page.get("nextCursor")
+            if not cursor:
+                return tools
+        log(f"{self.name}: tools/list pagination did not end; kept {len(tools)}")
+        return tools
 
     def request(self, method, params, timeout):
         if self.transport is None:
@@ -412,6 +435,25 @@ def load_config():
     return inner if isinstance(inner, dict) else cfg
 
 
+def tool_filter(spec, name):
+    """The per-server include/exclude from its entry, as a predicate.
+    `"tools": {"only": [...], "except": [...]}` — `only` admits the
+    named tools (fnmatch patterns against the MCP-side name), `except`
+    drops them, both at once meaning only-minus-except. A server that
+    ships forty tools costs a schema each round whether or not they are
+    wanted, so the cut happens before the mount, not at call time."""
+    conf = spec.get("tools") or {}
+    only = [p for p in conf.get("only") or [] if isinstance(p, str)]
+    except_ = [p for p in conf.get("except") or [] if isinstance(p, str)]
+
+    def admit(tname):
+        if only and not any(fnmatch.fnmatch(tname, p) for p in only):
+            return False
+        return not any(fnmatch.fnmatch(tname, p) for p in except_)
+
+    return admit if (only or except_) else (lambda _: True)
+
+
 def main():
     cfg = load_config()
     servers = {}
@@ -420,6 +462,7 @@ def main():
         if not isinstance(spec, dict):
             log(f"server '{name}': entry must be an object, skipped")
             continue
+        admit = tool_filter(spec, name)
         srv = Server(name, spec)
         try:
             listing = srv.start()
@@ -427,9 +470,11 @@ def main():
             log(f"server '{name}' skipped: {e}")
             srv.stop()
             continue
-        for t in listing.get("tools") or []:
+        for t in listing or []:
             tname = t.get("name")
             if not isinstance(tname, str) or not tname:
+                continue
+            if not admit(tname):
                 continue
             schema = t.get("inputSchema")
             if not (isinstance(schema, dict) and schema.get("type") == "object"):

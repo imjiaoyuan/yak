@@ -306,7 +306,12 @@ pub(crate) fn print_output_block(text: &str) {
     }
 }
 
-pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
+pub(crate) fn truncate_tail(
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+    max_tokens: u64,
+) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = lines[lines.len().saturating_sub(max_lines)..].join("\n");
     let mut truncated = lines.len() > max_lines;
@@ -332,12 +337,12 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
     // 3-4x more, so enforce the estimate too (binary search over char
     // boundaries keeps this cheap and never splits a codepoint)
     let tokens = crate::agent::compact::text_tokens;
-    if tokens(&out) > MAX_TOKENS {
+    if tokens(&out) > max_tokens {
         let bounds: Vec<usize> = out.char_indices().map(|(i, _)| i).collect();
         let (mut lo, mut hi) = (0usize, bounds.len());
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if tokens(&out[bounds[mid]..]) <= MAX_TOKENS {
+            if tokens(&out[bounds[mid]..]) <= max_tokens {
                 hi = mid;
             } else {
                 lo = mid + 1;
@@ -353,9 +358,27 @@ pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> (
 
 /// Tail-truncate and mark, the shared ending for process-shaped tool output.
 pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) -> String {
-    let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes);
+    let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes, MAX_TOKENS);
     if truncated {
         out.push_str("\n[output truncated]\n");
+    }
+    out
+}
+
+/// Marked truncation with the caller's own token budget. Extension tools
+/// (MCP bridges included) route here: their results come from another
+/// process built with no opinion about this context window, so the host
+/// enforces the shared caps — and says so, because a silently cut answer
+/// reads as a complete one.
+pub(crate) fn truncate_marked_budgeted(
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+    max_tokens: u64,
+) -> String {
+    let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes, max_tokens);
+    if truncated {
+        out.push_str("\n[output truncated to fit the context window]\n");
     }
     out
 }
@@ -407,7 +430,7 @@ pub(crate) fn truncate_with_spill(text: &str) -> String {
 
 /// [`truncate_with_spill`] against an explicit scratch dir (the test seam).
 pub(crate) fn truncate_with_spill_in(dir: &Path, text: &str) -> String {
-    let (out, truncated) = truncate_tail(text, MAX_LINES, MAX_BYTES);
+    let (out, truncated) = truncate_tail(text, MAX_LINES, MAX_BYTES, MAX_TOKENS);
     if !truncated {
         return out;
     }

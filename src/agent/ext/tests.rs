@@ -631,6 +631,50 @@ done
 /// batch makes necessary. The id is echoed back as the result here.
 #[cfg(unix)]
 #[test]
+/// An extension result past the caps is cut like any tool output, and the
+/// cut is marked: the model must be able to tell a complete answer from a
+/// truncated one (a silent cap reads as a short answer).
+fn an_oversized_extension_result_is_cut_and_marked() {
+    let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      printf '{"id":%s,"result":"' "$id"
+      # well past both the byte cap and the token cap
+      seq 1 200000 | sed 's/.*/x/' | tr -d '\n'
+      printf '"}\n'
+      ;;
+  esac
+done
+"#;
+    let ext = connect_stub(&write_stub_extension("flood", body));
+    let tool = ExtTool {
+        ext,
+        tool_name: "ping".into(),
+        exposed: "ping".into(),
+        description: String::new(),
+        schema: json!({"type": "object", "properties": {}}),
+        tier: Tier::Exec,
+    };
+    let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
+    assert!(!out.is_error());
+    assert!(out.content.len() < MAX_BYTES * 2, "cut to the cap");
+    assert!(
+        out.content
+            .contains("[output truncated to fit the context window]"),
+        "the cut is marked"
+    );
+}
+
+/// The model's tool_call_id rides the `call_tool` frame: a stateful
+/// extension keys per-call state on it, which the concurrent read-only
+/// batch makes necessary. The id is echoed back as the result here.
+#[cfg(unix)]
+#[test]
 fn a_tool_call_carries_the_models_call_id() {
     let body = r#"#!/bin/sh
 while IFS= read -r line; do
