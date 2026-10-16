@@ -251,14 +251,64 @@ pub struct Carried {
 
 pub fn carried(pkg: &Path) -> Carried {
     let mut out = Carried::default();
-    if let Some(def) = crate::agent::skills::pack_root_skill(pkg) {
-        out.root_skill = Some(def.name);
+    if let Some(name) = root_skill_name(pkg) {
+        out.root_skill = Some(name);
     }
-    let mut defs = Vec::new();
-    crate::agent::skills::load_dir(&pkg.join("skills"), &mut defs);
-    out.skills = defs.into_iter().map(|d| d.name).collect();
+    out.skills = skill_names(&pkg.join("skills"));
     out.extensions = entry_names(&pkg.join("extensions"));
     out.prompts = file_stems(&pkg.join("commands"), "md");
+    out
+}
+
+/// The `name:` line of a package-root SKILL.md (falling back to the
+/// directory name) — enough for the install report; the full parse is the
+/// skills plugin's business, not the installer's.
+fn root_skill_name(pkg: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(pkg.join("SKILL.md")).ok()?;
+    let (fm, _) = crate::yaml::split_frontmatter(&text)?;
+    let fallback = pkg.file_name()?.to_string_lossy().into_owned();
+    let name = crate::yaml::parse(fm)
+        .ok()
+        .and_then(|map| map.get("name").cloned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(fallback);
+    Some(name)
+}
+
+/// Every skill name in one `skills/` directory: `<dir>/<name>/SKILL.md`
+/// plus flat `<dir>/<name>.md` — the names the install report lists, read
+/// off each file's `name:` line (the directory/file stem is the fallback).
+fn skill_names(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in rd.flatten().map(|e| e.path()) {
+        let skill_file = if path.is_dir() {
+            path.join("SKILL.md")
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            path.clone()
+        } else {
+            continue;
+        };
+        let fallback = path
+            .file_stem()
+            .or_else(|| path.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill")
+            .to_string();
+        let name = std::fs::read_to_string(&skill_file)
+            .ok()
+            .and_then(|text| {
+                crate::yaml::split_frontmatter(&text)
+                    .and_then(|(fm, _)| crate::yaml::parse(fm).ok())
+            })
+            .and_then(|map| map.get("name").cloned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(fallback);
+        out.push(name);
+    }
+    out.sort();
     out
 }
 
@@ -415,25 +465,6 @@ fn list(argv: &[String]) -> i32 {
         );
     }
     0
-}
-
-/// Package-carried extension directories, nearest-first roots for the
-/// discovery walks (project pkg wins over user pkg via ordering at the
-/// call site).
-/// The package clones rooted anywhere: the skills walk passes the user
-/// dir it was handed (so discovery stays hermetic in tests) instead of the
-/// ambient one.
-pub fn packages_in(root: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut out: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    out.sort();
-    out
 }
 
 pub fn extension_dirs(local: bool) -> Vec<PathBuf> {

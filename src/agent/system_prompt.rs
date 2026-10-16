@@ -42,14 +42,15 @@ pub fn project_context(cwd: &Path) -> Option<String> {
 }
 
 /// Assemble the agent system prompt: the reference-shaped built-ins, project
-/// context discovery, skills, and the trailing cwd line. Continuations keep
-/// the stored prompt verbatim so the provider prefix cache survives a resume.
+/// context discovery, the sections mounted plugins contribute, and the
+/// trailing cwd line. Continuations keep the stored prompt verbatim so the
+/// provider prefix cache survives a resume.
 pub fn build_system_prompt(
     cwd: &Path,
     replace: Option<&str>,
     append: Option<&str>,
     stored: Option<&str>,
-    skills: &[crate::agent::skills::SkillDef],
+    plugin_sections: &[String],
 ) -> Option<String> {
     let continuation = replace.is_none() && stored.is_some();
     let base = match replace {
@@ -97,9 +98,9 @@ pub fn build_system_prompt(
             out.push_str("\n\n");
             out.push_str(&ctx);
         }
-        if let Some(block) = crate::agent::skills::skills_block(skills) {
+        for section in plugin_sections {
             out.push_str("\n\n");
-            out.push_str(&block);
+            out.push_str(section);
         }
     }
     if let Some(extra) = append {
@@ -181,6 +182,23 @@ mod tests {
         let with = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         assert!(with.contains("<project_memory path="), "{with}");
         assert!(with.contains("never commit target/"), "{with}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugin_sections_ride_after_project_context_on_a_fresh_prompt() {
+        let dir = crate::core::testutil::scratch_dir("spplug");
+        std::fs::write(dir.join("AGENTS.md"), "# notes\n").unwrap();
+        let sections =
+            vec!["<available_skills>\n  <skill>…</skill>\n</available_skills>".to_string()];
+        let out = build_system_prompt(&dir, None, None, None, &sections).unwrap();
+        let ctx = out.find("<project_context>").unwrap();
+        let block = out.find("<available_skills>").unwrap();
+        assert!(ctx < block, "the section rides after the project context");
+        // a continuation keeps its stored prompt (sections included) verbatim
+        let stored = build_system_prompt(&dir, None, None, None, &sections).unwrap();
+        let again = build_system_prompt(&dir, None, None, Some(&stored), &[]).unwrap();
+        assert!(again.contains("<available_skills>"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

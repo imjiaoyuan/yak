@@ -20,6 +20,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `mcp_bridge.py` | resident | mounts an MCP server (stdio or streamable HTTP) as one `<server>__<tool>` per MCP tool; config in `mcp.json` |
 | `mcp_notion.py` | resident | Notion's remote MCP endpoint, OAuth-only; the login runs by the human, not the agent (§ Notion below) |
 | `subagent.py` | resident | runs another `yak` in its own context window against an agent definition from `~/.yak/agents/` or `.yak/agents/` |
+| `skills` | resident | SKILL.md discovery as a plugin: the `<available_skills>` system-prompt section, the banner/`/help` skill list and every `/skill:<name>` command — global (`~/.yak/skills`, `~/.agents/skills`, `~/.yak/pkg`) and project-level (nearest `.yak/skills`/`.agents/skills`, `.yak/pkg`) homes, project shadowing user by name |
 | `repeat_guard.py` | resident | a `tool_call` deny gate for stuck loops |
 | `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |
 | `workspace_checkpoint.py` | resident | a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree` |
@@ -128,17 +129,27 @@ Every request carries `id` (and `"v": 1`), every reply echoes it. Requests you d
 **`initialize`**: advertise what you provide:
 
 ```json
-→ {"id": 1, "type": "initialize", "v": 1, "params": {"version": "0.1.9", "cwd": "/home/me/proj"}}
+→ {"id": 1, "type": "initialize", "v": 1, "params": {"version": "0.1.9", "cwd": "/home/me/proj", "user_dir": "/home/me/.yak"}}
 ← {"id": 1, "result": {
      "tools":    [{"name": "deploy", "description": "Deploy the current tree",
                     "parameters": {"type": "object", "properties": {}, "required": []}}],
      "commands": ["guard"],
      "events":   ["tool_call", "turn_end"],
+     "system":   "a section appended to the agent system prompt",
+     "skills":   [{"name": "pdf", "description": "extract tables", "model_invocation": true}],
      "tool_timeout": 900
    }}
 ```
 
-`parameters` is JSON Schema; `commands` and `events` may be empty lists or omitted. Each tool may carry an optional `"tier": "read" | "write" | "exec"` (default `exec`).
+`parameters` is JSON Schema; `commands` and `events` may be empty lists or omitted. Each tool may carry an optional `"tier": "read" | "write" | "exec"` (default `exec").
+
+`params.user_dir` is the resolved yak user directory (honors `YAK_USER_PATH`), so an extension can find its global homes without guessing at `~`.
+
+Three more reply keys mount surfaces beyond tools and commands:
+
+- **`system`** (string): appended to the agent system prompt for the session — the seam a skill index, a project glossary or house rules ride on (the `skills` example builds its `<available_skills>` block here). Continuations keep the stored prompt verbatim, sections included.
+- **`skills`** (list of `{name, description, model_invocation?}`): the skills your extension mounts; the banner, `/help` and `/skill:` completion list them. `model_invocation` defaults true (listed to the model in whatever `system` section you contribute).
+- **`task`** in a `run_command` reply (see below).
 
 `tool_timeout` (seconds, optional) is your own deadline for `call_tool`: ask for it when your tool legitimately runs for minutes (spawning a build, running another agent). It replaces the config default for this extension and is clamped to one hour; omit it and `extensions.tool_timeout` applies. The wait stays interruptible either way.
 
@@ -163,7 +174,7 @@ The reply's `result` should be a string; a list lays out as **segments** — str
 ← {"id": 3, "result": "via duckduckgo\n1. ureq - docs.rs\n   https://docs.rs/ureq …"}
 ```
 
-`args` is everything after the command name, as one string. The reply prints dim in the session.
+`args` is everything after the command name, as one string. The reply prints dim in the session. A command whose answer is *work for the model* replies with a task instead of text — `{"result": {"task": "…"}}` — and the session submits that string as one agent task (the `/skill:<name>` shape: the `skills` example reads the SKILL.md off disk and hands back a `<skill name dir>` prompt). `task` wins over a printed `result` when both ride the reply.
 
 **`event`**: see the table below (deadline 5s). Only `tool_call`, `tool_result` and `compact` replies are interpreted; other events are fire-and-forget (reply `null` or nothing).
 

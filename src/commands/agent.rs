@@ -322,22 +322,11 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
         }
     };
 
-    // skills and the system prompt load here, still underneath the
-    // extension handshakes; the join below settles whatever is left
-    let skills = crate::agent::skills::discover(
-        &crate::core::config::user_dir(),
-        &cwd,
-        &settings.disabled_skills,
-    );
-    let system = crate::agent::system_prompt::build_system_prompt(
-        &cwd,
-        args.opt(&["system-prompt"]),
-        args.opt(&["append-system-prompt"]),
-        conv_system.as_deref(),
-        &skills,
-    );
     // extensions: the background connect from the top joins here. A failed
-    // extension warns and mounts nothing, never aborting the session
+    // extension warns and mounts nothing, never aborting the session. The
+    // system prompt waits for the join: a plugin may contribute a section
+    // (the skills plugin's <available_skills> block), and the prompt must
+    // embed what actually mounted
     let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
         csv.split(',')
             .map(str::trim)
@@ -345,6 +334,13 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
             .collect()
     });
     let extensions = extensions_connecting.join();
+    let system = crate::agent::system_prompt::build_system_prompt(
+        &cwd,
+        args.opt(&["system-prompt"]),
+        args.opt(&["append-system-prompt"]),
+        conv_system.as_deref(),
+        &extensions.system_sections(),
+    );
 
     let mut session = crate::agent::session::Session {
         max_request_bytes,
@@ -398,7 +394,7 @@ fn execute_mode(args: &ParsedArgs) -> Result<i32, String> {
     // a task stays an error
     if prompt.trim().is_empty() {
         if std::io::stdin().is_terminal() {
-            return crate::agent::repl::repl(session, skills, attachments);
+            return crate::agent::repl::repl(session, attachments);
         }
         eprintln!(
             "Error: no task provided (pass an argument, pipe stdin, or run bare for interactive mode)"

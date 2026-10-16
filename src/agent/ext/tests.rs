@@ -736,6 +736,40 @@ fn a_reply_without_a_result_is_an_error() {
     assert!(err.contains("replied without a result"), "{err}");
 }
 
+/// An initialize reply may contribute a system-prompt section and a skill
+/// list: the host hands both to the agent surfaces (the system prompt embeds
+/// the section, the REPL lists the skills).
+#[test]
+fn initialize_reply_contributes_a_system_section_and_skills() {
+    let dir = crate::core::testutil::scratch_dir("ext-contrib");
+    let py = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n  msg = json.loads(line)\n  if msg.get('type') == 'initialize':\n    print(json.dumps({\n      'id': msg['id'], 'result': {\n        'commands': ['run'],\n        'system': 'some section',\n        'skills': [\n          {'name': 'pdf', 'description': 'extract tables',\n           'model_invocation': False},\n          {'name': 'gitflow', 'description': 'release flow'},\n          {'description': 'no name: dropped'},\n        ],\n      },\n    }), flush=True)\n".to_string();
+    let path = write_stub_extension("contrib", &py);
+    let ext = connect_stub(&path);
+    assert!(crate::core::sync::lock(&ext.state).is_ok());
+    assert_eq!(ext.system_section(), Some("some section".to_string()));
+    let skills = ext.skills();
+    assert_eq!(skills.len(), 2);
+    assert_eq!(skills[0].name, "pdf");
+    assert!(!skills[0].model_invocation);
+    assert_eq!(skills[1].name, "gitflow");
+    assert!(skills[1].model_invocation);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Ext::system_section` and `Ext::skills` expose one connection's own
+/// contribution (the `Extensions` aggregators compose them).
+#[test]
+fn one_extension_exposes_its_own_section_and_skills() {
+    let dir = crate::core::testutil::scratch_dir("ext-one");
+    let py = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n  msg = json.loads(line)\n  if msg.get('type') == 'initialize':\n    print(json.dumps({'id': msg['id'], 'result': {\n      'system': 'sec', 'skills': [{'name': 'a', 'description': 'd'}]}}), flush=True)\n";
+    let path = write_stub_extension("one", py);
+    let ext = connect_stub(&path);
+    assert_eq!(ext.system_section(), Some("sec".to_string()));
+    assert_eq!(ext.skills().len(), 1);
+    assert_eq!(ext.skills()[0].name, "a");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// argv mode must pick the value of the *declared* argument, not whatever
 /// key the model happened to put first or an extra key it invented: the
 /// script receives exactly what its manifest asked for.

@@ -10,7 +10,6 @@ pub mod memory;
 pub mod repl;
 pub mod session;
 pub mod settings;
-pub mod skills;
 pub mod system_prompt;
 pub mod tools;
 

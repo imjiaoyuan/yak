@@ -64,11 +64,29 @@ pub struct ToolMeta {
     pub tier: Tier,
 }
 
+/// One skill advertised by the initialize reply: name, description and
+/// whether the model may pick it up on its own. The REPL surface (banner,
+/// `/help`, `/skill:<name>`) reads these; the system-prompt listing rides
+/// whatever `system` section the extension contributes.
+#[derive(Clone)]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+    /// false = excluded from the system-prompt list; only /skill:name works
+    pub model_invocation: bool,
+}
+
 pub struct ExtState {
     /// advertised tools, commands and event subscriptions
     tools: Vec<ToolMeta>,
     commands: Vec<String>,
     events: Vec<String>,
+    /// a section appended to the agent system prompt (the `<available_skills>`
+    /// block when this is the skills plugin); None when the extension
+    /// contributes nothing
+    system_section: Option<String>,
+    /// advertised skills, for the REPL surfaces
+    skills: Vec<SkillMeta>,
     /// how long tool calls wait before the extension is dropped
     tool_timeout: Duration,
 }
@@ -374,21 +392,20 @@ impl Ext {
         })
     }
 
-    /// Run one extension-registered slash command; the reply prints.
-    pub fn run_command(&self, name: &str, args: &str) -> Result<String, String> {
+    /// Run one extension-registered slash command. The whole reply object
+    /// comes back: `result` prints, `task` submits as one agent task (the
+    /// `/skill:<name>` shape — a command whose answer is work for the model,
+    /// not text for the terminal), so the caller, not the host, interprets.
+    pub fn run_command(&self, name: &str, args: &str) -> Result<Value, String> {
         let result = self.request(
             &json!({"id": next_id(), "type": "run_command", "v": 1, "name": name, "args": args}),
             TOOL_TIMEOUT,
             None,
         )?;
-        match result.get("result") {
-            Some(Value::String(s)) => Ok(s.clone()),
-            Some(other) => Ok(crate::jsonfmt::dumps_indent(other, 2)),
-            None => Err(format!(
-                "extension '{}' replied without a result",
-                self.name
-            )),
-        }
+        result
+            .get("result")
+            .cloned()
+            .ok_or_else(|| format!("extension '{}' replied without a result", self.name))
     }
 
     /// Fire an event hook. `tool_call` expects a reply — the extension may
@@ -416,6 +433,23 @@ impl Ext {
             tail.pop_front();
         }
         tail.push_back(line);
+    }
+
+    /// This connection's own system-prompt section, when its initialize
+    /// reply contributed one (a failed extension contributes nothing).
+    pub fn system_section(&self) -> Option<String> {
+        crate::core::sync::lock(&self.state)
+            .as_ref()
+            .ok()
+            .and_then(|s| s.system_section.clone())
+    }
+
+    /// This connection's own advertised skills (empty on any failure).
+    pub fn skills(&self) -> Vec<SkillMeta> {
+        crate::core::sync::lock(&self.state)
+            .as_ref()
+            .map(|s| s.skills.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -799,6 +833,23 @@ impl Extensions {
             .cloned()
     }
 
+    /// The system-prompt sections every ready extension contributes, in
+    /// discovery order (a fresh prompt embeds them; a continuation keeps
+    /// its stored prompt, sections included, verbatim).
+    pub fn system_sections(&self) -> Vec<String> {
+        self.exts
+            .iter()
+            .filter_map(|ext| ext.system_section())
+            .collect()
+    }
+
+    /// Every skill the ready extensions advertise, for the banner, `/help`
+    /// and completion. Registry order; name merging is the provider's
+    /// business (the skills plugin shadows by name before advertising).
+    pub fn skills(&self) -> Vec<SkillMeta> {
+        self.exts.iter().flat_map(|ext| ext.skills()).collect()
+    }
+
     /// Every slash command any ready extension registered, for completion.
     pub fn command_names(&self) -> Vec<String> {
         self.exts
@@ -929,7 +980,8 @@ impl Ext {
                         "cwd": std::env::current_dir()
                             .unwrap_or_else(|_| Path::new(".").to_path_buf())
                             .display()
-                            .to_string()
+                            .to_string(),
+                        "user_dir": crate::core::config::user_dir().display().to_string()
                     },
                 }),
                 CONNECT_TIMEOUT,
@@ -959,6 +1011,12 @@ impl Ext {
                         .collect()
                 })
                 .unwrap_or_default();
+            let system_section = result
+                .get("system")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
+            let skills = parse_skills(result);
             // a long-running tool (the subagent example) may ask for its
             // own call budget in the initialize reply; the config value
             // stays the default for extensions that do not
@@ -968,6 +1026,8 @@ impl Ext {
                 tools,
                 commands,
                 events,
+                system_section,
+                skills,
                 tool_timeout,
             });
             Ok(())
@@ -1059,6 +1119,35 @@ impl Ext {
 fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The `skills` array of an initialize reply: `{name, description,
+/// model_invocation?}` objects, an absent `model_invocation` reading true
+/// (the skill is listed to the model). Entries without a name are dropped.
+fn parse_skills(result: &Value) -> Vec<SkillMeta> {
+    result
+        .get("skills")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    let name = s.get("name")?.as_str()?;
+                    Some(SkillMeta {
+                        name: name.to_string(),
+                        description: s
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        model_invocation: s
+                            .get("model_invocation")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_tools(result: &Value) -> Vec<ToolMeta> {

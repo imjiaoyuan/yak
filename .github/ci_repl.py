@@ -281,8 +281,16 @@ def main():
     work = os.path.realpath(tempfile.mkdtemp())
     with open(os.path.join(work, "hello.txt"), "w") as f:
         f.write("from smoke\n")
-    # a skill for the /skill:<name> lane: its prompt must carry the skill's
-    # own directory, or the references/ a skill points at resolve against cwd
+    # skills are plugin-shaped: the skills extension installs project-local
+    # (the second level of the plugin homes) and mounts the /skill:<name>
+    # commands. A skill for the lane: its prompt must carry the skill's own
+    # directory, or the references/ it points at resolve against cwd
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proj_ext = os.path.join(work, ".yak", "extensions")
+    os.makedirs(proj_ext, exist_ok=True)
+    shutil.copyfile(os.path.join(here, "examples", "extensions", "skills"),
+                    os.path.join(proj_ext, "skills"))
+    os.chmod(os.path.join(proj_ext, "skills"), 0o755)
     skill_dir = os.path.join(work, ".yak", "skills", "probe")
     os.makedirs(os.path.join(skill_dir, "references"))
     with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
@@ -435,13 +443,20 @@ def main():
     assert prompts and prompts[-1] == "from editor", \
         f"editor round-trip on the wire: {prompts!r}"
 
-    # /skill:<name> ships the skill's directory on the wire
+    # /skill:<name> ships the skill's directory on the wire; the command
+    # round-trips through the skills plugin first, so wait for the prompt
+    # itself rather than a fixed beat
     OUT.clear()
     send(fd, b"/skill:probe\r")
-    time.sleep(1.0)
-    prompts = seen.get("prompts") or []
     want = f'<skill name="probe" dir="{skill_dir}">'
-    assert prompts and want in prompts[-1], \
+    got = None
+    for _ in range(60):
+        time.sleep(0.5)
+        prompts = seen.get("prompts") or []
+        if prompts and want in prompts[-1]:
+            got = prompts[-1]
+            break
+    assert got is not None, \
         f"skill prompt: {prompts[-1] if prompts else None!r} (wanted {want!r})"
 
     # a commands-dir prompt ships its body and frontmatter system

@@ -9,7 +9,6 @@ use crate::term::render::{cache_note, humanize_tokens};
 
 pub fn repl(
     mut session: crate::agent::session::Session,
-    mut skills: Vec<crate::agent::skills::SkillDef>,
     mut attachments: Vec<crate::providers::Attachment>,
 ) -> Result<i32, String> {
     let mut settings = crate::agent::settings::load();
@@ -18,7 +17,7 @@ pub fn repl(
     // ctrl-c during a running task interrupts it instead of killing the REPL
     crate::term::install_sigint_handler();
 
-    print_banner(&session, &skills);
+    print_banner(&session);
     render_history(&session.seed);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
@@ -34,8 +33,13 @@ pub fn repl(
         }
         let p = crate::theme::err();
         let prompt = format!("{}>{} ", p.bold, p.reset);
-        let help = repl_help(&session, &skills);
-        let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+        let help = repl_help(&session);
+        let skill_names: Vec<String> = session
+            .extensions
+            .skills()
+            .into_iter()
+            .map(|s| s.name.clone())
+            .collect();
         let cwd = session.cwd.display().to_string();
         let command_names = session.extensions.command_names();
         // commands-dir prompts are discovered lazily at submit time, so the
@@ -104,12 +108,8 @@ pub fn repl(
             }
             continue;
         }
-        if let Some(name) = text.strip_prefix("/skill:") {
-            run_skill(&mut session, &skills, name);
-            continue;
-        }
         if text.starts_with('/') {
-            if repl_command(&mut session, &mut settings, text, &mut skills) {
+            if repl_command(&mut session, &mut settings, text) {
                 break;
             }
             continue;
@@ -243,47 +243,6 @@ fn run_task_logged(
     }
 }
 
-/// `/skill:name` — load the skill file and submit it as one task.
-fn run_skill(session: &mut Session, skills: &[crate::agent::skills::SkillDef], name: &str) {
-    let Some(skill) = skills.iter().find(|s| s.name == name) else {
-        eprintln!(
-            "{}unknown skill '{name}' (see /help){}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-        return;
-    };
-    let Ok(body) = std::fs::read_to_string(&skill.path) else {
-        eprintln!(
-            "{}cannot read {}{}",
-            crate::theme::err().dim,
-            skill.path.display(),
-            crate::theme::err().reset
-        );
-        return;
-    };
-    let prompt = skill_prompt(&skill.name, &skill.path, &body);
-    run_task_logged(session, &prompt, &mut Vec::new());
-}
-
-/// The task `/skill:name` submits: the SKILL.md body plus its directory, so
-/// the `references/`, `scripts/` and assets a skill points at resolve from
-/// anywhere in the repo. A skill body is written relative to its own home
-/// (model-invoked skills get the path in the system prompt; a slash
-/// invocation had no path at all, so `references/x.md` read against the cwd).
-fn skill_prompt(name: &str, path: &std::path::Path, body: &str) -> String {
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(path);
-    format!(
-        "<skill name=\"{name}\" dir=\"{}\">\n{}\n</skill>\n\nApply this skill. \
-         The files it references (references/, scripts/) live in that dir.",
-        dir.display(),
-        body.trim_end()
-    )
-}
-
 fn restore_default_sigint() {
     crate::term::restore_sigint_handler();
 }
@@ -306,7 +265,7 @@ fn abbrev_home(path: &str) -> String {
 }
 
 /// Full help page shown on ctrl+o.
-fn repl_help(session: &Session, skills: &[crate::agent::skills::SkillDef]) -> String {
+fn repl_help(session: &Session) -> String {
     let p = crate::theme::err();
     let mut h = format!(
         "{}keys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
@@ -314,7 +273,7 @@ fn repl_help(session: &Session, skills: &[crate::agent::skills::SkillDef]) -> St
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
     h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /reload /exit · !cmd runs shell · /help lists all");
-    h.push_str(&info_rows(session, skills, "    "));
+    h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", model_label(session)),
         None => model_label(session),
@@ -330,7 +289,7 @@ const NAME_CAP: usize = 6;
 
 /// The context/session rows shared by the banner and the ctrl+o page.
 /// `pad` widens the label to match the surrounding layout.
-fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: &str) -> String {
+fn info_rows(session: &Session, pad: &str) -> String {
     let mut rows = String::new();
     // project instructions directly in the working directory, file name only
     let context = ["CLAUDE.md", "AGENTS.md"]
@@ -349,7 +308,12 @@ fn info_rows(session: &Session, skills: &[crate::agent::skills::SkillDef], pad: 
     // skill or extension that never loaded is visible here and not only in
     // /help and /status (a label is 7 cells, matching `session`)
     let plugins = session.extensions.plugin_names();
-    let skills: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    let skills: Vec<String> = session
+        .extensions
+        .skills()
+        .into_iter()
+        .map(|s| s.name.clone())
+        .collect();
     rows.push_str(&name_row("plugins:", pad, &plugins));
     rows.push_str(&name_row("skills:", pad, &skills));
     // sticky persistence failure: the run continues in memory only, and a
@@ -646,7 +610,7 @@ fn tree_event_params(
 }
 
 /// Startup banner: bold identity line, then dim label-aligned rows.
-fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
+fn print_banner(session: &Session) {
     let thinking = session
         .thinking
         .as_deref()
@@ -663,7 +627,7 @@ fn print_banner(session: &Session, skills: &[crate::agent::skills::SkillDef]) {
         m = model_label(session),
         t = thinking,
     );
-    eprint!("{}{}{}", p.dim, info_rows(session, skills, " "), p.reset);
+    eprint!("{}{}{}", p.dim, info_rows(session, " "), p.reset);
 }
 
 /// Replay the loaded conversation on resume, so the user actually sees what
@@ -912,7 +876,6 @@ fn repl_command(
     session: &mut Session,
     settings: &mut crate::agent::settings::AgentSettings,
     text: &str,
-    skills: &mut Vec<crate::agent::skills::SkillDef>,
 ) -> bool {
     let (cmd, arg) = match text.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
@@ -943,15 +906,17 @@ fn repl_command(
                     crate::theme::err().reset
                 );
             }
-            // skills are commands (/skill:<name>): they live on the same
-            // slash plane, so /help lists them where the commands are
+            // skills are plugin commands (/skill:<name>): they live on
+            // the same slash plane, so /help lists them where the commands
+            // are — from what the plugins advertise
+            let skills = session.extensions.skills();
             if !skills.is_empty() {
                 let p = crate::theme::err();
                 eprintln!(
                     "{}  skills — run one with /skill:<name> (tab completes):{}",
                     p.dim, p.reset
                 );
-                for s in skills.iter() {
+                for s in &skills {
                     let hidden = if s.model_invocation { "" } else { " · hidden" };
                     let desc = crate::core::text::truncate_chars(&s.description, 64);
                     eprintln!("{}  /skill:{}{hidden} — {desc}{}", p.dim, s.name, p.reset);
@@ -1085,12 +1050,7 @@ fn repl_command(
             session.clear();
             eprint!("{}", crate::theme::cursor().clear_screen);
             let _ = std::io::stderr().flush();
-            *skills = crate::agent::skills::discover(
-                &crate::core::config::user_dir(),
-                &session.cwd,
-                &settings.disabled_skills,
-            );
-            print_banner(session, skills);
+            print_banner(session);
         }
         "/compact" => {
             if let Err(e) = session.compact_manual((!arg.is_empty()).then_some(arg)) {
@@ -1215,16 +1175,11 @@ fn repl_command(
             ),
         },
         "/reload" => {
-            *skills = crate::agent::skills::discover(
-                &crate::core::config::user_dir(),
-                &session.cwd,
-                &settings.disabled_skills,
-            );
             *settings = crate::agent::settings::load();
             session.extensions = crate::agent::ext::Extensions::connect(&session.cwd);
             session.rebuild_tools();
             eprintln!(
-                "{}reloaded skills, plugin tools and settings{}",
+                "{}reloaded plugin tools and settings{}",
                 crate::theme::err().dim,
                 crate::theme::err().reset
             );
@@ -1232,16 +1187,33 @@ fn repl_command(
         "/exit" => return true,
         other => {
             let name = other.strip_prefix('/').unwrap_or(other);
-            // an extension-registered command runs out-of-process and its
-            // reply prints
+            // an extension-registered command runs out-of-process; its
+            // reply either prints (`result`) or submits as one agent task
+            // (`task` — the /skill:<name> shape: a command whose answer is
+            // work for the model, not text for the terminal)
             if other.starts_with('/')
                 && let Some(ext) = session.extensions.command_owner(name)
             {
                 match ext.run_command(name, arg) {
-                    Ok(text) => {
-                        for line in text.lines() {
+                    Ok(reply) => {
+                        if let Some(task) = reply.get("task").and_then(serde_json::Value::as_str)
+                            && !task.trim().is_empty()
+                        {
+                            run_task_logged(session, task, &mut Vec::new());
+                        } else if let Some(text) =
+                            reply.get("result").and_then(serde_json::Value::as_str)
+                        {
+                            for line in text.lines() {
+                                eprintln!(
+                                    "  {}{line}{}",
+                                    crate::theme::err().dim,
+                                    crate::theme::err().reset
+                                );
+                            }
+                        } else {
+                            let text = crate::jsonfmt::dumps_indent(&reply, 2);
                             eprintln!(
-                                "  {}{line}{}",
+                                "  {}{text}{}",
                                 crate::theme::err().dim,
                                 crate::theme::err().reset
                             );
@@ -1321,19 +1293,6 @@ mod tests {
             sep = std::path::MAIN_SEPARATOR
         );
         assert_eq!(abbrev_home(&sibling), sibling);
-    }
-
-    #[test]
-    fn slash_skill_prompt_carries_the_skill_dir() {
-        let path = std::path::Path::new("/pkg/shuorenhua/SKILL.md");
-        let prompt = skill_prompt("shuorenhua", path, "body\n");
-        assert!(prompt.starts_with("<skill name=\"shuorenhua\" dir=\"/pkg/shuorenhua\">"));
-        assert!(prompt.contains("\nbody\n</skill>"));
-        assert!(prompt.ends_with("live in that dir."));
-        // a path with no parent still renders (never panic on the dir)
-        assert!(
-            skill_prompt("x", std::path::Path::new("SKILL.md"), "b").contains("dir=\"SKILL.md\"")
-        );
     }
 
     #[test]

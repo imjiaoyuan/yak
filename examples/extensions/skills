@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""skills — the skills plugin: SKILL.md discovery as a resident yak extension.
+
+Copy to ~/.yak/extensions/skills (global) or .yak/extensions/skills
+(project) , chmod +x. This is the built-in skills surface moved onto the
+extension protocol: the same discovery order, the same spec validation, the
+same <available_skills> block in the system prompt, the same /skill:<name>
+slash commands. Nothing mounts unless this file is installed.
+
+Discovery, lowest priority first so later entries shadow earlier by name:
+
+  <user_dir>/pkg/*/            installed packages (yak install)
+  <project>/.yak/pkg/*/        project-local packages
+  ~/.agents/skills/            the agentskills interop dir
+  <user_dir>/skills/           our own global dir
+  <project>/.agents/skills/    interop, project-level (nearest walking up)
+  <project>/.yak/skills/       our own project dir (nearest walking up)
+
+A skill is <dir>/<name>/SKILL.md (the standard layout) or a flat
+<dir>/<name>.md; a package may also carry one whole-repo SKILL.md at its
+root. The `description` is required — it is what the model matches a task
+against. `disable-model-invocation: true` hides it from the system prompt
+(`/skill:<name>` still works). Config `[agent] disabled_skills` drops
+entries by name.
+
+Protocol: newline-delimited JSON on stdio (docs/extensions.md).
+"""
+
+import json
+import os
+import re
+import sys
+
+from pathlib import Path
+
+FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.S)
+
+MAX_NAME_LENGTH = 64
+MAX_DESCRIPTION_LENGTH = 1024
+
+SYSTEM_HEAD = (
+    "The following skills provide specialized instructions for specific tasks.\n"
+    "Use the read tool to load a skill's file when the task matches its description.\n"
+    "When a skill file references a relative path, resolve it against the skill "
+    "directory (parent of SKILL.md / dirname of the path) and use that absolute "
+    "path in tool commands.\n"
+    "\n"
+    "<available_skills>\n"
+)
+SYSTEM_TAIL = "</available_skills>"
+
+
+def warn(msg):
+    print(f"skills: {msg}", file=sys.stderr)
+
+
+def parse_frontmatter(text):
+    """The flat subset core parsed: `key: value` pairs with indented
+    continuation folded in. Returns a dict or None when the file carries no
+    parseable frontmatter."""
+    m = FRONT.match(text)
+    if not m:
+        return None
+    meta = {}
+    key = None
+    for line in m.group(1).splitlines():
+        kv = re.match(r"(\w[\w-]*):\s?(.*)", line)
+        if kv:
+            key = kv.group(1)
+            meta[key] = kv.group(2).strip()
+        elif key and line.startswith((" ", "\t")) and isinstance(meta.get(key), str):
+            meta[key] += " " + line.strip()
+    return meta
+
+
+def parse_skill_md(path, fallback):
+    """One SKILL.md -> dict, or None when it is not a usable skill. A
+    missing description or unparseable frontmatter skips the skill with a
+    warning; an invalid name only warns and the skill still loads."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        warn(f"cannot read {path}: {e}")
+        return None
+    meta = parse_frontmatter(text)
+    if meta is None:
+        warn(f"{path}: no frontmatter")
+        return None
+    description = (meta.get("description") or "").strip()
+    if not description:
+        warn(f"{path}: description is required")
+        return None
+    if len(description) > MAX_DESCRIPTION_LENGTH:
+        warn(f"{path}: description exceeds {MAX_DESCRIPTION_LENGTH} characters")
+    name = (meta.get("name") or "").strip() or fallback
+    if len(name) > MAX_NAME_LENGTH:
+        warn(f"{path}: name exceeds {MAX_NAME_LENGTH} characters")
+    if not re.fullmatch(r"[a-z0-9-]+", name):
+        warn(f"{path}: name must be lowercase a-z, 0-9, hyphens only")
+    if name.startswith("-") or name.endswith("-") or "--" in name:
+        warn(f"{path}: name must not start/end with a hyphen or contain --")
+    return {
+        "name": name,
+        "description": description,
+        "path": str(path),
+        "model_invocation": meta.get("disable-model-invocation", "").strip().lower() != "true",
+    }
+
+
+def load_dir(d, out):
+    """Every skill in one directory: <dir>/<name>/SKILL.md plus flat
+    <dir>/<name>.md files."""
+    try:
+        entries = sorted(Path(d).iterdir())
+    except OSError:
+        return
+    for p in entries:
+        if p.is_dir():
+            f = p / "SKILL.md"
+            if f.is_file():
+                defn = parse_skill_md(f, p.name)
+                if defn:
+                    out.append(defn)
+        elif p.suffix == ".md":
+            defn = parse_skill_md(p, p.stem)
+            if defn:
+                out.append(defn)
+
+
+def load_package(pkg, out):
+    """One installed package: a whole-repo SKILL.md at the root plus its
+    skills/ entries."""
+    root = pkg / "SKILL.md"
+    if root.is_file():
+        defn = parse_skill_md(root, pkg.name)
+        if defn:
+            out.append(defn)
+    load_dir(pkg / "skills", out)
+
+
+def nearest_dir_up(cwd, rel, stop_at_git_root=True):
+    """The nearest directory named `rel` walking up, stopping at a git root
+    (skills belong to their repository)."""
+    d = cwd.resolve()
+    while True:
+        candidate = d / rel
+        if candidate.is_dir():
+            return candidate
+        if stop_at_git_root and (d / ".git").exists():
+            return None
+        parent = d.parent
+        if parent == d:
+            return None
+        d = parent
+
+
+def discover(user_dir, cwd, disabled):
+    """The merged, shadowed, disabled-filtered list — lowest priority
+    loaded first so later entries replace earlier by name."""
+    defs = []
+    for pkg_root in (Path(user_dir) / "pkg",
+                     nearest_dir_up(cwd, ".yak/pkg") or cwd / ".yak" / "pkg"):
+        try:
+            pkgs = sorted(pkg_root.iterdir())
+        except OSError:
+            continue
+        for pkg in pkgs:
+            if pkg.is_dir():
+                load_package(pkg, defs)
+    home = Path.home()
+    load_dir(home / ".agents" / "skills", defs)
+    load_dir(Path(user_dir) / "skills", defs)
+    for rel in (".agents/skills", ".yak/skills", ".llm/skills"):
+        d = nearest_dir_up(cwd, rel)
+        if d:
+            load_dir(d, defs)
+    merged = {}
+    for defn in defs:
+        if defn["name"] in disabled:
+            continue
+        merged[defn["name"]] = defn
+    return list(merged.values())
+
+
+def xml_escape(value):
+    return (value.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
+
+
+def system_section(skills):
+    """The <available_skills> block for the agent system prompt: one entry
+    per model-invocable skill, name + description + location."""
+    visible = [s for s in skills if s["model_invocation"]]
+    if not visible:
+        return None
+    out = [SYSTEM_HEAD]
+    for s in visible:
+        out.append("  <skill>\n")
+        out.append(f"    <name>{xml_escape(s['name'])}</name>\n")
+        out.append(f"    <description>{xml_escape(s['description'])}</description>\n")
+        out.append(f"    <location>{xml_escape(s['path'])}</location>\n")
+        out.append("  </skill>\n")
+    out.append(SYSTEM_TAIL)
+    return "".join(out)
+
+
+def skill_task(defn):
+    """The task a /skill:<name> run submits: the SKILL.md body plus its
+    directory, so references/ and scripts/ resolve from anywhere. Rides the
+    run_command reply's result as {"task": ...} — the host reads `task` from
+    the result object and submits it as one agent task."""
+    try:
+        text = Path(defn["path"]).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, f"cannot read {defn['path']}: {e}"
+    body = FRONT.sub("", text, count=1) if FRONT.match(text) else text
+    d = str(Path(defn["path"]).parent)
+    task = (
+        f'<skill name="{defn["name"]}" dir="{d}">\n{body.strip()}\n</skill>\n\n'
+        "Apply this skill. The files it references (references/, scripts/) "
+        "live in that dir."
+    )
+    return {"task": task}, None
+
+
+def disabled_names(config_path):
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            root = json.load(f)
+    except (OSError, ValueError):
+        return []
+    names = (root.get("agent") or {}).get("disabled_skills") or []
+    return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+
+
+class Skills:
+    """Discovered at initialize (and on respawn after a crash): skills are
+    read-once metadata, and /reload respawns the process, which is the
+    documented refresh path."""
+
+    def __init__(self, user_dir, cwd):
+        disabled = disabled_names(Path(user_dir) / "config.json")
+        # the project config can tighten further; a missing table is empty
+        proj_cfg = nearest_dir_up(cwd, ".yak/config.json", stop_at_git_root=False)
+        if proj_cfg:
+            disabled += disabled_names(proj_cfg)
+        self.skills = discover(user_dir, cwd, set(disabled))
+        self.by_command = {f"skill:{s['name']}": s for s in self.skills}
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    skills = None
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind, mid = msg.get("type"), msg.get("id")
+        if kind == "initialize":
+            params = msg.get("params") or {}
+            skills = Skills(params.get("user_dir") or os.path.expanduser("~/.yak"),
+                            Path(params.get("cwd") or os.getcwd()))
+            section = system_section(skills.skills)
+            reply({"id": mid, "result": {
+                "commands": list(skills.by_command),
+                "skills": skills.skills,
+                **({"system": section} if section else {}),
+            }})
+        elif kind == "run_command":
+            if skills is None:
+                reply({"id": mid, "error": "not initialized"})
+                continue
+            name = msg.get("name") or ""
+            defn = skills.by_command.get(name)
+            if defn is None:
+                bare = name[6:] if name.startswith("skill:") else name
+                reply({"id": mid, "error": f"unknown skill '{bare}' (see /help)"})
+            else:
+                result, err = skill_task(defn)
+                if err:
+                    reply({"id": mid, "error": err})
+                else:
+                    reply({"id": mid, "result": result})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

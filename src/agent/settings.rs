@@ -24,7 +24,6 @@ pub struct AgentSettings {
     /// typed read and `load` refuses a spelling neither of them knows
     pub cache_ttl: Option<String>,
     pub tool_policies: std::collections::BTreeMap<String, String>,
-    pub disabled_skills: Vec<String>,
     /// `models.thinking` off the same bytes: `settings::load` reads this
     /// file once, and the agent entry then never re-reads it for the
     /// stored reasoning level
@@ -111,13 +110,6 @@ pub fn parse(raw: &str) -> AgentSettings {
             }
         }
     }
-    if let Some(list) = agent.get("disabled_skills").and_then(|v| v.as_array()) {
-        for v in list {
-            if let Some(name) = v.as_str() {
-                s.disabled_skills.push(name.to_string());
-            }
-        }
-    }
     s.default_thinking = value
         .get("models")
         .and_then(|m| m.get("thinking"))
@@ -175,7 +167,6 @@ mod agent_settings_tests {
   "agent": {
     "compact_at_tokens": 250000,
     "keep_recent_tokens": 100,
-    "disabled_skills": ["old-thing"],
     "tools": {"bash": "prompt"}
   }
 }"#;
@@ -186,7 +177,6 @@ mod agent_settings_tests {
             s.tool_policies.get("bash").map(String::as_str),
             Some("prompt")
         );
-        assert_eq!(s.disabled_skills, vec!["old-thing".to_string()]);
     }
 
     #[test]

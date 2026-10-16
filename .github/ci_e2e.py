@@ -888,31 +888,45 @@ def main():
     assert nj.returncode == 1 and "needs a task" in nj.stdout + nj.stderr, \
         f"--json without a task: rc={nj.returncode} out={(nj.stdout + nj.stderr)[-200:]!r}"
 
-    # skills lane: the shipped example skills install like any user skill
-    # (copy into ~/.yak/skills/<name>/) and must reach the system prompt as
-    # <available_skills> entries — name, description and location — because
-    # that block is the whole discovery surface for model-invoked skills
-    skills_src = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "examples", "skills")
-    if os.path.isdir(skills_src):
-        for entry in sorted(os.listdir(skills_src)):
-            src = os.path.join(skills_src, entry)
-            if os.path.isdir(src):
-                shutil.copytree(src, os.path.join(user, "skills", entry))
+    # skills lane: skills are plugin-shaped now — install the skills
+    # extension (global) and the shipped example skills into the user dir,
+    # plus one project-local skill, then the system prompt must carry the
+    # <available_skills> entries (name, description, location) and the
+    # project copy must shadow a same-named user skill
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    skills_ext = os.path.join(here, "examples", "extensions", "skills")
+    if os.path.isfile(skills_ext):
+        shutil.copyfile(skills_ext, os.path.join(user, "extensions", "skills"))
+        if sys.platform != "win32":
+            os.chmod(os.path.join(user, "extensions", "skills"), 0o755)
+        skills_src = os.path.join(here, "examples", "skills")
+        if os.path.isdir(skills_src):
+            for entry in sorted(os.listdir(skills_src)):
+                src = os.path.join(skills_src, entry)
+                if os.path.isdir(src):
+                    shutil.copytree(src, os.path.join(user, "skills", entry))
+        # a project-local skill shadows the user copy by name and a
+        # project-local skills plugin shadows the global one (installed
+        # first so ordering cannot fake the shadow)
+        proj_skills = os.path.join(work, ".yak", "skills", "commit-hygiene")
+        os.makedirs(proj_skills, exist_ok=True)
+        with open(os.path.join(proj_skills, "SKILL.md"), "w") as f:
+            f.write("---\nname: commit-hygiene\ndescription: project copy wins\n---\nbody\n")
         seen["want_system"] = True
         seen.pop("system", None)
         sk = run([binary, "--no-session", "-m", "mock/m-a", "hi"],
-                 env, stdin=subprocess.DEVNULL)
+                 env, cwd=work, stdin=subprocess.DEVNULL)
         seen["want_system"] = False
         assert sk.returncode == 0, \
             f"skills lane rc={sk.returncode} err={sk.stderr[-300:]!r}"
         system = seen.get("system") or ""
         assert "<available_skills>" in system, \
             f"the skills block never reached the system prompt: {system[-400:]!r}"
-        for name in ("commit-hygiene", "pkg-skill-audit", "release-checklist"):
+        for name in ("pkg-skill-audit", "release-checklist"):
             assert f"<name>{name}</name>" in system, \
                 f"the shipped skill {name} must be listed: {system[-400:]!r}"
+        assert "<description>project copy wins</description>" in system, \
+            f"the project skill must shadow the user copy: {system[-400:]!r}"
 
     # subagent lane: examples/extensions/subagent.py mounts a tool that spawns
     # a real child yak (--json, its own tools and system prompt), reads its

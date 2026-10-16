@@ -1,6 +1,6 @@
 ---
 name: pkg-skill-audit
-description: Audit an installed yak package for what it carries and mounts - walk its skills/, extensions/ and commands/ trees, cross-check against pkg::carved classification and the mounted surfaces, and report anything that mounts but was not declared
+description: Audit an installed yak package for what it carries and mounts - walk its skills/, extensions/ and commands/ trees, cross-check against what `yak list` reports and the mounted surfaces, and report anything that mounts but was not declared
 ---
 
 # Package skill audit
