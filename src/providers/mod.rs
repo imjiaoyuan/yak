@@ -426,7 +426,13 @@ pub(crate) fn replay_reasoning(m: &ResolvedModel) -> bool {
 pub(crate) fn dispatch(
     req: HttpRequest,
     stream: bool,
-    feed: impl Fn(&str, &Value, &mut Option<Usage>, &mut StopReason, &mut dyn FnMut(Event)),
+    mut feed: impl FnMut(
+        &str,
+        &Value,
+        &mut Option<Usage>,
+        &mut StopReason,
+        &mut dyn FnMut(Event),
+    ) -> Result<(), String>,
     complete: impl Fn(&Value, &mut dyn FnMut(Event)),
     on_event: &mut dyn FnMut(Event),
 ) -> Result<(), String> {
@@ -445,11 +451,18 @@ pub(crate) fn dispatch(
             }
             on_event(e);
         };
-        stream_events(&req, &handed, |event_type, chunk| {
-            feed(event_type, chunk, &mut usage, &mut stop, &mut |e| {
-                forward(e)
-            });
-        })?;
+        let mut feed_error = None;
+        let result = stream_events(&req, &handed, |event_type, chunk| {
+            if feed_error.is_none()
+                && let Err(error) = feed(event_type, chunk, &mut usage, &mut stop, &mut forward)
+            {
+                feed_error = Some(error);
+            }
+        });
+        if let Some(error) = feed_error {
+            return Err(error);
+        }
+        result?;
         on_event(Event::Done { usage, stop });
         Ok(())
     } else {
@@ -567,7 +580,7 @@ pub(crate) fn decoded_text(a: &Attachment) -> Result<String, String> {
 /// the answer half-arrived, so the round is not a clean turn, but the link
 /// did not fail either. Callers that show it mark it as a warning (`!`) about
 /// the answer, not as a broken run.
-pub const TRUNCATED_STREAM: &str = "stream ended without a completion marker ([DONE] / message_stop) — the answer may be truncated";
+pub const TRUNCATED_STREAM: &str = "stream ended without a completion marker ([DONE] / message_stop / response.done / response.completed / response.incomplete) — the answer may be truncated";
 
 /// Whether a stream error is that truncation rather than a wire failure.
 pub fn is_truncation(error: &str) -> bool {
@@ -578,7 +591,8 @@ pub fn is_truncation(error: &str) -> bool {
 /// (event_type, value) to `on_value`. An `error` event aborts with its
 /// message (parsed when possible, raw otherwise). A stream that closes
 /// without its completion marker — `[DONE]` for openai-compat,
-/// `message_stop` for anthropic — is a truncation, not a success: the
+/// `message_stop` for anthropic, or a terminal Responses event for Codex —
+/// is a truncation, not a success: the
 /// answer half-arrived and must surface as an error instead of being
 /// logged as a finished turn.
 pub fn stream_events(
@@ -604,7 +618,27 @@ pub fn stream_events(
             return;
         }
         match serde_json::from_str::<Value>(data) {
-            Ok(chunk) => on_value(event_type, &chunk),
+            Ok(chunk) => {
+                let kind = chunk["type"].as_str().unwrap_or(event_type);
+                match kind {
+                    "response.done" | "response.completed" | "response.incomplete" => {
+                        saw_done = true
+                    }
+                    "response.failed" | "error" => {
+                        stream_error = Some(
+                            chunk["response"]["error"]["message"]
+                                .as_str()
+                                .or_else(|| chunk["error"]["message"].as_str())
+                                .or_else(|| chunk["message"].as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| chunk.to_string()),
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+                on_value(event_type, &chunk);
+            }
             Err(e) => eprintln!(
                 "Warning: dropping unparsable SSE data ({e}): {}",
                 &data[..crate::core::text::floor_boundary(data, 200)]

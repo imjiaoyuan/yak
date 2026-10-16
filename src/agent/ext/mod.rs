@@ -1041,6 +1041,15 @@ impl Ext {
     fn spawn_conn(&self, path: &Path) -> Result<Conn, String> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         let mut command = Command::new(path);
+        // Children launched by an extension must use this harness build,
+        // rather than an unrelated (possibly older) yak found on PATH.
+        if std::env::var_os("YAK_BIN").is_none() {
+            command.env(
+                "YAK_BIN",
+                std::env::current_exe()
+                    .map_err(|e| format!("cannot resolve the running yak executable: {e}"))?,
+            );
+        }
         command
             .current_dir(&cwd)
             .stdin(Stdio::piped())

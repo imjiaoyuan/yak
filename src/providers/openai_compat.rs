@@ -405,7 +405,10 @@ pub fn run(
     super::dispatch(
         HttpRequest { url, headers, body },
         stream,
-        |_event_type, chunk, usage, stop, on_event| feed_chunk(chunk, usage, stop, on_event),
+        |_event_type, chunk, usage, stop, on_event| {
+            feed_chunk(chunk, usage, stop, on_event);
+            Ok(())
+        },
         |value, on_event| {
             feed_complete(value, on_event);
         },

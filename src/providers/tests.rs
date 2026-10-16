@@ -512,3 +512,52 @@ fn a_stored_context_window_survives_the_cli_option_merge() {
     cli.context_window = ResolvedModel::take_context_window(&mut cli.options).unwrap();
     assert_eq!(cli.context_window, Some(999));
 }
+
+fn responses_stream(body: &str) -> (Result<(), String>, Vec<Value>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = body.to_owned();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        crate::core::testutil::read_request(&mut conn);
+        write!(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    let req = HttpRequest {
+        url: format!("http://{addr}/responses"),
+        headers: vec![],
+        body: "{}".into(),
+    };
+    let mut events = Vec::new();
+    let result = stream_events(
+        &req,
+        &std::sync::atomic::AtomicBool::new(false),
+        |_, value| events.push(value.clone()),
+    );
+    server.join().unwrap();
+    (result, events)
+}
+
+#[test]
+fn responses_terminal_events_finish_without_done_sentinel() {
+    for kind in ["response.done", "response.completed", "response.incomplete"] {
+        let terminal = json!({"type": kind, "response": {"usage": {"input_tokens": 12}}});
+        let (result, events) = responses_stream(&format!("data: {terminal}\n\n"));
+        assert_eq!(result, Ok(()));
+        assert_eq!(events, vec![terminal]);
+    }
+}
+
+#[test]
+fn responses_failure_surfaces_the_server_message() {
+    let (result, _) = responses_stream(
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"quota exhausted\"}}}\n\n",
+    );
+    assert_eq!(result, Err("quota exhausted".into()));
+}
+
+#[test]
+fn responses_stream_without_terminal_event_is_truncated() {
+    let (result, _) = responses_stream("data: {\"type\":\"response.created\"}\n\n");
+    assert_eq!(result, Err(TRUNCATED_STREAM.into()));
+}

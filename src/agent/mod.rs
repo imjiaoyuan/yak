@@ -446,6 +446,9 @@ pub fn run_agent(
                     continue;
                 }
             }
+            let recoverable_stream = crate::providers::is_truncation(&e)
+                || e.starts_with("stream: ")
+                || e.starts_with("stream idle ");
             // a drop after output was handed out is never replayed — the
             // answer on screen would duplicate — but the run need not die
             // either: the partial text becomes a real assistant message and
@@ -465,7 +468,7 @@ pub fn run_agent(
                     reasoning_meta: None,
                 });
                 recoveries += 1;
-                if recoveries <= MAX_STREAM_RECOVERIES {
+                if recoveries <= MAX_STREAM_RECOVERIES && recoverable_stream {
                     on_update(AgentUpdate::StreamRecovered {
                         chars: round.text.chars().count(),
                         error: e,
@@ -483,6 +486,7 @@ pub fn run_agent(
                 && round.reasoning.is_none()
                 && round.tool_calls.is_empty()
                 && recoveries < MAX_STREAM_RECOVERIES
+                && recoverable_stream
             {
                 // nothing was handed out — not one delta of text, reasoning
                 // or a tool call — so replaying the request cannot duplicate

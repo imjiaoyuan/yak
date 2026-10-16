@@ -1148,3 +1148,39 @@ fn manual_compaction_reaches_the_extension_with_instructions() {
         "the extension's summary replaced the prefix"
     );
 }
+
+#[test]
+fn an_unknown_provider_fails_without_stream_recovery() {
+    let mut model = mock_model(9);
+    model.kind = "unknown-wire".into();
+    let opts = test_opts();
+    let mut approval = approval::ApprovalConfig::default();
+    let mut recovered = 0;
+    let mut update = |event| {
+        if matches!(event, AgentUpdate::StreamRecovered { .. }) {
+            recovered += 1;
+        }
+    };
+    let mut deny = |_: ApprovalRequest<'_>| ApprovalResponse::Deny;
+    let result = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &[],
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        RunCallbacks {
+            on_update: &mut update,
+            on_approval: &mut deny,
+        },
+    );
+    let error = match result {
+        Ok(_) => panic!("unknown provider must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(error.message, "Unknown provider kind: unknown-wire");
+    assert_eq!(recovered, 0);
+}

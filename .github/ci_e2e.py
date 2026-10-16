@@ -520,6 +520,115 @@ def probe_examples(ex_dir, env):
     return ran, skipped
 
 
+def check_codex(binary):
+    """Exercise the real binary through reasoning, extension and built-in
+    tool rounds, replay, persistence and both output presentation modes."""
+    import base64
+
+    requests = []
+    class CodexHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(body)
+            assert self.path == "/codex/responses"
+            assert body["stream"] is True and body["store"] is False
+            assert self.headers["chatgpt-account-id"] == "ci-account"
+            assert all("strict" in t and t["strict"] is None for t in body["tools"])
+            outputs = [i for i in body["input"] if i.get("type") == "function_call_output"]
+            reasoning = {"type": "reasoning", "id": "rs_ci", "summary": [], "encrypted_content": "opaque-ci"}
+            if not outputs:
+                call = {"type": "function_call", "call_id": "call_echo", "name": "echo", "arguments": '{"text":"codex"}'}
+                events = [
+                    {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs_ci", "summary": []}},
+                    {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+                    {"type": "response.output_item.added", "output_index": 1, "item": {**call, "arguments": ""}},
+                    {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": '{"text":'},
+                    {"type": "response.function_call_arguments.done", "output_index": 1, "arguments": call["arguments"]},
+                    {"type": "response.output_item.done", "output_index": 1, "item": call},
+                    {"type": "response.done", "response": {"status": "completed", "output": [reasoning, call], "usage": {"input_tokens": 10, "output_tokens": 3}}},
+                ]
+            elif len(outputs) == 1:
+                assert outputs[0]["output"] == "echo: codex"
+                assert reasoning in body["input"], "hidden reasoning lost on replay"
+                call = {"type": "function_call", "call_id": "call_read", "name": "read", "arguments": '{"path":"fixture.txt"}'}
+                # Snapshot-only calls must also execute and continue.
+                events = [{"type": "response.completed", "response": {"status": "completed", "output": [call], "usage": {"input_tokens": 20, "output_tokens": 4}}}]
+            else:
+                assert len(outputs) == 2 and "fixture contents" in outputs[1]["output"]
+                item = {"type": "message", "content": [{"type": "output_text", "text": "codex final"}]}
+                events = [
+                    {"type": "response.output_text.delta", "output_index": 0, "delta": "codex "},
+                    {"type": "response.output_text.delta", "output_index": 0, "delta": "final"},
+                    {"type": "response.output_item.done", "output_index": 0, "item": item},
+                    {"type": "response.completed", "response": {"status": "completed", "output": [item], "usage": {"input_tokens": 30, "output_tokens": 5}}},
+                ]
+            payload = "".join("data: " + json.dumps(e) + "\n\n" for e in events).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)  # Responses has no [DONE] sentinel.
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), CodexHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="yak-codex-ci-") as tmp:
+            user = os.path.join(tmp, "user")
+            work = os.path.join(tmp, "work")
+            os.makedirs(os.path.join(user, "extensions"))
+            os.makedirs(work)
+            fake_log = os.path.join(tmp, "echo.log")
+            echo_body = ECHO_EXT.replace('log = os.environ["ECHO_LOG"]', 'log = os.environ["ECHO_LOG"]\nassert os.environ["YAK_BIN"] == os.environ["YAK_EXPECT_BIN"]')
+            write_extension(os.path.join(user, "extensions"), "echo", echo_body)
+            with open(os.path.join(work, "fixture.txt"), "w") as f:
+                f.write("fixture contents\n")
+            with open(os.path.join(user, "config.json"), "w") as f:
+                json.dump({"providers": {"chatgpt": {"kind": "codex", "base_url": f"http://127.0.0.1:{server.server_port}", "models": ["codex-ci"]}}, "models": {"default": "chatgpt/codex-ci"}}, f)
+            payload = base64.urlsafe_b64encode(json.dumps({"https://api.openai.com/auth": {"chatgpt_account_id": "ci-account"}}).encode()).decode().rstrip("=")
+            with open(os.path.join(user, "auth.json"), "w") as f:
+                json.dump({"chatgpt": {"access": f"e30.{payload}.signature", "refresh": "ci-refresh", "expires": 9999999999}}, f)
+            env = {**os.environ, "YAK_USER_PATH": user, "ECHO_LOG": fake_log, "YAK_EXPECT_BIN": os.path.realpath(binary)}
+            env.pop("YAK_BIN", None)
+            for flags in ([], ["--no-stream"]):
+                before = len(requests)
+                result = run([binary, "--json", "--tools", "read,echo", *flags, "inspect fixture"], env, cwd=work, stdin=subprocess.DEVNULL)
+                assert result.returncode == 0, result.stderr
+                events = [json.loads(line) for line in result.stdout.splitlines()]
+                assert len(requests) - before == 3, result.stdout
+                assert [e["name"] for e in events if e["type"] == "tool_start"] == ["echo", "read"], result.stdout
+                assert "".join(e["text"] for e in events if e["type"] == "text") == "codex final", result.stdout
+                assert events[-1]["type"] == "result" and events[-1]["text"] == "codex final", result.stdout
+            paths = [os.path.join(user, "threads", name) for name in os.listdir(os.path.join(user, "threads")) if name.endswith(".jsonl")]
+            assert len(paths) == 2, paths
+            for path in paths:
+                with open(path) as f:
+                    turns = [json.loads(line) for line in f]
+                assert len(turns) == 3, turns
+                assert turns[-1]["response"] == "codex final"
+                assistant = next(m for m in turns[0]["messages"] if m["role"] == "assistant")
+                assert assistant["reasoning"] is None
+                assert assistant["reasoning_meta"]["items"][0]["id"] == "rs_ci"
+            # Resume the saved Codex thread, retaining tool pairing and the
+            # encrypted reasoning. Explicit child-binary overrides still win.
+            before = len(requests)
+            override_env = {**env, "YAK_BIN": "explicit-yak-override", "YAK_EXPECT_BIN": "explicit-yak-override"}
+            resumed = run([binary, "-c", "--json", "--tools", "read,echo", "continue"], override_env, cwd=work, stdin=subprocess.DEVNULL)
+            assert resumed.returncode == 0, resumed.stderr
+            assert len(requests) - before == 1, resumed.stdout
+            assert json.loads(resumed.stdout.splitlines()[-1])["text"] == "codex final"
+            assert any(i.get("encrypted_content") == "opaque-ci" for i in requests[-1]["input"])
+            assert len(os.listdir(os.path.join(user, "threads"))) == 2
+            print("codex e2e passed (streamed, buffered, resume and extension binary inheritance)")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def main():
     # absolute: some scenarios run with cwd=work, and a relative binary
     # path would resolve against the child's cwd on posix and vanish
@@ -962,7 +1071,8 @@ def main():
                 "You are the CI scout.\n")
     # a legacy codepage is what Windows CI actually runs under; pinning it on
     # unix too makes the lane prove the example survives one everywhere
-    sub_env = dict(env, YAK_BIN=os.path.abspath(binary), PYTHONIOENCODING="cp1252")
+    sub_env = dict(env, PYTHONIOENCODING="cp1252")
+    sub_env.pop("YAK_BIN", None)
     sb = run([binary, "--no-session", "-m", "mock-sub/m-sub", "ask the scout"],
              sub_env, cwd=work, stdin=subprocess.DEVNULL)
     assert sb.returncode == 0, f"subagent lane rc={sb.returncode} err={sb.stderr[-800:]}"
@@ -1109,6 +1219,7 @@ def main():
     named = [f for f in os.listdir(here) if f.startswith("yak-") and f.endswith(".md")]
     assert named, f"no default-named export in {os.listdir(here)}"
 
+    check_codex(binary)
     print("e2e smoke passed")
     return 0
 

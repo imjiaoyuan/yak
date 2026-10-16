@@ -456,7 +456,8 @@ pub fn run(
         HttpRequest { url, headers, body },
         stream,
         |event_type, chunk, usage, stop, on_event| {
-            feed_event(event_type, chunk, usage, stop, on_event)
+            feed_event(event_type, chunk, usage, stop, on_event);
+            Ok(())
         },
         |value, on_event| {
             feed_complete(value, on_event);

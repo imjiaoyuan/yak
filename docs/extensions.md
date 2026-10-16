@@ -2,7 +2,7 @@
 
 Extensions are the plugin system: anything the core skips, you build yourself as an executable dropped into `~/.yak/extensions/` or the project's `.yak/extensions/`; drop a file in, restart or `/reload`. This page is the full reference; runnable examples live in [`examples/extensions/`](../examples/extensions/), one row each in the table below. Copy what you need; nothing mounts unless you install it.
 
-Extensions run with your full user permissions and inherit your environment. Only install or write code you would run yourself.
+Extensions run with your full user permissions and inherit your environment. Resident extensions also receive `YAK_BIN` pointing to the running yak executable, so child agents use the same build even when PATH contains an older installation; an explicit `YAK_BIN` override is preserved. Only install or write code you would run yourself.
 
 ## The examples
 
