@@ -77,10 +77,10 @@ def write_extension(dir_path, name, body=ECHO_EXT):
     script there; the stem stays the extension's name either way."""
     if sys.platform == "win32":
         script = os.path.join(dir_path, name + ".py")
-        with open(script, "w") as f:
+        with open(script, "w", encoding="utf-8") as f:
             f.write(body)
         exe = os.path.join(dir_path, name + ".cmd")
-        with open(exe, "w") as f:
+        with open(exe, "w", encoding="utf-8") as f:
             f.write(f'@"{sys.executable}" "{script}" %*\r\n')
     else:
         exe = os.path.join(dir_path, name)
