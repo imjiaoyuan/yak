@@ -271,17 +271,21 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
     out
 }
 
-/// The last update_plan checklist in the dropped prefix, verbatim. The plan
+/// The last plan-tool checklist in the dropped prefix, verbatim. The plan
 /// tool is an extension, but its result rides the history this module already
 /// owns, and compaction is the one moment the plan's authoritative copy is
 /// about to be replaced by a summary that may compress it into prose. The
 /// model re-reads the checklist from the summary afterwards; keeping the exact
 /// list (not a paraphrase) is what lets it keep stepping through it.
 /// Deliberate coupling to the tool's name, same as the loop knows its other
-/// tools' names.
+/// tools' names. Both spellings match: the extension was `update_plan`
+/// before it was renamed to `plan`, and an old transcript still carries the
+/// old name in its stored results.
 pub(crate) fn preserved_plan(prefix: &[Msg]) -> Option<String> {
     prefix.iter().rev().find_map(|msg| match msg {
-        Msg::ToolResult { name, content, .. } if name == "update_plan" => Some(content.clone()),
+        Msg::ToolResult { name, content, .. } if name == "plan" || name == "update_plan" => {
+            Some(content.clone())
+        }
         _ => None,
     })
 }

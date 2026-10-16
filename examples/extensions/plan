@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""update_plan — a resident yak extension: one tool, no state.
+"""plan — a resident yak extension: one tool, no state (the former update_plan).
 
-Copy to ~/.yak/extensions/update_plan, chmod +x, /reload. It mounts:
+Copy to ~/.yak/extensions/plan, chmod +x, /reload. It mounts:
 
-  update_plan {plan}    the model-owned checklist
+  plan {plan}    the model-owned checklist (renamed from update_plan)
 
-This is the built-in update_plan moved onto the extension surface,
-byte-compatible with its former self (the worked example that the plugin
+This is the checklist tool moved onto the extension surface,
+renamed from update_plan, otherwise byte-compatible with its former self (the worked example that the plugin
 system can carry a core tool). The plan needs no harness-side state: it
 lives in the model's own tool call, is re-read from the transcript every
 turn and survives a resume for free. Read-tier: it touches no files and
@@ -25,7 +25,7 @@ DESCRIPTION = (
 
 TOOLS = [
     {
-        "name": "update_plan",
+        "name": "plan",
         "description": DESCRIPTION,
         "parameters": {
             "type": "object",
@@ -144,7 +144,7 @@ def main():
             reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
         elif kind == "call_tool":
             args = msg.get("args") or {}
-            if msg.get("name") == "update_plan":
+            if msg.get("name") == "plan":
                 err = validate_plan(args)
                 if err:
                     reply({"id": mid, "error": err})

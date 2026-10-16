@@ -515,6 +515,59 @@ impl ExtensionsConnecting {
 }
 
 impl Extensions {
+    /// The plugins' file mtimes, newest first, as (mtime-or-zero, index)
+    /// pairs: the listing surfaces order shared by the banner row and
+    /// `/status`, so the two never disagree. A file that cannot be stat'ed
+    /// (a placeholder, a deleted script) sorts last, in registry order.
+    fn newest_first(paths: &[Option<std::path::PathBuf>]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..paths.len()).collect();
+        order.sort_by_key(|&i| {
+            let mtime = paths[i]
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok());
+            match mtime {
+                // Reverse: the newest mtime leads. None sinks, and equal
+                // mtimes (a batch install) keep discovery order
+                Some(t) => std::cmp::Reverse(
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                ),
+                None => std::cmp::Reverse(u64::MIN),
+            }
+        });
+        order
+    }
+
+    /// Every mounted plugin, for the banner: a resident extension's stem
+    /// (marked when it never connected) followed by each manifest script
+    /// tool's declared name — both live in the same registry, so both
+    /// belong in the one row. Newest first: the row reads as "what landed
+    /// lately", so a freshly added plugin leads instead of hiding behind
+    /// the veterans in an arbitrary directory order.
+    pub fn plugin_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .exts
+            .iter()
+            .map(|ext| match &*crate::core::sync::lock(&ext.state) {
+                Ok(_) => ext.name.clone(),
+                Err(_) => format!("{} (failed)", ext.name),
+            })
+            .collect();
+        names.extend(self.script_tools.iter().map(|s| s.name.clone()));
+        let paths: Vec<Option<std::path::PathBuf>> = self
+            .exts
+            .iter()
+            .map(|e| e.path.clone())
+            .chain(self.script_tools.iter().map(|s| Some(s.path.clone())))
+            .collect();
+        let sorted: Vec<String> = Self::newest_first(&paths)
+            .into_iter()
+            .map(|i| names[i].clone())
+            .collect();
+        sorted
+    }
     /// An empty host: no residents, no script tools. The agent loop holds
     /// one unconditionally — with nothing discovered it fires no events and
     /// mounts nothing, which replaces the old `Option<&Extensions>`.
@@ -760,26 +813,11 @@ impl Extensions {
             .collect()
     }
 
-    /// Every mounted plugin, for the banner: a resident extension's stem
-    /// (marked when it never connected) followed by each manifest script
-    /// tool's declared name — both live in the same registry, so both
-    /// belong in the one row.
-    pub fn plugin_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .exts
-            .iter()
-            .map(|ext| match &*crate::core::sync::lock(&ext.state) {
-                Ok(_) => ext.name.clone(),
-                Err(_) => format!("{} (failed)", ext.name),
-            })
-            .collect();
-        names.extend(self.script_tools.iter().map(|s| s.name.clone()));
-        names
-    }
-
     /// Listing for `/tools`: (name, target, tools, commands, reason).
     pub fn rows(&self) -> Vec<(String, String, usize, usize, String)> {
-        self.exts
+        let paths: Vec<Option<PathBuf>> = self.exts.iter().map(|e| e.path.clone()).collect();
+        let rows: Vec<_> = self
+            .exts
             .iter()
             .map(|ext| match &*crate::core::sync::lock(&ext.state) {
                 Ok(state) => (
@@ -791,6 +829,12 @@ impl Extensions {
                 ),
                 Err(reason) => (ext.name.clone(), ext.target.clone(), 0, 0, reason.clone()),
             })
+            .collect();
+        // the same newest-first order the banner's plugin row shows, so the
+        // two listings never disagree about who leads
+        Self::newest_first(&paths)
+            .into_iter()
+            .map(|i| rows[i].clone())
             .collect()
     }
 }

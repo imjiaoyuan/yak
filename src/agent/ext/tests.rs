@@ -945,3 +945,56 @@ fn a_rust_source_error_names_the_tool_and_shows_rustc_diagnostics() {
         "compile failure must name the tool and carry diagnostics, got: {text}"
     );
 }
+
+/// The listings lead with the newest plugin file, not the directory's
+/// arbitrary order: the banner row and `/status` read as "what landed
+/// lately", so a freshly added plugin is first, not buried at `+N more`.
+#[cfg(unix)]
+#[test]
+fn plugin_listings_lead_with_the_newest_file() {
+    fn spec_at(name: &str, age_secs: u64) -> ExecToolSpec {
+        let dir = crate::core::testutil::scratch_dir("ext-order");
+        let path = dir.join(format!("{name}.sh"));
+        std::fs::write(&path, "#!/bin/sh\necho ok\n").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        ExecToolSpec {
+            path,
+            name: name.to_string(),
+            description: String::new(),
+            schema: serde_json::json!({}),
+            arg_mode_argv: false,
+            interpreter: None,
+            timeout: 120,
+            tier: crate::agent::approval::Tier::Read,
+        }
+    }
+    let host = Extensions {
+        exts: vec![
+            failed("veteran", "never connected".to_string()),
+            failed("middling", "never connected".to_string()),
+        ],
+        script_tools: vec![spec_at("brand-new", 0), spec_at("older-tool", 3600)],
+    };
+    // newest mtime leads: the just-written tool first, then the hour-old
+    // one; the two path-less residents sink in registry order
+    assert_eq!(
+        host.plugin_names(),
+        vec![
+            "brand-new",
+            "older-tool",
+            "veteran (failed)",
+            "middling (failed)"
+        ]
+    );
+    let rows = host.rows();
+    assert_eq!(rows.len(), 2, "the script tools have no /status row");
+    // both residents failed their handshake: the reason column carries it
+    assert_eq!(rows[0].0, "veteran");
+    assert!(rows[0].4.contains("never connected"));
+}

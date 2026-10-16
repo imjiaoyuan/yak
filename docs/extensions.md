@@ -6,14 +6,14 @@ Extensions run with your full user permissions and inherit your environment. Onl
 
 ## The examples
 
-Every runnable example in [`examples/extensions/`](../examples/extensions/), one row each. The six tools migrated off the built-in registry (`ls`, `update_plan`, `grep`+`glob` riding the one `search` extension, `remember`, `webfetch`) are byte-compatible with their built-in former selves.
+Every runnable example in [`examples/extensions/`](../examples/extensions/), one row each. The six tools migrated off the built-in registry (`ls`, `plan` (the former `update_plan`), `grep`+`glob` riding the one `search` extension, `memory` (the former `remember`), `webfetch`) are byte-compatible with their built-in former selves.
 
 | Example | Kind | What it does |
 |---|---|---|
 | `ls` | script tool | directory listing; the reference tool the host used to carry built in, kept byte-compatible |
-| `update_plan` | script tool | the checklist: a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
+| `plan` | script tool | the checklist (renamed from `update_plan`): a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
 | `search` | script tool | the `grep`/`glob` pair over ripgrep, read-only over the tree; read-tier, never prompts |
-| `remember` | script tool | memory: one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
+| `memory` | script tool | memory (renamed from `remember`): one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
 | `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier |
 | `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
