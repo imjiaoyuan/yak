@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// cap on the injected section (bytes), char-boundary safe
 const SECTION_CAP: usize = 16 * 1024;
 
-pub fn memory_path() -> PathBuf {
+fn memory_path() -> PathBuf {
     crate::core::config::user_dir().join("YAK.md")
 }
 

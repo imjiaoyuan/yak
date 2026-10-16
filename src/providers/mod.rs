@@ -419,13 +419,12 @@ pub(crate) fn dispatch(
     }
 }
 
-/// `agent.max_request_bytes` in config.json overrides it; the ceiling is a
-/// property of the gateway, not of any one provider.
-///
-/// How full the request ceiling already is, when the attachments the user just
-/// asked for are heavy enough to be worth saying out loud: the pre-flight will
-/// refuse an oversized body, so the one moment the fix is cheap is here. Fires
-/// past a fifth of the limit (the conversation adds more on top) and names the
+/// How full the request ceiling already is, when the attachments the user
+/// just asked for are heavy enough to be worth saying out loud: the
+/// pre-flight will refuse an oversized body, so the one moment the fix is
+/// cheap is here (the ceiling itself is a property of the gateway, not of
+/// any one provider, and `agent.max_request_bytes` tightens it). Fires past
+/// a fifth of the limit (the conversation adds more on top) and names the
 /// numbers either way.
 pub fn attachment_weight(attachments: &[Attachment], limit: usize) -> Option<String> {
     let bytes: usize = attachments.iter().map(|a| a.base64_data.len()).sum();

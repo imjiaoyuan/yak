@@ -301,10 +301,10 @@ pub fn row_lock() -> &'static std::sync::Mutex<()> {
     &LOCK
 }
 
-/// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. the
-/// `osc8_hyperlink` shape. The URI is sanitized first — control characters
-/// (including the terminators themselves) are dropped so a crafted URL
-/// cannot close the sequence early and smuggle terminal chrome.
+/// An OSC 8 hyperlink opener: `ESC ] 8 ; params ; URI (BEL|ST)`. The URI is
+/// sanitized first — control characters (including the terminators
+/// themselves) are dropped so a crafted URL cannot close the sequence early
+/// and smuggle terminal chrome.
 pub fn osc8_open(url: &str) -> String {
     if !hyperlinks_on() {
         return String::new();

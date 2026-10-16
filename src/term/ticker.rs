@@ -69,7 +69,18 @@ impl Ticker {
                     let frame_text = frame_text(spin, secs, &phase, hint);
                     let _guard = crate::theme::row_lock().lock();
                     let c = crate::theme::cursor();
-                    eprint!("{}{}{frame_text}{}", c.clear_line, p.gray, p.reset);
+                    // a hidden cursor for the whole spin: chrome that
+                    // repaints around the row (lane blocks) must not leave a
+                    // stray cursor parked next to the frame — the spinner owns
+                    // the row, so it owns the cursor state too, and `stop`
+                    // shows it again
+                    eprint!(
+                        "{}{}{}{frame_text}{}",
+                        c.hide(),
+                        c.clear_line,
+                        p.gray,
+                        p.reset
+                    );
                     let _ = std::io::stderr().flush();
                     p2.store(true, std::sync::atomic::Ordering::Relaxed);
                     last_draw = std::time::Instant::now();
@@ -108,7 +119,11 @@ impl Ticker {
             // only retract a row this ticker actually wrote: an erase under a
             // settled answer, or on an empty row, is a redraw of its own
             if self.painted.load(std::sync::atomic::Ordering::Relaxed) {
-                eprint!("{}", crate::theme::cursor().clear_line);
+                eprint!(
+                    "{}{}",
+                    crate::theme::cursor().clear_line,
+                    crate::theme::cursor().show()
+                );
                 let _ = std::io::stderr().flush();
             }
         }

@@ -70,7 +70,7 @@ const DIFF_MAX_LINES: usize = 30;
 /// Print a diff block from `change_hunks` under a `$` action line: wrapped
 /// to the terminal: additions green, deletions red, hunk headers and
 /// context gray.
-pub fn print_diff_block(diff: &str) {
+pub(crate) fn print_diff_block(diff: &str) {
     let width = crate::term::columns().max(20);
     let p = crate::theme::err();
     for line in diff.split('\n') {
@@ -99,9 +99,9 @@ pub trait Tool: Send + Sync {
     fn diff(&self, _args: &Value, _cwd: &Path) -> Option<String> {
         None
     }
-    /// Salvage malformed argument shapes before validation (the
-    /// `prepareArguments`, which the loop runs ahead of the schema check): a
-    /// tool may normalize what the model sent. Must be idempotent.
+    /// Salvage malformed argument shapes before validation, which the loop
+    /// runs ahead of the schema check: a tool may normalize what the model
+    /// sent. Must be idempotent.
     fn prepare_arguments(&self, args: &Value) -> Value {
         args.clone()
     }
@@ -402,12 +402,12 @@ pub(crate) fn json_escaped_len(s: &str) -> usize {
 }
 
 /// Merge captured process output into one stream: stderr rides under
-/// stdout, and ANSI escape sequences are stripped (as escape bytes are tokens about terminal state,
-/// the same at capture): the result is model context first — escape bytes
-/// are tokens about terminal state, not the command's answer — and the
-/// live head renders through wrap paths that count them as zero cells, so
-/// a `--color=always` row would both cost tokens and mis-wrap. Shared by
-/// the bash tool's normal and timed-out endings.
+/// stdout, and ANSI escape sequences are stripped — escape bytes are tokens
+/// about terminal state, not the command's answer, so the merged result is
+/// model context first, and the live head renders through wrap paths that
+/// count them as zero cells, so a `--color=always` row would both cost
+/// tokens and mis-wrap. Shared by the bash tool's normal and timed-out
+/// endings.
 fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut out = crate::core::text::strip_ansi(&String::from_utf8_lossy(stdout));
     let err_text = crate::core::text::strip_ansi(&String::from_utf8_lossy(stderr));

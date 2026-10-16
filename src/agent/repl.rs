@@ -168,11 +168,18 @@ fn attach_local_files(
         };
         if let Ok(loaded) = crate::core::attachments::load(path_str, Some(mime)) {
             let req = loaded.request();
+            // hard-wrapped: a tmp paste path plus its mime runs past 80
+            // cells and a soft-wrapped chrome row would leave the terminal's
+            // autowrap artifact on the row above the prompt
+            let width = crate::term::columns().max(20).saturating_sub(2);
+            let notice = crate::core::render_md::wrap_block(
+                &format!("→ attached {} ({})", path_str, req.mime_type),
+                width,
+                2,
+            );
             eprintln!(
-                "{}→ attached {} ({}){}",
+                "{}{notice}{}",
                 crate::theme::err().dim,
-                path_str,
-                req.mime_type,
                 crate::theme::err().reset
             );
             queue.push(req);

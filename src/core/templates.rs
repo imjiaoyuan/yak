@@ -132,7 +132,7 @@ pub fn substitute(text: &str, params: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// Evaluate a template against user input and params (original `_apply_template`).
+/// Evaluate a template against user input and params.
 pub fn apply(
     t: &Template,
     input: &str,

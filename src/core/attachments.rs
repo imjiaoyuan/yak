@@ -159,7 +159,6 @@ pub fn read_piped_prompt(
     if wants_stdin(args) || std::io::stdin().is_terminal() {
         return Ok(prompt);
     }
-    use std::io::Read;
     let mut buf = String::new();
     std::io::stdin()
         .read_to_string(&mut buf)
@@ -193,10 +192,6 @@ pub fn load_args(args: &crate::core::args::ParsedArgs) -> Result<Vec<Loaded>, St
 /// Resolve one `-a` reference: `-` reads stdin, http(s) URLs are
 /// fetched (content-type wins the mime), anything else is a local file.
 pub fn load(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
-    load_raw(reference, mime)
-}
-
-fn load_raw(reference: &str, mime: Option<&str>) -> Result<Loaded, String> {
     if reference == "-" {
         let mut buf = Vec::new();
         std::io::stdin()

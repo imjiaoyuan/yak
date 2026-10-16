@@ -309,7 +309,10 @@ pub fn fetch_models_url(
 
 /// Fetch a provider's model list (OpenAI-compatible `/models` endpoint); the
 /// wizard offers what the endpoint actually serves.
-pub fn fetch_model_list(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
+pub(crate) fn fetch_model_list(
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<Vec<String>, String> {
     let agent = crate::core::http::short_agent();
     let mut request = agent.get(url);
     for (k, v) in headers {

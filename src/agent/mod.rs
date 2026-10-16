@@ -536,9 +536,9 @@ pub fn run_agent(
 
         // A gateway can overflow silently — no 400, just a usage report past
         // the window, or a length stop that consumed the whole window and
-        // produced nothing . The window must
-        // be known to see it; then it is the same forced-compact-and-retry as
-        // an outright refusal, bounded the same way.
+        // produced nothing. The window must be known to see it; then it is
+        // the same forced-compact-and-retry as an outright refusal, bounded
+        // the same way.
         if let (Some(u), Some(w)) = (usage, model.context_window)
             && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
             && let Some(cfg) = cfg_now.as_ref()
@@ -1445,9 +1445,9 @@ fn prepare_call<'a>(
     if let Some(rewritten) = rewritten {
         call.arguments = rewritten;
     }
-    // the tool may salvage the shape it was sent (prepareArguments,
-    // which runs ahead of validation): the edit tool parses a stringified
-    // `edits` array and the legacy flat single-edit shape
+    // the tool may salvage the shape it was sent, which runs ahead of
+    // validation: the edit tool parses a stringified `edits` array and the
+    // legacy flat single-edit shape
     if let Some(tool) = tools.iter().find(|t| t.name() == call.name) {
         call.arguments = tool.prepare_arguments(&call.arguments);
     }

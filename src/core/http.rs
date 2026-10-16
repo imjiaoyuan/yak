@@ -790,7 +790,6 @@ fn get_blocking(
     Ok((buf, content_type))
 }
 
-/// A fetched web page, decoded to text: the final URL (after redirects),
 #[cfg(test)]
 mod tests {
     use super::*;

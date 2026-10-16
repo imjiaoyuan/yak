@@ -184,9 +184,8 @@ pub fn discover(user_dir: &Path, cwd: &Path, disabled: &[String]) -> Vec<SkillDe
     merged
 }
 
-/// The system-prompt section, the `formatSkillsForPrompt`: one XML entry
-/// per skill the model may pick up on its own, with the file location for
-/// progressive disclosure.
+/// The system-prompt section, one XML entry per skill the model may pick
+/// up on its own, with the file location for progressive disclosure.
 pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     let visible: Vec<&SkillDef> = skills.iter().filter(|s| s.model_invocation).collect();
     if visible.is_empty() {
@@ -217,8 +216,8 @@ pub fn skills_block(skills: &[SkillDef]) -> Option<String> {
     Some(out)
 }
 
-/// the `escapeXml`, so a description containing angle brackets or quotes
-/// cannot break the block's structure.
+/// Angle brackets and quotes in a description cannot break the block's
+/// structure.
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")

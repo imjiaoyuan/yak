@@ -52,7 +52,7 @@ const TAIL_LINES: usize = 20;
 /// chatty extension cannot grow the buffer without bound.
 const PROGRESS_LINES: usize = 64;
 /// `recv_timeout` slice; keeps ctrl+c responsive while waiting.
-const POLL_SLICE: Duration = Duration::from_millis(100);
+const POLL_SLICE: Duration = Duration::from_millis(20);
 
 /// One tool advertised by the initialize handshake.
 #[derive(Clone)]
@@ -419,8 +419,8 @@ impl Ext {
     }
 }
 
-/// Lay out a segmented tool result so the model can tell items apart
-/// with more than one text segment each
+/// Lay out a segmented tool result so the model can tell items apart when
+/// more than one output segment rides the reply. Each non-console segment
 /// starts with a `==> text N/M <==` line, and console segments follow all
 /// other output in one `<console_output>` block. An empty list or a list
 /// with no text and no console lines renders as its pretty JSON — the

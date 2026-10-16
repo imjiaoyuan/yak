@@ -255,7 +255,7 @@ impl Session {
             let painted_before = lanes_painted.get();
             let width = crate::term::columns().max(20).saturating_sub(2);
             let mut out = String::new();
-            out.push_str(c.hide());
+            out.push_str(&c.hide());
             out.push_str(&c.up(painted_before));
             let mut painted = 0usize;
             for (lane, text) in rows {
@@ -272,7 +272,9 @@ impl Session {
             if painted < painted_before {
                 out.push_str(c.clear_below());
             }
-            out.push_str(c.show());
+            // the cursor stays hidden: the spinner row below the block owns
+            // it (a `show` here parked a visible cursor next to the running
+            // frame until the next chrome print)
             eprint!("{out}");
             use std::io::Write;
             let _ = std::io::stderr().flush();
