@@ -3,7 +3,7 @@
 
 Copy to ~/.yak/extensions/webfetch, chmod +x, /reload. It mounts:
 
-  webfetch {url}    GET the URL, return readable text
+  webfetch {url, markdown?}   GET the URL, return readable text
 
 This is the built-in webfetch moved onto the extension surface,
 byte-compatible with its former self: HTML is stripped to text with its
@@ -12,12 +12,23 @@ URL is reported when redirects moved the fetch, proxies are honoured
 (HTTP_PROXY/HTTPS_PROXY/NO_PROXY, via urllib), and the result is cut to
 the shared head (2000 lines / 50KB escaped / 12k tokens) every tool result
 obeys. Exec-tier: it is the one door untrusted content comes in by.
-Protocol: newline-delimited JSON on stdio, one reply per request id
-(docs/extensions.md has the reference).
+
+When the task's model runs on a deepseek provider (agent_start says so)
+and a DeepSeek key is around (DEEPSEEK_API_KEY, else the deepseek
+provider's api_key in <user_dir>/config.json), the direct GET falls back
+to DeepSeek's Fetch API on failure — a dead page, a 403 bot wall, an
+empty text extraction — and markdown:true forces that path up front:
+server-side rendering into Markdown where a plain GET only sees scripts.
+The first line of the result says which path answered. Exec-tier still:
+the URL leaves the machine either way. Protocol: newline-delimited JSON
+on stdio, one reply per request id (docs/extensions.md has the reference).
 """
 
 import json
+import os
+import re
 import socket
+import string
 import sys
 import urllib.error
 import urllib.request
@@ -32,7 +43,9 @@ USER_AGENT = "yak/dev"
 
 DESCRIPTION = (
     "Fetch a URL as text (HTML stripped); JSON, XML and plain text "
-    "pass through."
+    "pass through. With markdown: true, or on a deepseek-model session "
+    "when the direct fetch fails, the page is fetched and rendered to "
+    "Markdown by DeepSeek's Fetch API."
 )
 
 TOOLS = [
@@ -45,13 +58,21 @@ TOOLS = [
                 "url": {
                     "type": "string",
                     "description": "http(s) URL to fetch",
-                }
+                },
+                "markdown": {
+                    "type": "boolean",
+                    "description": "fetch via DeepSeek's Fetch API (server-side "
+                    "rendered Markdown; needs a deepseek-model session)",
+                },
             },
             "required": ["url"],
         },
         "tier": "exec",
     },
 ]
+
+DEEPSEEK_MODEL = {"on": False}
+DEEPSEEK_KEY = {"v": None}
 
 
 def reply(obj):
@@ -315,16 +336,84 @@ def html_to_text(html):
     return "\n".join(clean).strip()
 
 
-def webfetch(args):
-    url = args.get("url")
-    if not isinstance(url, str):
-        return None, "missing string argument 'url'"
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return None, f"only http(s) URLs are allowed (refusing {url})"
+def deepseek_key(user_dir):
+    """DEEPSEEK_API_KEY wins, else the deepseek provider's api_key in
+    config.json (its ${VAR} form expands from the environment)."""
+    env = os.environ.get("DEEPSEEK_API_KEY", "")
+    if env:
+        return env
     try:
-        final_url, content_type, body = fetch(url)
-    except Exception as e:
-        return None, str(e)
+        with open(os.path.join(user_dir, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    key = cfg.get("providers", {}).get("deepseek", {}).get("api_key", "")
+    if not key:
+        return None
+    return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), key)
+
+
+def ds_unescape(text):
+    r"""DeepSeek's Markdown over-escapes structure punctuation (`\#`, `\-`,
+    `\/`, ...), so headings, lists and emphasis arrive literal. Undo the
+    CommonMark backslash escapes (backslash + ASCII punctuation) outside
+    fenced code blocks, where the backslashes are real code."""
+    out = []
+    fenced = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        if fenced:
+            out.append(line)
+            continue
+        chars = []
+        i = 0
+        while i < len(line):
+            if line[i] == "\\" and i + 1 < len(line) and line[i + 1] in string.punctuation:
+                chars.append(line[i + 1])
+                i += 2
+            else:
+                chars.append(line[i])
+                i += 1
+        out.append("".join(chars))
+    return "\n".join(out)
+
+
+def ds_fetch(url):
+    """DeepSeek's Fetch API: the page rendered to Markdown server-side.
+    Returns the text (already cut to the head) or raises with its error."""
+    key = DEEPSEEK_KEY["v"]
+    if not key:
+        raise Exception(f"Failed to fetch {url}: DeepSeek fetch needs DEEPSEEK_API_KEY "
+                        "or a deepseek provider in config.json")
+    body = json.dumps({"url": url}).encode()
+    req = urllib.request.Request(
+        "https://api.deepseek.com/v1/tools/fetch",
+        data=body,
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        d = json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+    except urllib.error.HTTPError as e:
+        raise Exception(f"DeepSeek fetch: HTTP {e.code}") from None
+    title = (d.get("title") or "").strip()
+    content = ds_unescape(d.get("content") or "")
+    s = (title + "\n\n" if title else "") + content.strip()
+    if not content.strip():
+        raise Exception(f"DeepSeek fetch: no extractable content")
+    return truncate_head_marked(s), title or None
+
+
+def direct_fetch(url):
+    """The direct GET, shaped exactly as before. Returns the marked text;
+    raises on any failure; (text, title_or_None) so the caller can tell an
+    empty extraction from a real answer."""
+    final_url, content_type, body = fetch(url)
     is_html = content_type.lower() in ("text/html", "application/xhtml+xml")
     if is_html:
         text = html_to_text(body)
@@ -335,12 +424,56 @@ def webfetch(args):
         if title:
             s += title + "\n\n"
         s += text
-    else:
-        s = body.strip()
+        return s, title, len(text)
+    s = body.strip()
+    return s, None, len(s)
+
+
+def webfetch(args):
+    url = args.get("url")
+    if not isinstance(url, str):
+        return None, "missing string argument 'url'"
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None, f"only http(s) URLs are allowed (refusing {url})"
+    ds = DEEPSEEK_MODEL["on"] and DEEPSEEK_KEY["v"]
+    if args.get("markdown") is True:
+        if not ds:
+            return None, "markdown: true needs a deepseek-model session " \
+                         "(DEEPSEEK_API_KEY or a deepseek provider in config.json)"
+        try:
+            text, _ = ds_fetch(url)
+        except Exception as e:
+            return None, str(e)
+        return "[via deepseek fetch]\n" + text, None
+    err = None
+    try:
+        s, _title, text_len = direct_fetch(url)
+    except Exception as e:
+        err = str(e)
+        s, text_len = None, 0
+    if err is None and text_len >= 200:
+        return truncate_head_marked(s), None
+    # direct path failed or came back with (almost) nothing: a deepseek
+    # session retries server-side, where JS-rendered pages have content
+    if ds:
+        why = "empty page" if err is None else "direct fetch failed"
+        try:
+            text, _ = ds_fetch(url)
+        except Exception as e:
+            # surface both: the direct failure is the real diagnosis, the
+            # fallback failure is why there is no page to show
+            return None, f"{err or ('empty text extraction from ' + url)}; {e}"
+        head = f"[via deepseek fetch ({why})]"
+        if err is not None:
+            head += f"\n[direct: {err}]"
+        return head + "\n" + text, None
+    if err is not None:
+        return None, err
     return truncate_head_marked(s), None
 
 
 def main():
+    user_dir = None
     for line in sys.stdin:
         try:
             msg = json.loads(line)
@@ -348,7 +481,13 @@ def main():
             continue
         mid, kind = msg.get("id"), msg.get("type")
         if kind == "initialize":
-            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+            user_dir = (msg.get("params") or {}).get("user_dir")
+            DEEPSEEK_KEY["v"] = deepseek_key(user_dir) if user_dir else None
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": ["agent_start"]}})
+        elif kind == "event" and msg.get("name") == "agent_start":
+            model = (msg.get("params") or {}).get("model", "")
+            DEEPSEEK_MODEL["on"] = model.startswith("deepseek/")
+            reply({"id": mid, "result": None})
         elif kind == "call_tool":
             if msg.get("name") != "webfetch":
                 reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})

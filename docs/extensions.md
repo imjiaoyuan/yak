@@ -14,7 +14,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `plan` | script tool | the checklist (renamed from `update_plan`): a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
 | `search` | script tool | the `grep`/`glob` pair over ripgrep, read-only over the tree; read-tier, never prompts |
 | `memory` | script tool | memory (renamed from `remember`): one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
-| `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier |
+| `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier. On a deepseek-model session a failed or JS-hollow direct GET retries via DeepSeek's Fetch API (server-rendered Markdown, `markdown: true` forces it; key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json) |
 | `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
 | `mcp_bridge.py` | resident | mounts an MCP server (stdio or streamable HTTP) as one `<server>__<tool>` per MCP tool; config in `mcp.json` |
@@ -29,7 +29,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
 | `model_pin` | resident | the per-directory model pin, kept automatically: an `agent_start` subscriber that writes `<cwd>: <model>` into `<user_dir>/model-pins.json` for every task, so the next yak in that directory starts on the model the last one ran |
-| `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
+| `websearch` | resident | a `/web` command plus `web_search` tool; DeepSeek's Search API (model-facing summaries, query operators like `site:`/`lang:`/`after:` pass through) when the session's model is a deepseek one — key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json — then Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 | `workflow.py` | resident | resumable graph orchestration: JSON graphs of agent/tool/router/parallel/human/subgraph nodes, each agent node its own model and tool subset run as a `yak --json` child; append-only event logs under `~/.yak/workflows/`, replay-based resume, `/workflow` commands and a `workflow_run` tool; graphs and their format live in `examples/workflows/` (see its README) |
 

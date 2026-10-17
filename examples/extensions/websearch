@@ -6,18 +6,26 @@ Copy to ~/.yak/extensions/websearch, chmod +x, /reload. It mounts:
   web_search {query, limit?}   web search → top titles + URLs
   /web <query>                 run a search straight from the prompt
 
-Search backend: Brave's Search API when BRAVE_API_KEY is set in the
-environment (free tier at https://brave.com/search/api — full web
-results, official API). Without a key it degrades to a keyless chain:
-DuckDuckGo's HTML page, then its Instant Answer JSON, then the Wikipedia
-API (encyclopedia scope, always works). The result's first line says
-which backend answered.
+Search backends, first match wins:
 
-Page fetching is deliberately not mounted: the `webfetch` example covers
-it, so this example mounts only the capability the host lacks. All
-extension tools are exec-tier, gated only by the blacklist and per-tool
-policies. Protocol: newline-delimited JSON on stdio, one reply per request
-id (docs/extensions.md has the reference).
+  deepseek   DeepSeek's Search API — used when the task's model is a
+             deepseek provider (subscribes to agent_start). Returns the
+             per-result summary written for models (600-800 chars), plus
+             title/url/date. Query operators pass through intact:
+             site:, -site:, -term, "exact phrase", lang:zh,en, after:,
+             before:. Key: DEEPSEEK_API_KEY, else the api_key of the
+             deepseek provider in <user_dir>/config.json.
+  brave      Brave's Search API when BRAVE_API_KEY is set in the
+             environment (free tier at https://brave.com/search/api).
+  keyless    DuckDuckGo's HTML page, then its Instant Answer JSON, then
+             the Wikipedia API (encyclopedia scope, always works).
+
+The result's first line says which backend answered. Page fetching is
+deliberately not mounted: the `webfetch` example covers it, so this
+example mounts only the capability the host lacks. All extension tools
+are exec-tier, gated only by the blacklist and per-tool policies.
+Protocol: newline-delimited JSON on stdio, one reply per request id
+(docs/extensions.md has the reference).
 """
 
 import json
@@ -33,6 +41,12 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; yak-websearch/1.0)",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
+
+# set from agent_start's model ("deepseek/<model>" → True) and cleared
+# when the key cannot be found; a task on any other provider never pays
+# the config read
+DEEPSEEK_MODEL = {"on": False}
+DEEPSEEK_KEY = {"v": None}
 
 
 def reply(obj):
@@ -61,6 +75,55 @@ def http_get(url, timeout=15):
 
 def http_get_json(url, timeout=15):
     return json.loads(http_get(url, timeout))
+
+
+def deepseek_key(user_dir):
+    """DEEPSEEK_API_KEY wins, else the deepseek provider's api_key in
+    config.json (its ${VAR} form expands from the environment)."""
+    env = os.environ.get("DEEPSEEK_API_KEY", "")
+    if env:
+        return env
+    try:
+        with open(os.path.join(user_dir, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    key = cfg.get("providers", {}).get("deepseek", {}).get("api_key", "")
+    if not key:
+        return None
+    return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), key)
+
+
+# deepseek search
+def _deepseek(query, limit):
+    key = DEEPSEEK_KEY["v"]
+    if not key:
+        raise RuntimeError("no DeepSeek key (DEEPSEEK_API_KEY or config.json)")
+    body = json.dumps({"query": query, "count": min(limit, 50)}).encode()
+    req = urllib.request.Request(
+        "https://api.deepseek.com/v1/tools/search",
+        data=body,
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        d = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"DeepSeek search: HTTP {e.code}") from e
+    out = []
+    for r in d.get("results", []):
+        meta = r.get("date") or ""
+        meta = meta[:10]
+        out.append(
+            (
+                f"{r.get('title', '')} [{meta}]" if meta else r.get("title", ""),
+                r.get("url", ""),
+                r.get("summary") or r.get("snippet") or "",
+            )
+        )
+    return out
 
 
 # search
@@ -92,7 +155,7 @@ def _brave(query, limit):
     for r in d.get("web", {}).get("results", []):
         desc = re.sub(r"<[^>]+>", "", r.get("description", ""))
         title = r.get("title", "")
-        out.append((f"{title} — {unescape(desc)}".strip(" —"), r["url"]))
+        out.append((f"{title} — {unescape(desc)}".strip(" —"), r["url"], ""))
         if len(out) >= limit:
             break
     return out
@@ -112,7 +175,7 @@ def _ddg_html(query, limit):
     out = []
     for m in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S):
         title = re.sub(r"<[^>]+>", "", m.group(2))
-        out.append((unescape(title).strip(), _ddg_unwrap(m.group(1))))
+        out.append((unescape(title).strip(), _ddg_unwrap(m.group(1)), ""))
         if len(out) >= limit:
             break
     return out
@@ -129,7 +192,7 @@ def _ddg_instant(query, limit):
     def walk(topics):
         for t in topics:
             if "FirstURL" in t and len(out) < limit:
-                out.append((t.get("Text", ""), t["FirstURL"]))
+                out.append((t.get("Text", ""), t["FirstURL"], ""))
             walk(t.get("Topics", []))
 
     walk(d.get("RelatedTopics", []))
@@ -145,33 +208,41 @@ def _wikipedia(query, limit):
         + "&format=json"
     )
     return [
-        (h["title"], "https://en.wikipedia.org/wiki/" + h["title"].replace(" ", "_"))
+        (h["title"], "https://en.wikipedia.org/wiki/" + h["title"].replace(" ", "_"), "")
         for h in d.get("query", {}).get("search", [])[:limit]
     ]
 
 
-BACKENDS = [
-    ("brave", _brave),
-    ("duckduckgo", _ddg_html),
-    ("duckduckgo instant answers", _ddg_instant),
-    ("wikipedia (encyclopedia only)", _wikipedia),
-]
+def backends():
+    """DeepSeek first when the task runs on a deepseek model, then the
+    static chain."""
+    chain = [
+        ("brave", _brave),
+        ("duckduckgo", _ddg_html),
+        ("duckduckgo instant answers", _ddg_instant),
+        ("wikipedia (encyclopedia only)", _wikipedia),
+    ]
+    if DEEPSEEK_MODEL["on"] and DEEPSEEK_KEY["v"]:
+        return [("deepseek", _deepseek)] + chain
+    return chain
 
 
 def web_search(query, limit=5):
     if not query.strip():
         return "error: empty query"
     errors = []
-    for label, backend in BACKENDS:
+    for label, backend in backends():
         try:
             results = backend(query, limit)
         except Exception as e:
             errors.append(f"{label}: {e}")
             continue
         if results:
-            lines = [f"via {label}"] + [
-                f"{i}. {title}\n   {url}" for i, (title, url) in enumerate(results, 1)
-            ]
+            lines = [f"via {label}"]
+            for i, (title, url, summary) in enumerate(results, 1):
+                lines.append(f"{i}. {title}\n   {url}")
+                if summary:
+                    lines.append(f"   {summary}")
             return "\n".join(lines)
     hint = "" if os.environ.get("BRAVE_API_KEY") else (
         "\n(set BRAVE_API_KEY for full Brave web search; free tier at "
@@ -186,7 +257,8 @@ TOOLS = [
     {
         "name": "web_search",
         "description": "Search the web and return the top result titles and "
-        "URLs (Brave Search API when BRAVE_API_KEY is set, keyless "
+        "URLs (DeepSeek's Search API when the session's model is a deepseek "
+        "one, Brave Search API when BRAVE_API_KEY is set, keyless "
         "DuckDuckGo/Wikipedia fallback otherwise)",
         "parameters": {
             "type": "object",
@@ -204,6 +276,7 @@ TOOLS = [
 
 
 def main():
+    user_dir = None
     for line in sys.stdin:
         try:
             msg = json.loads(line)
@@ -211,7 +284,13 @@ def main():
             continue
         mid, kind = msg.get("id"), msg.get("type")
         if kind == "initialize":
-            reply({"id": mid, "result": {"tools": TOOLS, "commands": ["web"], "events": []}})
+            user_dir = (msg.get("params") or {}).get("user_dir")
+            DEEPSEEK_KEY["v"] = deepseek_key(user_dir) if user_dir else None
+            reply({"id": mid, "result": {"tools": TOOLS, "commands": ["web"], "events": ["agent_start"]}})
+        elif kind == "event" and msg.get("name") == "agent_start":
+            model = (msg.get("params") or {}).get("model", "")
+            DEEPSEEK_MODEL["on"] = model.startswith("deepseek/")
+            reply({"id": mid, "result": None})
         elif kind == "call_tool":
             args = msg.get("args") or {}
             try:
