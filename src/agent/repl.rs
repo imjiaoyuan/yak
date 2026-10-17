@@ -960,7 +960,8 @@ fn repl_command(
             }
             // switching also pins the cwd: the next session in this
             // directory starts on the picked model even though the stored
-            // default moved (the pin outranks it). `/model-pin off` lifts it
+            // default moved (the pin outranks it). Deleting the entry in
+            // model-pins.json lifts it
             match crate::providers::set_path_pin(
                 &session.cwd.display().to_string(),
                 Some(&choice.model),

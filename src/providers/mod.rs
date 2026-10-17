@@ -139,7 +139,9 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
 /// prefix of cwd wins (a pin on `~/work/a` covers `~/work/a/sub`); the
 /// model itself must still resolve, and one that does not is dropped with
 /// a warning — a stale pin must not dead-end every yak started under its
-/// path. Managed by the `model_pin` example extension.
+/// path. Written by `/model` on every switch and kept current by the
+/// `model_pin` example extension, which records the model every task runs
+/// on.
 pub(crate) fn path_pinned_model(cfg: &crate::core::config::Config) -> Option<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     path_pinned_model_at(cfg, &user_pins_path(), &cwd)
@@ -151,7 +153,8 @@ pub(crate) fn user_pins_path() -> std::path::PathBuf {
 
 /// Write (or, on None, remove) the pin for one directory: the write side
 /// of `path_pinned_model`, ridden by `/model` (auto-pin the cwd) and the
-/// `model_pin` extension. A malformed pins file is refused, not rewritten
+/// `model_pin` extension (it records the model every `agent_start` task
+/// runs on). A malformed pins file is refused, not rewritten
 /// by guesswork — the loud path matches the read side's warning.
 pub(crate) fn set_path_pin(dir: &str, model: Option<&str>) -> Result<(), String> {
     set_path_pin_at(&user_pins_path(), dir, model)

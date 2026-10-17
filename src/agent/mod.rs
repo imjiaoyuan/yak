@@ -269,7 +269,11 @@ pub fn run_agent(
 
     opts.hooks.fire(
         "agent_start",
-        &json!({"cwd": opts.cwd.display().to_string(), "task": prompt}),
+        &json!({
+            "cwd": opts.cwd.display().to_string(),
+            "task": prompt,
+            "model": model.qualified_id(),
+        }),
     );
     // the hard cap on model rounds: enough for any real task, small enough
     // that a model stuck repeating itself cannot burn tokens forever

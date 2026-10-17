@@ -28,7 +28,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or held in an inbox until the session is free; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
-| `model_pin` | resident | the per-directory model pin: `/model-pin` reads and writes `<user_dir>/model-pins.json`, the nearest pinned ancestor of cwd wins at startup |
+| `model_pin` | resident | the per-directory model pin, kept automatically: an `agent_start` subscriber that writes `<cwd>: <model>` into `<user_dir>/model-pins.json` for every task, so the next yak in that directory starts on the model the last one ran |
 | `websearch` | resident | a `/web` command plus `web_search` tool; Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 
@@ -214,7 +214,7 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 
 | Event | Fired | `params` |
 |---|---|---|
-| `agent_start` | once per task, before the first model call | `{cwd, task}` |
+| `agent_start` | once per task, before the first model call | `{cwd, task, model}`: `model` is the task's resolved `provider/model` |
 | `input` | the pending user message, before each model call | `{text, attachments: [{path, url, mime_type}], cwd, focused?}`: same `cwd`/`focused` semantics as `agent_end` |
 | `turn_start` | each agent loop turn | `{turn}` |
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
