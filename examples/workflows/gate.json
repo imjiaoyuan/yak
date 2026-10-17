@@ -1,0 +1,56 @@
+{
+  "name": "gate",
+  "version": 1,
+  "entry": "plan",
+  "state": {
+    "task": "string",
+    "plan": "string",
+    "approved": "boolean",
+    "result": "string"
+  },
+  "models": {
+    "planner": {"model": "@smart", "thinking": "high"},
+    "worker": {"model": "@fast"}
+  },
+  "nodes": {
+    "plan": {
+      "kind": "agent",
+      "model": "planner",
+      "input": {"task": "$.task"},
+      "prompt": "Draft a short implementation plan. Reply with a ```json block: {\"plan\": \"...\"}.",
+      "writes": ["plan"]
+    },
+    "approve": {
+      "kind": "human",
+      "prompt": "Proceed with the plan above?",
+      "choices": ["approve", "reject"],
+      "writes": ["approved"]
+    },
+    "gate": {
+      "kind": "router",
+      "routes": [
+        {"when": "$.approved == true", "to": "execute"},
+        {"when": "$.approved == false", "to": "decline"}
+      ],
+      "default": "decline",
+      "max_iterations": 2
+    },
+    "execute": {
+      "kind": "agent",
+      "model": "worker",
+      "input": {"plan": "$.plan"},
+      "prompt": "Execute the plan. Reply with a ```json block: {\"result\": \"...\"}.",
+      "writes": ["result"]
+    },
+    "decline": {
+      "kind": "agent",
+      "input": {"approved": "$.approved"},
+      "prompt": "Write one closing sentence recording the rejection. Reply with a ```json block: {\"result\": \"...\"}.",
+      "writes": ["result"]
+    }
+  },
+  "edges": [
+    {"from": "plan", "to": "approve"},
+    {"from": "approve", "to": "gate"}
+  ]
+}

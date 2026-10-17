@@ -1,0 +1,27 @@
+{
+  "name": "audit",
+  "version": 1,
+  "entry": "collect",
+  "state": {
+    "path": "string",
+    "listing": "string",
+    "report": "string"
+  },
+    "nodes": {
+    "collect": {
+      "kind": "tool",
+      "tool": "bash",
+      "args": {"command": "ls \"$PATH\""},
+      "writes": ["listing"]
+    },
+    "report": {
+      "kind": "agent",
+      "input": {"listing": "$.listing"},
+      "prompt": "Turn the listing into an audit report, max five lines. Reply with a ```json block: {\"report\": \"...\"}.",
+      "writes": ["report"]
+    }
+  },
+  "edges": [
+    {"from": "collect", "to": "report"}
+  ]
+}

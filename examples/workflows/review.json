@@ -1,0 +1,35 @@
+{
+  "name": "review",
+  "version": 1,
+  "entry": "review",
+  "defaults": {"model": "@smart"},
+  "state": {
+    "task": "string",
+    "review": "object",
+    "summary": "string"
+  },
+  "models": {
+    "smart": {"model": "@smart", "thinking": "high"},
+    "fast": {"model": "@fast"}
+  },
+  "nodes": {
+    "review": {
+      "kind": "agent",
+      "model": "smart",
+      "input": {"task": "$.task"},
+      "prompt": "Review the task's implementation in this repository. Reply with a single ```json block: {\"ok\": true|false, \"issues\": [\"...\"]} — ok=false when something must change.",
+      "tools": ["read", "bash"],
+      "writes": ["review"]
+    },
+    "summarize": {
+      "kind": "agent",
+      "model": "fast",
+      "input": {"review": "$.review"},
+      "prompt": "Summarize the review outcome in at most five bullet points. Reply with a ```json block: {\"summary\": \"...\"}.",
+      "writes": ["summary"]
+    }
+  },
+  "edges": [
+    {"from": "review", "to": "summarize"}
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "name": "pipeline",
+  "version": 1,
+  "entry": "start",
+  "state": {
+    "task": "string",
+    "notes": {"type": "array", "reducer": "append"},
+    "done": "boolean"
+  },
+  "nodes": {
+    "start": {
+      "kind": "parallel",
+      "branches": [{"node": "alpha"}, {"node": "beta"}]
+    },
+    "alpha": {
+      "kind": "agent",
+      "input": {"task": "$.task"},
+      "prompt": "One angle on the task, max three sentences. Reply with a ```json block: {\"notes\": [\"...\"]}.",
+      "tools": ["read"],
+      "writes": ["notes"]
+    },
+    "beta": {
+      "kind": "agent",
+      "input": {"task": "$.task"},
+      "prompt": "A different angle on the task, max three sentences. Reply with a ```json block: {\"notes\": [\"...\"]}.",
+      "tools": ["read"],
+      "writes": ["notes"]
+    },
+    "check": {
+      "kind": "router",
+      "routes": [
+        {"when": "$.task != \"\" and $.notes != []", "to": "finish"},
+        {"when": "$.notes == []", "to": "alpha"}
+      ],
+      "default": "finish",
+      "max_iterations": 3
+    },
+    "finish": {
+      "kind": "agent",
+      "input": {"notes": "$.notes"},
+      "prompt": "Merge the notes into one paragraph. Reply with a ```json block: {\"done\": true}.",
+      "writes": ["done"]
+    }
+  },
+  "edges": [
+    {"from": "start", "to": "check"}
+  ]
+}
