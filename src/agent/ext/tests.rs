@@ -915,7 +915,7 @@ fn a_reply_without_a_result_is_an_error() {
         .expect_err("a reply without result must fail");
     assert!(err.contains("replied without a result"), "{err}");
     let err = ext
-        .run_command("web", "query")
+        .run_command("web", "query", None)
         .expect_err("same contract on run_command");
     assert!(err.contains("replied without a result"), "{err}");
 }

@@ -6,8 +6,12 @@
 
 use crate::core::args::{OptSpec, render_help};
 use crate::flag_spec;
+use crate::value_spec;
 
-const SPECS: &[OptSpec] = &[flag_spec!("help", Some('h'), "Show this message and exit")];
+const SPECS: &[OptSpec] = &[
+    flag_spec!("help", Some('h'), "Show this message and exit"),
+    value_spec!("thread", None, "Thread id to export", "ID"),
+];
 
 fn help() -> String {
     render_help(
@@ -32,7 +36,18 @@ pub fn run(argv: &[String]) -> i32 {
             return 1;
         }
     };
-    match crate::core::export::export_latest(&cwd, args.positionals.first().map(String::as_str)) {
+    let result = match args.opt(&["thread"]) {
+        Some(cid) => crate::core::export::export_thread(
+            cid,
+            &cwd,
+            args.positionals.first().map(String::as_str),
+        )
+        .map(|path| (cid.to_string(), path)),
+        None => {
+            crate::core::export::export_latest(&cwd, args.positionals.first().map(String::as_str))
+        }
+    };
+    match result {
         Ok((cid, path)) => {
             println!("exported {cid} to {}", path.display());
             0

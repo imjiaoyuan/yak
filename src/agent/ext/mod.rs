@@ -7,7 +7,7 @@
 //! → {"id":1,"type":"initialize","params":{"version":..,"cwd":..}}
 //! ← {"id":1,"result":{"tools":[{"name","description","parameters"}],..}}
 //! → {"id":2,"type":"call_tool","name":..,"args":{..}}   ← {"id":2,"result":..}
-//! → {"id":3,"type":"run_command","name":..,"args":".."} ← {"id":3,"result":".."}
+//! → {"id":3,"type":"run_command","name":..,"args":"..","context":{..}} ← {"id":3,"result":".."}
 //! → {"id":4,"type":"event","name":"tool_call","params":{..}} ← {"id":4,"result":{..}}
 //! → {"type":"shutdown"}                                  (then stdin closes)
 //! ```
@@ -407,12 +407,23 @@ impl Ext {
     /// comes back: `result` prints, `task` submits as one agent task (the
     /// `/skill:<name>` shape — a command whose answer is work for the model,
     /// not text for the terminal), so the caller, not the host, interprets.
-    pub fn run_command(&self, name: &str, args: &str) -> Result<Value, String> {
-        let result = self.request(
-            &json!({"id": next_id(), "type": "run_command", "v": 1, "name": name, "args": args}),
-            TOOL_TIMEOUT,
-            None,
-        )?;
+    pub fn run_command(
+        &self,
+        name: &str,
+        args: &str,
+        context: Option<&Value>,
+    ) -> Result<Value, String> {
+        let mut frame = json!({
+            "id": next_id(),
+            "type": "run_command",
+            "v": 1,
+            "name": name,
+            "args": args
+        });
+        if let Some(context) = context {
+            frame["context"] = context.clone();
+        }
+        let result = self.request(&frame, TOOL_TIMEOUT, None)?;
         result
             .get("result")
             .cloned()
@@ -755,15 +766,13 @@ impl Extensions {
         replacement
     }
 
-    /// Fire `compact` across every subscriber and return the replacement
-    /// compaction when one extension offers it: the last reply shaped
-    /// `{"decision":"compact","summary":..,"keep_recent_tokens":n}` wins
-    /// (the token field is optional; without it the caller keeps its own
-    /// value). Every other event reply observes only, and the whole path is
-    /// fail-open: a dead, slow, silent or malformed extension returns
-    /// `None` and the caller runs its built-in compaction instead.
-    pub fn replace_compaction(&self, params: &Value) -> Option<(String, Option<u32>)> {
+    /// Fire `compact` across every subscriber. An extension may replace the
+    /// summary or return text that must survive beside the built-in summary.
+    /// Both surfaces are generic: the host never knows which tool produced
+    /// the preserved text. The path is fail-open on extension failures.
+    pub fn compact_reply(&self, params: &Value) -> (Option<(String, Option<u32>)>, Vec<String>) {
         let mut replacement: Option<(String, Option<u32>)> = None;
+        let mut preserved = Vec::new();
         for ext in &self.exts {
             match ext.fire("compact", params) {
                 Ok(Some(reply)) => {
@@ -778,19 +787,44 @@ impl Extensions {
                                 .and_then(|n| u32::try_from(n).ok()),
                         ));
                     }
+                    if let Some(items) = reply.get("preserved").and_then(Value::as_array) {
+                        for item in items {
+                            if let Some(content) = item.as_str().filter(|s| !s.trim().is_empty()) {
+                                preserved.push(content.to_string());
+                            } else if let Some(content) = item
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.trim().is_empty())
+                            {
+                                let label = item.get("label").and_then(Value::as_str);
+                                preserved.push(match label {
+                                    Some(label) if !label.is_empty() => {
+                                        format!("[{label}]\n{content}")
+                                    }
+                                    _ => content.to_string(),
+                                });
+                            }
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => ext.note(e),
             }
         }
-        replacement
+        (replacement, preserved)
+    }
+
+    /// Compatibility-shaped helper for callers that only need replacement.
+    #[cfg(test)]
+    pub fn replace_compaction(&self, params: &Value) -> Option<(String, Option<u32>)> {
+        self.compact_reply(params).0
     }
 
     /// Fire an event on every extension subscribed to it. Replies are
     /// fire-and-forget: per the protocol only `tool_call`, `tool_result` and
     /// `compact` replies are interpreted (here via
     /// [`Extensions::gate_tool_call`], in `rewrite_tool_result` and in
-    /// `replace_compaction`) — an extension answering any other event
+    /// `compact_reply`) — an extension answering any other event
     /// with a `decision` is out of contract and the reply is dropped, not
     /// acted on. Failures land in the extension's diagnostics tail.
     pub fn fire(&self, name: &str, params: &Value) {

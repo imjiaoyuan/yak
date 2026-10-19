@@ -323,6 +323,7 @@ pub fn cache_label(u: Usage) -> Option<String> {
 /// here, which is the figure worth seeing the moment it happens — a compaction
 /// or a prefix change invalidates the whole cached prefix — while the session
 /// average lags behind it.
+#[cfg(test)]
 pub fn cache_note(total: Usage, last: Option<Usage>) -> String {
     let Some(label) = cache_label(total) else {
         return String::new();

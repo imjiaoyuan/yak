@@ -13,7 +13,10 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `ls` | script tool | directory listing; the reference tool the host used to carry built in, kept byte-compatible |
 | `plan` | script tool | the checklist (renamed from `update_plan`): a `{step, status}` list with at most one `in_progress`; the plan lives in the model's own tool call, so no harness-side state |
 | `search` | script tool | the `grep`/`glob` pair over ripgrep, read-only over the tree; read-tier, never prompts |
-| `memory` | script tool | memory (renamed from `remember`): one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
+| `memory` | script tool | memory (renamed from `remember`): injects global and project memory sections and writes one dated deduped line into `~/.yak/YAK.md`, or with `project: true` into `<project>/.yak/YAK.md`; write-tier |
+| `commands` | resident | Markdown prompt-template commands from package, project and user `commands/` directories; frontmatter `system` becomes task-local system text |
+| `export` | resident | `/export` command forwarding the current thread to the core `yak export --thread` implementation |
+| `status` | resident | `/status` command rendering the live session context supplied to `run_command` |
 | `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier. On a deepseek-model session a failed or JS-hollow direct GET retries via DeepSeek's Fetch API (server-rendered Markdown, `markdown: true` forces it; key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json) |
 | `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
@@ -171,11 +174,11 @@ The reply's `result` should be a string; a list lays out as **segments** — str
 **`run_command`**: the user typed your `/command` (deadline 120s):
 
 ```json
-→ {"id": 3, "type": "run_command", "v": 1, "name": "web", "args": "rust ureq"}
+→ {"id": 3, "type": "run_command", "v": 1, "name": "web", "args": "rust ureq", "context": {"thread": "01H…", "cwd": "/home/me/proj", "model": "provider/model", "context_tokens": 12000}}
 ← {"id": 3, "result": "via duckduckgo\n1. ureq - docs.rs\n   https://docs.rs/ureq …"}
 ```
 
-`args` is everything after the command name, as one string. The reply prints dim in the session. A command whose answer is *work for the model* replies with a task instead of text — `{"result": {"task": "…"}}` — and the session submits that string as one agent task (the `/skill:<name>` shape: the `skills` example reads the SKILL.md off disk and hands back a `<skill name dir>` prompt). `task` wins over a printed `result` when both ride the reply.
+`args` is everything after the command name, as one string. `context` carries the live session's thread id, cwd, model, usage, context estimate, tool count and mounted plugin rows; extensions that do not need it may ignore it. The reply prints dim in the session. A command whose answer is *work for the model* replies with a task instead of text — `{"result": {"task": "…", "system": "…"}}` — and the session submits that string as one agent task (the `/skill:<name>` shape: the `skills` example reads the SKILL.md off disk and hands back a `<skill name dir>` prompt). The optional `system` is appended only for this task and is restored afterwards. `task` wins over a printed `result` when both ride the reply.
 
 **`event`**: see the table below (deadline 5s). Only `tool_call`, `tool_result` and `compact` replies are interpreted; other events are fire-and-forget (reply `null` or nothing).
 
@@ -221,7 +224,7 @@ While a call is in flight an extension may stream **lane frames** on stdout — 
 | `turn_end` | each completed model call | `{turn, usage: [in, out, cached] or null}` |
 | `tool_call` | **before** each tool runs: see gate semantics | `{tool, args}` |
 | `tool_result` | after each tool call (once), before it enters the transcript | `{tool, args, tool_call_id, summary, is_error, error, content}`: reply `{"content": ..}` to replace it, see below |
-| `compact` | a compaction is due — the pre-request check, an overflow refusal, a silent overflow, or the manual `/compact` — before the built-in summarizer runs | `{reason: "trigger"\|"overflow"\|"stalled"\|"manual", trigger_tokens, keep_recent_tokens, instructions?}`: `instructions` rides only a manual `/compact [text]`; reply `{"decision": "compact", "summary": .., "keep_recent_tokens": n}` to replace it, see below |
+| `compact` | a compaction is due — the pre-request check, an overflow refusal, a silent overflow, or the manual `/compact` — before the built-in summarizer runs | `{reason: "trigger"\|"overflow"\|"stalled"\|"manual", trigger_tokens, keep_recent_tokens, instructions?, dropped_tool_results}`: `instructions` rides only a manual `/compact [text]`; `dropped_tool_results` lets an extension recover state after resume; reply `{"decision": "compact", "summary": .., "keep_recent_tokens": n}` to replace it, see below |
 | `approval` | an approval prompt is about to surface, before it blocks | `{cwd, tool, preview, pattern, focused?}`: `pattern` is the matched ask-list line for a bash ask, else null — the desktop-notification seam (see `notify.py`); fire-and-forget. Auto-allowed calls (read-tier, allow policies, `tool_call` pre-allow without a blacklist hit) never fire it |
 | `agent_end` | task finished or interrupted | `{cwd, final_text, interrupted, focused?}`: `cwd` (on both events, and on `agent_start`) is the session's working directory — with more than one yak running it is what tells the notifications apart. `focused` (on both events) is present only when the terminal reports focus (`ESC[I`/`ESC[O`, the focus-report mode held while yak reads input): true means the window is focused, so the user is already looking and a notification is noise — `notify.py` stays quiet then (its `NOTIFY_WHEN = "always"` opts out); absent means focus is unknown, and a gate must not guess |
 | `session_before_tree` | `/tree` picked a turn, before the session moves to it | `{thread, kept_turns, dropped_turns, dropped_ids}`: the ids leaving the active branch (the active chain minus the chain the jump lands on; the turns stay in the file as a sibling branch — nothing is deleted) — restore the workspace here (see the checkpoint example); a hook error or timeout aborts the jump before the transcript moves |
@@ -256,12 +259,14 @@ Reply without a `content` field (or `null`) to observe only. The replacement is 
 
 ### Replacing a compaction
 
-A `compact` subscriber sees that a compaction is due and may replace the built-in summarize-the-prefix step with its own summary — the seam a privacy filter, a domain-specific distiller or a side-model call plugs into. The event tells you why it fired: `trigger` (the token estimate crossed the trigger), `overflow` (the provider refused the prompt as too large), `stalled` (a previous attempt failed; this is the retry), `manual` (the user ran `/compact`; `instructions` carries its optional focus text):
+A `compact` subscriber sees that a compaction is due and may replace the built-in summarize-the-prefix step with its own summary — the seam a privacy filter, a domain-specific distiller or a side-model call plugs into. It may also return `{"preserved": [{"label": "...", "content": "..."}]}`; those opaque text blocks are appended to the built-in or replacement summary. This is the generic seam for extension-owned state that must survive compaction; the host does not know which tool produced it. The event tells you why it fired: `trigger` (the token estimate crossed the trigger), `overflow` (the provider refused the prompt as too large), `stalled` (a previous attempt failed; this is the retry), `manual` (the user ran `/compact`; `instructions` carries its optional focus text):
 
 ```json
 → {"id": 7, "type": "event", "v": 1, "name": "compact",
     "params": {"reason": "trigger", "trigger_tokens": 64000, "keep_recent_tokens": 20000}}
 ← {"id": 7, "result": {"decision": "compact", "summary": "<the new context prefix>", "keep_recent_tokens": 8000}}
+
+An extension that only wants to preserve text may reply with `{"preserved": [{"label": "active task list", "content": "..."}]}` and let the built-in summarizer run.
 ```
 
 `trigger_tokens` is the resolved trigger (0 when automatic compaction is off — a `manual` event can still arrive then, because `/compact` is never gated on it).

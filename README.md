@@ -129,6 +129,7 @@ Usage: yak export [OPTIONS] PATH
 
 Options:
   -h, --help            Show this message and exit
+      --thread ID       Thread id to export
 ```
 
 ```

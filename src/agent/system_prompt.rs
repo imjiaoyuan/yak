@@ -89,11 +89,6 @@ pub fn build_system_prompt(
     let mut out = base;
     if !continuation {
         out.push_str("\n\n");
-        out.push_str(&crate::agent::memory::section());
-        if let Some(pm) = crate::agent::memory::project_section(cwd) {
-            out.push_str("\n\n");
-            out.push_str(&pm);
-        }
         if let Some(ctx) = project_context(cwd) {
             out.push_str("\n\n");
             out.push_str(&ctx);
@@ -166,22 +161,9 @@ mod tests {
         ] {
             assert!(!out.contains(gone), "unexpected {gone}");
         }
-        // the memory block still rides under the slimmed base
-        assert!(out.contains("<user_memory"), "{out}");
-        assert!(!out.contains("Today's date"), "{out}");
-        assert!(!out.contains("Environment: "), "{out}");
         // stable across builds in the same directory (the prefix cache)
         let again = build_system_prompt(&dir, None, None, None, &[]).unwrap();
         assert_eq!(out, again);
-        // a scratch dir without .yak/YAK.md injects no project memory; one
-        // with the file does, wrapped in its own tag (the guideline text
-        // mentions the tag name, so assert on the block opening itself)
-        assert!(!out.contains("<project_memory path="), "{out}");
-        std::fs::create_dir_all(dir.join(".yak")).unwrap();
-        std::fs::write(dir.join(".yak/YAK.md"), "- never commit target/\n").unwrap();
-        let with = build_system_prompt(&dir, None, None, None, &[]).unwrap();
-        assert!(with.contains("<project_memory path="), "{with}");
-        assert!(with.contains("never commit target/"), "{with}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

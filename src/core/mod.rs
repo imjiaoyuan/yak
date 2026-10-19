@@ -9,7 +9,6 @@
 pub mod args;
 pub mod attachments;
 pub mod bmp;
-pub mod commands_md;
 pub mod config;
 pub mod db;
 pub mod export;
@@ -20,7 +19,6 @@ pub mod pngenc;
 pub mod render_md;
 pub mod sha256;
 pub mod sync;
-pub mod templates;
 #[cfg(test)]
 pub mod testutil;
 pub mod text;

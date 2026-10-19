@@ -301,23 +301,17 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
     out
 }
 
-/// The last plan-tool checklist in the dropped prefix, verbatim. The plan
-/// tool is an extension, but its result rides the history this module already
-/// owns, and compaction is the one moment the plan's authoritative copy is
-/// about to be replaced by a summary that may compress it into prose. The
-/// model re-reads the checklist from the summary afterwards; keeping the exact
-/// list (not a paraphrase) is what lets it keep stepping through it.
-/// Deliberate coupling to the tool's name, same as the loop knows its other
-/// tools' names. Both spellings match: the extension was `update_plan`
-/// before it was renamed to `plan`, and an old transcript still carries the
-/// old name in its stored results.
-pub(crate) fn preserved_plan(prefix: &[Msg]) -> Option<String> {
-    prefix.iter().rev().find_map(|msg| match msg {
-        Msg::ToolResult { name, content, .. } if name == "plan" || name == "update_plan" => {
-            Some(content.clone())
+/// Append extension-owned context that must survive the summary. The core
+/// deliberately treats each item as opaque text and does not know which tool
+/// or extension produced it.
+pub(crate) fn append_preserved(mut summary: String, items: &[String]) -> String {
+    for item in items {
+        if !item.trim().is_empty() {
+            summary.push_str("\n\n");
+            summary.push_str(item);
         }
-        _ => None,
-    })
+    }
+    summary
 }
 
 /// Run the summarization call: streaming, no tools. A prefix that already
@@ -937,22 +931,12 @@ mod tests {
     }
 
     #[test]
-    fn preserved_plan_takes_the_last_checklist_verbatim() {
-        let plan = "[x] read the file\n[>] edit the file\n[ ] test";
-        // the prefix being dropped: two plan updates, the older one stale
-        let prefix = vec![
-            user("task"),
-            Msg::tool_result("1", "update_plan", "[ ] read the file"),
-            Msg::tool_result("2", "update_plan", plan),
-            // other tools' results never answer the question
-            Msg::tool_result("3", "read", "file contents"),
-        ];
-        assert_eq!(preserved_plan(&prefix).as_deref(), Some(plan));
-        // no plan anywhere: nothing to preserve, nothing to append
-        assert_eq!(
-            preserved_plan(&[user("task"), Msg::tool_result("4", "bash", "ok")]),
-            None
+    fn preserved_context_is_appended_without_tool_knowledge() {
+        let summary = append_preserved(
+            "summary".to_string(),
+            &["[active task list]\n[>] edit the file".to_string()],
         );
-        assert_eq!(preserved_plan(&[]), None);
+        assert_eq!(summary, "summary\n\n[active task list]\n[>] edit the file");
+        assert_eq!(append_preserved("summary".to_string(), &[]), "summary");
     }
 }

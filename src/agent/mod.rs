@@ -6,7 +6,6 @@ pub mod approval;
 pub mod blacklist;
 pub mod compact;
 pub mod ext;
-pub mod memory;
 pub mod repl;
 pub mod session;
 pub mod settings;
@@ -911,21 +910,42 @@ fn compact_now(
     // configured keep-recent as-is: `effective_keep_recent`'s cap only
     // protects the built-in budget math, not a policy an extension chose.
     let hooks = ch.hooks;
+    let mut preserved = Vec::new();
     if hooks.subscribes("compact") {
         let keep = cfg.keep_recent_tokens;
         if let Some(cut) = compact::find_cut(history, keep) {
+            let dropped_tool_results: Vec<_> = history[..cut]
+                .iter()
+                .filter_map(|message| match message {
+                    Msg::ToolResult {
+                        call_id,
+                        name,
+                        content,
+                        ..
+                    } => Some(json!({
+                        "call_id": call_id,
+                        "tool": name,
+                        "content": content,
+                    })),
+                    _ => None,
+                })
+                .collect();
             let mut params = json!({
                 "reason": ch.reason,
                 "trigger_tokens": trigger,
                 "keep_recent_tokens": keep,
+                "dropped_tool_results": dropped_tool_results,
             });
             if let Some(instructions) = ch.focus {
                 params["instructions"] = json!(instructions);
             }
-            if let Some((summary, ext_keep)) = hooks.replace_compaction(&params) {
+            let (replacement, additions) = hooks.compact_reply(&params);
+            preserved = additions;
+            if let Some((summary, ext_keep)) = replacement {
                 let cut = ext_keep
                     .and_then(|k| compact::find_cut(history, u64::from(k)))
                     .unwrap_or(cut);
+                let summary = compact::append_preserved(summary, &preserved);
                 apply_replacement(history, cut, summary, after, on_update, ch.skip_round);
                 return Ok(());
             }
@@ -940,16 +960,7 @@ fn compact_now(
     if summary.trim().is_empty() {
         return Err("the summarizer returned nothing".to_string());
     }
-    // the model's active plan lives in the prefix being dropped; re-attach it
-    // to the summary that replaces it, so the checklist survives compaction
-    // as the exact list the model last wrote (not a paraphrase the
-    // summarizer may compress or drop)
-    let summary = match compact::preserved_plan(&history[..cut]) {
-        Some(plan) => format!(
-            "{summary}\n\n[Your active task list was preserved across context compression]\n{plan}"
-        ),
-        None => summary,
-    };
+    let summary = compact::append_preserved(summary, &preserved);
     let tail = history.split_off(cut);
     history.clear();
     history.push(Msg::Summary { text: summary });

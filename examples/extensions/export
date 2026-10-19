@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""REPL /export command backed by yak's stable core export implementation.
+
+The CLI ``yak export`` remains a core command; this extension supplies the
+interactive slash surface and passes the exact current thread id.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        kind = message.get("type")
+        if kind == "initialize":
+            reply({"id": message.get("id"), "result": {"commands": ["export"]}})
+        elif kind == "run_command":
+            context = message.get("context") or {}
+            thread = context.get("thread")
+            if not thread:
+                reply({"id": message.get("id"), "result": "no session yet — nothing to export"})
+                continue
+            command = [
+                os.environ.get("YAK_BIN", "yak"),
+                "export",
+                "--thread",
+                thread,
+            ]
+            args = (message.get("args") or "").strip()
+            if args:
+                command.append(args)
+            try:
+                process = subprocess.run(
+                    command,
+                    cwd=context.get("cwd") or None,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError as error:
+                reply({"id": message.get("id"), "error": f"cannot run yak export: {error}"})
+                continue
+            output = (process.stdout if process.returncode == 0 else process.stderr).strip()
+            if process.returncode:
+                reply({"id": message.get("id"), "error": output or f"yak export exited {process.returncode}"})
+            else:
+                reply({"id": message.get("id"), "result": output})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

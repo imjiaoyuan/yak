@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Resident /status command using the session context supplied by yak."""
+
+import json
+import sys
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def usage_line(name, usage):
+    return f"{name} input {usage.get('input', 0)} · output {usage.get('output', 0)} · cached {usage.get('cached', 0)}"
+
+
+def render(context):
+    lines = [
+        f"model   {context.get('model') or '(no model)'}",
+        f"session {context.get('thread') or 'new (not logged yet)'}",
+        f"context {context.get('context_tokens', 0)} tokens · {context.get('messages', 0)} messages",
+        f"tokens  {usage_line('cumulative', context.get('usage') or {})}",
+    ]
+    if context.get("last_usage"):
+        lines.append(f"last    {usage_line('round', context['last_usage'])}")
+    lines.append(f"tools   {context.get('tools', 0)} · thinking {context.get('thinking') or '(model default)'}")
+    plugins = context.get("plugins") or []
+    if plugins:
+        lines.append(f"plugins {len(plugins)} extension(s)")
+        for plugin in plugins:
+            error = plugin.get("error")
+            if error:
+                lines.append(f"  {plugin.get('name')}: {error}")
+            else:
+                lines.append(
+                    f"  {plugin.get('name')}: {plugin.get('tools', 0)} tool(s), "
+                    f"{plugin.get('commands', 0)} command(s)"
+                )
+    return "\n".join(lines)
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("type") == "initialize":
+            reply({"id": message.get("id"), "result": {"commands": ["status"]}})
+        elif message.get("type") == "run_command":
+            reply({"id": message.get("id"), "result": render(message.get("context") or {})})
+        elif message.get("type") == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

@@ -506,25 +506,6 @@ pub fn extension_dirs(local: bool) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-pub fn command_dirs(local: bool) -> Vec<PathBuf> {
-    pkg_dirs(local, "commands")
-}
-
-fn pkg_dirs(local: bool, sub: &str) -> Vec<PathBuf> {
-    let root = pkg_root(local);
-    let Ok(rd) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in rd.flatten() {
-        let dir = entry.path().join(sub);
-        if dir.is_dir() {
-            out.push(dir);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Carried, carried, install, list, notes, parse_source, remove};

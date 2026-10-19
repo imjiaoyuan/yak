@@ -1,8 +1,8 @@
 //! Minimal flat frontmatter parser — zero deps, no emitter (nothing writes
 //! YAML).
 //!
-//! One consumer shape: the frontmatter of a `SKILL.md` or a commands-dir
-//! prompt, reduced to flat `key: value` string pairs. `description`/`system`
+//! One consumer shape: the frontmatter of a `SKILL.md`, reduced to flat
+//! `key: value` string pairs. `description`/`system`
 //! may be multi-line (a `|`/`>` block scalar, or indented continuation
 //! lines). Nested maps and lists are skipped, not modelled: nothing in-tree
 //! reads them.

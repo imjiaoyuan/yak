@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Markdown prompt-template commands.
+
+Mounts *.md files from the same command directories as the core command
+loader. A command body becomes an agent task; frontmatter's ``system`` is
+returned as the task-local system prompt.
+"""
+
+import json
+import os
+import re
+import sys
+
+NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def ancestors(path):
+    path = os.path.abspath(path)
+    while True:
+        yield path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return
+        path = parent
+
+
+def search_dirs(cwd, user_dir):
+    dirs = []
+    for root in (os.path.join(cwd, ".yak", "pkg"), os.path.join(user_dir, "pkg")):
+        try:
+            for name in os.listdir(root):
+                path = os.path.join(root, name, "commands")
+                if os.path.isdir(path):
+                    dirs.append(path)
+        except OSError:
+            pass
+    for directory in ancestors(cwd):
+        dirs.extend(
+            os.path.join(directory, name)
+            for name in (".yak/commands", ".llm/commands")
+        )
+        if os.path.exists(os.path.join(directory, ".git")):
+            break
+    dirs.append(os.path.join(user_dir, "commands"))
+    return dirs
+
+
+def scalar(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    if " #" in value:
+        value = value.split(" #", 1)[0].rstrip()
+    return value
+
+
+def parse(text):
+    system = None
+    body = text.strip()
+    if not text.startswith("---\n") and not text.startswith("---\r\n"):
+        return body, system
+    lines = text.splitlines()
+    try:
+        end = lines[1:].index("---") + 1
+    except ValueError:
+        return body, system
+    index = 1
+    while index < end:
+        line = lines[index]
+        if not line.startswith("system:"):
+            index += 1
+            continue
+        raw = line[7:].strip()
+        index += 1
+        if raw in ("|", "|-", ">", ">-"):
+            block = []
+            while index < end and (not lines[index].strip() or lines[index].startswith(" ")):
+                block.append(lines[index].lstrip())
+                index += 1
+            system = (" " if raw.startswith(">") else "\n").join(block)
+            if raw.endswith("-"):
+                system = system.rstrip("\n")
+        else:
+            values = [scalar(raw)]
+            while index < end and lines[index].startswith(" "):
+                values.append(lines[index].strip())
+                index += 1
+            system = " ".join(value for value in values if value)
+    body = "\n".join(lines[end + 1:]).lstrip("\n").strip()
+    return body, system
+
+
+def find(name, cwd, user_dir):
+    if not NAME.fullmatch(name) or name.startswith("-"):
+        return None
+    filename = name + ".md"
+    for directory in search_dirs(cwd, user_dir):
+        path = os.path.join(directory, filename)
+        try:
+            with open(path, encoding="utf-8") as f:
+                return parse(f.read())
+        except OSError:
+            pass
+    return None
+
+
+def expand(text, system, args):
+    if not args.strip():
+        return text, system
+
+    def replace(match):
+        return args if (match.group(1) or match.group(2)) == "input" else match.group(0)
+
+    prompt = VARIABLE.sub(replace, text)
+    if "$input" not in text and "${input}" not in text:
+        prompt += "\n" + args
+    if system is not None:
+        system = VARIABLE.sub(replace, system)
+    return prompt, system
+
+
+def names(cwd, user_dir):
+    result = set()
+    for directory in search_dirs(cwd, user_dir):
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.endswith(".md") and NAME.fullmatch(entry[:-3]) and not entry.startswith("-"):
+                result.add(entry[:-3])
+    return sorted(result)
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    cwd = os.getcwd()
+    user_dir = os.environ.get("YAK_USER_PATH")
+    if not user_dir:
+        user_dir = os.path.join(os.environ.get("HOME") or os.environ.get("USERPROFILE") or ".", ".yak")
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        kind = message.get("type")
+        if kind == "initialize":
+            params = message.get("params") or {}
+            cwd = params.get("cwd", cwd)
+            user_dir = params.get("user_dir", user_dir)
+            reply({"id": message.get("id"), "result": {"commands": names(cwd, user_dir)}})
+        elif kind == "run_command":
+            command = find(message.get("name", ""), cwd, user_dir)
+            if command is None:
+                reply({"id": message.get("id"), "error": "command not found"})
+                continue
+            prompt, system = expand(command[0], command[1], message.get("args", ""))
+            result = {"task": prompt}
+            if system is not None:
+                result["system"] = system
+            reply({"id": message.get("id"), "result": result})
+        elif kind == "shutdown":
+            return
+
+
+if __name__ == "__main__":
+    main()

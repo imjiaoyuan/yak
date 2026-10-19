@@ -20,7 +20,7 @@ Everything beyond the quick start: tools, approvals, the session store, models a
 
 ## The interactive session
 
-Bare `yak` opens the interactive session. Slash commands cover the model and the session: `/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/compact`, `/resume`, `/tree`, `/status`, `/reload`, … `/help` lists every one, including your skills as `/skill:<name>`. `!cmd` runs a shell command directly. Tab completes command names and paths — the built-ins, your skills, extension commands and your [prompt templates](#prompt-templates) alike — and a recognized command line is echoed bold as you type it.
+Bare `yak` opens the interactive session. Slash commands cover the model and the session: `/model`, `/thinking`, `/login`, `/logout`, `/clear`, `/compact`, `/resume`, `/tree`, `/reload`, … `/help` lists every one, including your skills as `/skill:<name>`. Install the `export` and `status` examples for the `/export` and `/status` surfaces. `!cmd` runs a shell command directly. Tab completes command names and paths — the built-ins, your skills, extension commands and your [prompt templates](#prompt-templates) alike — and a recognized command line is echoed bold as you type it.
 
 Ctrl-c or esc interrupts a running task. There is no input surface while it works: keystrokes other than the interrupt are swallowed, and the next message is composed in the editor once the task ends.
 
@@ -118,7 +118,7 @@ cp -r examples/skills/commit-hygiene ~/.yak/skills/
 
 ## Prompt templates
 
-Prompt templates turn a prompt you keep retyping into a slash command. Drop a `.md` file in `~/.yak/commands/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a `system` prompt on top of the agent's own, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task. Template names light up and tab-complete in the session like built-ins; the file itself is read only when you submit the command, so dropping one in mid-session is enough (no `/reload`).
+Prompt templates turn a prompt you keep retyping into a slash command. Install the [`commands`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/commands) extension once into `~/.yak/extensions/` or `.yak/extensions/`. Then drop a `.md` file in `~/.yak/commands/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a task-local `system` prompt, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task. Template names light up and tab-complete in the session like built-ins; restart or `/reload` after adding a new command name.
 
 ## Providers and models
 

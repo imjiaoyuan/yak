@@ -5,8 +5,6 @@ use crate::agent::session::Session;
 use crate::core::threads::StoredTurn;
 use std::io::{IsTerminal, Write};
 
-use crate::term::render::{cache_note, humanize_tokens};
-
 pub fn repl(
     mut session: crate::agent::session::Session,
     mut attachments: Vec<crate::providers::Attachment>,
@@ -19,8 +17,7 @@ pub fn repl(
 
     print_banner(&session);
     render_history(&session.seed);
-    let (mut skill_names, mut command_names, mut prompt_names, mut command_set) =
-        completion_data(&session);
+    let (mut skill_names, mut command_names, mut command_set) = completion_data(&session);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
     loop {
@@ -45,7 +42,7 @@ pub fn repl(
             if let Some(arg) = buf.strip_prefix('/')
                 && !arg.contains(' ')
             {
-                for name in command_names.iter().chain(prompt_names.iter()) {
+                for name in &command_names {
                     if name.starts_with(arg) {
                         out.push(format!("/{name}"));
                     }
@@ -98,7 +95,7 @@ pub fn repl(
             if repl_command(&mut session, &mut settings, text) {
                 break;
             }
-            (skill_names, command_names, prompt_names, command_set) = completion_data(&session);
+            (skill_names, command_names, command_set) = completion_data(&session);
             continue;
         }
 
@@ -116,7 +113,7 @@ pub fn repl(
     Ok(0)
 }
 
-fn completion_data(session: &Session) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+fn completion_data(session: &Session) -> (Vec<String>, Vec<String>, Vec<String>) {
     let skills = session
         .extensions
         .skills()
@@ -124,15 +121,13 @@ fn completion_data(session: &Session) -> (Vec<String>, Vec<String>, Vec<String>,
         .map(|s| s.name)
         .collect();
     let commands = session.extensions.command_names();
-    let prompts = crate::core::commands_md::names();
     let mut all: Vec<String> = SLASH_COMMANDS
         .iter()
         .map(|c| c.strip_prefix('/').unwrap_or(c).to_string())
         .collect();
     all.extend(commands.iter().cloned());
-    all.extend(prompts.iter().cloned());
     all.sort();
-    (skills, commands, prompts, all)
+    (skills, commands, all)
 }
 
 /// Local file paths mentioned in a prompt ride the message automatically:
@@ -324,7 +319,7 @@ fn repl_help(session: &Session) -> String {
         p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /status /reload /exit · !cmd runs shell · /help lists all");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", model_label(session)),
@@ -358,7 +353,7 @@ fn info_rows(session: &Session, pad: &str) -> String {
     }
     // the plugin surface: what is actually mounted right now, so a
     // skill or extension that never loaded is visible here and not only in
-    // /help and /status (a label is 7 cells, matching `session`)
+    // /help (a label is 7 cells, matching `session`)
     let plugins = session.extensions.plugin_names();
     let skills: Vec<String> = session
         .extensions
@@ -376,7 +371,7 @@ fn info_rows(session: &Session, pad: &str) -> String {
     rows
 }
 
-/// The model shown in the banner and /status: its qualified id, or a
+/// The model shown in the banner: its qualified id, or a
 /// pointer to the setup commands when the session has none yet.
 fn model_label(session: &Session) -> String {
     match &session.model {
@@ -407,7 +402,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/clear",
     "/compact",
-    "/status",
     "/exit",
     "/model",
     "/thinking",
@@ -933,6 +927,43 @@ fn path_files(word: &str, cwd: &str) -> Vec<String> {
 }
 
 /// Handle a /command. Returns true when the REPL should exit.
+fn command_context(session: &Session) -> serde_json::Value {
+    let used = crate::agent::compact::estimate_tokens(
+        &session.seed,
+        session.last_usage.map(|usage| (session.seed.len(), usage)),
+    );
+    serde_json::json!({
+        "thread": session.conversation_id.as_deref(),
+        "cwd": session.cwd,
+        "model": session.model.as_ref().map(|model| model.model_id.clone()),
+        "context_tokens": used,
+        "messages": session.seed.len(),
+        "usage": {
+            "input": session.usage.input,
+            "output": session.usage.output,
+            "cached": session.usage.cached,
+            "cached_write": session.usage.cached_write,
+        },
+        "last_usage": session.last_usage.map(|usage| serde_json::json!({
+            "input": usage.input,
+            "output": usage.output,
+            "cached": usage.cached,
+            "cached_write": usage.cached_write,
+        })),
+        "tools": session.tools.len(),
+        "thinking": session.thinking.as_deref(),
+        "plugins": session.extensions.rows().into_iter().map(|(name, target, tools, commands, reason)| {
+            serde_json::json!({
+                "name": name,
+                "target": target,
+                "tools": tools,
+                "commands": commands,
+                "error": (!reason.is_empty()).then_some(reason),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 fn repl_command(
     session: &mut Session,
     settings: &mut crate::agent::settings::AgentSettings,
@@ -955,7 +986,6 @@ fn repl_command(
                 "/export [PATH] write this conversation to markdown",
                 "/compact [TEXT] fold the context now, with optional focus",
                 "/clear         fresh session",
-                "/status        usage, context and plugins",
                 "/reload        reload skills/extensions",
                 "/exit          quit",
                 "paste an image with ctrl+v, or just type its path",
@@ -1140,94 +1170,6 @@ fn repl_command(
                 eprintln!("Error: {e}");
             }
         }
-        "/status" => {
-            let p = crate::theme::err();
-            // the last round's input covers the entire conversation (each
-            // round resends it all) and its output the final answer: the
-            // real usage is exact, not a chars/4 estimate
-            let n = session.seed.len();
-            let used = crate::agent::compact::estimate_tokens(
-                &session.seed,
-                session.last_usage.map(|u| (n, u)),
-            );
-            eprintln!(
-                "  {d}model   {r}{b}{}{r}",
-                model_label(session),
-                d = p.dim,
-                r = p.reset,
-                b = p.bold
-            );
-            eprintln!(
-                "  {d}session {r}{}",
-                session
-                    .conversation_id
-                    .as_deref()
-                    .unwrap_or("new (not logged yet)"),
-                d = p.dim,
-                r = p.reset
-            );
-            if let Some(e) = &session.persist_error {
-                let red = crate::theme::err();
-                eprintln!(
-                    "  {d}persist {r}{}NOT SAVED — {e}{}",
-                    red.bold,
-                    red.reset,
-                    d = p.dim,
-                    r = p.reset
-                );
-            }
-            eprintln!(
-                "  {d}context {r}{} · {} messages",
-                humanize_tokens(used),
-                session.seed.len(),
-                d = p.dim,
-                r = p.reset
-            );
-            eprintln!(
-                "  {d}tokens  {r}cumulative input {} · output {}{} · tools {} · thinking {}",
-                humanize_tokens(session.usage.input),
-                humanize_tokens(session.usage.output),
-                cache_note(session.usage, session.last_usage),
-                session.tools.len(),
-                session.thinking.as_deref().unwrap_or("(model default)"),
-                d = p.dim,
-                r = p.reset
-            );
-            let rows = session.extensions.rows();
-            if !rows.is_empty() {
-                let total: usize = rows.iter().map(|r| r.2).sum();
-                let commands: usize = rows.iter().map(|r| r.3).sum();
-                eprintln!(
-                    "  {d}plugins {r}{} extension(s) · {} tool(s){} · /reload re-reads them",
-                    rows.len(),
-                    total,
-                    if commands > 0 {
-                        format!(" · {} command(s)", commands)
-                    } else {
-                        String::new()
-                    },
-                    d = p.dim,
-                    r = p.reset
-                );
-                for (name, _target, tools, cmds, reason) in &rows {
-                    if !reason.is_empty() {
-                        eprintln!("  {d}  {name}: {reason}{r}", d = p.dim, r = p.reset);
-                    } else {
-                        eprintln!(
-                            "  {d}  {name}: {} tool(s){}{r}",
-                            tools,
-                            if *cmds > 0 {
-                                format!(", {} command(s)", cmds)
-                            } else {
-                                String::new()
-                            },
-                            d = p.dim,
-                            r = p.reset
-                        );
-                    }
-                }
-            }
-        }
         "/resume" => {
             if let Err(e) = resume_pick(session) {
                 eprintln!("Error: {e}");
@@ -1280,12 +1222,25 @@ fn repl_command(
             if other.starts_with('/')
                 && let Some(ext) = session.extensions.command_owner(name)
             {
-                match ext.run_command(name, arg) {
+                let context = command_context(session);
+                match ext.run_command(name, arg, Some(&context)) {
                     Ok(reply) => {
                         if let Some(task) = reply.get("task").and_then(serde_json::Value::as_str)
                             && !task.trim().is_empty()
                         {
+                            let base = session.system.clone();
+                            if let Some(system) = reply
+                                .get("system")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|s| !s.trim().is_empty())
+                            {
+                                session.system = Some(match &base {
+                                    Some(b) => format!("{b}\n\n{system}"),
+                                    None => system.to_string(),
+                                });
+                            }
                             run_task_logged(session, task, &mut Vec::new(), false);
+                            session.system = base;
                         } else if let Some(text) =
                             reply.get("result").and_then(serde_json::Value::as_str)
                         {
@@ -1309,26 +1264,7 @@ fn repl_command(
                 }
                 return false;
             }
-            // otherwise a commands-dir prompt template: the file's body
-            // (plus any trailing words) becomes one agent task
-            if let Some(cmd) = crate::core::commands_md::find(name) {
-                let input = arg.trim();
-                let (prompt, system) = crate::core::commands_md::expand(&cmd, input);
-                // frontmatter `system` rides this task only, appended to the
-                // session prompt (the `--append-system-prompt` semantic) so
-                // the agent keeps its tool guidance; restored afterwards
-                let base = session.system.clone();
-                if let Some(s) = &system {
-                    session.system = Some(match &base {
-                        Some(b) => format!("{b}\n\n{s}"),
-                        None => s.clone(),
-                    });
-                }
-                run_task_logged(session, &prompt, &mut Vec::new(), false);
-                session.system = base;
-                return false;
-            }
-            // not a builtin and not a commands-dir command: plain task text
+            // not a builtin and not an extension command: plain task text
             // (covers path-looking words like "/home/me/shot.jpg see?").
             run_task_logged(session, text, &mut Vec::new(), false);
             return false;
@@ -1524,8 +1460,8 @@ mod tests {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
-            "model", "thinking", "login", "logout", "resume", "clear", "status", "reload", "tree",
-            "export", "compact", "help", "exit",
+            "model", "thinking", "login", "logout", "resume", "clear", "reload", "tree", "export",
+            "compact", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }
@@ -1535,11 +1471,7 @@ mod tests {
     fn slash_highlight_matches_registered_commands_only() {
         // the editor's echo bolds only what actually dispatches as a
         // command; a `/`-prefixed path is ordinary task text
-        let names = [
-            "clear".to_string(),
-            "status".to_string(),
-            "export".to_string(),
-        ];
+        let names = ["clear".to_string(), "export".to_string()];
         assert!(slash_command_line("/clear", &names));
         assert!(slash_command_line("/c", &names));
         assert!(slash_command_line("/export /tmp/a.md", &names));

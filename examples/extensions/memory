@@ -24,6 +24,52 @@ import os
 import sys
 import time
 
+SECTION_CAP = 16 * 1024
+
+
+def memory_section(path, tag):
+    try:
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+    except OSError:
+        body = ""
+    if not body.strip():
+        body = f"(empty — durable {tag} notes belong here, one line each)"
+    encoded = body.encode("utf-8")
+    if len(encoded) > SECTION_CAP:
+        body = encoded[:SECTION_CAP].decode("utf-8", "ignore") + "\n[truncated]"
+    return (
+        "Memory: durable, reusable facts about the user (preferences, "
+        "environment, ways of working) live in the file below. Append with "
+        "the `memory` tool only when the user asks or the fact is clearly "
+        "durable — never secrets or one-off task details.\n"
+        f'<{tag} path="{path}">\n{body}\n</{tag}>'
+    )
+
+
+def project_memory_path(cwd):
+    path = os.path.abspath(cwd)
+    while True:
+        yak = os.path.join(path, ".yak")
+        if os.path.isdir(yak):
+            return os.path.join(yak, "YAK.md")
+        if os.path.exists(os.path.join(path, ".git")):
+            return None
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def system_section(params):
+    user_path = os.path.join(params["user_dir"], "YAK.md")
+    parts = [memory_section(user_path, "user_memory")]
+    project_path = project_memory_path(params["cwd"])
+    if project_path and os.path.isfile(project_path):
+        parts.append(memory_section(project_path, "project_memory"))
+    return "\n\n".join(parts)
+
+
 DESCRIPTION = (
     "Save one durable fact to memory, injected into every future session. "
     "Global by default (the user's YAK.md, all projects); pass project=true "
@@ -156,7 +202,17 @@ def main():
             continue
         mid, kind = msg.get("id"), msg.get("type")
         if kind == "initialize":
-            reply({"id": mid, "result": {"tools": TOOLS, "commands": [], "events": []}})
+            reply(
+                {
+                    "id": mid,
+                    "result": {
+                        "tools": TOOLS,
+                        "commands": [],
+                        "events": [],
+                        "system": system_section(msg.get("params") or {}),
+                    },
+                }
+            )
         elif kind == "call_tool":
             if msg.get("name") != "memory":
                 reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
