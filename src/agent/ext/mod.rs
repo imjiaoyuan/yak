@@ -471,7 +471,7 @@ impl Ext {
 /// with no text and no console lines renders as its pretty JSON — the
 /// extension probably meant a plain value.
 fn format_segments(items: &[Value]) -> String {
-    let seg_text = |v: &Value| -> Option<String> {
+    let segment_text = |v: &Value| -> Option<String> {
         match v {
             Value::String(s) => Some(s.clone()),
             Value::Object(o) => o.get("text").map(|t| match t {
@@ -481,29 +481,31 @@ fn format_segments(items: &[Value]) -> String {
             _ => None,
         }
     };
-    let is_console =
-        |v: &Value| matches!(v, Value::Object(o) if o.get("console") == Some(&Value::Bool(true)));
-    let total = items
-        .iter()
-        .filter(|v| !is_console(v) && seg_text(v).is_some())
-        .count();
-    let mut out: Vec<String> = Vec::new();
-    let mut console: Vec<String> = Vec::new();
-    let mut index = 0usize;
-    for v in items {
-        if is_console(v) {
-            if let Some(t) = seg_text(v) {
-                console.push(t);
-            }
-        } else if let Some(t) = seg_text(v) {
-            index += 1;
-            if total > 1 {
-                out.push(format!("==> text {index}/{total} <==\n{t}"));
+    let mut text_segments = Vec::new();
+    let mut console = Vec::new();
+    for value in items {
+        let is_console =
+            matches!(value, Value::Object(o) if o.get("console") == Some(&Value::Bool(true)));
+        if let Some(text) = segment_text(value) {
+            if is_console {
+                console.push(text);
             } else {
-                out.push(t);
+                text_segments.push(text);
             }
         }
     }
+    let total = text_segments.len();
+    let mut out: Vec<String> = text_segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            if total > 1 {
+                format!("==> text {}/{total} <==\n{text}", index + 1)
+            } else {
+                text
+            }
+        })
+        .collect();
     if out.is_empty() && console.is_empty() {
         return crate::jsonfmt::dumps_indent(&Value::Array(items.to_vec()), 2);
     }

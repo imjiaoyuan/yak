@@ -5,6 +5,7 @@
 //! `$input` receives the trailing args).
 
 use crate::core::config::user_dir;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -78,10 +79,11 @@ pub fn names() -> Vec<String> {
 }
 
 fn names_from(dirs: &[PathBuf]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for dir in dirs {
         for name in dir_names(dir) {
-            if !out.contains(&name) {
+            if seen.insert(name.clone()) {
                 out.push(name);
             }
         }
