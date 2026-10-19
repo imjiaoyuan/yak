@@ -59,13 +59,24 @@ pub fn gateway_headers(url: &str) -> Vec<(String, String)> {
     vec![("x-opencode-session".to_string(), session_id())]
 }
 
-/// The opencode.ai host, wherever it sits in the URL (zen, go, a path prefix).
-fn is_opencode(url: &str) -> bool {
+/// Bare host of a URL: scheme, userinfo, path, query and port stripped.
+fn host_of(url: &str) -> &str {
     let authority = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let host = authority.split(['/', '?', '#']).next().unwrap_or(authority);
     let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    host.eq_ignore_ascii_case("opencode.ai") || host.ends_with(".opencode.ai")
+    host.split(':').next().unwrap_or(host)
+}
+
+/// A URL on `domain` or one of its subdomains, wherever the host sits.
+fn is_host(url: &str, domain: &str) -> bool {
+    let host = host_of(url).to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+/// The opencode.ai host, wherever it sits in the URL (zen, go, a path prefix).
+fn is_opencode(url: &str) -> bool {
+    is_host(url, "opencode.ai")
 }
 
 /// One session id per process, so every turn and retry of a run shares it.
@@ -391,27 +402,38 @@ pub(crate) fn tool_result_images(
     Ok(Some(parts))
 }
 
+/// Options yak itself reads instead of forwarding: `context_window` is
+/// lifted off the list at resolution and `replay_reasoning` is consumed by the
+/// openai-compat adapter. A provider never documented either key, so neither
+/// may reach its body even when the user wrote it into the options table.
+const CLIENT_ONLY_OPTIONS: &[&str] = &["context_window", "replay_reasoning"];
+
 /// Merge `-o KEY=VALUE` options into a request body: JSON values pass
-/// through, others ride as strings.
+/// through, others ride as strings. The client-side knobs above stay home.
 pub(crate) fn apply_options(body: &mut Value, options: &[(String, String)]) {
     for (k, v) in options {
+        if CLIENT_ONLY_OPTIONS.contains(&k.as_str()) {
+            continue;
+        }
         let parsed: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone()));
         body[k] = parsed;
     }
 }
 
 /// Whether assistant `reasoning_content` must be replayed on later turns.
-/// DeepSeek's own API rejects it back ("reasoning_content ... is not
-/// expected"), but gateways fronting thinking models — opencode Console Go
-/// upstreams — 400 the other way ("The `reasoning_content` in the thinking
-/// mode must be passed back to the API"). Table: hosts that require it;
-/// everything else defaults to dropping it. `-o replay_reasoning=...`
-/// (or the per-model options table) overrides either way.
+/// Thinking-mode hosts reject a history that drops it — OpenCode's gateway and
+/// DeepSeek's V4 models (`deepseek-flash`, `deepseek-v4-pro`, ...) both 400
+/// with "The `reasoning_content` in the thinking mode must be passed back to
+/// the API". The retired `deepseek-chat`/`deepseek-reasoner` ids are the
+/// exception: they reject the field when sent back. `-o replay_reasoning=...`
+/// (or the per-model options table) overrides either default.
 pub(crate) fn replay_reasoning(m: &ResolvedModel) -> bool {
-    let default = m
-        .base_url
-        .split('/')
-        .any(|seg| seg.eq_ignore_ascii_case("opencode.ai"));
+    fn default(m: &ResolvedModel) -> bool {
+        const LEGACY_DEEPSEEK: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
+        is_opencode(&m.base_url)
+            || (is_host(&m.base_url, "api.deepseek.com")
+                && !LEGACY_DEEPSEEK.contains(&m.model_id.as_str()))
+    }
     match m
         .options
         .iter()
@@ -419,7 +441,7 @@ pub(crate) fn replay_reasoning(m: &ResolvedModel) -> bool {
         .map(|(_, v)| v.as_str())
     {
         Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
-        None => default,
+        None => default(m),
     }
 }
 

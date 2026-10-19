@@ -88,6 +88,10 @@ pub fn build_body(
     if let Some(system) = input.system {
         messages.push(json!({"role": "system", "content": system}));
     }
+    // when the host requires reasoning replay the field is always present:
+    // an empty string is the accepted stand-in for a round that streamed none
+    // (a thinking round can return an empty one and still demand it back)
+    let replay_reasoning = super::replay_reasoning(m);
     for (i, msg) in input.history.iter().enumerate() {
         match msg {
             Msg::User { text, attachments } => {
@@ -103,11 +107,8 @@ pub fn build_body(
                 flush_images(&mut messages, &mut pending_images);
                 if tool_calls.is_empty() {
                     let mut msg = json!({"role": "assistant", "content": text});
-                    if let Some(r) = reasoning
-                        && !r.is_empty()
-                        && super::replay_reasoning(m)
-                    {
-                        msg["reasoning_content"] = json!(r);
+                    if replay_reasoning {
+                        msg["reasoning_content"] = json!(reasoning.as_deref().unwrap_or(""));
                     }
                     messages.push(msg);
                 } else {
@@ -128,11 +129,8 @@ pub fn build_body(
                     };
                     let mut msg =
                         json!({"role": "assistant", "content": content, "tool_calls": calls});
-                    if let Some(r) = reasoning
-                        && !r.is_empty()
-                        && super::replay_reasoning(m)
-                    {
-                        msg["reasoning_content"] = json!(r);
+                    if replay_reasoning {
+                        msg["reasoning_content"] = json!(reasoning.as_deref().unwrap_or(""));
                     }
                     messages.push(msg);
                 }
@@ -668,7 +666,8 @@ mod tests {
             reasoning: Some("chain of thought".into()),
             reasoning_meta: None,
         }];
-        // plain host: reasoning is dropped (DeepSeek's API rejects it back)
+        // plain host: reasoning is dropped (the legacy DeepSeek ids and other
+        // non-thinking hosts reject it back)
         let body = build_body(&model("openai-compat"), &input(&history, &[]), false).unwrap();
         assert_eq!(body["messages"][0]["content"], json!("answer"));
         assert!(body["messages"][0].get("reasoning_content").is_none());
@@ -682,6 +681,60 @@ mod tests {
             json!("chain of thought")
         );
 
+        // DeepSeek V4 thinking models demand it back too
+        let mut ds = model("openai-compat");
+        ds.base_url = "https://api.deepseek.com".into();
+        ds.model_id = "deepseek-flash".into();
+        let body = build_body(&ds, &input(&history, &[]), false).unwrap();
+        assert_eq!(
+            body["messages"][0]["reasoning_content"],
+            json!("chain of thought")
+        );
+
+        // ... including an empty one, and a round that streamed none at all
+        let empty = [Msg::Assistant {
+            text: "answer".into(),
+            tool_calls: Vec::new(),
+            reasoning: Some(String::new()),
+            reasoning_meta: None,
+        }];
+        let body = build_body(&ds, &input(&empty, &[]), false).unwrap();
+        assert_eq!(body["messages"][0]["reasoning_content"], json!(""));
+        let body = build_body(
+            &ds,
+            &input(&[Msg::user("hi"), Msg::assistant("ho")], &[]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["messages"][1]["reasoning_content"], json!(""));
+
+        // the shape the API actually rejects: a tool round whose request ends
+        // with the tool results (the agent loop's next request), so the
+        // assistant message before them has to carry the field
+        let tool_tail = [
+            Msg::user("go"),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "noop".into(),
+                    arguments: json!({}),
+                }],
+                reasoning: None,
+                reasoning_meta: None,
+            },
+            Msg::tool_result("call_1", "noop", "ok"),
+        ];
+        let body = build_body(&ds, &input(&tool_tail, &[]), false).unwrap();
+        assert_eq!(body["messages"][1]["reasoning_content"], json!(""));
+        assert_eq!(body["messages"][2]["role"], json!("tool"));
+
+        // the retired ids keep the old drop
+        let mut legacy = ds;
+        legacy.model_id = "deepseek-reasoner".into();
+        let body = build_body(&legacy, &input(&history, &[]), false).unwrap();
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+
         // explicit -o override flips either default
         let mut opt = model("openai-compat");
         opt.options = vec![("replay_reasoning".into(), "true".into())];
@@ -690,6 +743,8 @@ mod tests {
             body["messages"][0]["reasoning_content"],
             json!("chain of thought")
         );
+        // the knob is ours: it is read, never forwarded to the provider
+        assert!(body.get("replay_reasoning").is_none(), "{body}");
     }
 
     #[test]
