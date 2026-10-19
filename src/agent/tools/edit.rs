@@ -7,7 +7,6 @@
 //! or overlapping edits fail with error texts a model can
 //! self-correct.
 
-use super::write::write_atomic;
 use super::*;
 
 pub(super) struct EditTool;
@@ -95,7 +94,7 @@ impl Tool for EditTool {
         // write the file back the way it reads: its own dominant line ending
         // and its BOM (both restored after working in LF space)
         let final_text = format!("{}{}", plan.bom, restore_line_endings(&merged, plan.ending));
-        match write_atomic(&path, final_text.as_bytes()) {
+        match crate::core::fsx::write_atomic(&path, final_text.as_bytes(), None) {
             Ok(()) => ToolOutput::ok(format!(
                 "Successfully replaced {} block(s) in {}.",
                 plan.spans.len(),

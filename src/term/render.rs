@@ -11,7 +11,7 @@ use crate::core::http::Usage;
 /// paths flush first (TaskView::pause), so nothing interleaves mid-line.
 /// ~250Hz keep-up: near-instant for local model streams; still amortizes the
 /// per-frame syscalls (one write+flush each frame, no per-character write).
-const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
+const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Typewriter cadence: one pacing tick every [`TICK_MILLIS`] — the pacer
 /// thread polls at 8ms but grants are time-gated to this cadence, so the

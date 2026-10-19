@@ -19,6 +19,8 @@ pub fn repl(
 
     print_banner(&session);
     render_history(&session.seed);
+    let (mut skill_names, mut command_names, mut prompt_names, mut command_set) =
+        completion_data(&session);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
     loop {
@@ -34,36 +36,20 @@ pub fn repl(
         let p = crate::theme::err();
         let prompt = format!("{}>{} ", p.bold, p.reset);
         let help = repl_help(&session);
-        let skill_names: Vec<String> = session
-            .extensions
-            .skills()
-            .into_iter()
-            .map(|s| s.name.clone())
-            .collect();
         let cwd = session.cwd.display().to_string();
-        let command_names = session.extensions.command_names();
-        // commands-dir prompts are discovered lazily at submit time, so the
-        // editor needs their names handed to it or a `/init` line never lights
-        let prompt_names = crate::core::commands_md::names();
-        // the echo highlight rides this predicate: registered names only, so
-        // a `/`-prefixed path (`/home/you/shot.png`) stays plain task text
-        let command_set = {
-            let mut names: Vec<String> = SLASH_COMMANDS
-                .iter()
-                .map(|c| c.strip_prefix('/').unwrap_or(c).to_string())
-                .collect();
-            names.extend(command_names.clone());
-            names.extend(prompt_names.clone());
-            names.sort();
-            names
-        };
-        let is_command = move |buf: &str| slash_command_line(buf, &command_set);
+        // These lists change only after an extension reload or a command
+        // directory change, not after every submitted line.
+        let echo_commands = command_set.clone();
+        let completion_skills = skill_names.clone();
+        let completion_commands = command_names.clone();
+        let completion_prompts = prompt_names.clone();
+        let is_command = move |buf: &str| slash_command_line(buf, &echo_commands);
         let completer = move |buf: &str| {
-            let mut out = completions(buf, &skill_names, &cwd);
+            let mut out = completions(buf, &completion_skills, &cwd);
             if let Some(arg) = buf.strip_prefix('/')
                 && !arg.contains(' ')
             {
-                for name in command_names.iter().chain(prompt_names.iter()) {
+                for name in completion_commands.iter().chain(completion_prompts.iter()) {
                     if name.starts_with(arg) {
                         out.push(format!("/{name}"));
                     }
@@ -112,6 +98,7 @@ pub fn repl(
             if repl_command(&mut session, &mut settings, text) {
                 break;
             }
+            (skill_names, command_names, prompt_names, command_set) = completion_data(&session);
             continue;
         }
 
@@ -127,6 +114,25 @@ pub fn repl(
     }
     restore_default_sigint();
     Ok(0)
+}
+
+fn completion_data(session: &Session) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let skills = session
+        .extensions
+        .skills()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    let commands = session.extensions.command_names();
+    let prompts = crate::core::commands_md::names();
+    let mut all: Vec<String> = SLASH_COMMANDS
+        .iter()
+        .map(|c| c.strip_prefix('/').unwrap_or(c).to_string())
+        .collect();
+    all.extend(commands.iter().cloned());
+    all.extend(prompts.iter().cloned());
+    all.sort();
+    (skills, commands, prompts, all)
 }
 
 /// Local file paths mentioned in a prompt ride the message automatically:
@@ -191,10 +197,30 @@ fn attach_local_files(
 /// file, so a path glued to trailing text still resolves. `None` when no
 /// prefix is a file (the common case: a plain word).
 fn existing_file_prefix(token: &str) -> Option<&str> {
-    (1..=token.len())
-        .rev()
-        .find(|&end| token.is_char_boundary(end) && std::path::Path::new(&token[..end]).is_file())
-        .map(|end| &token[..end])
+    if std::path::Path::new(token).is_file() {
+        return Some(token);
+    }
+    // A plain word cannot be a glued path. For path-like tokens, probe only
+    // boundaries after common attachment extensions instead of stat-ing every
+    // UTF-8 character prefix.
+    let extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf"];
+    let mut ends = Vec::new();
+    for (start, _) in token.char_indices() {
+        for ext in extensions {
+            if token[start..].starts_with(ext) {
+                ends.push(start + ext.len());
+            }
+        }
+    }
+    ends.sort_unstable();
+    ends.dedup();
+    ends.into_iter().rev().find_map(|end| {
+        if token.is_char_boundary(end) && std::path::Path::new(&token[..end]).is_file() {
+            Some(&token[..end])
+        } else {
+            None
+        }
+    })
 }
 
 /// One agent task with interrupt chrome — the shared path for typed input

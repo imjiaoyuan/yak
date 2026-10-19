@@ -1,14 +1,6 @@
 use super::edit::change_hunks;
 use super::*;
 
-/// Write through the shared atomic helper: a crash or power loss mid-write
-/// used to leave the target truncated — a real risk when the model writes a
-/// long document in one call. An existing file's permissions are carried
-/// over (the executable bit on edited scripts must survive).
-pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    crate::core::fsx::write_atomic(path, bytes, None)
-}
-
 pub(super) struct WriteTool;
 
 impl Tool for WriteTool {
@@ -68,7 +60,7 @@ impl Tool for WriteTool {
         {
             return ToolOutput::err(format!("cannot create {}: {e}", parent.display()));
         }
-        match write_atomic(&path, content.as_bytes()) {
+        match crate::core::fsx::write_atomic(&path, content.as_bytes(), None) {
             Ok(()) => ToolOutput::ok(format!(
                 "wrote {} bytes to {}",
                 content.len(),

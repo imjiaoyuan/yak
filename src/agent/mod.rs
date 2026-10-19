@@ -473,7 +473,15 @@ pub fn run_agent(
                     reasoning_meta: None,
                 });
                 recoveries += 1;
-                if recoveries <= MAX_STREAM_RECOVERIES && recoverable_stream {
+                // Replaying a long partial answer is expensive and visibly
+                // risks duplication; short pre-first-token drops retain the
+                // wider retry budget.
+                let recovery_limit = if round.text.chars().count() > 2_000 {
+                    2
+                } else {
+                    MAX_STREAM_RECOVERIES
+                };
+                if recoveries <= recovery_limit && recoverable_stream {
                     on_update(AgentUpdate::StreamRecovered {
                         chars: round.text.chars().count(),
                         error: e,

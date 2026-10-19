@@ -193,6 +193,9 @@ pub fn build_body(
         "model": m.model_id,
         "messages": messages,
         "stream": stream,
+        // Keep tool rounds and ordinary answers bounded; explicit -o values
+        // are applied below and retain full control.
+        "max_tokens": 4096,
     });
     if stream {
         body["stream_options"] = json!({"include_usage": true});

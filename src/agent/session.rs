@@ -1176,16 +1176,33 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
 /// per user turn) — the two are separate budgets and stay in step only
 /// by deliberate change, not by accident.
 const IMAGE_TURNS_KEPT: usize = 2;
+/// A recent turn can still contain a single huge screenshot. Keep a byte
+/// ceiling as well as the turn window so one attachment cannot consume the
+/// whole request budget.
+const IMAGE_BYTES_KEPT: usize = 8 * 1024 * 1024;
 
 /// Drop the pixels from images older than the newest `IMAGE_TURNS_KEPT` user
 /// turns — from tool results too, since a screenshot can enter as a `read`
 /// result and belongs to the turn it ran in.
 pub(crate) fn budget_images(msgs: &mut [Msg]) {
-    let Some(start) = image_window_start(msgs) else {
-        return;
-    };
+    let start = image_window_start(msgs).unwrap_or(0);
     for m in &mut msgs[..start] {
         drop_images(m);
+    }
+    let mut remaining = IMAGE_BYTES_KEPT;
+    for m in msgs[start..].iter_mut().rev() {
+        let attachments = match m {
+            Msg::User { attachments, .. } | Msg::ToolResult { attachments, .. } => attachments,
+            _ => continue,
+        };
+        for attachment in attachments.iter_mut().rev().filter(|a| a.is_image()) {
+            let bytes = attachment.base64_data.len().saturating_mul(3) / 4;
+            if bytes > remaining {
+                attachment.base64_data.clear();
+            } else {
+                remaining -= bytes;
+            }
+        }
     }
 }
 

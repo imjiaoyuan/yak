@@ -1,6 +1,9 @@
 use super::edit::change_hunks;
-use super::write::write_atomic;
 use super::*;
+
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    crate::core::fsx::write_atomic(path, bytes, None)
+}
 
 #[test]
 fn atomic_write_replaces_content_and_leaves_no_temp_behind() {

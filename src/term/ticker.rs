@@ -85,7 +85,7 @@ impl Ticker {
                     p2.store(true, std::sync::atomic::Ordering::Relaxed);
                     last_draw = std::time::Instant::now();
                 }
-                std::thread::sleep(std::time::Duration::from_millis(15));
+                std::thread::sleep(std::time::Duration::from_millis(30));
             }
         });
         Ticker {
@@ -153,7 +153,7 @@ impl DrainTicker {
         let f2 = flag.clone();
         let handle = std::thread::spawn(move || {
             while !f2.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(std::time::Duration::from_millis(12));
                 let more = renderer.lock().map(|mut r| r.pump_due()).unwrap_or(false);
                 if !more {
                     break;

@@ -235,7 +235,7 @@ pub fn build_body(
 
     let mut body = json!({
         "model": m.model_id,
-        "max_tokens": 8192,
+        "max_tokens": 4096,
         "messages": messages,
         "stream": stream,
     });
@@ -274,7 +274,7 @@ pub fn build_body(
         && let Some(budget) = super::thinking_budget(level)
     {
         body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
-        let max = body["max_tokens"].as_u64().unwrap_or(8192);
+        let max = body["max_tokens"].as_u64().unwrap_or(4096);
         if max <= budget {
             body["max_tokens"] = json!(budget + 4096);
         }
@@ -833,7 +833,7 @@ mod tests {
             body["thinking"],
             json!({"type": "enabled", "budget_tokens": 16384})
         );
-        // default max_tokens (8192) must exceed the budget
+        // the default must still exceed the thinking budget
         assert_eq!(body["max_tokens"], json!(16384 + 4096));
 
         // a user-set max_tokens above the budget is left alone

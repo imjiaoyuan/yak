@@ -234,9 +234,14 @@ const UPDATE_TEMPLATE: &str = "The messages above are NEW conversation messages 
                               Use this EXACT format:\n\
                               \n";
 
-/// Serialize a message prefix for the summarizer, truncating each entry.
+/// Keep the summarizer's own request bounded: per-message truncation alone
+/// still lets a long prefix overflow the context window.
+const MAX_SUMMARY_INPUT_CHARS: usize = 48 * 1024;
+
+/// Serialize a message prefix for the summarizer, truncating each entry and
+/// then applying a total budget while preserving the first and newest entries.
 fn serialize_prefix(prefix: &[Msg]) -> String {
-    let mut out = String::new();
+    let mut entries = Vec::with_capacity(prefix.len());
     for msg in prefix {
         let mut entry = match msg {
             Msg::User { text, .. } => format!("user: {text}"),
@@ -265,9 +270,34 @@ fn serialize_prefix(prefix: &[Msg]) -> String {
             }
         };
         crate::core::text::truncate_ellipsis(&mut entry, 2000);
-        out.push_str(&entry);
-        out.push_str("\n\n");
+        entries.push(entry);
     }
+    let total: usize = entries.iter().map(|entry| entry.len() + 2).sum();
+    if total <= MAX_SUMMARY_INPUT_CHARS {
+        return entries.join("\n\n") + if entries.is_empty() { "" } else { "\n\n" };
+    }
+    let mut out = String::new();
+    if let Some(first) = entries.first() {
+        out.push_str(first);
+        out.push_str("\n\n[older messages omitted from summarizer input]\n\n");
+    }
+    let mut tail = String::new();
+    for entry in entries.iter().skip(1).rev() {
+        let addition = if tail.is_empty() {
+            entry.len()
+        } else {
+            entry.len() + 2
+        };
+        if out.len() + tail.len() + addition > MAX_SUMMARY_INPUT_CHARS {
+            break;
+        }
+        if !tail.is_empty() {
+            tail.insert_str(0, "\n\n");
+        }
+        tail.insert_str(0, entry);
+    }
+    out.push_str(&tail);
+    out.push_str("\n\n");
     out
 }
 
@@ -796,6 +826,14 @@ mod tests {
         assert!(s.contains("tool result bash (error):"));
         assert!(s.contains('…'));
         assert!(s.len() < 6000);
+    }
+
+    #[test]
+    fn serialization_has_a_total_budget_for_long_prefixes() {
+        let prefix: Vec<_> = (0..40).map(|_| user(&"x".repeat(2000))).collect();
+        let s = serialize_prefix(&prefix);
+        assert!(s.len() <= MAX_SUMMARY_INPUT_CHARS + 2000);
+        assert!(s.contains("older messages omitted"));
     }
 
     #[test]

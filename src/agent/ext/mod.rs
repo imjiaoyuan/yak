@@ -52,7 +52,7 @@ const TAIL_LINES: usize = 20;
 /// chatty extension cannot grow the buffer without bound.
 const PROGRESS_LINES: usize = 64;
 /// `recv_timeout` slice; keeps ctrl+c responsive while waiting.
-const POLL_SLICE: Duration = Duration::from_millis(20);
+const POLL_SLICE: Duration = Duration::from_millis(40);
 
 /// One tool advertised by the initialize handshake.
 #[derive(Clone)]
@@ -124,7 +124,7 @@ impl Drop for Conn {
             .send("{\"type\":\"shutdown\"}\n".to_string())
             .is_ok()
         {
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let deadline = Instant::now() + Duration::from_millis(250);
             while Instant::now() < deadline {
                 match self.child.try_wait() {
                     Ok(Some(_)) => return, // exited cleanly, nothing to kill
@@ -150,13 +150,13 @@ impl Conn {
 
     /// Take the progress lines written since the last call, draining the
     /// buffer (the caller discards them to start a call on a clean slate).
-    fn take_progress(&self) -> Vec<String> {
-        crate::core::sync::lock(&self.progress).drain(..).collect()
+    fn take_progress(&self) -> std::collections::VecDeque<String> {
+        std::mem::take(&mut *crate::core::sync::lock(&self.progress))
     }
 
     /// Take the lane frames written since the last drain, same discipline.
-    fn take_lanes(&self) -> Vec<(String, String)> {
-        crate::core::sync::lock(&self.lanes).drain(..).collect()
+    fn take_lanes(&self) -> std::collections::VecDeque<(String, String)> {
+        std::mem::take(&mut *crate::core::sync::lock(&self.lanes))
     }
 }
 

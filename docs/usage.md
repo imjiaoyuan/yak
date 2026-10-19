@@ -78,7 +78,7 @@ yak -a - "what is this?" < shot.png        # stdin as the attachment
 
 Images, PDFs, wav/mp3 clips and plain text (.txt, .md, .csv, source files) are sent as native content blocks. Text becomes a document block on Anthropic models and an extra text part elsewhere. Anything the chosen model cannot accept is refused before the request leaves your machine.
 
-In a session, ctrl+v pastes the clipboard image as a short `[paste #N image]` token (the temp-file path rides underneath and attaches on submit) (whatever image type the clipboard offers) a copied image *file* as its own path, and any local image path you type attaches itself. A clipboard that carries no image says what it does hold instead. Long conversations keep only the newest image attachments; older ones collapse into short text notes.
+In a session, ctrl+v pastes the clipboard image as a short `[paste #N image]` token (the temp-file path rides underneath and attaches on submit) (whatever image type the clipboard offers) a copied image *file* as its own path, and any local image path you type attaches itself. A clipboard that carries no image says what it does hold instead. Long conversations keep only the newest image attachments; older ones collapse into short text notes, and recent images share an 8 MiB decoded-pixel budget so one oversized screenshot cannot consume the whole request.
 
 ## Sessions
 
@@ -103,7 +103,7 @@ The rewind is transcript-only: files the agent wrote stay written. To take the w
 
 ## Skills
 
-Skills are `SKILL.md` folders. They are mounted by the skills extension ([`examples/extensions/skills`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/skills), the sixth core surface moved onto the plugin system): install it once — globally into `~/.yak/extensions/` or project-local into `.yak/extensions/` — and it discovers skills from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name, so a project copy shadows a global one). Installed packages carrying `skills/` or a root `SKILL.md` mount through it too.
+Skills are `SKILL.md` folders. They are mounted by the skills extension ([`examples/extensions/skills`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/skills), the sixth migrated agent surface moved onto the plugin system): install it once — globally into `~/.yak/extensions/` or project-local into `.yak/extensions/` — and it discovers skills from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name, so a project copy shadows a global one). Installed packages carrying `skills/` or a root `SKILL.md` mount through it too.
 
 A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
 
@@ -164,7 +164,7 @@ Under the `"agent"` key of `config.json`:
 }
 ```
 
-`tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes` caps one request body in bytes (32MB by default): lower it when a gateway in front of the model refuses less than the provider documents, and the run refuses the oversized body locally, naming the attachments that filled it, instead of coming back as an opaque 413.
+`tools` maps a tool to `allow`, `deny` or `prompt`. `max_request_bytes` caps one request body in bytes (32MB by default): lower it when a gateway in front of the model refuses less than the provider documents, and the run refuses the oversized body locally, naming the attachments that filled it, instead of coming back as an opaque 413. Provider requests default to at most 4096 output tokens unless a model option or `-o max_tokens=...` overrides it; thinking budgets raise that ceiling when necessary.
 
 `cache_ttl` picks how long the provider should hold this conversation's prompt-cache entry: `5m` (the default, what every provider gives) or `1h`. Only the Anthropic Messages API takes a lifetime: the OpenAI-compatible wire caches automatically. The long entry is billed at a higher write rate, and it pays for itself as soon as one gap lapses a five-minute one: an approval prompt, a long test run or a coffee break otherwise leaves the next round re-writing the whole conversation instead of reading it back.
 
