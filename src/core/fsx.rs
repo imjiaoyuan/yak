@@ -54,7 +54,10 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        // best-effort: a filesystem that does not carry Unix modes (a CIFS
+        // mount, some FUSE setups) must not make the user dir unusable, and
+        // the directory itself was still created
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
     }
     Ok(())
 }
