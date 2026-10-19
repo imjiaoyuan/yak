@@ -36,13 +36,13 @@ pub fn prune_before(dir: &Path, now: SystemTime, retention: Duration) -> usize {
     removed
 }
 
-/// Prune the user's tmp dir against the wall clock.
+/// Prune the user's tmp dir against the wall clock, and make what survives
+/// owner-only (older builds left spilled command output world-readable).
 pub fn prune_user_tmp() -> usize {
-    prune_before(
-        &crate::core::config::user_dir().join("tmp"),
-        SystemTime::now(),
-        RETENTION,
-    )
+    let dir = crate::core::config::user_dir().join("tmp");
+    let _ = crate::core::fsx::create_private_dir_all(&dir);
+    crate::core::fsx::tighten_files(&dir);
+    prune_before(&dir, SystemTime::now(), RETENTION)
 }
 
 #[cfg(test)]

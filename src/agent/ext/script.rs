@@ -162,7 +162,7 @@ impl ScriptTool {
         if binary.is_file() {
             return Ok(binary);
         }
-        let _ = std::fs::create_dir_all(&cache_dir);
+        let _ = crate::core::fsx::create_private_dir_all(&cache_dir);
         // compile to a per-attempt staging name then rename, so a cache hit
         // can never be a half-written binary from an interrupted compile —
         // and two processes compiling the same source concurrently (the

@@ -459,9 +459,11 @@ pub(crate) fn truncate_with_spill_in(dir: &Path, text: &str) -> String {
 /// the caller falls back to the plain truncation mark rather than losing the
 /// output twice.
 fn spill_full_output(dir: &Path, text: &str) -> Option<String> {
-    std::fs::create_dir_all(dir).ok()?;
+    // a command's full output is the most sensitive thing yak writes down:
+    // private dir, private file
+    crate::core::fsx::create_private_dir_all(dir).ok()?;
     let path = dir.join(format!("bash-{}.log", crate::core::db::ulid()));
-    std::fs::write(&path, text).ok()?;
+    crate::core::fsx::write_private(&path, text.as_bytes()).ok()?;
     Some(path.display().to_string())
 }
 

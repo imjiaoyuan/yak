@@ -210,7 +210,8 @@ impl Store {
     }
 
     pub fn open_path(path: &Path) -> Result<Store, String> {
-        fs::create_dir_all(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+        crate::core::fsx::create_private_dir_all(path)
+            .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
         Ok(Store {
             dir: path.to_path_buf(),
         })

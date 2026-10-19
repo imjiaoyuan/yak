@@ -207,9 +207,9 @@ impl LineEditor {
                     drop(focus_mode.take());
                     drop(term);
                     let dir = crate::core::config::user_dir().join("tmp");
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = crate::core::fsx::create_private_dir_all(&dir);
                     let path = dir.join(format!("edit-{}.md", crate::core::db::ulid()));
-                    if std::fs::write(&path, &buf).is_ok() {
+                    if crate::core::fsx::write_private(&path, buf.as_bytes()).is_ok() {
                         let editor = std::env::var("VISUAL")
                             .or_else(|_| std::env::var("EDITOR"))
                             .unwrap_or_else(|_| crate::platform::default_editor().to_string());
@@ -277,13 +277,14 @@ impl LineEditor {
                                     };
                                     if let Some((ext, payload)) = paste {
                                         let dir = crate::core::config::user_dir().join("tmp");
-                                        let _ = std::fs::create_dir_all(&dir);
+                                        let _ = crate::core::fsx::create_private_dir_all(&dir);
                                         let path = dir.join(format!(
                                             "paste-{}.{}",
                                             crate::core::db::ulid(),
                                             ext
                                         ));
-                                        if std::fs::write(&path, &payload).is_ok() {
+                                        if crate::core::fsx::write_private(&path, &payload).is_ok()
+                                        {
                                             // the path still lands in the submitted
                                             // text (auto-attach scans for it), but the
                                             // buffer shows a short atomic token — the

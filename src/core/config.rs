@@ -82,7 +82,9 @@ pub fn user_dir() -> PathBuf {
                 }
             }
         };
-        let _ = fs::create_dir_all(&path);
+        // the user dir is private by construction: owner-only (0700), so a
+        // shared machine cannot list the transcripts or read the keys
+        let _ = crate::core::fsx::create_private_dir_all(&path);
         path
     });
     DIR.clone()
@@ -306,7 +308,7 @@ fn write_root(root: &serde_json::Value) -> std::io::Result<()> {
 // model aliases — the hand-edited "aliases" object in config.json
 
 pub fn save(config: &Config) -> std::io::Result<()> {
-    fs::create_dir_all(user_dir())?;
+    crate::core::fsx::create_private_dir_all(&user_dir())?;
     // merge into the existing file so hand-added keys ("agent" etc.) survive
     let mut root = read_root()?;
     let providers = serde_json::to_value(&config.providers).expect("providers serialize");
@@ -396,7 +398,7 @@ fn clear_default_for_in(root: &mut serde_json::Value, provider: &str) -> bool {
 
 /// Read-modify-write the models table, preserving every other config key.
 fn edit_mode_default(edit: impl FnOnce(&mut serde_json::Value)) -> std::io::Result<()> {
-    fs::create_dir_all(user_dir())?;
+    crate::core::fsx::create_private_dir_all(&user_dir())?;
     let mut root = read_root()?;
     edit(&mut root);
     write_root(&root)

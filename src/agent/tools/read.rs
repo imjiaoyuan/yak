@@ -330,9 +330,9 @@ fn reencoded_bmp(path: &std::path::Path, bytes: &[u8]) -> ToolOutput {
         .map(|n| n.to_string_lossy().trim_end_matches(".bmp").to_owned())
         .unwrap_or_else(|| "image".into());
     let dir = crate::core::config::user_dir().join("tmp");
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| {
-        std::fs::write(
-            dir.join(format!("{stem}-{}.png", crate::core::db::ulid())),
+    if let Err(e) = crate::core::fsx::create_private_dir_all(&dir).and_then(|()| {
+        crate::core::fsx::write_private(
+            &dir.join(format!("{stem}-{}.png", crate::core::db::ulid())),
             &png,
         )
     }) {
