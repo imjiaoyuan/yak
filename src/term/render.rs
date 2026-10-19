@@ -68,6 +68,9 @@ pub struct Renderer {
     /// one SSE chunk, seconds apart) reads as continuous typing — never a
     /// chunk pop, never stop-motion.
     backlog: String,
+    /// Bytes already granted to the output queue. Keeping an offset avoids
+    /// moving the unread tail on every typewriter tick.
+    backlog_start: usize,
     /// true while the backlog is being played out (a paced batch is open)
     draining: bool,
     /// when the latest installment was granted (cadence gating)
@@ -94,6 +97,7 @@ impl Renderer {
                 .checked_sub(FLUSH_INTERVAL)
                 .unwrap_or_else(std::time::Instant::now),
             backlog: String::new(),
+            backlog_start: 0,
             draining: false,
             // pre-aged so the very first installment grants immediately
             last_grant: std::time::Instant::now()
@@ -125,6 +129,10 @@ impl Renderer {
     /// size shapes nothing the eye can see.
     pub fn push_delta(&mut self, text: &str) {
         self.output.push_str(text);
+        if self.backlog_start > 4096 {
+            self.backlog = self.backlog[self.backlog_start..].to_string();
+            self.backlog_start = 0;
+        }
         if let Some(md) = self.md.as_mut() {
             md.push_delta(text, &mut self.backlog);
             // pacing opens exactly when settled text is waiting; a stream
@@ -146,17 +154,18 @@ impl Renderer {
         if crate::term::screen()
             .flush_now
             .swap(false, std::sync::atomic::Ordering::Relaxed)
-            && !self.backlog.is_empty()
+            && self.backlog_start < self.backlog.len()
         {
             // the user pressed a key mid-stream: they are watching — print
             // everything waiting at once. Write-once holds; pacing only
             // ever decided when bytes were written, never what is written.
-            self.pending.push_str(&self.backlog);
+            self.pending.push_str(&self.backlog[self.backlog_start..]);
             self.backlog.clear();
+            self.backlog_start = 0;
             self.draining = false;
         }
         let now = std::time::Instant::now();
-        if !self.backlog.is_empty() {
+        if self.backlog_start < self.backlog.len() {
             self.take_due_chars(now);
         }
         if self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -183,7 +192,9 @@ impl Renderer {
     /// before it. Escape sequences (`\x1b[...m`) ride whole and cost no
     /// budget. Returns the visible count; an empty backlog closes the batch.
     fn take_due_chars(&mut self, now: std::time::Instant) -> usize {
-        if self.backlog.is_empty() {
+        if self.backlog_start == self.backlog.len() {
+            self.backlog.clear();
+            self.backlog_start = 0;
             self.draining = false;
             return 0;
         }
@@ -195,8 +206,8 @@ impl Renderer {
         // the count only feeds the accel divisor and the budget caps at
         // MAX_GRANT, so counting past the point where it saturates is
         // wasted work on a long backlog: count that far and stop
-        let behind = self
-            .backlog
+        let available = &self.backlog[self.backlog_start..];
+        let behind = available
             .chars()
             .take((MAX_GRANT - BASE_CHARS) * ACCEL_DIV)
             .count();
@@ -205,9 +216,9 @@ impl Renderer {
         // and including it, the sequence itself is invisible on screen
         let mut end = 0usize;
         let mut n = 0usize;
-        let bytes = self.backlog.as_bytes();
+        let bytes = available.as_bytes();
         while end < bytes.len() {
-            let ch = self.backlog[end..].chars().next().unwrap();
+            let ch = available[end..].chars().next().unwrap();
             if ch == '\x1b' {
                 // an SGR span is invisible on screen: it rides whole (never
                 // split mid-sequence) and costs no budget
@@ -220,10 +231,12 @@ impl Renderer {
             n += 1;
             end += ch.len_utf8();
         }
-        self.pending.push_str(&self.backlog[..end]);
-        self.backlog.drain(..end);
+        self.pending.push_str(&available[..end]);
+        self.backlog_start += end;
         self.last_grant = now;
-        if self.backlog.is_empty() {
+        if self.backlog_start == self.backlog.len() {
+            self.backlog.clear();
+            self.backlog_start = 0;
             self.draining = false;
         }
         n
@@ -271,8 +284,9 @@ impl Renderer {
             }
         }
         self.draining = false;
-        self.pending.push_str(&self.backlog);
+        self.pending.push_str(&self.backlog[self.backlog_start..]);
         self.backlog.clear();
+        self.backlog_start = 0;
         self.flush_pending();
     }
 }
@@ -708,7 +722,7 @@ mod tests {
         r.output = text.clone();
         r.drain_tick();
         let behind = text.chars().count();
-        let drained = behind - r.backlog.chars().count();
+        let drained = behind - r.backlog[r.backlog_start..].chars().count();
         assert_eq!(
             drained,
             (BASE_CHARS + behind / ACCEL_DIV).min(MAX_GRANT),
@@ -716,7 +730,7 @@ mod tests {
         );
         assert_eq!(r.output, text, "the full text is always accumulated");
         // repeated ticks drain everything; finish_stream settles the rest
-        while !r.backlog.is_empty() {
+        while r.backlog_start < r.backlog.len() {
             r.drain_tick();
             std::thread::sleep(std::time::Duration::from_millis(TICK_MILLIS + 1));
         }

@@ -39,17 +39,13 @@ pub fn repl(
         let cwd = session.cwd.display().to_string();
         // These lists change only after an extension reload or a command
         // directory change, not after every submitted line.
-        let echo_commands = command_set.clone();
-        let completion_skills = skill_names.clone();
-        let completion_commands = command_names.clone();
-        let completion_prompts = prompt_names.clone();
-        let is_command = move |buf: &str| slash_command_line(buf, &echo_commands);
-        let completer = move |buf: &str| {
-            let mut out = completions(buf, &completion_skills, &cwd);
+        let is_command = |buf: &str| slash_command_line(buf, &command_set);
+        let completer = |buf: &str| {
+            let mut out = completions(buf, &skill_names, &cwd);
             if let Some(arg) = buf.strip_prefix('/')
                 && !arg.contains(' ')
             {
-                for name in completion_commands.iter().chain(completion_prompts.iter()) {
+                for name in command_names.iter().chain(prompt_names.iter()) {
                     if name.starts_with(arg) {
                         out.push(format!("/{name}"));
                     }
