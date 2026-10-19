@@ -1,6 +1,6 @@
 [package]
 name = "yak"
-version = "0.4.6"
+version = "0.5.0"
 edition = "2024"
 description = "A plugin-based harness for LLMs in Rust."
 
