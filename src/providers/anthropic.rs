@@ -115,7 +115,7 @@ pub fn build_body(
     // orphan pairing resolved from the borrowed history: no Vec<Msg> copy
     // of the whole conversation per round
     let last_result = super::last_result_index(input.history);
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<Value> = Vec::with_capacity(input.history.len() + 2);
     let mut pending_results: Vec<Value> = Vec::new();
     // assembled position of the last message the previous request carried:
     // the stable anchor a cache breakpoint can read back. The caller names a

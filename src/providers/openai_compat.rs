@@ -64,7 +64,7 @@ pub fn build_body(
     // orphan pairing resolved from the borrowed history: no Vec<Msg> copy
     // of the whole conversation per round
     let last_result = super::last_result_index(input.history);
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<Value> = Vec::with_capacity(input.history.len() + 2);
     // images from a run of consecutive tool results, flushed as ONE user
     // message after the run: interleaving a user message between parallel
     // tool results would break the OpenAI protocol shape

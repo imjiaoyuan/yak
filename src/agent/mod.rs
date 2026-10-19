@@ -218,14 +218,17 @@ pub fn run_agent(
         on_update,
         on_approval,
     } = cb;
-    let tool_defs: Vec<ToolDef> = tools
-        .iter()
-        .map(|t| ToolDef {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters(),
-        })
-        .collect();
+    let mut tool_defs: Vec<ToolDef> = Vec::with_capacity(tools.len());
+    tool_defs.extend(
+        tools
+            .iter()
+            .map(|t| ToolDef {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let mut history: Vec<Msg> = seed;
     // where the round in flight starts: everything from here on is the round
