@@ -90,13 +90,22 @@ fn glm_text_models_are_text_only() {
         "glm-5.1",
         "glm-5.2",
         "glm-5.3",
+        "glm-4.5",
+        "glm-4.5-air",
     ] {
         assert!(!rm("zai", id).supports_images(), "{id} should be text-only");
     }
     assert!(rm("zai", "glm-4.5v").supports_images());
     assert!(rm("zai", "glm-4.6v").supports_images());
+    assert!(rm("zai", "glm-4.5v").supports_images());
     assert!(rm("zai", "glm-5.3-flash").supports_images());
     assert!(rm("opencode-go", "glm-5.3-flash").supports_images());
+}
+
+#[test]
+fn deepseek_v4_pro_is_text_only_while_flash_sees_images() {
+    assert!(!rm("deepseek", "deepseek-v4-pro").supports_images());
+    assert!(rm("deepseek", "deepseek-flash").supports_images());
 }
 
 fn attachment(name: &str, base64_len: usize) -> Attachment {

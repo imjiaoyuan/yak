@@ -90,7 +90,11 @@ pub fn repl(
             }
             continue;
         }
-        if text.starts_with('/') {
+        // a line whose first word is a path is task text, not a command: a
+        // ctrl+v paste substitutes the temp path at the head of the line, and
+        // that must reach the auto-attach path below, not a command fallback
+        // that never attaches anything
+        if text.starts_with('/') && !path_like(text) {
             if repl_command(&mut session, &mut settings, text) {
                 break;
             }
@@ -98,7 +102,7 @@ pub fn repl(
             continue;
         }
 
-        attach_local_files(
+        let attached = attach_local_files(
             text,
             &mut attachments,
             session
@@ -106,7 +110,7 @@ pub fn repl(
                 .as_ref()
                 .is_some_and(|m| m.kind == "anthropic"),
         );
-        run_task_logged(&mut session, text, &mut attachments);
+        run_task_logged(&mut session, text, &mut attachments, attached > 0);
     }
     restore_default_sigint();
     Ok(0)
@@ -142,8 +146,9 @@ fn attach_local_files(
     text: &str,
     queue: &mut Vec<crate::providers::Attachment>,
     supports_pdf: bool,
-) {
+) -> usize {
     use std::io::Read;
+    let mut attached = 0;
     for token in text.split_whitespace() {
         let Some(path_str) = existing_file_prefix(token) else {
             continue;
@@ -170,12 +175,28 @@ fn attach_local_files(
         };
         if let Ok(loaded) = crate::core::attachments::load(path_str, Some(mime)) {
             let req = loaded.request();
+            // the text can name a file an -a/queued attachment already
+            // carries; one copy per task
+            if queue.iter().any(|a| a.path.as_deref() == Some(path_str)) {
+                continue;
+            }
             // hard-wrapped: a tmp paste path plus its mime runs past 80
             // cells and a soft-wrapped chrome row would leave the terminal's
             // autowrap artifact on the row above the prompt
             let width = crate::term::columns().max(20).saturating_sub(2);
+            // a clipboard paste lives under the user tmp dir with an opaque
+            // ULID name: the directory says nothing and the full path is
+            // noise, so the file name alone carries it
+            let tmp = crate::core::config::user_dir().join("tmp");
+            let shown = if path.starts_with(&tmp) {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.to_string())
+            } else {
+                path_str.to_string()
+            };
             let notice = crate::core::render_md::wrap_block(
-                &format!("→ attached {} ({})", path_str, req.mime_type),
+                &format!("→ attached {shown} ({})", req.mime_type),
                 width,
                 2,
             );
@@ -185,8 +206,10 @@ fn attach_local_files(
                 crate::theme::err().reset
             );
             queue.push(req);
+            attached += 1;
         }
     }
+    attached
 }
 
 /// The longest prefix of `token` at a char boundary that names an existing
@@ -220,14 +243,17 @@ fn existing_file_prefix(token: &str) -> Option<&str> {
 }
 
 /// One agent task with interrupt chrome — the shared path for typed input
-/// and /skill:name. Persistence runs inside run_task.
+/// and /skill:name. Persistence runs inside run_task. `announced` is true when
+/// the caller has just printed one `→ attached …` row per file; the count row
+/// would only repeat it.
 fn run_task_logged(
     session: &mut Session,
     text: &str,
     attachments: &mut Vec<crate::providers::Attachment>,
+    announced: bool,
 ) {
     crate::core::http::clear_interrupt();
-    if !attachments.is_empty() {
+    if !announced && !attachments.is_empty() {
         eprintln!(
             "{}→ {} attachment{} ride this task{}",
             crate::theme::err().dim,
@@ -235,15 +261,18 @@ fn run_task_logged(
             if attachments.len() == 1 { "" } else { "s" },
             crate::theme::err().reset
         );
-        // the queue can already crowd the request ceiling: the same heads-up
-        // the CLI prints for -a, before the pre-flight refuses anything
-        if let Some(warning) =
-            crate::providers::attachment_weight(attachments, session.max_request_bytes)
-        {
-            eprintln!("Warning: {warning}");
-        }
     }
-    // cloned in, cleared on success: a failed task keeps them queued
+    // the queue can already crowd the request ceiling: the same heads-up the
+    // CLI prints for -a, before the pre-flight refuses anything
+    if !attachments.is_empty()
+        && let Some(warning) =
+            crate::providers::attachment_weight(attachments, session.max_request_bytes)
+    {
+        eprintln!("Warning: {warning}");
+    }
+    // cloned in and dropped when the task ends, either way: a failed prompt
+    // never lands in the history, so keeping its attachment queued would ride
+    // every later, unrelated message (and re-bill the image each time)
     match session.run_task(text, attachments.clone()) {
         Ok((outcome, _reasoning)) => {
             attachments.clear();
@@ -260,6 +289,7 @@ fn run_task_logged(
         }
         Err(e) => {
             eprintln!("Error: {e}");
+            attachments.clear();
             // run_task restores the seed so the session survives errors
         }
     }
@@ -389,6 +419,14 @@ const SLASH_COMMANDS: &[&str] = &[
     "/reload",
 ];
 
+/// Whether the line opens with a path rather than a command name. The first
+/// word carries a second `/` (`/home/me/shot.png`, `/tmp/x`), or it names an
+/// existing file — either way `/` is a root here, not a command sigil.
+fn path_like(text: &str) -> bool {
+    let word = text.split_whitespace().next().unwrap_or("");
+    word.get(1..).is_some_and(|rest| rest.contains('/')) || std::path::Path::new(word).is_file()
+}
+
 /// Is this buffer a command line for the echo highlight? Only when its
 /// first word is a registered command — exact (arguments allowed) or, still
 /// being typed, a prefix of one. A `/`-prefixed path matches no name and
@@ -404,6 +442,9 @@ fn slash_command_word(buf: &str, names: &[String]) -> bool {
     let Some(rest) = buf.strip_prefix('/') else {
         return false;
     };
+    if path_like(buf) {
+        return false;
+    }
     let (word, has_space) = rest
         .split_once(' ')
         .map_or((rest, false), |(w, _)| (w, true));
@@ -1244,7 +1285,7 @@ fn repl_command(
                         if let Some(task) = reply.get("task").and_then(serde_json::Value::as_str)
                             && !task.trim().is_empty()
                         {
-                            run_task_logged(session, task, &mut Vec::new());
+                            run_task_logged(session, task, &mut Vec::new(), false);
                         } else if let Some(text) =
                             reply.get("result").and_then(serde_json::Value::as_str)
                         {
@@ -1283,13 +1324,13 @@ fn repl_command(
                         None => s.clone(),
                     });
                 }
-                run_task_logged(session, &prompt, &mut Vec::new());
+                run_task_logged(session, &prompt, &mut Vec::new(), false);
                 session.system = base;
                 return false;
             }
             // not a builtin and not a commands-dir command: plain task text
             // (covers path-looking words like "/home/me/shot.jpg see?").
-            run_task_logged(session, text, &mut Vec::new());
+            run_task_logged(session, text, &mut Vec::new(), false);
             return false;
         }
     }
@@ -1440,14 +1481,35 @@ mod tests {
         // ctrl+v drops the path in, then the user keeps typing with no space
         let text = format!("{}make-it-this-big", shot.display());
         let mut queue = Vec::new();
-        attach_local_files(&text, &mut queue, false);
+        assert_eq!(attach_local_files(&text, &mut queue, false), 1);
         assert_eq!(queue.len(), 1, "the glued path attaches");
         assert_eq!(queue[0].filename.as_deref(), Some("shot.png"));
+        // a second mention of the same file is not a second attachment
+        let twice = format!("{} and {}", shot.display(), shot.display());
+        assert_eq!(attach_local_files(&twice, &mut queue, false), 0);
+        assert_eq!(queue.len(), 1);
         // a plain word names no file and attaches nothing
         let mut none = Vec::new();
-        attach_local_files("no file here make-it-this-big", &mut none, false);
+        assert_eq!(
+            attach_local_files("no file here make-it-this-big", &mut none, false),
+            0
+        );
         assert!(none.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_that_opens_with_a_path_is_task_text_not_a_command() {
+        assert!(path_like("/home/me/shot.png look"));
+        assert!(path_like("/tmp/x"));
+        // a path glued to the words typed right after it (ctrl+v then no space)
+        assert!(path_like("/tmp/paste-01.jpg怎么"));
+        assert!(path_like("/etc/hosts"));
+        // command words, including ones with arguments, stay commands
+        assert!(!path_like("/help"));
+        assert!(!path_like("/model zai/glm-5.3"));
+        assert!(!path_like("/skill:foo"));
+        assert!(!path_like("plain task text"));
     }
 
     #[test]

@@ -890,13 +890,17 @@ impl ResolvedModel {
         const TEXT_ONLY: &[&str] = &[
             "deepseek-chat",
             "deepseek-reasoner",
+            // V4 Pro accepts an image block and then answers as if there
+            // were none (the V4 catalog lists image understanding for Flash
+            // only), so sending pixels just pays for them twice
+            "deepseek-v4-pro",
             "gpt-3.5",
             "gpt-4.1-mini",
             "gpt-4.1-nano",
             "llama-3.1",
             "llama-3.3",
             "qwen2.5-",
-            "glm-4.5-",
+            "glm-4.5",
             "glm-4.6",
             "glm-4.7",
             // glm-5.x on the z.ai coding endpoint is text-only (the API 400s
