@@ -298,9 +298,14 @@ def main():
     with open(os.path.join(skill_dir, "references", "x.md"), "w") as f:
         f.write("# x\n")
 
-    # a commands-dir prompt carrying a frontmatter `system`: `/review <arg>`
-    # must ship the substituted body *and* the system line, appended to the
-    # agent's own prompt rather than replacing it
+    # prompt templates are an extension now: the commands plugin must mount
+    # the user commands directory and return the task-local system line
+    user_ext = os.path.join(user, "extensions")
+    os.makedirs(user_ext, exist_ok=True)
+    for extension in ("commands", "status", "export"):
+        shutil.copyfile(os.path.join(here, "examples", "extensions", extension),
+                        os.path.join(user_ext, extension))
+        os.chmod(os.path.join(user_ext, extension), 0o755)
     cmds = os.path.join(user, "commands")
     os.makedirs(cmds)
     with open(os.path.join(cmds, "review.md"), "w") as f:
