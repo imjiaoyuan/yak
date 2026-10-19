@@ -62,9 +62,9 @@ def project_memory_path(cwd):
 
 
 def system_section(params):
-    user_path = os.path.join(params["user_dir"], "YAK.md")
+    user_path = os.path.join(params.get("user_dir") or user_dir(), "YAK.md")
     parts = [memory_section(user_path, "user_memory")]
-    project_path = project_memory_path(params["cwd"])
+    project_path = project_memory_path(params.get("cwd") or os.getcwd())
     if project_path and os.path.isfile(project_path):
         parts.append(memory_section(project_path, "project_memory"))
     return "\n\n".join(parts)
