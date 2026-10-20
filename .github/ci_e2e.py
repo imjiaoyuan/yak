@@ -1332,9 +1332,12 @@ def main():
         "an untrusted project must say why its extensions stayed out"
     assert "projmark" not in (seen.get("tools") or []), \
         f"the untrusted project's tool leaked into the registry: {seen.get('tools')}"
-    # trust it: the same extension loads on the next start
+    # trust it: the same extension loads on the next start. the key is the
+    # physical path: yak keys the table by getcwd(), which resolves symlinks
+    # (macOS tempdirs live behind /var -> /private/var), while mkdtemp hands
+    # back the logical one
     with open(os.path.join(user, "trusted-projects.json"), "w") as f:
-        json.dump({trust_work: "ci"}, f)
+        json.dump({os.path.realpath(trust_work): "ci"}, f)
     tp2 = run([binary, "--no-session", "-m", "mock/m-wc",
                "call the projmark tool with text 'now trusted'"],
               env, cwd=trust_work, stdin=subprocess.DEVNULL)
