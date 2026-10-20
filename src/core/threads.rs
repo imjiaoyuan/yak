@@ -150,6 +150,8 @@ pub struct ThreadSummary {
     pub preview: String,
     /// working directory of the thread's last turn, when recorded
     pub cwd: Option<String>,
+    /// the hand-set display name, when one was recorded (`agent::names`)
+    pub name: Option<String>,
 }
 
 /// True when two recorded working directories name the same place.
@@ -201,6 +203,12 @@ fn summary_from_tail(bytes: &[u8]) -> (usize, Option<StoredTurn>, Option<String>
 #[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
+}
+
+/// The session-name table that lives beside the threads: one JSON object
+/// mapping thread ids to display names (see `agent::names`).
+pub fn names_path() -> std::path::PathBuf {
+    config::threads_dir().join("thread-names.json")
 }
 
 impl Store {
@@ -447,6 +455,7 @@ impl Store {
             last: last.ts,
             preview: preview.unwrap_or_default(),
             cwd: last.cwd,
+            name: crate::agent::names::thread_name(Some(id)),
         })
     }
 

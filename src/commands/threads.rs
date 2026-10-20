@@ -94,14 +94,18 @@ fn render(
 /// `turns_exact` says whether the count covers the whole file (the summary
 /// reads a bounded tail) so a consumer need not guess what `turns` means.
 fn summary_json(t: &ThreadSummary) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "id": t.id,
         "turns": t.turns,
         "turns_exact": t.turns_exact,
         "last": t.last,
         "preview": t.preview,
         "cwd": t.cwd,
-    })
+    });
+    if let Some(name) = &t.name {
+        v["name"] = serde_json::json!(name);
+    }
+    v
 }
 
 /// `/resume <id|prefix>`: the id itself, or the unambiguous prefix — with
@@ -176,8 +180,8 @@ pub fn pick_thread(cwd: &Path, title: &str) -> Result<Option<String>, String> {
     Ok(Some(threads[i].id.clone()))
 }
 
-/// One picker row: id, turn count, preview, age, and — when the list
-/// spans directories — the directory it ran in.
+/// One picker row: name or id, turn count, preview, age, and — when the
+/// list spans directories — the directory it ran in.
 fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
     let preview: String = t.preview.chars().take(40).collect();
     let preview = preview.replace('\n', " ");
@@ -188,15 +192,20 @@ fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
             .unwrap_or(cwd),
         None => "--",
     };
+    // a hand-set name replaces the preview quote; the raw id stays in front
+    // so a resume-by-prefix still reads against the row
+    let quote = match &t.name {
+        Some(name) => format!("\"{name}\""),
+        None => format!("\"{preview}\""),
+    };
     format!(
-        "{} · {}{} turn{} · \"{}\" · {}{}",
+        "{} · {}{} turn{} · {quote} · {}{}",
         &t.id[..t.id.len().min(6)],
         t.turns,
         // the summary scans a thread's tail, so a huge conversation's count
         // is the bound it saw, not the file's whole line count
         if t.turns_exact { "" } else { "+" },
         if t.turns == 1 { "" } else { "s" },
-        preview,
         crate::core::db::short_time(now, &t.last),
         if with_dir {
             format!(" · {dir}")
