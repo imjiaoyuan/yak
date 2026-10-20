@@ -451,12 +451,18 @@ fn slash_command_word(buf: &str, names: &[String]) -> bool {
     names.iter().any(|n| n == word || n.starts_with(word))
 }
 
-/// `/resume`: pick a past conversation — this directory's, newest first —
-/// and load it into this session (history replays, the next task appends to
-/// the same thread).
-fn resume_pick(session: &mut Session) -> Result<(), String> {
-    let Some(cid) = crate::commands::threads::pick_thread(&session.cwd, "resume:")? else {
-        return Ok(());
+/// `/resume [ID]`: with an argument, that conversation (full id or an
+/// unambiguous prefix); without one, a picker over this directory's history,
+/// newest first. Either way the history replays into this session and the
+/// next task appends to the same thread.
+fn resume(session: &mut Session, arg: &str) -> Result<(), String> {
+    let cid = if arg.is_empty() {
+        match crate::commands::threads::pick_thread(&session.cwd, "resume:")? {
+            Some(cid) => cid,
+            None => return Ok(()),
+        }
+    } else {
+        crate::commands::threads::resolve_prefix(&session.cwd, arg)?
     };
     let store = crate::core::threads::Store::open()?;
     let turns = store.read_thread(&cid)?;
@@ -467,9 +473,13 @@ fn resume_pick(session: &mut Session) -> Result<(), String> {
     session.seed = rebuilt.messages;
     session.system = rebuilt.system;
     session.usage = rebuilt.usage;
-    session.conversation_id = Some(cid);
+    session.conversation_id = Some(cid.clone());
     session.branch_parent = None;
     render_history(&session.seed);
+    // a remote reply or a scripted `/resume <prefix>` remembers what it
+    // landed on; the picker's row was already on screen
+    let p = crate::theme::err();
+    eprintln!("{}resumed {cid}{}", p.dim, p.reset);
     // the replay above shows the thread as stored; the projection happens
     // before the next request, where it belongs
     session.prune_seed_to_fit();
@@ -981,7 +991,7 @@ fn repl_command(
                 "/thinking      reasoning effort",
                 "/login         add a provider (or /login NAME to skip the list)",
                 "/logout        remove one",
-                "/resume        load a past session",
+                "/resume [ID]   load a past session (id/prefix, or pick)",
                 "/tree          jump between branches of this session",
                 "/export [PATH] write this conversation to markdown",
                 "/compact [TEXT] fold the context now, with optional focus",
@@ -1171,7 +1181,7 @@ fn repl_command(
             }
         }
         "/resume" => {
-            if let Err(e) = resume_pick(session) {
+            if let Err(e) = resume(session, arg) {
                 eprintln!("Error: {e}");
             }
         }

@@ -1,10 +1,141 @@
-//! The session browser behind `yak -r` and `/resume`: one filterable list of
-//! recent threads (the fuzzy-filter shape). Enter opens the transcript, then one key
-//! resumes it in the agent session.
+//! The session browser behind `yak threads`, `yak -r` and `/resume`: a
+//! filterable list of recent threads (the fuzzy-filter shape), a non-interactive
+//! list for scripts and remote clients, and the id/prefix resolver behind
+//! `/resume <id>`.
 
 use std::path::Path;
 
+use crate::core::args::{OptSpec, render_help};
 use crate::core::threads::{Store, ThreadSummary};
+use crate::{flag_spec, value_spec};
+
+const SPECS: &[OptSpec] = &[
+    flag_spec!("help", Some('h'), "Show this message and exit"),
+    flag_spec!("all", Some('a'), "Every directory, not only this one"),
+    flag_spec!("json", None, "One JSON array of thread objects on stdout"),
+    value_spec!("limit", Some('n'), "How many rows (default 20)", "N"),
+];
+
+fn help() -> String {
+    render_help("yak threads", "List recent conversations", SPECS, &[])
+}
+
+/// `yak threads`: the same summaries `/resume` picks from, printed — the
+/// non-interactive surface a script, editor or phone bridge addresses a
+/// session through.
+pub fn run(argv: &[String]) -> i32 {
+    let rest: Vec<String> = argv.get(1..).unwrap_or_default().to_vec();
+    let (args, code) = crate::core::args::parse_with_help(&rest, SPECS, help);
+    let Some(args) = args else { return code };
+    match list(&args) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
+}
+
+fn list(args: &crate::core::args::ParsedArgs) -> Result<(), String> {
+    let limit = match args.opt(&["limit", "n"]) {
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|_| format!("invalid --limit '{raw}' (want a number)"))?,
+        None => 20,
+    };
+    if limit == 0 {
+        return Err("--limit must be at least 1".into());
+    }
+    let all_dirs = args.flag(&["all", "a"]);
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let store = Store::open()?;
+    render(&store, &cwd, all_dirs, limit, args.flag(&["json"]))
+}
+
+/// The list itself, with the store injected: the path the tests drive.
+fn render(
+    store: &Store,
+    cwd: &Path,
+    all_dirs: bool,
+    limit: usize,
+    json: bool,
+) -> Result<(), String> {
+    let dir = cwd.display().to_string();
+    let scope = if all_dirs { None } else { Some(dir.as_str()) };
+    let rows = store.recent_threads(limit, scope);
+    if json {
+        let value = serde_json::Value::Array(rows.iter().map(summary_json).collect());
+        println!("{value}");
+        return Ok(());
+    }
+    if rows.is_empty() {
+        let p = crate::theme::err();
+        eprintln!(
+            "{}no conversations {}{}",
+            p.dim,
+            if all_dirs {
+                "yet"
+            } else {
+                "in this directory — -a lists every directory"
+            },
+            p.reset
+        );
+        return Ok(());
+    }
+    let now = crate::core::db::now_turn_datetime();
+    for t in &rows {
+        println!("{}", thread_item(t, &now, all_dirs));
+    }
+    Ok(())
+}
+
+/// One row as a machine reads it: the summary verbatim, full id included.
+/// `turns_exact` says whether the count covers the whole file (the summary
+/// reads a bounded tail) so a consumer need not guess what `turns` means.
+fn summary_json(t: &ThreadSummary) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "turns": t.turns,
+        "turns_exact": t.turns_exact,
+        "last": t.last,
+        "preview": t.preview,
+        "cwd": t.cwd,
+    })
+}
+
+/// `/resume <id|prefix>`: the id itself, or the unambiguous prefix — with
+/// the same this-directory preference the picker has. An ambiguous prefix is
+/// an error naming the candidates, never a guess.
+pub fn resolve_prefix(cwd: &Path, raw: &str) -> Result<String, String> {
+    let store = Store::open()?;
+    resolve_in(&store, cwd, raw)
+}
+
+fn resolve_in(store: &Store, cwd: &Path, raw: &str) -> Result<String, String> {
+    let dir = cwd.display().to_string();
+    if let Some(cid) = store.resolve_thread(raw, Some(&dir))? {
+        return Ok(cid);
+    }
+    let hits = store.threads_matching(raw);
+    if hits.is_empty() {
+        return Err(format!("no session matches '{raw}'"));
+    }
+    let now = crate::core::db::now_turn_datetime();
+    let mut rows: Vec<String> = hits
+        .iter()
+        .take(5)
+        .map(|t| thread_item(t, &now, true))
+        .collect();
+    if hits.len() > rows.len() {
+        rows.push(format!("… and {} more", hits.len() - rows.len()));
+    }
+    Err(format!(
+        "'{raw}' matches {} sessions — use more of the id:\n  {}",
+        hits.len(),
+        rows.join("\n  ")
+    ))
+}
 
 /// The conversations a picker offers: those that ran in `cwd`, newest first —
 /// a resume list is this project's history. A directory with none of
@@ -165,4 +296,81 @@ pub fn show_transcript(cid: &str) -> i32 {
         println!();
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_in, summary_json};
+    use crate::core::testutil::scratch_dir;
+    use crate::core::threads::Store;
+    use std::path::Path;
+
+    /// A thread file with only the fields the store requires: the reader
+    /// defaults the rest, so the fixture stays about the listing.
+    fn write_thread(dir: &Path, id: &str, cwd: &str, ts: &str, prompt: &str) {
+        let line = serde_json::json!({
+            "id": "t1",
+            "ts": ts,
+            "mode": "agent",
+            "model": "mock/m",
+            "cwd": cwd,
+            "prompt": prompt,
+            "response": "ok",
+            "messages": [],
+        });
+        std::fs::write(dir.join(format!("{id}.jsonl")), format!("{line}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_resume_prefix_prefers_this_directory_and_refuses_ambiguity() {
+        let dir = scratch_dir("resume-prefix");
+        write_thread(&dir, "01abcA", "/p/a", "2026-10-20T10:00:00+00:00", "first");
+        write_thread(
+            &dir,
+            "01abcB",
+            "/p/b",
+            "2026-10-20T11:00:00+00:00",
+            "second",
+        );
+        let store = Store::open_path(&dir).unwrap();
+        // a local match wins over a newer sibling in another directory
+        assert_eq!(
+            resolve_in(&store, Path::new("/p/a"), "01abc").unwrap(),
+            "01abcA"
+        );
+        // nothing local: the prefix is ambiguous, and the error names both
+        let err = resolve_in(&store, Path::new("/p/c"), "01abc").unwrap_err();
+        assert!(err.contains("matches 2 sessions"), "{err}");
+        assert!(err.contains("01abcA") && err.contains("01abcB"), "{err}");
+        // a unique prefix resolves from any directory
+        assert_eq!(
+            resolve_in(&store, Path::new("/p/c"), "01abcB").unwrap(),
+            "01abcB"
+        );
+        let err = resolve_in(&store, Path::new("/p/c"), "zzz").unwrap_err();
+        assert!(err.contains("no session matches 'zzz'"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_json_row_carries_the_full_id_and_the_count_meaning() {
+        let dir = scratch_dir("threads-json");
+        write_thread(
+            &dir,
+            "01abcA",
+            "/p/a",
+            "2026-10-20T10:00:00+00:00",
+            "hello there",
+        );
+        let store = Store::open_path(&dir).unwrap();
+        let rows = store.recent_threads(20, None);
+        let v = summary_json(&rows[0]);
+        assert_eq!(v["id"], "01abcA");
+        assert_eq!(v["turns"], 1);
+        assert_eq!(v["turns_exact"], true);
+        assert_eq!(v["preview"], "hello there");
+        assert_eq!(v["cwd"], "/p/a");
+        assert_eq!(v["last"], "2026-10-20T10:00:00+00:00");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

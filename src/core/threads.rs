@@ -369,6 +369,19 @@ impl Store {
             .is_some_and(|c| same_dir(&c, cwd))
     }
 
+    /// Every thread whose id equals or starts with `prefix`, newest first —
+    /// the candidate list behind an ambiguous `/resume <prefix>`, and what
+    /// `yak threads <prefix>` would show.
+    pub fn threads_matching(&self, prefix: &str) -> Vec<ThreadSummary> {
+        let mut out: Vec<ThreadSummary> = self
+            .summaries()
+            .into_iter()
+            .filter(|t| t.id.starts_with(prefix))
+            .collect();
+        out.sort_by(|a, b| b.last.cmp(&a.last));
+        out
+    }
+
     /// Recent threads, newest first (by last-turn timestamp), capped at
     /// `limit`. A `limit` of `usize::MAX` lists everything; `cwd` restricts
     /// the list to conversations that ran in that directory.
@@ -864,6 +877,28 @@ mod tests {
         );
         // a different directory is filtered out
         assert!(store.recent_threads(30, Some("/p/c")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn threads_matching_returns_every_prefix_candidate_newest_first() {
+        let dir = scratch("prefix-candidates");
+        let store = Store::open_path(&dir).unwrap();
+        let a = seed(&store, &[turn_in("1", "/p/a", "first")], 120);
+        let b = seed(&store, &[turn_in("2", "/p/b", "second")], 60);
+        // rename onto prefix-sharing ids: how much of a ULID's timestamp two
+        // fast writes happen to share is not something a test should assume
+        fs::rename(store.thread_path(&a), dir.join("01abcA.jsonl")).unwrap();
+        fs::rename(store.thread_path(&b), dir.join("01abcB.jsonl")).unwrap();
+        let ids =
+            |ts: Vec<ThreadSummary>| -> Vec<String> { ts.into_iter().map(|t| t.id).collect() };
+        // newest first, like the list it feeds
+        assert_eq!(
+            ids(store.threads_matching("01abc")),
+            vec!["01abcB".to_string(), "01abcA".to_string()]
+        );
+        assert_eq!(ids(store.threads_matching("01abcA")), vec!["01abcA"]);
+        assert!(store.threads_matching("zzz").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -73,3 +73,8 @@ fn the_readme_remove_help_block_matches_the_binary() {
 fn the_readme_list_help_block_matches_the_binary() {
     assert_matches_readme("Usage: yak list", &["list", "-h"]);
 }
+
+#[test]
+fn the_readme_threads_help_block_matches_the_binary() {
+    assert_matches_readme("Usage: yak threads", &["threads", "-h"]);
+}

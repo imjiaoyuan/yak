@@ -26,6 +26,7 @@ agentic task with tools.
 Available commands:
   export     Export a conversation as markdown (also: /export)
   install    Install a git package (also: remove, list)
+  threads    List recent conversations (--all, --json, -n N)
 
 Flags:
   -h, --help      Show this message and exit
@@ -64,6 +65,7 @@ fn dispatch(argv: &[String]) -> i32 {
             0
         }
         Some("export") => commands::export::run(argv),
+        Some("threads") => commands::threads::run(argv),
         Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
             commands::pkg::run(argv)
         }

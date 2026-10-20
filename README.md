@@ -105,6 +105,7 @@ agentic task with tools.
 Available commands:
   export     Export a conversation as markdown (also: /export)
   install    Install a git package (also: remove, list)
+  threads    List recent conversations (--all, --json, -n N)
 
 Flags:
   -h, --help      Show this message and exit
@@ -148,6 +149,18 @@ Usage: yak list [OPTIONS]
 
 Options:
   -h, --help            Show this message and exit
+```
+
+```
+List recent conversations
+
+Usage: yak threads [OPTIONS] 
+
+Options:
+  -h, --help            Show this message and exit
+  -a, --all             Every directory, not only this one
+      --json            One JSON array of thread objects on stdout
+  -n, --limit N         How many rows (default 20)
 ```
 
 ## Development

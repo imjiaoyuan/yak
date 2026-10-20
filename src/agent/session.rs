@@ -701,6 +701,10 @@ impl Session {
             cwd: &self.cwd,
             system: self.system.as_deref(),
         };
+        // the supervisor's handle on the conversation: a resumed thread up
+        // front (and a fresh one below, the moment its first round lands),
+        // so a caller can label or continue what it started
+        emit_event(&session_json(self.conversation_id.as_deref(), &self.cwd));
         let mut on_update = |u: AgentUpdate| {
             match &u {
                 AgentUpdate::ReasoningDelta(text) => {
@@ -715,8 +719,11 @@ impl Session {
                 }
                 // the round lands in the thread file here and is not emitted:
                 // the event stream stays the UI surface, persistence is not
-                // part of the contract
+                // part of the contract. The one exception is the id a fresh
+                // thread just got: it is the supervisor's only way to resume
+                // this run, so the `session` event repeats with it.
                 AgentUpdate::RoundEnd { messages, usage } => {
+                    let created = self.conversation_id.is_none();
                     persist_round(
                         self.store.as_ref(),
                         &mut self.conversation_id,
@@ -728,6 +735,9 @@ impl Session {
                         &round_reasoning,
                         round_started,
                     );
+                    if created && let Some(id) = self.conversation_id.as_deref() {
+                        emit_event(&session_json(Some(id), &self.cwd));
+                    }
                     round_reasoning.clear();
                     round_started = std::time::Instant::now();
                     return;
@@ -779,6 +789,7 @@ impl Session {
             Ok(mut outcome) => {
                 emit_event(&serde_json::json!({
                     "type": "result",
+                    "thread": self.conversation_id,
                     "text": &outcome.final_text,
                     "usage": usage_json(outcome.usage.as_ref()),
                     "interrupted": outcome.interrupted,
@@ -794,6 +805,7 @@ impl Session {
             Err(failure) => {
                 emit_event(&serde_json::json!({
                     "type": "error",
+                    "thread": self.conversation_id,
                     "message": &failure.message,
                     "text": &failure.final_text,
                 }));
@@ -1010,6 +1022,18 @@ fn usage_json(usage: Option<&crate::core::http::Usage>) -> serde_json::Value {
         }),
         None => serde_json::Value::Null,
     }
+}
+
+/// The `session` event: the thread a caller can resume and the directory it
+/// runs in. Emitted up front (the resumed id, or null for a fresh thread) and
+/// again the moment a new thread's first round lands, so a supervisor always
+/// learns the id it would pass to `--session`/`/resume`.
+fn session_json(thread: Option<&str>, cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "session",
+        "thread": thread,
+        "cwd": cwd.display().to_string(),
+    })
 }
 
 /// Write one event line and flush: consumers read the stream live, so a
@@ -2323,6 +2347,18 @@ mod tests {
         let err = store.read_thread("th1").unwrap_err();
         assert!(err.contains("corrupt turn"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_event_names_the_thread_and_the_directory() {
+        let resumed = session_json(Some("01m5bz"), std::path::Path::new("/p/a"));
+        assert_eq!(resumed["type"], "session");
+        assert_eq!(resumed["thread"], "01m5bz");
+        assert_eq!(resumed["cwd"], "/p/a");
+        // a fresh thread has no id yet: the field stays present as null, so
+        // a consumer never branches on its absence
+        let fresh = session_json(None, std::path::Path::new("/p/a"));
+        assert!(fresh["thread"].is_null());
     }
 
     #[test]

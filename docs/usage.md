@@ -88,12 +88,16 @@ Every conversation is saved, so you can always come back to it:
 yak -c "and in python?"                    # continue the newest session here
 yak -r                                     # browse and resume past sessions
 yak --session 01ABC... "..."               # pick an exact one (a short prefix works)
+yak threads                                # list this directory's sessions
+yak threads -a --json                      # every directory, as JSON for a script
 yak --no-session "..."                     # this run only, don't save it
 yak --fork "..."                           # branch this session onto a new thread
 yak export notes.md                        # write the newest session here as markdown
 ```
 
-`-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list. `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `yak-<id>.md` in the working directory by default (the same renderer backs `yak export`).
+`-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list, and `/resume <id|prefix>` loads one without the picker — the shape a script or a remote client drives (an ambiguous prefix is an error listing the candidates, never a guess). `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `yak-<id>.md` in the working directory by default (the same renderer backs `yak export`).
+
+`yak threads` prints the same summaries without a picker: this directory's newest 20 by default, `-a` for every directory, `-n N` for a different cap, and `--json` for one array of `{id, turns, turns_exact, last, preview, cwd}` objects (the full id, so it can be fed straight back to `--session` or `/resume`; `turns_exact` says whether the count covers the whole file or only the tail the listing reads).
 
 ## Session tree
 
@@ -176,7 +180,7 @@ Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`
 
 ## The --json interface
 
-`--json` replaces the terminal UI with one JSON object per line (`text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end`, `compacting` and a closing `result`) for a supervising process: an editor, a CI lane, or another agent driving a child `yak`. The task is the same task (pass one as an argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. Sessions, usage accounting and persistence are identical to a normal run (a round's `turn_end` carries its `usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two cache numbers are what a supervisor prices); the interactive session is what `--json` is *not*) it wants a task and exits.
+`--json` replaces the terminal UI with one JSON object per line (`session`, `text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end`, `compacting` and a closing `result`) for a supervising process: an editor, a CI lane, or another agent driving a child `yak`. The task is the same task (pass one as an argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. The `session` event names the conversation: `{"type": "session", "thread": <id or null>, "cwd": ...}` arrives first (a resumed thread's id up front, null for a fresh one), repeats the moment a new thread's first round lands, and the closing `result`/`error` objects carry `thread` too — so a supervisor always learns the id it would pass to `--session` or `/resume`. Sessions, usage accounting and persistence are identical to a normal run (a round's `turn_end` carries its `usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two cache numbers are what a supervisor prices); the interactive session is what `--json` is *not*) it wants a task and exits.
 
 ## Plugins
 
