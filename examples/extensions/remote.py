@@ -34,6 +34,12 @@
 #   ... work, approval prompt pushes to the phone, reply "/y" ...
 #   ... answer pushes to the phone, reply "next: run the tests" ...
 #
+# For a headless machine, `remote_rpc.py` beside this file is the
+# protocol form of the same bridge: it runs `yak --rpc` itself and turns
+# replies into protocol commands (prompts, steers, approval answers), so
+# nothing depends on tmux being attached. This file stays the interactive
+# form.
+#
 # Configuration lives in a JSON file — `remote.json` beside this script,
 # or `<user_dir>/remote.json` (~/.yak, YAK_USER_PATH honored). The same
 # scalar keys may ride env vars that override the file (yak's own override
