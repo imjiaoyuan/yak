@@ -305,6 +305,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # child ran with its definition's subset
             seen.setdefault("generic_tools", []).append(
                 [t["function"]["name"] for t in body.get("tools", [])])
+            prompt_text = next((m.get("content", "") for m in reversed(messages)
+                                if m.get("role") == "user"
+                                and isinstance(m.get("content"), str)), "")
+            if "projmark" in prompt_text and any(
+                t["function"]["name"] == "projmark" for t in body.get("tools", [])
+            ):
+                # the trust lane: the project extension is on the wire, so
+                # call it and finish on the tool result
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_pm", "type": "function",
+                         "function": {"name": "projmark",
+                                      "arguments": '{"text": "from model"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+                self.sse(chunks)
+                return
             chunks = [
                 {"choices": [{"index": 0, "delta": {"tool_calls": [
                     {"index": 0, "id": "call_1", "type": "function",
@@ -1297,10 +1314,171 @@ def main():
     named = [f for f in os.listdir(here) if f.startswith("yak-") and f.endswith(".md")]
     assert named, f"no default-named export in {os.listdir(here)}"
 
+    # project trust: a project extension must NOT run before /trust records
+    # the project, and must load once it does
+    trust_proj = tempfile.mkdtemp()
+    trust_work = os.path.join(trust_proj, "repo")
+    os.makedirs(os.path.join(trust_work, ".yak", "extensions"))
+    # the project copy registers its own tool name, so the user-level echo
+    # extension cannot mask whether it mounted
+    proj_body = ECHO_EXT.replace('"name": "echo"', '"name": "projmark"')
+    write_extension(os.path.join(trust_work, ".yak", "extensions"),
+                    "projmarker", proj_body)
+    tp = run([binary, "--no-session", "-m", "mock/m-wc",
+              "call the projmark tool with text 'from project'"],
+             env, cwd=trust_work, stdin=subprocess.DEVNULL)
+    assert tp.returncode == 0, f"untrusted run rc={tp.returncode} err={tp.stderr[-400:]}"
+    assert "not trusted" in tp.stdout + tp.stderr, \
+        "an untrusted project must say why its extensions stayed out"
+    assert "projmark" not in (seen.get("tools") or []), \
+        f"the untrusted project's tool leaked into the registry: {seen.get('tools')}"
+    # trust it: the same extension loads on the next start
+    with open(os.path.join(user, "trusted-projects.json"), "w") as f:
+        json.dump({trust_work: "ci"}, f)
+    tp2 = run([binary, "--no-session", "-m", "mock/m-wc",
+               "call the projmark tool with text 'now trusted'"],
+              env, cwd=trust_work, stdin=subprocess.DEVNULL)
+    assert tp2.returncode == 0, f"trusted run rc={tp2.returncode} err={tp2.stderr[-400:]} out={tp2.stdout[-200:]}"
+    assert "projmark" in (seen.get("tools") or []), \
+        f"the trusted project's tool must mount: {seen.get('tools')}"
+    log_now = open(fake_log).read() if os.path.exists(fake_log) else ""
+    assert "from model" in log_now or "now trusted" in log_now, \
+        f"the project extension call never ran after trust: log={log_now[-200:]!r} out={tp2.stdout[-300:]!r}"
+
+    check_rpc(binary)
     check_codex(binary)
     check_plugin_regressions()
     print("e2e smoke passed")
     return 0
+
+
+def check_rpc(binary):
+    """The long-lived control mode, end to end against a dedicated mock:
+    prompt acceptance, a remote approval round-trip, steering between
+    rounds, get_state, naming, HTML export, and a clean exit on stdin EOF."""
+    import threading as _th
+    import queue as _q
+    rpc_port = 8231
+
+    class RpcHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            msgs = body.get("messages", [])
+            has_tool = any(m.get("role") == "tool" for m in msgs)
+            if not has_tool:
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "c1", "type": "function",
+                         "function": {"name": "bash",
+                                      "arguments": '{"command": "echo hi"}'}}]}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            else:
+                steered = any("do it in french" in (m.get("content") or "")
+                              for m in msgs if m.get("role") == "user")
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"content": "answer" + (" (steered)" if steered else "")}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for c in chunks:
+                self.wfile.write(b"data: " + json.dumps(c).encode() + b"\n\n")
+            self.wfile.write(b"data: [DONE]\n\n")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), RpcHandler)
+    port = srv.server_address[1]
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+
+    with tempfile.TemporaryDirectory(prefix="yak-rpc-ci-") as tmp:
+        user = os.path.join(tmp, "user")
+        work = os.path.join(tmp, "work")
+        os.makedirs(user)
+        os.makedirs(work)
+        with open(os.path.join(user, "config.json"), "w") as f:
+            json.dump({"providers": {"mock": {"kind": "openai-compat",
+                "base_url": f"http://127.0.0.1:{port}/v1", "api_key": "sk-x",
+                "models": ["m"]}}, "models": {"default": "mock/m"}}, f)
+        # one ask-list pattern so the bash call raises a remote approval
+        with open(os.path.join(user, "blacklist"), "w") as f:
+            f.write("echo\n")
+        env = {**os.environ, "YAK_USER_PATH": user}
+        # start_new_session would isolate the child; stdin is the protocol
+        proc = subprocess.Popen([binary, "--rpc"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                env=env, cwd=work)
+
+        out_q = _q.Queue()
+
+        def reader():
+            for line in proc.stdout:
+                out_q.put(line.strip())
+            out_q.put(None)
+
+        _th.Thread(target=reader, daemon=True).start()
+
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        def expect(pred, what, timeout=30):
+            deadline = time.time() + timeout
+            seen = []
+            while time.time() < deadline:
+                try:
+                    line = out_q.get(timeout=0.4)
+                except _q.Empty:
+                    continue
+                if line is None:
+                    raise AssertionError(f"rpc child exited early waiting for {what}: {seen[-5:]}")
+                v = json.loads(line)
+                seen.append(v)
+                if pred(v):
+                    return v
+            raise AssertionError(f"rpc timeout waiting for {what}: {json.dumps(seen)[:1500]}")
+
+        expect(lambda v: v.get("type") == "session", "the opening session event")
+        send({"id": "r1", "type": "prompt", "message": "run the echo"})
+        expect(lambda v: v.get("id") == "r1" and v.get("success"), "the prompt acceptance")
+        ap = expect(lambda v: v.get("type") == "approval_request", "the remote approval ask")
+        assert ap["tool"] == "bash" and "echo" in ap["preview"], ap
+        # steer first: the approval answer releases the run, and the steer
+        # must already be queued for the drain to pick it up between rounds
+        send({"id": "s1", "type": "steer", "message": "do it in french"})
+        send({"type": "approval_response", "request": ap["id"], "answer": "allow"})
+        expect(lambda v: v.get("id") == "s1" and v.get("success"), "the steer ack")
+        res = expect(lambda v: v.get("type") == "result", "the steered result")
+        assert "steered" in res["text"], res
+        # the steer queue must be empty when the dust settles: no second task
+        send({"id": "g0", "type": "get_state"})
+        st0 = expect(lambda v: v.get("id") == "g0", "post-run state")
+        assert st0["data"]["queued"] == 0, st0["data"]
+        send({"id": "g1", "type": "get_state"})
+        st = expect(lambda v: v.get("id") == "g1", "get_state")
+        assert st["data"]["model"] == "mock/m" and st["data"]["thread"], st
+        thread_id = st["data"]["thread"]
+        send({"id": "n1", "type": "name", "name": "rpc smoke"})
+        expect(lambda v: v.get("id") == "n1" and v.get("success"), "the name ack")
+        send({"id": "e1", "type": "export_html"})
+        ex = expect(lambda v: v.get("id") == "e1", "the html export")
+        html = open(ex["data"]["path"], encoding="utf-8").read()
+        assert "run the echo" in html and "echo hi" in html, html[:200]
+        # the name shows in the threads list json
+        ls = run([binary, "threads", "-a", "--json"], env, cwd=work, stdin=subprocess.DEVNULL)
+        rows = json.loads(ls.stdout)
+        row = next(r for r in rows if r["id"] == thread_id)
+        assert row.get("name") == "rpc smoke", row
+        proc.stdin.close()
+        rc = proc.wait(timeout=10)
+        assert rc == 0, f"rpc exit {rc}: {proc.stderr.read()[-400:] if proc.stderr else ''}"
+        srv.shutdown()
+        srv.server_close()
+    print("rpc e2e passed (prompt, remote approval, steer, state, name, html export)")
 
 
 if __name__ == "__main__":

@@ -288,6 +288,11 @@ def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     proj_ext = os.path.join(work, ".yak", "extensions")
     os.makedirs(proj_ext, exist_ok=True)
+    # project plugin homes load only for a trusted project: the lane uses
+    # them on purpose (the skills plugin below), so record the trust the
+    # way /trust would
+    with open(os.path.join(user, "trusted-projects.json"), "w") as f:
+        json.dump({work: "ci"}, f)
     shutil.copyfile(os.path.join(here, "examples", "extensions", "skills"),
                     os.path.join(proj_ext, "skills"))
     os.chmod(os.path.join(proj_ext, "skills"), 0o755)
