@@ -69,6 +69,7 @@ The front page ends here. Everything else lives in [`docs/usage.md`](docs/usage.
 - [Providers and models](docs/usage.md#providers-and-models): `/login`, hand-edited config, aliases
 - [Tuning the agent](docs/usage.md#tuning-the-agent): tool policies, request caps, cache TTL, compaction
 - [The --json interface](docs/usage.md#the---json-interface): drive `yak` from an editor, CI lane or another agent
+- [The --rpc control mode](docs/usage.md#the---rpc-control-mode): a long-lived session steered over JSONL — prompts, steers and approvals from another process (the `remote_rpc.py` phone gateway)
 - [Plugins](docs/usage.md#plugins): script tools (Python, shell, Rust — `.rs` sources compile on first call), resident extensions, subagents, MCP
 
 The plugin wire protocol has its own full reference: [`docs/extensions.md`](docs/extensions.md).
@@ -107,6 +108,11 @@ Available commands:
   install    Install a git package (also: remove, list)
   threads    List recent conversations (--all, --json, -n N)
 
+Notable flags:
+  --rpc          Long-lived JSONL control mode (commands in, events out)
+  --json         One task as a JSON event stream
+  -r, --resume   Browse past sessions and continue one
+
 Flags:
   -h, --help      Show this message and exit
   -v, --version   Show the version number
@@ -124,13 +130,14 @@ Options:
 ```
 
 ```
-Export a conversation as a markdown file
+Export a conversation as markdown or self-contained HTML
 
 Usage: yak export [OPTIONS] PATH
 
 Options:
   -h, --help            Show this message and exit
       --thread ID       Thread id to export
+      --html            Write one self-contained HTML file instead of markdown
 ```
 
 ```

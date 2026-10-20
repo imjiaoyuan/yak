@@ -182,6 +182,38 @@ Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`
 
 `--json` replaces the terminal UI with one JSON object per line (`session`, `text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end`, `compacting` and a closing `result`) for a supervising process: an editor, a CI lane, or another agent driving a child `yak`. The task is the same task (pass one as an argument), approvals and diagnostics stay on stderr, and stdout is nothing but events. The `session` event names the conversation: `{"type": "session", "thread": <id or null>, "cwd": ...}` arrives first (a resumed thread's id up front, null for a fresh one), repeats the moment a new thread's first round lands, and the closing `result`/`error` objects carry `thread` too — so a supervisor always learns the id it would pass to `--session` or `/resume`. Sessions, usage accounting and persistence are identical to a normal run (a round's `turn_end` carries its `usage` (`input`, `output`, `cached`, `cached_write`; `input` counts the cached tokens in, so the two cache numbers are what a supervisor prices); the interactive session is what `--json` is *not*) it wants a task and exits.
 
+## The --rpc control mode
+
+`yak --rpc` is `--json`'s long-lived sibling: the same session, the same event stream, but bidirectional. The process reads one JSON command per line on stdin and writes events and command responses on stdout until stdin closes; a phone bridge, an editor plugin or another agent can prompt it, steer a running task, answer an approval from the other side of the world, switch models or sessions, and export — all without a terminal.
+
+```json
+→ {"id":"1","type":"prompt","message":"fix the failing test"}
+← {"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+← {"type":"text","text":"..."}                      events, the --json shapes
+← {"type":"approval_request","id":"ap1","tool":"bash","preview":"rm -rf build","reason":"..."}
+→ {"id":"2","type":"approval_response","request":"ap1","answer":"allow"}
+→ {"id":"3","type":"steer","message":"also update the changelog"}
+← {"type":"result","thread":"01JD...","text":"done","usage":{...}}
+```
+
+Commands: `prompt` (with `attachments` by path or URL), `steer` (delivered between the running task's tool round and its next model request; queued as the next prompt when nothing runs), `follow_up` (queued for after the task settles), `clear_queue`, `interrupt`/`abort` (the cooperative interrupt), `get_state`, `set_model`, `compact`, `new_session`, `switch_session` (id or unambiguous prefix), `fork`, `name`, `get_tree` (every branch, the active chain marked), `export_html`, `approval_response` (`allow`, `allow_session`, `deny`), `exit`. Every command may carry a string `id`; the response repeats it, so a client can correlate under concurrency. Events carry no id — they describe session activity.
+
+Approval over the wire is the mode's reason to exist: an ask blocks the run and emits `approval_request` carrying the ask's own id; `approval_response` names that id and the run continues. If stdin closes with an ask waiting, the ask fails closed (deny) exactly like a terminal prompt with no terminal. `--approval allow` still answers everything unattended without asking the wire.
+
+stdout is protocol records only; diagnostics go to stderr, like `--json`. The `remote_rpc.py` example extension is this protocol's phone gateway: Telegram or email replies become prompts, steers and approval answers.
+
+## Session names
+
+`/name TEXT` titles the current conversation; `/name` shows it, `/name off` clears it. The title replaces the preview quote in `yak threads` rows and the `/resume` picker, and rides the `--json` threads listing as `name` — the label a phone bridge pins its UI to. Names live in `thread-names.json` beside the threads directory; the transcript files are untouched.
+
+## Project trust
+
+A project's `.yak/extensions/` and `.yak/pkg/` are plugin homes: whatever they contain runs with your permissions the moment it loads. So a cloned repository is **untrusted by default** — `cd` into it and yak skips its project plugins with a notice, while your own `~/.yak/extensions/` loads as always. `/trust` records the project (by absolute path) in `~/.yak/trusted-projects.json` and its plugins load from the next start; `/reload` picks them up immediately; `/trust off` drops the decision again. A corrupt trust table is a loud error, never a silently widened one.
+
+## HTML export
+
+`export_html` on the rpc wire (and `yak export --html [PATH]`) writes the conversation as one self-contained HTML file: the branch tree in a sidebar, the active branch as the transcript, images inline as base64, dark/light by the viewer's scheme, one column under a phone's width. No external assets — the file opens offline exactly as online.
+
 ## Plugins
 
 Extensions are how you add things the core does not ship. Put a file in `~/.yak/extensions/` (or in the project's `.yak/extensions/`, which wins by name) then restart, or type `/reload`. There are two shapes, and the shape is chosen by the file itself.

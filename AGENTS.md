@@ -116,6 +116,8 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
 - `auth.json`: OAuth credentials for the subscription channels (`chatgpt` today), one entry per provider name — `access`/`refresh`/`expires`, 0600, written by `/login`'s browser flow and refreshed in place; `/logout` of the provider drops its entry.
 - `history.jsonl`: the REPL input history: one `{"ts", "text"}` object per line, single-write appends (concurrent processes never interleave), 0600, adjacent submissions deduped at record time, rewritten down to a 1600-entry soft cap once past 2000; the in-memory window is the last 200.
 - `blacklist`: the command blacklist file (plus a project `.yak/blacklist`).
+- `trusted-projects.json`: the project-trust table (`/trust`): absolute project roots the user vouched for, so their `.yak/extensions/` and local `pkg/` may load (`agent/trust.rs`; untrusted project homes are skipped with a notice, a corrupt table fails loudly).
+- `threads/thread-names.json`: the session-title table (`/name`), thread id → display name, shown by `yak threads` and the `/resume` picker (`agent/names.rs`; the transcript files are untouched).
 - `YAK.md`: global user memory, hand-edited or appended by the `memory` tool when the user
   asks to note something durable; injected into the agent system prompt (`agent/memory.rs`).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories (skills are mounted by the `examples/extensions/skills` plugin — the core only knows the extension protocol).
