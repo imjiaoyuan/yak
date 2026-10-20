@@ -3,8 +3,14 @@
 
 Remote access without a resident daemon: plain `ssh` subprocesses
 with hardened arguments (BatchMode, no forwarding, no locale, strict host
-keys against this extension's own known_hosts), one call = one ssh run.
-No persistent connection and nothing installed on the remote side.
+keys against this extension's own known_hosts). Each host keeps one
+shared multiplexed connection (ssh ControlMaster under the user dir): the
+first call pays the handshake, later calls ride the socket and start in
+milliseconds. Nothing is installed on the remote side.
+
+Long commands stream live: output lines are written to stderr as they
+arrive, which the host renders as the running tool's progress, so a build
+or a slow pipeline reports while it runs instead of dumping at the end.
 
 Hosts live in `ssh.json` beside this script or in `<user_dir>/ssh.json`
 (YAK_USER_PATH honored):
@@ -44,6 +50,7 @@ Run this file directly to check the setup:
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import threading
@@ -114,11 +121,26 @@ def _opt_path(name, value):
     return value.replace("%", "%%")
 
 
-def ssh_argv(entry):
+def control_socket(name):
+    """The per-host ControlMaster socket under the user dir (Windows has no
+    Unix sockets worth trusting for this; it simply gets no reuse)."""
+    if platform.system() == "Windows":
+        return None
+    d = os.path.join(user_dir(), "ssh-ctl")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return None
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    return os.path.join(d, f"{safe}.sock")
+
+
+def ssh_argv(entry, name=None):
     """Hardened ssh command line up to the host, a strict list: no prompts,
-    no forwarding of any kind, no shared connections, no commands from
-    the config, no locale forwarding — and strict host keys against this
-    extension's own file under a fixed alias."""
+    no forwarding of any kind, no commands from the config, no locale
+    forwarding — and strict host keys against this extension's own file
+    under a fixed alias. With `name`, the one per-host ControlMaster
+    socket carries every call (auth happens once per ten minutes)."""
     host = entry.get("host", "")
     _check_field("host", host)
     user = entry.get("user")
@@ -133,14 +155,23 @@ def ssh_argv(entry):
             "-o", "ClearAllForwardings=yes",
             "-o", "ForwardAgent=no",
             "-o", "ForwardX11=no",
-            "-o", "ControlMaster=no",
-            "-o", "ControlPath=none",
             "-o", "RemoteCommand=none",
             "-o", "PermitLocalCommand=no",
             "-o", "SendEnv=-*",
             "-o", "ServerAliveInterval=15",
             "-o", "GlobalKnownHostsFile=none",
             "-o", "HashKnownHosts=no"]
+    # connection reuse: one master per host, the socket under the user dir.
+    # A stale socket (the machine slept, the network changed) is probed
+    # away by ssh itself; -O check below prunes dead masters on error.
+    sock = control_socket(name) if name else None
+    if sock:
+        opts += ["-o", "ControlMaster=auto",
+                 "-o", f"ControlPath={sock}",
+                 "-o", "ControlPersist=10m"]
+    else:
+        opts += ["-o", "ControlMaster=no",
+                 "-o", "ControlPath=none"]
     if entry.get("config_file"):
         opts += ["-F", _opt_path("config_file", entry["config_file"])]
     if mode == "strict" or mode == "accept-new":
@@ -180,17 +211,30 @@ def run_ssh(name, remote_command, timeout=0, stdin_text=None):
     if entry is None:
         known = ", ".join(sorted(HOSTS)) or "none configured"
         return 1, f"unknown host {name!r} (ssh.json hosts: {known})", False
-    argv = ["ssh"] + ssh_argv(entry) + [remote_command]
+    argv = ["ssh"] + ssh_argv(entry, name) + [remote_command]
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT)
     with _live_lock:
         _live.add(proc)
     out = []
+    live_lines = [0]
 
     def pump():
+        """Collect output and mirror its lines to stderr as live progress:
+        the first ten lines while the command runs, then a counter — a
+        long build reports instead of looking wedged."""
+        buf = b""
         for chunk in iter(lambda: proc.stdout.read(65536), b""):
             out.append(chunk)
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                live_lines[0] += 1
+                if live_lines[0] <= 10:
+                    note(line.decode("utf-8", "replace")[:200])
+        if live_lines[0] > 10:
+            note(f"[+{live_lines[0] - 10} more lines streaming]")
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
@@ -230,6 +274,15 @@ def run_ssh(name, remote_command, timeout=0, stdin_text=None):
                  f"{entry.get('host', '')} >> {os.path.join(user_dir(), 'ssh_known_hosts')} "
                  "(then verify the fingerprint out of band), or set "
                  f'"known_hosts": "accept-new" for this host]')
+    if proc.returncode != 0 and control_socket(name):
+        # a refused connection through a stale master: prune the socket so
+        # the next call builds a fresh one instead of failing forever
+        low = text.lower()
+        if "control socket" in low or "mux" in low:
+            try:
+                os.unlink(control_socket(name))
+            except OSError:
+                pass
     return proc.returncode, text, False
 
 
