@@ -176,49 +176,63 @@ fn default_answer(line: &str, default: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn wizard() -> Result<(), String> {
+pub(crate) fn wizard(preset_arg: Option<&str>) -> Result<(), String> {
     // step 1 — provider. Alphabetical, plus `custom` for a base URL we do
     // not know. esc here (or at any later step) aborts the whole thing: no
-    // partial config is written.
+    // partial config is written. A provider named on the command line
+    // (`/login openai`) answers this step up front.
     let list = presets();
-    let mut items: Vec<String> = list
-        .iter()
-        .map(|p| {
-            let base = if p.base_url.is_empty() {
-                "(URL prompted)".to_string()
-            } else {
-                p.base_url.clone()
+    let fast = preset_arg.is_some_and(|name| name != "custom");
+    let picked: Option<usize> = match preset_arg {
+        // `custom` has no catalog values to prefill: it still asks
+        Some("custom") => None,
+        Some(wanted) => Some(
+            list.iter()
+                .position(|p| p.name == wanted)
+                .ok_or_else(|| format!("unknown provider '{wanted}' — run /login to pick one"))?,
+        ),
+        None => {
+            let mut items: Vec<String> = list
+                .iter()
+                .map(|p| {
+                    let base = if p.base_url.is_empty() {
+                        "(URL prompted)".to_string()
+                    } else {
+                        p.base_url.clone()
+                    };
+                    format!("{:<26} {}", p.name, base)
+                })
+                .collect();
+            items.push("custom".to_string());
+            let Some(idx) = crate::term::lineedit::pick("Add a provider:", &items, true) else {
+                eprintln!(
+                    "{}aborted{}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                );
+                return Ok(());
             };
-            format!("{:<26} {}", p.name, base)
-        })
-        .collect();
-    items.push("custom".to_string());
-    let Some(idx) = crate::term::lineedit::pick("Add a provider:", &items, true) else {
-        eprintln!(
-            "{}aborted{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-        return Ok(());
+            (idx < list.len()).then_some(idx)
+        }
     };
-    let (preset, preset_name): (Option<&Preset>, String) = if idx == list.len() {
-        (None, String::new())
-    } else {
-        (Some(&list[idx]), list[idx].name.clone())
-    };
+    let preset: Option<&Preset> = picked.map(|i| &list[i]);
     // a second subscription to the same provider (two OpenCode Go keys) is a
     // second provider entry: prefill the next free name so the new one never
     // silently overwrites the first
-    let preset_name = if preset.is_some() {
-        let cfg = config::load();
-        next_free_name(&preset_name, |n| cfg.providers.contains_key(n))
-    } else {
-        preset_name
+    let preset_name = match preset {
+        Some(p) => {
+            let cfg = config::load();
+            next_free_name(&p.name, |n| cfg.providers.contains_key(n))
+        }
+        None => String::new(),
     };
 
     // name and URL are decided before the key so esc during the key step
-    // still has nothing to undo — nothing is written until the key is in
+    // still has nothing to undo — nothing is written until the key is in.
+    // The fast path takes the catalog entry as typed instead of asking for
+    // values it already knows.
     let name = match &preset {
+        Some(_) if fast => preset_name.clone(),
         Some(_) => prompt_with_default("Provider name", &preset_name).ok_or("cancelled")?,
         None => prompt("Provider name (e.g. my-proxy)").ok_or("cancelled")?,
     };
@@ -265,6 +279,7 @@ pub(crate) fn wizard() -> Result<(), String> {
             format!("https://{res}.openai.azure.com/openai/v1")
         }
         _ => match &preset {
+            Some(p) if fast => p.base_url.clone(),
             Some(p) => prompt_with_default("Base URL", &p.base_url).ok_or("cancelled")?,
             None => prompt("Base URL (e.g. https://api.deepseek.com/v1)").ok_or("cancelled")?,
         },
@@ -274,6 +289,13 @@ pub(crate) fn wizard() -> Result<(), String> {
     // uri character" from the model fetch, and the wizard would happily write
     // the broken base URL to config once a model id was typed
     validate_base_url(&base_url)?;
+    if fast {
+        eprintln!(
+            "{}provider {name} · {kind} · {base_url}{}",
+            crate::theme::err().dim,
+            crate::theme::err().reset
+        );
+    }
 
     // step 2 — a ChatGPT subscription login (kind codex) takes no API key:
     // the OAuth browser flow owns every step from here
@@ -398,8 +420,11 @@ fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         return Err("ChatGPT login needs a terminal (the browser callback flow)".into());
     }
-    let flow = crate::providers::chatgpt_oauth::start_login()?;
-    let (callback, port) = crate::providers::chatgpt_oauth::spawn_callback_server()?;
+    // the callback server comes first: the authorize URL has to carry the
+    // port it actually bound (1455 when free, any free loopback port else)
+    let server = crate::providers::chatgpt_oauth::spawn_callback_server()?;
+    let redirect = crate::providers::chatgpt_oauth::redirect_uri(server.port());
+    let flow = crate::providers::chatgpt_oauth::start_login(&redirect)?;
     eprintln!(
         "{}opening the browser to sign in with ChatGPT …{}",
         crate::theme::err().dim,
@@ -413,16 +438,15 @@ fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
     );
     crate::platform::open_url(&flow.url);
     eprintln!(
-        "{}waiting for the login callback on http://127.0.0.1:{port}/auth/callback — or paste the redirect URL here{}",
+        "{}waiting for the login callback on {redirect}{}",
         crate::theme::err().dim,
         crate::theme::err().reset
     );
-    let pasted = prompt("Redirect URL (empty = keep waiting for the browser)");
-    let url = match pasted {
-        Some(u) => u,
-        None => callback
-            .recv_timeout(std::time::Duration::from_secs(600))
-            .map_err(|_| "login timed out (10 min) — run /login again".to_string())?,
+    // whichever comes first ends the wait: the browser callback (no
+    // keystroke needed) or a redirect URL pasted here. esc/ctrl-c cancel.
+    // The server is dropped on every exit path below, freeing its port.
+    let Some(url) = wait_for_login(server.urls())? else {
+        return cancelled();
     };
     let token = crate::providers::chatgpt_oauth::manual_complete(flow, &url)?;
     let models = crate::providers::codex::CHANNEL_MODELS;
@@ -451,6 +475,116 @@ fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
         crate::providers::chatgpt_oauth::auth_file_display().display()
     );
     Ok(())
+}
+
+/// How long one login may sit waiting for the browser.
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Wait for whichever finishes the login first: the browser callback or a
+/// redirect URL pasted here. Both are polled from a raw-mode read, so the
+/// callback never waits for a keystroke (a cooked-mode `read_line` blocked
+/// past the browser's redirect, leaving the terminal waiting after the page
+/// already said "sign-in complete") and esc cancels without Enter.
+/// Typed bytes are echoed; backspace edits; enter submits the pasted URL.
+fn wait_for_login(urls: &std::sync::mpsc::Receiver<String>) -> Result<Option<String>, String> {
+    let p = crate::theme::err();
+    let prompt = format!(
+        "{}Redirect URL (or just wait for the browser — esc cancels): {}",
+        p.dim, p.reset
+    );
+    let Some(mut term) = crate::platform::RawTerm::acquire(1, 0) else {
+        // no raw mode (a terminal that refuses termios): the browser is the
+        // only path left, so wait on it alone
+        eprintln!("{prompt}");
+        eprintln!(
+            "{}(keyboard input unavailable — waiting for the browser){}",
+            p.dim, p.reset
+        );
+        return urls
+            .recv_timeout(LOGIN_TIMEOUT)
+            .map(Some)
+            .map_err(|_| "login timed out (10 min) — run /login again".to_string());
+    };
+    let mut out = std::io::stderr();
+    let _ = write!(out, "{prompt}");
+    let _ = out.flush();
+    wait_for_input(urls, &mut || term.next_byte(), &mut out, LOGIN_TIMEOUT)
+}
+
+/// The race itself, with the key source and the echo sink injected so the
+/// terminal-less test drives the same loop the prompt does.
+fn wait_for_input(
+    callback: &std::sync::mpsc::Receiver<String>,
+    next: &mut impl FnMut() -> crate::platform::RawByte,
+    out: &mut impl Write,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, String> {
+    use crate::platform::RawByte;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buffer = String::new();
+    loop {
+        // the browser first: a callback that already landed must never wait
+        // for a keystroke — that was the bug this loop replaces
+        if let Ok(url) = callback.try_recv() {
+            let _ = writeln!(out);
+            return Ok(Some(url));
+        }
+        // a SIGINT that cannot become a key (raw mode keeps it out of ISIG)
+        // still sets the cooperative flag; treat it as the cancel it is
+        if crate::core::http::interrupted() {
+            crate::core::http::clear_interrupt();
+            let _ = writeln!(out);
+            return Ok(None);
+        }
+        match next() {
+            RawByte::Key(0x03) | RawByte::Key(0x04) => {
+                let _ = writeln!(out);
+                return Ok(None);
+            }
+            RawByte::Key(0x1b) => {
+                // a lone esc cancels; an arrow or home/end key (ESC + CSI)
+                // is a stray keypress, so swallow the sequence and keep
+                // waiting instead of tearing the login down
+                match next() {
+                    RawByte::Timeout => {
+                        let _ = writeln!(out);
+                        return Ok(None);
+                    }
+                    RawByte::Key(b'[' | b'O') => loop {
+                        match next() {
+                            RawByte::Key(b) if (0x40..=0x7e).contains(&b) => break,
+                            RawByte::Key(_) => {}
+                            RawByte::Timeout => break,
+                        }
+                    },
+                    RawByte::Key(_) => {}
+                }
+            }
+            RawByte::Key(b'\r' | b'\n') => {
+                let _ = writeln!(out);
+                let value = buffer.trim().to_string();
+                return Ok((!value.is_empty()).then_some(value));
+            }
+            RawByte::Key(0x7f | 0x08) => {
+                if buffer.pop().is_some() {
+                    let _ = write!(out, "{}", crate::theme::cursor().erase_char);
+                    let _ = out.flush();
+                }
+            }
+            RawByte::Key(b) if b.is_ascii_graphic() || b == b' ' => {
+                buffer.push(b as char);
+                let _ = out.write_all(&[b]);
+                let _ = out.flush();
+            }
+            RawByte::Key(_) => {}
+            RawByte::Timeout => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = writeln!(out);
+                    return Err("login timed out (10 min) — run /login again".into());
+                }
+            }
+        }
+    }
 }
 
 /// The catalog entry's env var, matching the registry (AZURE_OPENAI_API_KEY
@@ -487,8 +621,122 @@ fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_answer, next_free_name, validate_base_url};
+    use super::{default_answer, next_free_name, validate_base_url, wait_for_input};
+    use crate::platform::RawByte;
     use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    /// Feeds a fixed byte script to the wait loop, one key per call; a spent
+    /// script times out like an idle terminal.
+    fn keys(script: &[u8]) -> impl FnMut() -> RawByte {
+        let script = script.to_vec();
+        let mut at = 0usize;
+        move || {
+            let Some(&b) = script.get(at) else {
+                return RawByte::Timeout;
+            };
+            at += 1;
+            RawByte::Key(b)
+        }
+    }
+
+    /// The regression: the browser page said "sign-in complete" while the
+    /// terminal still waited for a keypress, because the prompt read stdin
+    /// before it ever looked at the callback channel.
+    #[test]
+    fn a_browser_callback_ends_the_wait_without_a_keystroke() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let url = "http://127.0.0.1:1455/auth/callback?code=x&state=y";
+        tx.send(url.to_string()).unwrap();
+        let got = wait_for_input(
+            &rx,
+            &mut || unreachable!("the callback must be read before any key"),
+            &mut Vec::new(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(got.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn a_pasted_redirect_url_is_submitted_on_enter() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let url = "http://127.0.0.1:1455/auth/callback?code=x&state=y";
+        let mut script = url.as_bytes().to_vec();
+        script.push(b'\r');
+        let got = wait_for_input(
+            &rx,
+            &mut keys(&script),
+            &mut Vec::new(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(got.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn esc_ctrl_c_and_an_empty_enter_cancel_the_login() {
+        for script in [&[0x1b][..], &[0x03][..], &[0x04][..], b"\r"] {
+            let (_tx, rx) = std::sync::mpsc::channel();
+            let got = wait_for_input(
+                &rx,
+                &mut keys(script),
+                &mut Vec::new(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(got, None, "{script:?} must cancel");
+        }
+    }
+
+    #[test]
+    fn backspace_edits_the_pasted_url() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let got = wait_for_input(
+            &rx,
+            &mut keys(b"httx\x7f\r"),
+            &mut Vec::new(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(got.as_deref(), Some("htt"));
+    }
+
+    #[test]
+    fn an_arrow_key_is_not_an_esc_cancel() {
+        // the esc prefix of a CSI key must not tear the login down: only a
+        // bare esc (no sequence behind it) cancels
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let got = wait_for_input(
+            &rx,
+            &mut keys(b"\x1b[Aurl\r"),
+            &mut Vec::new(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(got.as_deref(), Some("url"));
+    }
+
+    #[test]
+    fn a_silent_login_times_out() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let err = wait_for_input(
+            &rx,
+            &mut || RawByte::Timeout,
+            &mut Vec::new(),
+            Duration::from_millis(0),
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_provider_name_is_refused_before_any_prompt() {
+        // `/login nope` fails loudly instead of falling back to the menu
+        let err = super::wizard(Some("nope")).unwrap_err();
+        assert!(err.contains("unknown provider 'nope'"), "{err}");
+        assert!(err.contains("/login"), "the error names the menu: {err}");
+    }
 
     #[test]
     fn base_url_validation_refuses_whitespace_and_missing_schemes() {

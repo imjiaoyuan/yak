@@ -190,6 +190,9 @@ pub struct Cursor {
     pub clear_line: &'static str,
     /// erase the whole screen and home the cursor (`\x1b[2J\x1b[H`)
     pub clear_screen: &'static str,
+    /// erase the character before the cursor: backspace, space, backspace —
+    /// for a hand-rolled echo that edits in place
+    pub erase_char: &'static str,
     /// are the row-control helpers below live? A piped stderr must not
     /// print them: the helpers then degrade to printing only (no rewriting)
     pub rows_live: bool,
@@ -279,12 +282,14 @@ static CURSOR: LazyLock<Cursor> = LazyLock::new(|| {
         Cursor {
             clear_line: "\r\x1b[2K",
             clear_screen: "\x1b[2J\x1b[H",
+            erase_char: "\x08 \x08",
             rows_live: true,
         }
     } else {
         Cursor {
             clear_line: "",
             clear_screen: "",
+            erase_char: "",
             rows_live: false,
         }
     }

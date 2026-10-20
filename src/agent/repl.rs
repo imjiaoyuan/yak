@@ -979,7 +979,7 @@ fn repl_command(
             for line in [
                 "/model         switch model",
                 "/thinking      reasoning effort",
-                "/login         add a provider",
+                "/login         add a provider (or /login NAME to skip the list)",
                 "/logout        remove one",
                 "/resume        load a past session",
                 "/tree          jump between branches of this session",
@@ -1099,7 +1099,7 @@ fn repl_command(
                 );
                 return false;
             }
-            match crate::commands::login::wizard() {
+            match crate::commands::login::wizard((!arg.is_empty()).then_some(arg)) {
                 Ok(()) => {
                     // the wizard writes the picked model as the stored
                     // default: adopt it into the live session when none is

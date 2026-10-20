@@ -16,7 +16,6 @@ use crate::core::sha256;
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const SCOPE: &str = "openid profile email offline_access";
 /// The JWT claim path holding the account id (the `chatgpt-account-id`
 /// request header needs it).
@@ -165,19 +164,31 @@ pub fn account_id(access: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// The loopback callback URL for a server bound to `port`. `127.0.0.1`, not
+/// `localhost`: the listener binds IPv4 only, and a browser that resolves
+/// `localhost` to `::1` first would never reach it (the Codex CLI redirects
+/// to the same host for the same reason).
+pub fn redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/auth/callback")
+}
+
 /// One login attempt. The caller opens the URL and feeds the callback.
 pub struct LoginFlow {
     pub url: String,
     verifier: String,
     state: String,
+    /// the redirect URI this URL was authorized with: the token exchange has
+    /// to repeat it verbatim, and it carries the port the callback server
+    /// actually bound
+    redirect_uri: String,
 }
 
-pub fn start_login() -> Result<LoginFlow, String> {
+pub fn start_login(redirect_uri: &str) -> Result<LoginFlow, String> {
     let (verifier, challenge) = pkce();
     let state = random_b64url(32);
     let mut url = format!(
         "{AUTHORIZE_URL}?response_type=code&client_id={CLIENT_ID}\
-         &redirect_uri={REDIRECT_URI}&scope={SCOPE}\
+         &redirect_uri={redirect_uri}&scope={SCOPE}\
          &code_challenge={challenge}&code_challenge_method=S256&state={state}\
          &id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=yak"
     );
@@ -186,6 +197,7 @@ pub fn start_login() -> Result<LoginFlow, String> {
         url,
         verifier,
         state,
+        redirect_uri: redirect_uri.to_string(),
     })
 }
 
@@ -217,7 +229,7 @@ impl LoginFlow {
             return Err("state mismatch — not your login callback".into());
         }
         let code = code.ok_or("callback carried no authorization code")?;
-        exchange_code(&code, &self.verifier)
+        exchange_code(&code, &self.verifier, &self.redirect_uri)
     }
 }
 
@@ -262,10 +274,10 @@ fn token_from_response(v: &Value) -> Result<Token, String> {
     })
 }
 
-fn exchange_code(code: &str, verifier: &str) -> Result<Token, String> {
+fn exchange_code(code: &str, verifier: &str, redirect_uri: &str) -> Result<Token, String> {
     let form = format!(
         "grant_type=authorization_code&client_id={CLIENT_ID}\
-         &code={code}&code_verifier={verifier}&redirect_uri={REDIRECT_URI}"
+         &code={code}&code_verifier={verifier}&redirect_uri={redirect_uri}"
     );
     token_from_response(&token_post(&form)?)
 }
@@ -310,17 +322,70 @@ pub fn auth_file_display() -> std::path::PathBuf {
 /// The login callback server: listen on 127.0.0.1:1455/auth/callback and
 /// send each full callback URL (query included) down the channel. The HTTP
 /// parse is handwritten — one GET line is not worth an HTTP server crate.
-/// Returns the receiver and the bound port.
-pub fn spawn_callback_server() -> Result<(std::sync::mpsc::Receiver<String>, u16), String> {
+///
+/// The listener is owned: dropping it frees the port, so a cancelled or a
+/// pasted-URL login leaves no stale server behind to shadow the next one.
+pub struct CallbackServer {
+    port: u16,
+    urls: std::sync::mpsc::Receiver<String>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CallbackServer {
+    /// The port actually bound: 1455 when free, else any free loopback port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The channel the browser's callback URL arrives on.
+    pub fn urls(&self) -> &std::sync::mpsc::Receiver<String> {
+        &self.urls
+    }
+}
+
+impl Drop for CallbackServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn spawn_callback_server() -> Result<CallbackServer, String> {
     use std::io::{BufRead, BufReader};
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 1455)).map_err(|e| {
-        format!("cannot bind port 1455 for the login callback ({e}) — another login running?")
-    })?;
+    // 1455 is the Codex client's port; a second login (or any other holder)
+    // falls back to a free loopback port, which the redirect URI carries
+    // back into the authorize URL, so both ends still agree
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", 1455)) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            std::net::TcpListener::bind(("127.0.0.1", 0))
+                .map_err(|e| format!("cannot bind a loopback port for the login callback ({e})"))?
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot bind port 1455 for the login callback ({e})"
+            ));
+        }
+    };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(1455);
+    // nonblocking accepts: the stop flag has to end the loop without waiting
+    // for one more connection (a cancelled login frees the port at once)
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("cannot poll the login callback socket ({e})"))?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
+        use std::sync::atomic::Ordering::SeqCst;
+        while !stopping.load(SeqCst) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                Err(_) => continue,
+            };
             let mut reader = BufReader::new(match stream.try_clone() {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -330,6 +395,16 @@ pub fn spawn_callback_server() -> Result<(std::sync::mpsc::Receiver<String>, u16
                 continue;
             }
             let path = request_line.split_whitespace().nth(1).unwrap_or("");
+            // only the callback itself (a query included) completes the
+            // login: a favicon probe or a reload of the success page must
+            // not race the real redirect into the waiting channel
+            if !path.starts_with("/auth/callback") || !path.contains('?') {
+                let _ = std::io::Write::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            }
             let url = format!("http://127.0.0.1:{port}{path}");
             let _ = std::io::Write::write_all(
                 &mut stream,
@@ -338,9 +413,16 @@ pub fn spawn_callback_server() -> Result<(std::sync::mpsc::Receiver<String>, u16
             if tx.send(url).is_err() {
                 return;
             }
+            // one callback ends the wait: stop listening so a reloaded
+            // success page cannot feed a second URL into the exchange
+            return;
         }
     });
-    Ok((rx, port))
+    Ok(CallbackServer {
+        port,
+        urls: rx,
+        stop,
+    })
 }
 
 #[cfg(test)]
@@ -372,8 +454,59 @@ mod tests {
     }
 
     #[test]
+    fn a_redirect_uri_names_the_loopback_address_the_server_binds() {
+        // `localhost` can resolve to ::1 first while the listener is IPv4: a
+        // browser would then show a connection error and the login would sit
+        // waiting for a callback that can never arrive
+        let uri = redirect_uri(1455);
+        assert_eq!(uri, "http://127.0.0.1:1455/auth/callback");
+        assert!(!uri.contains("localhost"));
+        assert!(
+            start_login(&uri)
+                .unwrap()
+                .url
+                .contains("redirect_uri=http://127.0.0.1:1455/auth/callback")
+        );
+    }
+
+    #[test]
+    fn a_callback_request_delivers_the_url_and_other_paths_do_not() {
+        use std::io::{Read, Write};
+        fn get(port: u16, path: &str) -> String {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            body
+        }
+        let server = spawn_callback_server().unwrap();
+        let port = server.port();
+        // a favicon probe or a reload of the success page must not race the
+        // real redirect into the channel
+        assert!(get(port, "/favicon.ico").starts_with("HTTP/1.1 404"));
+        assert!(
+            server
+                .urls()
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        let page = get(port, "/auth/callback?code=abc&state=xyz");
+        assert!(page.starts_with("HTTP/1.1 200"));
+        assert!(page.contains("Sign-in complete"));
+        let url = server
+            .urls()
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(url.contains("/auth/callback?code=abc&state=xyz"), "{url}");
+    }
+
+    #[test]
     fn callback_state_mismatch_refuses() {
-        let flow = start_login().unwrap();
+        let flow = start_login(&redirect_uri(1455)).unwrap();
         let err = flow.complete("http://localhost:1455/auth/callback?code=x&state=other");
         assert!(err.unwrap_err().contains("state mismatch"));
     }
