@@ -319,7 +319,7 @@ fn repl_help(session: &Session) -> String {
         p.dim
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /reload /exit · !cmd runs shell · /help lists all");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /trust /reload /exit · !cmd runs shell · /help lists all");
     h.push_str(&info_rows(session, "    "));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", model_label(session)),
@@ -410,6 +410,8 @@ const SLASH_COMMANDS: &[&str] = &[
     "/resume",
     "/tree",
     "/export",
+    "/name",
+    "/trust",
     "/reload",
 ];
 
@@ -994,6 +996,9 @@ fn repl_command(
                 "/resume [ID]   load a past session (id/prefix, or pick)",
                 "/tree          jump between branches of this session",
                 "/export [PATH] write this conversation to markdown",
+                "/name [TEXT]   show, set or clear this session's title",
+                "/trust [off]  vouch for (or drop) this project's extensions",
+                "/trust        vouch for this project's extensions",
                 "/compact [TEXT] fold the context now, with optional focus",
                 "/clear         fresh session",
                 "/reload        reload skills/extensions",
@@ -1209,6 +1214,73 @@ fn repl_command(
                 crate::theme::err().reset
             ),
         },
+        "/name" => match session.conversation_id.clone() {
+            // the hand-set title the lists show instead of the preview
+            // quote; `/name` with no argument shows (or clears with `off`)
+            Some(cid) => {
+                if arg.is_empty() {
+                    let current = crate::agent::names::thread_name(Some(&cid))
+                        .unwrap_or_else(|| "(none)".to_string());
+                    eprintln!(
+                        "{}{current} — /name TEXT sets it, /name off clears it{}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
+                    );
+                } else {
+                    let clear = arg == "off";
+                    match crate::agent::names::set_thread_name(
+                        &cid,
+                        if clear { None } else { Some(arg) },
+                    ) {
+                        Ok(()) => eprintln!(
+                            "{}{}{}",
+                            crate::theme::err().dim,
+                            if clear {
+                                "name cleared".to_string()
+                            } else {
+                                format!("named \"{arg}\"")
+                            },
+                            crate::theme::err().reset
+                        ),
+                        Err(e) => eprintln!("Error: {e}"),
+                    }
+                }
+            }
+            None => eprintln!(
+                "{}no session yet — the first task creates one{}",
+                crate::theme::err().dim,
+                crate::theme::err().reset
+            ),
+        },
+        "/trust" => {
+            // vouch for this project's plugin homes: the decision is the
+            // user's, made at a terminal, never defaulted. `/trust off`
+            // drops the recorded trust again.
+            if arg == "off" {
+                match crate::agent::trust::untrust(&session.cwd) {
+                    Ok(Some(key)) => eprintln!(
+                        "{}untrusted {key} — its .yak/extensions stop loading from the next start{}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
+                    ),
+                    Ok(None) => eprintln!(
+                        "{}this project was not trusted{}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
+                    ),
+                    Err(e) => eprintln!("Error: {e}"),
+                }
+                return false;
+            }
+            match crate::agent::trust::trust(&session.cwd) {
+                Ok(key) => eprintln!(
+                    "{}trusted {key} — its .yak/extensions load from the next start (/reload picks them up now){}",
+                    crate::theme::err().dim,
+                    crate::theme::err().reset
+                ),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
         "/reload" => match crate::agent::ext::Extensions::connect(&session.cwd) {
             Ok(extensions) => {
                 *settings = crate::agent::settings::load();
@@ -1465,13 +1537,13 @@ mod tests {
             .map(|c| c.strip_prefix('/').unwrap())
             .collect();
         for gone in [
-            "memory", "init", "settings", "tools", "ask", "quit", "mcp", "trust", "skills",
+            "memory", "init", "settings", "tools", "ask", "quit", "mcp", "skills",
         ] {
             assert!(!names.contains(&gone), "{gone} should be gone");
         }
         for kept in [
             "model", "thinking", "login", "logout", "resume", "clear", "reload", "tree", "export",
-            "compact", "help", "exit",
+            "compact", "trust", "name", "help", "exit",
         ] {
             assert!(names.contains(&kept), "{kept} should be listed");
         }
