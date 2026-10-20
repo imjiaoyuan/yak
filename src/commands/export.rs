@@ -11,12 +11,17 @@ use crate::value_spec;
 const SPECS: &[OptSpec] = &[
     flag_spec!("help", Some('h'), "Show this message and exit"),
     value_spec!("thread", None, "Thread id to export", "ID"),
+    flag_spec!(
+        "html",
+        None,
+        "Write one self-contained HTML file instead of markdown"
+    ),
 ];
 
 fn help() -> String {
     render_help(
         "yak export",
-        "Export a conversation as a markdown file",
+        "Export a conversation as markdown or self-contained HTML",
         SPECS,
         &[(
             "PATH",
@@ -36,15 +41,32 @@ pub fn run(argv: &[String]) -> i32 {
             return 1;
         }
     };
+    let path = args.positionals.first().map(String::as_str);
+    let html = args.flag(&["html"]);
     let result = match args.opt(&["thread"]) {
-        Some(cid) => crate::core::export::export_thread(
-            cid,
-            &cwd,
-            args.positionals.first().map(String::as_str),
-        )
-        .map(|path| (cid.to_string(), path)),
+        Some(cid) => {
+            if html {
+                crate::core::export::export_html_thread(cid, &cwd, path)
+                    .map(|path| (cid.to_string(), path))
+            } else {
+                crate::core::export::export_thread(cid, &cwd, path)
+                    .map(|path| (cid.to_string(), path))
+            }
+        }
         None => {
-            crate::core::export::export_latest(&cwd, args.positionals.first().map(String::as_str))
+            // no thread named: what -c would continue, in either format
+            let cid = match crate::core::export::latest_thread_id(&cwd) {
+                Ok(cid) => cid,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            if html {
+                crate::core::export::export_html_thread(&cid, &cwd, path).map(|path| (cid, path))
+            } else {
+                crate::core::export::export_thread(&cid, &cwd, path).map(|path| (cid, path))
+            }
         }
     };
     match result {
