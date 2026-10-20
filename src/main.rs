@@ -28,6 +28,11 @@ Available commands:
   install    Install a git package (also: remove, list)
   threads    List recent conversations (--all, --json, -n N)
 
+Notable flags:
+  --rpc          Long-lived JSONL control mode (commands in, events out)
+  --json         One task as a JSON event stream
+  -r, --resume   Browse past sessions and continue one
+
 Flags:
   -h, --help      Show this message and exit
   -v, --version   Show the version number
@@ -66,6 +71,10 @@ fn dispatch(argv: &[String]) -> i32 {
         }
         Some("export") => commands::export::run(argv),
         Some("threads") => commands::threads::run(argv),
+        // the long-lived control mode: routes before the agent's own flag
+        // table so its stdin belongs to the protocol, never to a piped
+        // prompt
+        _ if argv.iter().any(|a| a == "--rpc") => commands::rpc::run(argv),
         Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
             commands::pkg::run(argv)
         }

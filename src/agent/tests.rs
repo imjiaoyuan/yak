@@ -204,6 +204,7 @@ fn deny_callbacks() -> RunCallbacks<'static> {
     RunCallbacks {
         on_update: Box::leak(Box::new(|_| {})),
         on_approval: Box::leak(Box::new(|_| ApprovalResponse::Deny)),
+        steer: Box::leak(Box::new(|| None)),
     }
 }
 
@@ -558,6 +559,7 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         RunCallbacks {
             on_update: &mut on_update,
             on_approval: &mut |_| ApprovalResponse::Deny,
+            steer: &mut || None,
         },
     )
     .expect("the extension compaction must succeed");
@@ -1051,6 +1053,7 @@ fn an_approval_ask_reaches_a_subscribed_extension_and_auto_allows_stay_silent() 
         RunCallbacks {
             on_update: &mut |_| {},
             on_approval: &mut |_| ApprovalResponse::Allow,
+            steer: &mut || None,
         },
     )
     .expect("the ask is answered by the callback");
@@ -1129,6 +1132,11 @@ fn manual_compaction_folds_the_seed_with_the_focus() {
                 )
                 .as_bytes(),
             );
+            // the run settles on the second round: stop serving so `join`
+            // below can return (the pattern every mock here follows)
+            if seen2.lock().unwrap().len() >= 2 {
+                break;
+            }
         }
     });
     let model = mock_model(port);
@@ -1271,6 +1279,7 @@ fn an_unknown_provider_fails_without_stream_recovery() {
         RunCallbacks {
             on_update: &mut update,
             on_approval: &mut deny,
+            steer: &mut || None,
         },
     );
     let error = match result {
@@ -1279,4 +1288,152 @@ fn an_unknown_provider_fails_without_stream_recovery() {
     };
     assert_eq!(error.message, "Unknown provider kind: unknown-wire");
     assert_eq!(recovered, 0);
+}
+
+/// A steering message handed back after a tool round becomes the next
+/// round's prompt: the model sees it after its tool calls, before the next
+/// request — never spliced into a round in flight. A plain tool-free round
+/// settles the run without polling (the next message is the caller's).
+#[test]
+fn a_steered_message_runs_as_the_next_rounds_prompt() {
+    use std::io::{Read, Write};
+    // one request per connection, like every mock here: read the head and
+    // body, remember the body, answer with the scripted round
+    let read_and_body = |c: &mut std::net::TcpStream| -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if c.read(&mut byte).unwrap_or(0) == 0 {
+                break;
+            }
+            buf.push(byte[0]);
+            let Some(i) = buf.windows(4).rposition(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if buf.len() - i - 4 >= len {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        text.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let server = std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let mut c = conn;
+            let body = read_and_body(&mut c);
+            seen2.lock().unwrap().push(body);
+            // round 1 calls a tool (a read-tier no-op), so the loop reaches
+            // the steer poll; round 2 answers plain and settles the run
+            let out = if seen2.lock().unwrap().len() == 1 {
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"noop\",\"arguments\":\"{}\"}}]}}]}\n\n\
+                 data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                 data: [DONE]\n\n"
+            } else {
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"steered done\"}}]}\n\n\
+                 data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                 data: [DONE]\n\n"
+            };
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{out}",
+                    out.len()
+                )
+                .as_bytes(),
+            );
+            // the run settles on the second round: stop serving so `join`
+            // below can return (the pattern every mock here follows)
+            if seen2.lock().unwrap().len() >= 2 {
+                break;
+            }
+        }
+    });
+    let model = mock_model(port);
+    // the no-op read-tier tool every steered round calls
+    struct Noop;
+    impl tools::Tool for Noop {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn tier(&self) -> super::approval::Tier {
+            super::approval::Tier::Read
+        }
+        fn description(&self) -> &str {
+            "no-op"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn preview(&self, _args: &serde_json::Value) -> String {
+            "noop".into()
+        }
+        fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _cwd: &std::path::Path,
+            _log: &mut dyn FnMut(tools::ToolProgress),
+        ) -> tools::ToolOutput {
+            tools::ToolOutput::ok("nothing")
+        }
+    }
+    let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(Noop)];
+    let opts = test_opts();
+    let mut approval = approval::ApprovalConfig::default();
+    // steer exactly once: the first poll (after round 1's tool) hands the
+    // message over, the second (never reached — round 2 settles) would not
+    let mut steered = false;
+    let mut steer = || {
+        if steered {
+            None
+        } else {
+            steered = true;
+            Some(("and now this".to_string(), Vec::new()))
+        }
+    };
+    let mut update = |_: AgentUpdate| {};
+    let mut deny = |_: ApprovalRequest<'_>| ApprovalResponse::Deny;
+    let outcome = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "first",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        RunCallbacks {
+            on_update: &mut update,
+            on_approval: &mut deny,
+            steer: &mut steer,
+        },
+    )
+    .expect("the steered run completes");
+    let prompts = seen.lock().unwrap().clone();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "the steered message must drive a second request: {prompts:?}"
+    );
+    assert!(prompts[1].contains("and now this"), "{prompts:?}");
+    // both user messages are in the final history, in order
+    let texts: Vec<&str> = outcome
+        .history
+        .iter()
+        .filter_map(|m| match m {
+            Msg::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["first", "and now this"]);
+    server.join().unwrap();
 }

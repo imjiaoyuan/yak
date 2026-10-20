@@ -486,6 +486,9 @@ impl Session {
                 }
             }
         };
+        // the terminal has no live input surface mid-run (the KeyWatcher
+        // swallows everything but the interrupt keys), so nothing can steer
+        let mut no_steering = || None;
         // esc or ctrl-c during a running task requests a cooperative
         // interrupt; the watcher is paused around approval prompts, which
         // read the same stdin
@@ -517,6 +520,7 @@ impl Session {
             RunCallbacks {
                 on_update: &mut on_update,
                 on_approval: &mut on_approval,
+                steer: &mut no_steering,
             },
         );
         watcher.stop();
@@ -666,10 +670,67 @@ impl Session {
     /// answer — the shape a supervising process parses (the `subagent`
     /// example extension, an editor plugin, CI). Approvals still work: their
     /// prompt goes to stderr, so stdout stays parseable.
+    /// The public entry for a supervising surface (the rpc mode): the same
+    /// streamed task with every callback injected — events, approvals and
+    /// steering all belong to the caller.
+    pub fn run_task_streamed_pub(
+        &mut self,
+        prompt: &str,
+        attachments: Vec<crate::providers::Attachment>,
+        wire: &mut dyn FnMut(&serde_json::Value),
+        approval_sink: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+        steer: &mut dyn FnMut() -> Option<(String, Vec<crate::providers::Attachment>)>,
+    ) -> Result<(), String> {
+        self.run_task_streamed(prompt, attachments, wire, approval_sink, steer)
+            .map(|_| ())
+    }
+
+    /// The `--json` shape of [`Self::run_task_streamed`]: stdout events,
+    /// the unattended-allow approval policy, no steering.
     fn run_task_json(
         &mut self,
         prompt: &str,
         attachments: Vec<crate::providers::Attachment>,
+    ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        // --approval allow answers the ask-list prompt instead of failing
+        // closed: a subagent child runs with stdin closed, and a hard deny
+        // would just send the model looking for unlisted ways to do the same
+        // thing. The hardcoded refusals never consult an approval prompt at
+        // all, so they still deny under this flag.
+        let unattended_allow = self.unattended_allow;
+        let mut wire = |event: &serde_json::Value| emit_event(event);
+        let mut on_approval = move |req: ApprovalRequest| {
+            if unattended_allow {
+                emit_event(&serde_json::json!({
+                    "type": "approval",
+                    "tool": req.tool,
+                    "preview": req.preview,
+                    "pattern": req.pattern,
+                    "answer": "allow",
+                }));
+                return ApprovalResponse::Allow;
+            }
+            approval::prompt_approval(&req)
+        };
+        // a one-shot task has no input surface while it runs: nothing
+        // can arrive to steer it
+        let mut no_steering = || None;
+        self.run_task_streamed(
+            prompt,
+            attachments,
+            &mut wire,
+            &mut on_approval,
+            &mut no_steering,
+        )
+    }
+
+    fn run_task_streamed(
+        &mut self,
+        prompt: &str,
+        attachments: Vec<crate::providers::Attachment>,
+        wire: &mut dyn FnMut(&serde_json::Value),
+        approval_sink: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+        steer: &mut dyn FnMut() -> Option<(String, Vec<crate::providers::Attachment>)>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
         let Some(model) = self.model.as_ref() else {
             return Err(
@@ -704,7 +765,7 @@ impl Session {
         // the supervisor's handle on the conversation: a resumed thread up
         // front (and a fresh one below, the moment its first round lands),
         // so a caller can label or continue what it started
-        emit_event(&session_json(self.conversation_id.as_deref(), &self.cwd));
+        wire(&session_json(self.conversation_id.as_deref(), &self.cwd));
         let mut on_update = |u: AgentUpdate| {
             match &u {
                 AgentUpdate::ReasoningDelta(text) => {
@@ -736,7 +797,7 @@ impl Session {
                         round_started,
                     );
                     if created && let Some(id) = self.conversation_id.as_deref() {
-                        emit_event(&session_json(Some(id), &self.cwd));
+                        wire(&session_json(Some(id), &self.cwd));
                     }
                     round_reasoning.clear();
                     round_started = std::time::Instant::now();
@@ -744,27 +805,9 @@ impl Session {
                 }
                 _ => {}
             }
-            emit_event(&event_json(&u));
+            wire(&event_json(&u));
         };
-        // --approval allow answers the ask-list prompt instead of failing
-        // closed: a subagent child runs with stdin closed, and a hard deny
-        // would just send the model looking for unlisted ways to do the same
-        // thing. The hardcoded refusals never consult an approval prompt at
-        // all, so they still deny under this flag.
-        let unattended_allow = self.unattended_allow;
-        let mut on_approval = |req: ApprovalRequest| {
-            if unattended_allow {
-                emit_event(&serde_json::json!({
-                    "type": "approval",
-                    "tool": req.tool,
-                    "preview": req.preview,
-                    "pattern": req.pattern,
-                    "answer": "allow",
-                }));
-                return ApprovalResponse::Allow;
-            }
-            approval::prompt_approval(&req)
-        };
+        let mut on_approval = |req: ApprovalRequest| approval_sink(req);
         // no KeyWatcher here: stdin belongs to the caller (usually a pipe),
         // and ctrl-c kills this process like any other child
         let result = run_agent(
@@ -780,6 +823,7 @@ impl Session {
             RunCallbacks {
                 on_update: &mut on_update,
                 on_approval: &mut on_approval,
+                steer,
             },
         );
         crate::core::http::clear_interrupt();
@@ -787,7 +831,7 @@ impl Session {
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
-                emit_event(&serde_json::json!({
+                wire(&serde_json::json!({
                     "type": "result",
                     "thread": self.conversation_id,
                     "text": &outcome.final_text,
@@ -803,7 +847,7 @@ impl Session {
             // a failed round still saw real work: the stream reports it and
             // the round in flight persists, exactly as in the terminal path
             Err(failure) => {
-                emit_event(&serde_json::json!({
+                wire(&serde_json::json!({
                     "type": "error",
                     "thread": self.conversation_id,
                     "message": &failure.message,
@@ -950,7 +994,8 @@ fn persist_round(
 /// One event as the `--json` stream writes it. The mapping is a contract:
 /// the field names are what supervising processes parse, so a new
 /// [`AgentUpdate`] variant gets a new `type` rather than a reshuffle.
-fn event_json(u: &AgentUpdate) -> serde_json::Value {
+/// Public to the rpc mode, which emits the same shapes on its own wire.
+pub(crate) fn event_json(u: &AgentUpdate) -> serde_json::Value {
     match u {
         AgentUpdate::Delta(text) => serde_json::json!({"type": "text", "text": text}),
         // internal persistence marker: run_task_json intercepts it before

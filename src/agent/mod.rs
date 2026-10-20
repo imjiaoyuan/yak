@@ -6,11 +6,13 @@ pub mod approval;
 pub mod blacklist;
 pub mod compact;
 pub mod ext;
+pub mod names;
 pub mod repl;
 pub mod session;
 pub mod settings;
 pub mod system_prompt;
 pub mod tools;
+pub mod trust;
 
 use crate::agent::ext::Extensions;
 use crate::core::http::{StopReason, Usage};
@@ -184,6 +186,11 @@ pub struct RunRequest<'a> {
 pub struct RunCallbacks<'a> {
     pub on_update: &'a mut dyn FnMut(AgentUpdate),
     pub on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
+    /// a message that arrives while the run is between rounds: polled after
+    /// each assistant turn's tool calls and before the next model request,
+    /// where it becomes the next `pending` prompt (steering). The one-shot
+    /// surfaces pass a closure that always answers None.
+    pub steer: &'a mut dyn FnMut() -> Option<(String, Vec<crate::providers::Attachment>)>,
 }
 
 /// The cache anchor a run starts its first round from: the caller's, when it
@@ -216,6 +223,7 @@ pub fn run_agent(
     let RunCallbacks {
         on_update,
         on_approval,
+        steer,
     } = cb;
     let mut tool_defs: Vec<ToolDef> = Vec::with_capacity(tools.len());
     tool_defs.extend(
@@ -644,6 +652,13 @@ pub fn run_agent(
         });
         if interrupted {
             break;
+        }
+        // a steering message that arrived while the tools ran: it becomes
+        // the next round's prompt, delivered after this turn's tool calls
+        // and before the next model request — the one injection point where
+        // the conversation is at a coherent boundary
+        if let Some((text, attachments)) = steer() {
+            pending = Some(Msg::user_with(text, attachments));
         }
     }
 
