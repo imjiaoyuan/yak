@@ -1333,11 +1333,12 @@ def main():
     assert "projmark" not in (seen.get("tools") or []), \
         f"the untrusted project's tool leaked into the registry: {seen.get('tools')}"
     # trust it: the same extension loads on the next start. the key is the
-    # physical path: yak keys the table by getcwd(), which resolves symlinks
-    # (macOS tempdirs live behind /var -> /private/var), while mkdtemp hands
-    # back the logical one
+    # path exactly as the agent's cwd spells it: getcwd() resolves macOS
+    # tempdir symlinks (/var -> /private/var) while mkdtemp hands back the
+    # logical one, and windows runners keep the 8.3 short name (RUNNER~1)
+    # where realpath spells the long one — record both spellings
     with open(os.path.join(user, "trusted-projects.json"), "w") as f:
-        json.dump({os.path.realpath(trust_work): "ci"}, f)
+        json.dump({trust_work: "ci", os.path.realpath(trust_work): "ci"}, f)
     tp2 = run([binary, "--no-session", "-m", "mock/m-wc",
                "call the projmark tool with text 'now trusted'"],
               env, cwd=trust_work, stdin=subprocess.DEVNULL)
