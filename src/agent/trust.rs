@@ -177,8 +177,14 @@ mod tests {
             Some(false)
         );
 
-        // recorded: trusted
-        std::fs::write(&table, format!("{{\"{}\": \"today\"}}", root.display())).unwrap();
+        // recorded: trusted (serialized, not hand-spelled: a Windows path's
+        // backslashes are not JSON escapes)
+        let recorded = {
+            let mut t = BTreeMap::new();
+            t.insert(key_of(&root).unwrap(), "today".to_string());
+            serde_json::to_string(&t).unwrap()
+        };
+        std::fs::write(&table, recorded).unwrap();
         assert_eq!(
             trusted_at(&table, &root.join("src/bin")).unwrap(),
             Some(true)

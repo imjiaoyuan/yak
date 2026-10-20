@@ -378,6 +378,11 @@ pub fn spawn_callback_server() -> Result<CallbackServer, String> {
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering::SeqCst;
         while !stopping.load(SeqCst) {
+            // nonblocking accepts: the stop flag has to end the loop without waiting
+            // for one more connection (a cancelled login frees the port at once).
+            // The accepted stream is reset to blocking: it inherits the
+            // listener's flag on macOS/BSD, and a nonblocking read_line would
+            // drop the callback the moment the request line has not landed yet
             let (mut stream, _) = match listener.accept() {
                 Ok(accepted) => accepted,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -386,6 +391,7 @@ pub fn spawn_callback_server() -> Result<CallbackServer, String> {
                 }
                 Err(_) => continue,
             };
+            let _ = stream.set_nonblocking(false);
             let mut reader = BufReader::new(match stream.try_clone() {
                 Ok(s) => s,
                 Err(_) => continue,
