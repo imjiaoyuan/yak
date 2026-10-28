@@ -628,6 +628,9 @@ pub fn stream_events(
     let mut stream_error: Option<String> = None;
     let mut saw_done = false;
     let result = http::post_sse(req, handed, |event_type, data| {
+        if stream_error.is_some() {
+            return;
+        }
         if event_type == "error" {
             let msg = serde_json::from_str::<Value>(data)
                 .ok()
@@ -644,6 +647,16 @@ pub fn stream_events(
         }
         match serde_json::from_str::<Value>(data) {
             Ok(chunk) => {
+                if let Some(error) = chunk.get("error").filter(|v| !v.is_null()) {
+                    stream_error = Some(
+                        error["message"]
+                            .as_str()
+                            .or_else(|| error.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| error.to_string()),
+                    );
+                    return;
+                }
                 let kind = chunk["type"].as_str().unwrap_or(event_type);
                 match kind {
                     "response.done" | "response.completed" | "response.incomplete" => {
@@ -664,10 +677,7 @@ pub fn stream_events(
                 }
                 on_value(event_type, &chunk);
             }
-            Err(e) => eprintln!(
-                "Warning: dropping unparsable SSE data ({e}): {}",
-                &data[..crate::core::text::floor_boundary(data, 200)]
-            ),
+            Err(e) => stream_error = Some(format!("invalid SSE JSON: {e}")),
         }
     });
     result.map_err(|e| e.to_string())?;

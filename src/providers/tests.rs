@@ -570,3 +570,35 @@ fn responses_stream_without_terminal_event_is_truncated() {
     let (result, _) = responses_stream("data: {\"type\":\"response.created\"}\n\n");
     assert_eq!(result, Err(TRUNCATED_STREAM.into()));
 }
+
+#[test]
+fn multiline_sse_data_is_decoded_as_one_event() {
+    let (result, events) = responses_stream(
+        ": keepalive\r\nevent: response.completed\r\ndata: {\r\ndata: \"type\": \"response.completed\",\r\ndata: \"response\": {}}\r\n\r\n",
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        events,
+        vec![json!({"type": "response.completed", "response": {}})]
+    );
+}
+
+#[test]
+fn untyped_stream_error_survives_done_and_later_events() {
+    let (result, events) = responses_stream(
+        "data: {\"error\":{\"message\":\"upstream failed\"}}\n\ndata: {\"choices\":[]}\n\ndata: [DONE]\n\n",
+    );
+    assert_eq!(result, Err("upstream failed".into()));
+    assert!(events.is_empty());
+}
+
+#[test]
+fn malformed_stream_json_cannot_finish_successfully() {
+    let (result, _) = responses_stream("data: {broken\n\ndata: [DONE]\n\n");
+    assert!(result.unwrap_err().starts_with("invalid SSE JSON:"));
+}
+
+#[test]
+fn final_sse_frame_without_blank_line_is_processed() {
+    assert_eq!(responses_stream("data: [DONE]").0, Ok(()));
+}

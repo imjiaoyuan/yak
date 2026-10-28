@@ -432,7 +432,7 @@ pub fn short_agent() -> &'static ureq::Agent {
     })
 }
 
-/// POST and hand each SSE `data:` line (with its `event:` type) to the
+/// POST and hand each complete SSE event (with its `event:` type) to the
 /// caller's parser. Retryable failures (transport, 429 with its Retry-After,
 /// 5xx) resend with jittered backoff; a stream that already handed output to
 /// the user never resends transparently — replaying it would duplicate the
@@ -493,7 +493,7 @@ fn send_sse(
             }
         }
     });
-    let mut event_type = String::new();
+    let mut frame = SseFrame::default();
     let mut last_byte = Instant::now();
     loop {
         let line = match rx.recv_timeout(Duration::from_millis(100)) {
@@ -516,25 +516,48 @@ fn send_sse(
                 }
                 continue;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                frame.flush(on_data);
+                return Ok(());
+            }
         };
         if interrupted() {
             return Err(HttpError::new(0, "interrupted"));
         }
         let line = line.map_err(|e| HttpError::new(0, format!("stream: {e}")))?;
+        frame.line(&line, on_data);
+    }
+}
+
+/// SSE fields belong to one event until a blank line. Keep data whitespace
+/// intact except for the single optional space after the colon.
+#[derive(Default)]
+struct SseFrame {
+    event: String,
+    data: Vec<String>,
+}
+
+impl SseFrame {
+    fn line(&mut self, line: &str, on_data: &mut impl FnMut(&str, &str)) {
         if line.is_empty() {
-            event_type.clear();
-            continue;
+            self.flush(on_data);
+            return;
         }
-        let (field, value) = match line.split_once(':') {
-            Some((f, v)) => (f.trim(), v.trim_start()),
-            None => continue,
-        };
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
-            "event" => event_type = value.to_string(),
-            "data" => on_data(&event_type, value),
+            "event" => self.event = value.to_string(),
+            "data" => self.data.push(value.to_string()),
             _ => {}
         }
+    }
+
+    fn flush(&mut self, on_data: &mut impl FnMut(&str, &str)) {
+        if !self.data.is_empty() {
+            on_data(&self.event, &self.data.join("\n"));
+        }
+        self.event.clear();
+        self.data.clear();
     }
 }
 
@@ -793,6 +816,33 @@ fn get_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_fields_preserve_spaces_and_reset_between_events() {
+        let mut frame = SseFrame::default();
+        let mut events = Vec::new();
+        let mut emit = |event: &str, data: &str| events.push((event.to_string(), data.to_string()));
+        for line in [
+            "event: custom",
+            ": ping",
+            "data:  spaced",
+            "data",
+            "",
+            "event: ignored",
+            "",
+            "data: next",
+            "",
+        ] {
+            frame.line(line, &mut emit);
+        }
+        assert_eq!(
+            events,
+            vec![
+                ("custom".into(), " spaced\n".into()),
+                ("".into(), "next".into())
+            ]
+        );
+    }
 
     /// The one place a new `Usage` field has to be taught to the session
     /// totals: three call sites used to add the same three fields by hand.
