@@ -906,11 +906,9 @@ fn persist_round(
     if messages.is_empty() {
         return;
     }
-    // a trailing no-tool assistant message doubles as the round response;
-    // the stored slice drops it by index instead of cloning the round just
-    // to pop it back off
-    let ends_plain =
-        matches!(messages.last(), Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty());
+    // A plain answer doubles as the response. Signed/opaque provider state
+    // has no equivalent there, so keep that whole assistant message too.
+    let ends_plain = matches!(messages.last(), Some(Msg::Assistant { tool_calls, reasoning_meta: None, .. }) if tool_calls.is_empty());
     let stored_len = messages.len() - usize::from(ends_plain);
     let response = match messages.last() {
         Some(Msg::Assistant {
@@ -1216,9 +1214,9 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
             }
             msgs.push(m.clone());
         }
-        // the final plain assistant was popped out of `messages` (it doubles
-        // as the turn response); ride it back in so a resume sees the answer
-        if !turn.response.is_empty() {
+        // A signed final assistant is retained whole; older/plain responses
+        // live only in `response`. Do not duplicate an already kept answer.
+        if !turn.response.is_empty() && !turn.has_stored_response() {
             msgs.push(Msg::assistant(turn.response.clone()));
         }
     }
@@ -1324,6 +1322,35 @@ fn test_extensions() -> &'static crate::agent::ext::Extensions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_final_answers_survive_persistence_without_duplicate_replay() {
+        let dir = crate::core::testutil::scratch_path("signed-final");
+        let mut session = tight_session(Vec::new());
+        session.store = Some(threads::Store::open_path(&dir).unwrap());
+        let messages = vec![
+            Msg::user("hello"),
+            Msg::Assistant {
+                text: "answer".into(),
+                tool_calls: vec![],
+                reasoning: None,
+                reasoning_meta: Some(
+                    serde_json::json!({"gemini_model":"m", "gemini_parts":[{"text":"answer", "thoughtSignature":"opaque"}]}),
+                ),
+            },
+        ];
+        persist_test_round(&mut session, &messages);
+        let turns = session
+            .store
+            .as_ref()
+            .unwrap()
+            .read_thread(session.conversation_id.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(turns[0].response, "answer");
+        assert_eq!(turns[0].messages, messages);
+        assert_eq!(rebuild_turns(&turns).unwrap().messages, messages);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// Drive `persist_round` the way the loop's `RoundEnd` arm does.
     fn persist_test_round(session: &mut Session, messages: &[Msg]) {

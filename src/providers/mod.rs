@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod catalog;
 pub mod chatgpt_oauth;
 pub mod codex;
+pub mod gemini;
 pub mod message;
 pub mod openai_compat;
 pub mod responses;
@@ -31,6 +32,8 @@ use crate::core::text::human_bytes;
 fn auth_header(kind: &str, key: &str) -> (String, String) {
     if kind == "anthropic" {
         ("x-api-key".to_string(), key.to_string())
+    } else if kind == "gemini" {
+        ("x-goog-api-key".to_string(), key.to_string())
     } else {
         ("Authorization".to_string(), format!("Bearer {key}"))
     }
@@ -607,7 +610,7 @@ pub(crate) fn decoded_text(a: &Attachment) -> Result<String, String> {
 /// the answer half-arrived, so the round is not a clean turn, but the link
 /// did not fail either. Callers that show it mark it as a warning (`!`) about
 /// the answer, not as a broken run.
-pub const TRUNCATED_STREAM: &str = "stream ended without a completion marker ([DONE] / message_stop / response.done / response.completed / response.incomplete) — the answer may be truncated";
+pub const TRUNCATED_STREAM: &str = "stream ended without a completion marker ([DONE] / message_stop / response.done / response.completed / response.incomplete / Gemini finishReason) — the answer may be truncated";
 
 /// Whether a stream error is that truncation rather than a wire failure.
 pub fn is_truncation(error: &str) -> bool {
@@ -625,6 +628,17 @@ pub fn is_truncation(error: &str) -> bool {
 pub fn stream_events(
     req: &HttpRequest,
     handed: &std::sync::atomic::AtomicBool,
+    on_value: impl FnMut(&str, &Value),
+) -> Result<(), String> {
+    stream_events_with_terminal(req, handed, |_, _| false, on_value)
+}
+
+/// Native protocols may terminate inside a JSON frame rather than with a
+/// named SSE event. Error handling remains shared with the other adapters.
+pub(crate) fn stream_events_with_terminal(
+    req: &HttpRequest,
+    handed: &std::sync::atomic::AtomicBool,
+    terminal: impl Fn(&str, &Value) -> bool,
     mut on_value: impl FnMut(&str, &Value),
 ) -> Result<(), String> {
     let mut stream_error: Option<String> = None;
@@ -677,6 +691,7 @@ pub fn stream_events(
                     }
                     _ => {}
                 }
+                saw_done |= terminal(event_type, &chunk);
                 on_value(event_type, &chunk);
             }
             Err(e) => stream_error = Some(format!("invalid SSE JSON: {e}")),
@@ -938,6 +953,7 @@ impl ResolvedModel {
             "anthropic" => anthropic::run(self, input, stream, on_event),
             "codex" => codex::run(self, input, stream, on_event),
             "responses" => responses::run(self, input, stream, on_event),
+            "gemini" => gemini::run(self, input, stream, on_event),
             other => Err(format!("Unknown provider kind: {other}")),
         }
     }

@@ -135,6 +135,13 @@ pub struct StoredTurn {
     pub messages: Vec<Msg>,
 }
 
+impl StoredTurn {
+    /// Signed final answers stay in messages as well as the response field.
+    pub fn has_stored_response(&self) -> bool {
+        matches!(self.messages.last(), Some(Msg::Assistant {text, tool_calls, ..}) if tool_calls.is_empty() && text == &self.response)
+    }
+}
+
 /// One row of the browser list.
 #[derive(Clone)]
 pub struct ThreadSummary {

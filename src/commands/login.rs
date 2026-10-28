@@ -246,15 +246,19 @@ pub(crate) fn wizard(preset_arg: Option<&str>) -> Result<(), String> {
     let kind = match &preset {
         Some(p) => p.kind.clone(),
         None => loop {
-            let Some(k) =
-                prompt_with_default("Kind [openai-compat/anthropic/responses]", "openai-compat")
-            else {
+            let Some(k) = prompt_with_default(
+                "Kind [openai-compat/anthropic/responses/gemini]",
+                "openai-compat",
+            ) else {
                 return cancelled();
             };
-            if matches!(k.as_str(), "openai-compat" | "anthropic" | "responses") {
+            if matches!(
+                k.as_str(),
+                "openai-compat" | "anthropic" | "responses" | "gemini"
+            ) {
                 break k;
             }
-            eprintln!("kind must be openai-compat, anthropic or responses");
+            eprintln!("kind must be openai-compat, anthropic, responses or gemini");
         },
     };
     let base_url = match preset.and_then(|p| p.template) {
@@ -313,6 +317,8 @@ pub(crate) fn wizard(preset_arg: Option<&str>) -> Result<(), String> {
             // custom flow: check the obvious names for the chosen kind
             let vars: &[&str] = if kind == "anthropic" {
                 &["ANTHROPIC_API_KEY"]
+            } else if kind == "gemini" {
+                &["GEMINI_API_KEY", "GOOGLE_API_KEY"]
             } else {
                 &["OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"]
             };

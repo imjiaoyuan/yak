@@ -378,7 +378,7 @@ pub fn to_html(id: &str, turns: &[StoredTurn], chain: &[usize]) -> String {
             body.push_str(&html_message(m));
         }
         let answer = t.response.trim_end();
-        if !answer.is_empty() {
+        if !answer.is_empty() && !t.has_stored_response() {
             body.push_str(&format!("<div class=\"a\">{}</div>\n", esc(answer)));
         }
         if let Some(reasoning) = t
@@ -658,6 +658,12 @@ mod tests {
         t.response = "the final answer".into();
         let md = to_markdown("01THREAD", &[&t]);
         assert_eq!(md.matches("the final answer").count(), 1);
+        let html = to_html("01THREAD", &[t], &[0]);
+        assert_eq!(
+            html.matches("<div class=\"a\">the final answer</div>")
+                .count(),
+            1
+        );
     }
 
     #[test]

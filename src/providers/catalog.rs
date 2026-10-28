@@ -110,7 +110,13 @@ pub const ALL: &[Entry] = &[
         "https://api.deepseek.com",
         "DEEPSEEK_API_KEY",
     ),
-    // google's native api is generative-ai; we speak its openai bridge
+    e(
+        "google-native",
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "GEMINI_API_KEY",
+    ),
+    // Keep the existing Google preset on its OpenAI bridge.
     e(
         "google",
         "openai-compat",
@@ -322,6 +328,18 @@ pub(crate) fn fetch_model_list(
     url: &str,
     headers: &[(String, String)],
 ) -> Result<Vec<String>, String> {
+    let value = fetch_model_page(url, headers)?;
+    let array = value["data"]
+        .as_array()
+        .or_else(|| value["models"].as_array())
+        .ok_or("no model list in response")?;
+    Ok(array
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect())
+}
+
+fn fetch_model_page(url: &str, headers: &[(String, String)]) -> Result<serde_json::Value, String> {
     let agent = crate::core::http::short_agent();
     let mut request = agent.get(url);
     for (k, v) in headers {
@@ -334,15 +352,7 @@ pub(crate) fn fetch_model_list(
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut resp.into_body().into_reader(), &mut buf)
         .map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&buf).map_err(|e| e.to_string())?;
-    let array = value["data"]
-        .as_array()
-        .or_else(|| value["models"].as_array())
-        .ok_or("no model list in response")?;
-    Ok(array
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(String::from))
-        .collect())
+    serde_json::from_str(&buf).map_err(|e| e.to_string())
 }
 
 /// Fetch the model list; the reason a provider served none is returned, not
@@ -351,12 +361,102 @@ pub(crate) fn fetch_model_list(
 /// one it was.
 pub fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
     let (url, headers) = fetch_models_url(kind, base_url, api_key);
-    fetch_model_list(&url, &headers)
+    if kind != "gemini" {
+        return fetch_model_list(&url, &headers);
+    }
+    let mut page = url.clone();
+    let mut tokens = std::collections::BTreeSet::new();
+    let mut ids = Vec::new();
+    loop {
+        let value = fetch_model_page(&page, &headers)?;
+        let models = value["models"]
+            .as_array()
+            .ok_or("no Gemini model list in response")?;
+        for model in models {
+            if !model["supportedGenerationMethods"]
+                .as_array()
+                .is_some_and(|methods| methods.iter().any(|m| m == "generateContent"))
+            {
+                continue;
+            }
+            let name = model["name"].as_str().ok_or("Gemini model has no name")?;
+            let id = name.strip_prefix("models/").unwrap_or(name).to_string();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let Some(token) = value["nextPageToken"].as_str().filter(|t| !t.is_empty()) else {
+            break;
+        };
+        if !tokens.insert(token.to_string()) {
+            return Err("Gemini repeated a model-list page token".into());
+        }
+        let encoded: String = token
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
+        page = format!("{url}?pageToken={encoded}");
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_gemini_models_follow_pages_and_exclude_embedding_models() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (path, body) in [
+                (
+                    "/v1beta/models",
+                    serde_json::json!({"models":[{"name":"models/gemini-a", "supportedGenerationMethods":["generateContent"]}, {"name":"models/embed", "supportedGenerationMethods":["embedContent"]}], "nextPageToken":"a+/="}),
+                ),
+                (
+                    "/v1beta/models?pageToken=a%2B%2F%3D",
+                    serde_json::json!({"models":[{"name":"models/gemini-b", "supportedGenerationMethods":["generateContent"]}]}),
+                ),
+            ] {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&mut connection);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with(&format!("GET {path} HTTP/1.1")), "{line}");
+                let mut headers = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line.to_lowercase());
+                }
+                assert!(headers.contains("x-goog-api-key: local-key"));
+                assert!(!headers.contains("authorization:"));
+                let body = body.to_string();
+                write!(
+                    connection,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let models =
+            fetch_models("gemini", &format!("http://{address}/v1beta"), "local-key").unwrap();
+        server.join().unwrap();
+        assert_eq!(models, vec!["gemini-a", "gemini-b"]);
+    }
 
     fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         headers
