@@ -6,6 +6,7 @@ pub mod chatgpt_oauth;
 pub mod codex;
 pub mod message;
 pub mod openai_compat;
+pub mod responses;
 mod schema;
 
 pub use message::{
@@ -936,6 +937,7 @@ impl ResolvedModel {
             "openai-compat" => openai_compat::run(self, input, stream, on_event),
             "anthropic" => anthropic::run(self, input, stream, on_event),
             "codex" => codex::run(self, input, stream, on_event),
+            "responses" => responses::run(self, input, stream, on_event),
             other => Err(format!("Unknown provider kind: {other}")),
         }
     }

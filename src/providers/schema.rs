@@ -223,7 +223,7 @@ mod tests {
             body["tools"][0]["input_schema"]["properties"]["x"]["pattern"],
             r"\u0000"
         );
-        let body = super::super::codex::build_body(&model, &input, true).unwrap();
+        let body = super::super::responses::build_body(&model, &input, true).unwrap();
         assert_eq!(
             body["tools"][0]["parameters"]["properties"]["x"]["pattern"],
             r"\u0000"

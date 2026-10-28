@@ -58,6 +58,12 @@ pub const ALL: &[Entry] = &[
         "https://api.openai.com/v1",
         "OPENAI_API_KEY",
     ),
+    e(
+        "openai-responses",
+        "responses",
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+    ),
     // the ChatGPT Plus/Pro subscription login (OAuth, no API key): the
     // Codex channel
     e("chatgpt", "codex", "https://chatgpt.com/backend-api", ""),

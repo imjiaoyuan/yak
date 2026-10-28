@@ -246,14 +246,15 @@ pub(crate) fn wizard(preset_arg: Option<&str>) -> Result<(), String> {
     let kind = match &preset {
         Some(p) => p.kind.clone(),
         None => loop {
-            let Some(k) = prompt_with_default("Kind [openai-compat/anthropic]", "openai-compat")
+            let Some(k) =
+                prompt_with_default("Kind [openai-compat/anthropic/responses]", "openai-compat")
             else {
                 return cancelled();
             };
-            if k == "openai-compat" || k == "anthropic" {
+            if matches!(k.as_str(), "openai-compat" | "anthropic" | "responses") {
                 break k;
             }
-            eprintln!("kind must be openai-compat or anthropic");
+            eprintln!("kind must be openai-compat, anthropic or responses");
         },
     };
     let base_url = match preset.and_then(|p| p.template) {
