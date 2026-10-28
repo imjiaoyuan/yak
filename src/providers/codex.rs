@@ -235,6 +235,7 @@ pub fn build_body(
         body["prompt_cache_key"] = json!(key);
     }
     super::apply_options(&mut body, &m.options);
+    super::schema::normalize_tools(m, &mut body);
     Ok(body)
 }
 

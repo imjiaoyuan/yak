@@ -6,6 +6,7 @@ pub mod chatgpt_oauth;
 pub mod codex;
 pub mod message;
 pub mod openai_compat;
+mod schema;
 
 pub use message::{
     Msg, ORPHAN_RESULT, ToolCall, ToolCallAccumulator, ToolDef, ToolError, call_answered,

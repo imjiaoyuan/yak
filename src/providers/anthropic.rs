@@ -268,6 +268,7 @@ pub fn build_body(
         // `parallel_tool_calls: true`.
     }
     super::apply_options(&mut body, &m.options);
+    super::schema::normalize_tools(m, &mut body);
     // effort level → thinking budget; applied after the -o loop so a
     // hand-set max_tokens is respected unless the budget needs more room
     if let Some(level) = input.reasoning

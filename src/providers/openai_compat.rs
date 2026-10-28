@@ -238,6 +238,7 @@ pub fn build_body(
     // apply -o options; json values pass through, others are sent as strings
     // (OpenAI accepts numbers-as-numbers; we try numeric parsing first)
     super::apply_options(&mut body, &m.options);
+    super::schema::normalize_tools(m, &mut body);
     Ok(body)
 }
 
