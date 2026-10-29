@@ -118,6 +118,7 @@ impl Msg {
         }
     }
 
+    #[cfg(test)]
     pub fn assistant(text: impl Into<String>) -> Msg {
         Msg::Assistant {
             text: text.into(),

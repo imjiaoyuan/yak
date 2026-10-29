@@ -142,6 +142,18 @@ pub fn build_body(
                 reasoning_meta,
             } => {
                 flush_results(&mut messages, &mut pending_results);
+                // An interrupted, unsigned thinking-only response stays in
+                // the transcript, but has no replayable content on this wire.
+                // Sending it as an empty assistant would make recovery fail.
+                if text.is_empty()
+                    && tool_calls.is_empty()
+                    && reasoning_meta
+                        .as_ref()
+                        .and_then(|meta| meta["signature"].as_str())
+                        .is_none()
+                {
+                    continue;
+                }
                 if tool_calls.is_empty() && reasoning_meta.is_none() {
                     messages.push(json!({"role": "assistant", "content": text}));
                 } else {
@@ -479,6 +491,25 @@ mod tests {
         crate::providers::testutil::model(kind)
     }
     use serde_json::json;
+
+    #[test]
+    fn unsigned_thinking_only_history_does_not_send_an_empty_assistant() {
+        let history = vec![
+            Msg::user("go"),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![],
+                reasoning: Some("unfinished".into()),
+                reasoning_meta: None,
+            },
+        ];
+        let mut request = input(&history, &[]);
+        request.prompt = "Continue";
+        let body = build_body(&model("anthropic"), &request, true).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|msg| msg["role"] == "user"));
+    }
 
     #[test]
     fn pdf_attachment_rides_a_document_block() {

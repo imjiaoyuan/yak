@@ -236,7 +236,7 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".as_bytes(),
                 );
                 let _ = c.write_all(
-                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial ans\"}}]}\n\n",
+                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan before answer\",\"content\":\"partial ans\"}}]}\n\n",
                 );
                 drop(c); // no [DONE]: the stream is cut
             } else {
@@ -280,11 +280,209 @@ fn a_dropped_stream_continues_from_its_partial_answer() {
     );
     assert!(!outcome.interrupted);
     assert_eq!(outcome.final_text, "ued cleanly");
-    assert_eq!(outcome.history.len(), 3, "prompt, partial, continuation");
-    assert!(
-        matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, .. } if text == "partial ans" && tool_calls.is_empty()),
-        "the partial answer rides the history as a real assistant message"
+    assert_eq!(
+        outcome.history.len(),
+        4,
+        "prompt, partial, continuation request, answer"
     );
+    assert!(
+        matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, reasoning, .. } if text == "partial ans" && tool_calls.is_empty() && reasoning.as_deref() == Some("plan before answer")),
+        "the partial answer and reasoning ride the history as a real assistant message"
+    );
+}
+
+/// Run finite SSE responses and inspect the actual next request, including
+/// reasoning replay as required by the DeepSeek thinking wire.
+fn stream_recovery_fixture(
+    bodies: Vec<String>,
+) -> (
+    Result<AgentOutcome, AgentFailure>,
+    Vec<serde_json::Value>,
+    usize,
+) {
+    stream_recovery_fixture_with_kind("openai-compat", bodies)
+}
+
+fn stream_recovery_fixture_with_kind(
+    kind: &str,
+    bodies: Vec<String>,
+) -> (
+    Result<AgentOutcome, AgentFailure>,
+    Vec<serde_json::Value>,
+    usize,
+) {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for body in bodies {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(&mut connection);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut request = vec![0; length.expect("request body length")];
+            reader.read_exact(&mut request).unwrap();
+            requests.push(serde_json::from_slice(&request).unwrap());
+            write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        requests
+    });
+    let mut model = mock_model(port);
+    model.kind = kind.into();
+    if kind == "openai-compat" {
+        model
+            .options
+            .push(("replay_reasoning".into(), "true".into()));
+    }
+    let executed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tools: Vec<Box<dyn tools::Tool>> = vec![Box::new(ProbeTool(executed.clone()))];
+    let opts = test_opts();
+    let mut approval = approval::ApprovalConfig::default();
+    let result = run_agent(
+        RunRequest {
+            model: &model,
+            tools: &tools,
+            prompt: "go",
+            attachments: vec![],
+            seed: vec![],
+            opts: &opts,
+        },
+        &mut approval,
+        deny_callbacks(),
+    );
+    let requests = server.join().unwrap();
+    let count = executed.lock().unwrap().len();
+    (result, requests, count)
+}
+
+fn recovery_answer() -> String {
+    "data: {\"choices\":[{\"delta\":{\"content\":\"rest\"}}]}\n\ndata: [DONE]\n\n".into()
+}
+
+#[test]
+fn a_recovery_request_explicitly_asks_for_continuation() {
+    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\",\"reasoning_content\":\"plan\"}}]}\n\n".into();
+    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
+    let outcome = result.unwrap();
+    let messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"], "partial");
+    assert_eq!(messages[1]["reasoning_content"], "plan");
+    assert_eq!(messages.last().unwrap()["role"], "user");
+    assert!(
+        messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("Continue from where it stopped")
+    );
+    assert!(
+        matches!(&outcome.history[2], Msg::User { text, .. } if text.contains("Continue from where it stopped"))
+    );
+}
+
+#[test]
+fn a_reasoning_only_drop_is_preserved_and_recovered() {
+    let first =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished plan\"}}]}\n\n".into();
+    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
+    let outcome = result.unwrap();
+    assert_eq!(outcome.final_text, "rest");
+    assert_eq!(
+        requests[1]["messages"][1]["reasoning_content"],
+        "unfinished plan"
+    );
+    assert!(
+        matches!(&outcome.history[1], Msg::Assistant { reasoning: Some(text), .. } if text == "unfinished plan")
+    );
+}
+
+#[test]
+fn tools_from_a_dropped_stream_are_never_executed() {
+    let chunk = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"pending","function":{"name":"probe","arguments":"{\"unfinished\":"}}]}}]});
+    let (result, requests, executed) =
+        stream_recovery_fixture(vec![format!("data: {chunk}\n\n"), recovery_answer()]);
+    let outcome = result.unwrap();
+    assert_eq!(executed, 0);
+    assert!(
+        matches!(&outcome.history[2], Msg::ToolResult { call_id, error: Some(crate::providers::ToolError::Interrupted), .. } if call_id == "pending")
+    );
+    assert_eq!(requests[1]["messages"][2]["tool_call_id"], "pending");
+    assert!(
+        requests[1]["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("not executed")
+    );
+}
+
+#[test]
+fn a_fatal_stream_error_keeps_the_partial_text_in_the_failure() {
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\",\"reasoning_content\":\"plan\"}}]}\n\ndata: {\"error\":{\"message\":\"provider refused\"}}\n\n".into();
+    let (result, requests, _) = stream_recovery_fixture(vec![body]);
+    let failure = result.err().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(failure.message, "provider refused");
+    assert_eq!(failure.final_text, "partial");
+    assert!(
+        matches!(&failure.history[1], Msg::Assistant { reasoning: Some(text), .. } if text == "plan")
+    );
+}
+
+#[test]
+fn a_failure_before_output_still_keeps_the_user_prompt() {
+    let body = "data: {\"error\":{\"message\":\"provider refused\"}}\n\n".into();
+    let (result, _, _) = stream_recovery_fixture(vec![body]);
+    assert_eq!(result.err().unwrap().history, vec![Msg::user("go")]);
+}
+
+#[test]
+fn a_dropped_gemini_stream_pairs_signed_calls_with_interrupted_results() {
+    let signed_call = json!({"functionCall":{"id":"pending","name":"probe","args":{}},"thoughtSignature":"signed-call"});
+    let first = json!({"candidates":[{"content":{"parts":[{"text":"partial"},signed_call]}}]});
+    let last =
+        json!({"candidates":[{"content":{"parts":[{"text":"rest"}]},"finishReason":"STOP"}]});
+    let (result, requests, executed) = stream_recovery_fixture_with_kind(
+        "gemini",
+        vec![format!("data: {first}\n\n"), format!("data: {last}\n\n")],
+    );
+    result.unwrap();
+    assert_eq!(executed, 0);
+    assert_eq!(requests[1]["contents"][1]["parts"][1], signed_call);
+    let response = &requests[1]["contents"][2]["parts"][0]["functionResponse"];
+    assert_eq!(response["id"], "pending");
+    assert!(
+        response["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not executed")
+    );
+}
+
+#[test]
+fn a_failed_stream_retains_reported_usage() {
+    let chunk = json!({"usage":{"prompt_tokens":40,"completion_tokens":5,"prompt_cache_hit_tokens":6},"choices":[{"delta":{"content":"partial"}}]});
+    let body = format!("data: {chunk}\n\ndata: {{\"error\":{{\"message\":\"failed\"}}}}\n\n");
+    let (result, _, _) = stream_recovery_fixture(vec![body]);
+    let usage = result.err().unwrap().usage.unwrap();
+    assert_eq!((usage.input, usage.output, usage.cached), (40, 5, 6));
+}
+
+#[test]
+fn a_failed_gemini_stream_retains_reported_usage() {
+    let chunk = json!({"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":5,"thoughtsTokenCount":3},"candidates":[{"content":{"parts":[{"text":"partial"}]}}]});
+    let body = format!("data: {chunk}\n\ndata: {{\"error\":{{\"message\":\"failed\"}}}}\n\n");
+    let (result, _, _) = stream_recovery_fixture_with_kind("gemini", vec![body]);
+    let usage = result.err().unwrap().usage.unwrap();
+    assert_eq!((usage.input, usage.output), (40, 8));
 }
 
 /// A length-stopped response never runs its tool calls: streamed arguments

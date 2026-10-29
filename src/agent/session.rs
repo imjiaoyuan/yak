@@ -453,7 +453,7 @@ impl Session {
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
                     let what = if chars == 0 {
-                        "nothing received yet, resending".to_string()
+                        "no answer text received, retrying".to_string()
                     } else {
                         format!("keeping the partial answer ({chars} chars), continuing")
                     };
@@ -564,7 +564,7 @@ impl Session {
                         system: self.system.as_deref(),
                     },
                     &failure.history[failure.round_start.min(failure.history.len())..],
-                    None,
+                    failure.usage,
                     &round_reasoning,
                     round_started,
                 );
@@ -864,7 +864,7 @@ impl Session {
                         system: self.system.as_deref(),
                     },
                     &failure.history[failure.round_start.min(failure.history.len())..],
-                    None,
+                    failure.usage,
                     &round_reasoning,
                     round_started,
                 );
@@ -903,12 +903,12 @@ fn persist_round(
     let Some(store) = store else {
         return;
     };
-    if messages.is_empty() {
+    if messages.is_empty() && usage.is_none() {
         return;
     }
-    // A plain answer doubles as the response. Signed/opaque provider state
-    // has no equivalent there, so keep that whole assistant message too.
-    let ends_plain = matches!(messages.last(), Some(Msg::Assistant { tool_calls, reasoning_meta: None, .. }) if tool_calls.is_empty());
+    // Only a text-only answer can live solely in response. Reasoning and
+    // opaque state must keep their whole assistant message for replay.
+    let ends_plain = matches!(messages.last(), Some(Msg::Assistant { tool_calls, reasoning: None, reasoning_meta: None, .. }) if tool_calls.is_empty());
     let stored_len = messages.len() - usize::from(ends_plain);
     let response = match messages.last() {
         Some(Msg::Assistant {
@@ -1216,8 +1216,18 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
         }
         // A signed final assistant is retained whole; older/plain responses
         // live only in `response`. Do not duplicate an already kept answer.
-        if !turn.response.is_empty() && !turn.has_stored_response() {
-            msgs.push(Msg::assistant(turn.response.clone()));
+        let legacy_thinking_only = turn.reasoning.as_ref().is_some_and(|text| !text.is_empty())
+            && !turn
+                .messages
+                .iter()
+                .any(|msg| matches!(msg, Msg::Assistant { .. }));
+        if !turn.has_stored_response() && (!turn.response.is_empty() || legacy_thinking_only) {
+            msgs.push(Msg::Assistant {
+                text: turn.response.clone(),
+                tool_calls: Vec::new(),
+                reasoning: turn.reasoning.clone(),
+                reasoning_meta: None,
+            });
         }
     }
     // Only the kept window is worth reading off disk: an older image rides as
@@ -1350,6 +1360,153 @@ mod tests {
         assert_eq!(turns[0].messages, messages);
         assert_eq!(rebuild_turns(&turns).unwrap().messages, messages);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plain_reasoning_survives_persistence_and_resume() {
+        for text in ["answer", ""] {
+            let dir = crate::core::testutil::scratch_path("plain-reasoning");
+            let mut session = tight_session(Vec::new());
+            session.store = Some(threads::Store::open_path(&dir).unwrap());
+            let messages = vec![
+                Msg::user("go"),
+                Msg::Assistant {
+                    text: text.into(),
+                    tool_calls: vec![],
+                    reasoning: Some("plan".into()),
+                    reasoning_meta: None,
+                },
+            ];
+            persist_test_round(&mut session, &messages);
+            let turns = session
+                .store
+                .as_ref()
+                .unwrap()
+                .read_thread(session.conversation_id.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(rebuild_turns(&turns).unwrap().messages, messages);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn legacy_response_reasoning_is_restored_without_rewriting_the_thread() {
+        for text in ["answer", ""] {
+            let dir = crate::core::testutil::scratch_path("legacy-reasoning");
+            let mut session = tight_session(Vec::new());
+            session.store = Some(threads::Store::open_path(&dir).unwrap());
+            persist_test_round(&mut session, &[Msg::user("go"), Msg::assistant(text)]);
+            let mut turns = session
+                .store
+                .as_ref()
+                .unwrap()
+                .read_thread(session.conversation_id.as_deref().unwrap())
+                .unwrap();
+            turns[0].reasoning = Some("plan".into());
+            let rebuilt = rebuild_turns(&turns).unwrap();
+            assert!(
+                matches!(rebuilt.messages.last(), Some(Msg::Assistant { text: restored, reasoning: Some(reasoning), .. }) if restored == text && reasoning == "plan")
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    fn failed_usage_fixture(
+        recover: bool,
+        with_partial: bool,
+    ) -> (
+        crate::core::http::Usage,
+        Vec<StoredTurn>,
+        Vec<serde_json::Value>,
+    ) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let chunk = serde_json::json!({"choices": if with_partial { serde_json::json!([{"delta":{"content":"partial","reasoning_content":"plan"}}]) } else { serde_json::json!([]) }, "usage":{"prompt_tokens":40,"completion_tokens":5}});
+            let partial = format!("data: {chunk}\n\n");
+            let mut bodies = vec![if recover {
+                partial.to_string()
+            } else {
+                format!("{partial}data: {{\"error\":{{\"message\":\"failed\"}}}}\n\n")
+            }];
+            if recover {
+                bodies.push("data: {\"choices\":[{\"delta\":{\"content\":\"rest\"}}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n".into());
+            }
+            for body in bodies {
+                let (mut connection, _) = listener.accept().unwrap();
+                read_request(&mut connection);
+                write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let dir = crate::core::testutil::scratch_path("failed-usage");
+        let mut session = tight_session(Vec::new());
+        session.model.as_mut().unwrap().base_url = format!("http://{address}");
+        session.store = Some(threads::Store::open_path(&dir).unwrap());
+        let mut events = Vec::new();
+        let result = session.run_task_streamed(
+            "go",
+            vec![],
+            &mut |event| events.push(event.clone()),
+            &mut |_| ApprovalResponse::Deny,
+            &mut || None,
+        );
+        assert_eq!(result.is_ok(), recover);
+        server.join().unwrap();
+        let turns = session
+            .store
+            .as_ref()
+            .unwrap()
+            .read_thread(session.conversation_id.as_deref().unwrap())
+            .unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        (session.usage, turns, events)
+    }
+
+    #[test]
+    fn failed_round_usage_reaches_the_session_thread_and_json_once() {
+        let (usage, turns, events) = failed_usage_fixture(false, true);
+        assert_eq!((usage.input, usage.output), (40, 5));
+        assert_eq!(rebuild_turns(&turns).unwrap().usage, usage);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "turn_end")
+                .count(),
+            1
+        );
+        assert_eq!(events.last().unwrap()["text"], "partial");
+    }
+
+    #[test]
+    fn recovered_round_usage_is_added_once_before_the_next_attempt() {
+        let (usage, turns, events) = failed_usage_fixture(true, true);
+        assert_eq!((usage.input, usage.output), (90, 12));
+        assert_eq!(turns.len(), 2);
+        assert_eq!(rebuild_turns(&turns).unwrap().usage, usage);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "turn_end")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn usage_before_any_output_is_retained_across_a_retry() {
+        let (usage, turns, _) = failed_usage_fixture(true, false);
+        assert_eq!((usage.input, usage.output), (90, 12));
+        assert_eq!(turns.len(), 2);
+        assert_eq!(rebuild_turns(&turns).unwrap().usage, usage);
+        let rebuilt = rebuild_turns(&turns).unwrap().messages;
+        assert_eq!(
+            rebuilt
+                .iter()
+                .filter(|msg| matches!(msg, Msg::User { .. }))
+                .count(),
+            1
+        );
     }
 
     /// Drive `persist_round` the way the loop's `RoundEnd` arm does.

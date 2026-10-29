@@ -24,6 +24,8 @@ Bare `yak` opens the interactive session. Slash commands cover the model and the
 
 Ctrl-c or esc interrupts a running task. There is no input surface while it works: keystrokes other than the interrupt are swallowed, and the next message is composed in the editor once the task ends.
 
+If the response stream drops, yak keeps the received answer and reasoning, then makes a bounded attempt to continue. After partial output, the continuation instruction is recorded as another user message in the thread; unfinished tool calls are recorded as interrupted and never executed. A connection that sends no body bytes for 300 seconds reports an idle timeout.
+
 A project instructions file (`AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md`, the nearest walking up from the working directory, `AGENTS.override.md` winning) rides the system prompt whole; the banner shows which one is in play.
 
 ## Per-run flags

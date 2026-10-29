@@ -1,6 +1,6 @@
 //! HTTP plumbing: POST with SSE streaming, idle timeout, classified retries.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -42,6 +42,8 @@ pub enum Event {
         id: Option<String>,
         fragment: String,
     },
+    /// Latest cumulative usage for the current request, even if it later fails.
+    Usage(Usage),
     /// stream finished; carries token usage if reported and why the model
     /// stopped
     Done {
@@ -309,9 +311,9 @@ impl Retry {
     }
 
     /// Whether to try again after `e`, and how long to wait. `None` gives
-    /// up. Stream drops are in the retryable set because `post_sse` refuses
-    /// to resend once any output was handed out — the guard lives there,
-    /// where "emitted" is known.
+    /// up. Buffered JSON bodies may retry a read failure because nothing has
+    /// been handed out; post_sse instead returns every stream failure to its
+    /// caller before consulting this policy.
     fn next(&mut self, e: &HttpError) -> Option<Duration> {
         let class = e.class();
         if !matches!(
@@ -432,18 +434,12 @@ pub fn short_agent() -> &'static ureq::Agent {
     })
 }
 
-/// POST and hand each complete SSE event (with its `event:` type) to the
-/// caller's parser. Retryable failures (transport, 429 with its Retry-After,
-/// 5xx) resend with jittered backoff; a stream that already handed output to
-/// the user never resends transparently — replaying it would duplicate the
-/// answer — so mid-stream drops surface as errors instead. `handed` is the
-/// caller-owned record of visible output (text/reasoning/tool deltas): the
-/// first SSE event alone does not count, a drop before any real output can
-/// still be retried safely.
+/// POST and parse SSE frames until the callback returns true or HTTP EOF.
+/// Retry connection/HTTP failures before streaming starts. Stream failures
+/// return immediately: only the caller may replay or continue a response.
 pub fn post_sse(
     req: &HttpRequest,
-    handed: &std::sync::atomic::AtomicBool,
-    mut on_data: impl FnMut(&str, &str),
+    mut on_data: impl FnMut(&str, &str) -> bool,
 ) -> Result<(), HttpError> {
     let a = agent();
     let mut retry = Retry::new();
@@ -452,13 +448,14 @@ pub fn post_sse(
         if interrupted() {
             return Err(HttpError::new(0, "interrupted"));
         }
-        let result = send_sse(a, req, &mut |ev, data| {
-            on_data(ev, data);
-        });
+        let result = send_sse(a, req, &mut on_data);
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
-                if handed.load(std::sync::atomic::Ordering::Relaxed) && e.class() == Class::Stream {
+                // The agent owns the bounded stream-recovery budget. Retrying
+                // here as well multiplies silent waits and leaks parser state
+                // from one attempt into the next.
+                if e.class() == Class::Stream {
                     return Err(e);
                 }
                 let Some(delay) = next_delay(&mut retry, &e) else {
@@ -476,19 +473,70 @@ pub fn post_sse(
 fn send_sse(
     agent: &'static ureq::Agent,
     req: &HttpRequest,
-    on_data: &mut impl FnMut(&str, &str),
+    on_data: &mut impl FnMut(&str, &str) -> bool,
 ) -> Result<(), HttpError> {
     let response = send_raw_interruptible_flag(agent, req, crate::platform::interrupt::flag())?;
-    let reader = BufReader::new(response.into_body().into_reader());
+    read_sse(
+        response.into_body().into_reader(),
+        on_data,
+        STREAM_IDLE_TIMEOUT,
+    )
+}
+
+enum StreamRead {
+    Bytes(Instant),
+    Line(Result<String, String>),
+}
+
+/// Record transport activity before line buffering: a split SSE line still
+/// counts as a live connection, including a split UTF-8 character.
+struct ActiveReader<R> {
+    inner: R,
+    tx: std::sync::mpsc::Sender<StreamRead>,
+}
+
+impl<R: Read> Read for ActiveReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if count > 0 {
+            self.tx
+                .send(StreamRead::Bytes(Instant::now()))
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream reader closed")
+                })?;
+        }
+        Ok(count)
+    }
+}
+
+fn read_sse(
+    reader: impl Read + Send + 'static,
+    on_data: &mut impl FnMut(&str, &str) -> bool,
+    idle_timeout: Duration,
+) -> Result<(), HttpError> {
     // the blocking read lives on its own thread while this loop polls the
     // interrupt flag between 100ms slices — a silent server (long thinking
     // stretches, a hung connection) interrupts at once instead of waiting
     // for the next SSE line, and a stream silent past the idle window is
     // declared dead however long the generation might have been
-    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Wait for the consumer after each line. Once a terminal frame is
+    // parsed, dropping proceed closes the reader before another blocking
+    // read, even if the peer never closes its HTTP body.
+    let (proceed, next_line) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        let reader = BufReader::new(ActiveReader {
+            inner: reader,
+            tx: tx.clone(),
+        });
         for line in reader.lines() {
-            if tx.send(line.map_err(|e| e.to_string())).is_err() {
+            if tx
+                .send(StreamRead::Line(line.map_err(|e| e.to_string())))
+                .is_err()
+            {
+                break;
+            }
+            if next_line.recv().is_err() {
                 break;
             }
         }
@@ -496,16 +544,20 @@ fn send_sse(
     let mut frame = SseFrame::default();
     let mut last_byte = Instant::now();
     loop {
+        if interrupted() {
+            return Err(HttpError::new(0, "interrupted"));
+        }
         let line = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(line) => {
-                last_byte = Instant::now();
-                line
+            Ok(StreamRead::Bytes(received)) => {
+                last_byte = received;
+                continue;
             }
+            Ok(StreamRead::Line(line)) => line,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if interrupted() {
                     return Err(HttpError::new(0, "interrupted"));
                 }
-                if last_byte.elapsed() >= STREAM_IDLE_TIMEOUT {
+                if last_byte.elapsed() >= idle_timeout {
                     return Err(HttpError::new(
                         0,
                         format!(
@@ -517,7 +569,9 @@ fn send_sse(
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                frame.flush(on_data);
+                frame.flush(&mut |ev, data| {
+                    on_data(ev, data);
+                });
                 return Ok(());
             }
         };
@@ -525,7 +579,14 @@ fn send_sse(
             return Err(HttpError::new(0, "interrupted"));
         }
         let line = line.map_err(|e| HttpError::new(0, format!("stream: {e}")))?;
-        frame.line(&line, on_data);
+        let mut finished = false;
+        frame.line(&line, &mut |ev, data| {
+            finished = on_data(ev, data);
+        });
+        if finished {
+            return Ok(());
+        }
+        let _ = proceed.send(());
     }
 }
 
@@ -818,6 +879,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_frame_releases_the_body_reader() {
+        struct HeldBody {
+            data: std::io::Cursor<Vec<u8>>,
+            release: std::sync::mpsc::Receiver<()>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+        impl Read for HeldBody {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.data.read(buf)?;
+                if count == 0 {
+                    let _ = self.release.recv_timeout(Duration::from_secs(3));
+                }
+                Ok(count)
+            }
+        }
+        impl Drop for HeldBody {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let (release, wait) = std::sync::mpsc::channel();
+        let (dropped, observe) = std::sync::mpsc::channel();
+        let reader = HeldBody {
+            data: std::io::Cursor::new(b"data: [DONE]\n\n".to_vec()),
+            release: wait,
+            dropped,
+        };
+        assert!(
+            read_sse(
+                reader,
+                &mut |_, data| data == "[DONE]",
+                Duration::from_secs(2)
+            )
+            .is_ok()
+        );
+        let closed = observe.recv_timeout(Duration::from_secs(1)).is_ok();
+        let _ = release.send(());
+        assert!(closed, "the worker kept reading an already completed body");
+    }
+
+    #[test]
+    fn partial_sse_lines_keep_the_stream_alive() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // A single line takes over a second, but bytes (including a
+            // split UTF-8 character) keep arriving inside the idle window.
+            for byte in "data: 你好\n\n".as_bytes() {
+                conn.write_all(&[*byte]).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let reader = std::net::TcpStream::connect(addr).unwrap();
+        let mut events = Vec::new();
+        let result = read_sse(
+            reader,
+            &mut |_, data| {
+                events.push(data.to_owned());
+                true
+            },
+            Duration::from_millis(500),
+        );
+        server.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(events, vec!["你好"]);
+    }
+
+    #[test]
+    fn a_silent_stream_still_times_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let reader = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let error = read_sse(reader, &mut |_, _| false, Duration::from_millis(100)).unwrap_err();
+        assert!(error.to_string().starts_with("stream idle "));
+    }
+
+    #[test]
     fn sse_fields_preserve_spaces_and_reset_between_events() {
         let mut frame = SseFrame::default();
         let mut events = Vec::new();
@@ -997,6 +1137,49 @@ mod tests {
         assert_eq!(e.class(), Class::Interrupted);
         let g = get_with_flag(agent(), "http://127.0.0.1:9/x", &flag).unwrap_err();
         assert!(g.contains("interrupted"), "{g}");
+    }
+
+    #[test]
+    fn sse_transport_does_not_retry_a_broken_body() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            crate::core::testutil::read_request(&mut connection);
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100\r\nConnection: close\r\n\r\n").unwrap();
+            drop(connection);
+            listener.set_nonblocking(true).unwrap();
+            let mut hits = 1;
+            while matches!(wait.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                match listener.accept() {
+                    Ok((mut connection, _)) => {
+                        crate::core::testutil::read_request(&mut connection);
+                        connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndata: [DONE]\n\n").unwrap();
+                        hits += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            hits
+        });
+        let request = HttpRequest {
+            url: format!("http://{address}/stream"),
+            headers: vec![],
+            body: "{}".into(),
+        };
+        let result = post_sse(&request, |_, data| data == "[DONE]");
+        release.send(()).unwrap();
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "stream recovery must have only one owner"
+        );
+        assert!(result.unwrap_err().to_string().starts_with("stream: "));
     }
 
     #[test]

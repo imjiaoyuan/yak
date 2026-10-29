@@ -469,30 +469,13 @@ pub(crate) fn dispatch(
     if stream {
         let mut usage: Option<Usage> = None;
         let mut stop = StopReason::default();
-        // visible-output record shared with the retry policy in post_sse:
-        // only real content counts, protocol prelude events do not
-        let handed = std::sync::atomic::AtomicBool::new(false);
-        let mut forward = |e: Event| {
-            if matches!(
-                e,
-                Event::Delta(_) | Event::ReasoningDelta { .. } | Event::ToolCallDelta { .. }
-            ) {
-                handed.store(true, std::sync::atomic::Ordering::Relaxed);
+        stream_events(&req, |event_type, chunk| {
+            let result = feed(event_type, chunk, &mut usage, &mut stop, on_event);
+            if let Some(usage) = usage {
+                on_event(Event::Usage(usage));
             }
-            on_event(e);
-        };
-        let mut feed_error = None;
-        let result = stream_events(&req, &handed, |event_type, chunk| {
-            if feed_error.is_none()
-                && let Err(error) = feed(event_type, chunk, &mut usage, &mut stop, &mut forward)
-            {
-                feed_error = Some(error);
-            }
-        });
-        if let Some(error) = feed_error {
-            return Err(error);
-        }
-        result?;
+            result
+        })?;
         on_event(Event::Done { usage, stop });
         Ok(())
     } else {
@@ -627,25 +610,23 @@ pub fn is_truncation(error: &str) -> bool {
 /// logged as a finished turn.
 pub fn stream_events(
     req: &HttpRequest,
-    handed: &std::sync::atomic::AtomicBool,
-    on_value: impl FnMut(&str, &Value),
+    on_value: impl FnMut(&str, &Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    stream_events_with_terminal(req, handed, |_, _| false, on_value)
+    stream_events_with_terminal(req, |_, _| false, on_value)
 }
 
 /// Native protocols may terminate inside a JSON frame rather than with a
 /// named SSE event. Error handling remains shared with the other adapters.
 pub(crate) fn stream_events_with_terminal(
     req: &HttpRequest,
-    handed: &std::sync::atomic::AtomicBool,
     terminal: impl Fn(&str, &Value) -> bool,
-    mut on_value: impl FnMut(&str, &Value),
+    mut on_value: impl FnMut(&str, &Value) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut stream_error: Option<String> = None;
     let mut saw_done = false;
-    let result = http::post_sse(req, handed, |event_type, data| {
+    let result = http::post_sse(req, |event_type, data| {
         if stream_error.is_some() {
-            return;
+            return true;
         }
         if event_type == "error" {
             let msg = serde_json::from_str::<Value>(data)
@@ -653,14 +634,15 @@ pub(crate) fn stream_events_with_terminal(
                 .and_then(|v| v["error"]["message"].as_str().map(String::from))
                 .unwrap_or_else(|| data.to_string());
             stream_error = Some(msg);
-            return;
+            return true;
         }
         // OpenAI-compatible streams end with a literal `data: [DONE]`
         // sentinel, not JSON — swallow it instead of warning on every turn.
         if data.trim() == "[DONE]" || event_type == "message_stop" {
             saw_done = true;
-            return;
+            return true;
         }
+        let mut stop_reading = false;
         match serde_json::from_str::<Value>(data) {
             Ok(chunk) => {
                 if let Some(error) = chunk.get("error").filter(|v| !v.is_null()) {
@@ -671,12 +653,13 @@ pub(crate) fn stream_events_with_terminal(
                             .map(String::from)
                             .unwrap_or_else(|| error.to_string()),
                     );
-                    return;
+                    return true;
                 }
                 let kind = chunk["type"].as_str().unwrap_or(event_type);
                 match kind {
                     "response.done" | "response.completed" | "response.incomplete" => {
-                        saw_done = true
+                        saw_done = true;
+                        stop_reading = true;
                     }
                     "response.failed" | "error" => {
                         stream_error = Some(
@@ -687,15 +670,20 @@ pub(crate) fn stream_events_with_terminal(
                                 .map(String::from)
                                 .unwrap_or_else(|| chunk.to_string()),
                         );
-                        return;
+                        return true;
                     }
                     _ => {}
                 }
                 saw_done |= terminal(event_type, &chunk);
-                on_value(event_type, &chunk);
+                if let Err(error) = on_value(event_type, &chunk) {
+                    stream_error = Some(error);
+                }
             }
             Err(e) => stream_error = Some(format!("invalid SSE JSON: {e}")),
         }
+        // A native candidate finishReason validates completion at EOF, but
+        // is not an SSE end marker: trailing usage must still be consumed.
+        stop_reading || stream_error.is_some()
     });
     result.map_err(|e| e.to_string())?;
     match stream_error {

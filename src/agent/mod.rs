@@ -167,6 +167,8 @@ pub struct AgentFailure {
     /// already persisted at its [`AgentUpdate::RoundEnd`], so this is the
     /// only slice a failure still has to write
     pub round_start: usize,
+    /// Usage already reported for the failed round, if any.
+    pub usage: Option<Usage>,
 }
 
 /// One run's inputs: the model, the tool set, the prompt and the seed
@@ -304,6 +306,7 @@ pub fn run_agent(
                 history,
                 final_text,
                 round_start,
+                usage: None,
             });
         }
         opts.hooks.fire("turn_start", &json!({"turn": turn}));
@@ -406,6 +409,11 @@ pub fn run_agent(
 
         let mut round = stream_round(model, &input, opts.stream, on_update);
         if let Some(e) = round.error.take() {
+            // Count the failed attempt once using only reported values.
+            if round.usage.is_some() {
+                last_usage = round.usage;
+                on_update(AgentUpdate::TurnEnd { usage: round.usage });
+            }
             if crate::core::http::interrupted() {
                 interrupted = true;
                 // keep the interrupted round's own messages: the pending
@@ -416,18 +424,13 @@ pub fn run_agent(
                 if has_pending {
                     history.push(pending.take().expect("checked above"));
                 }
-                if !round.text.is_empty() {
+                if round.has_output() {
                     final_text = round.text.clone();
-                    history.push(Msg::Assistant {
-                        text: round.text,
-                        tool_calls: vec![],
-                        reasoning: None,
-                        reasoning_meta: None,
-                    });
+                    round.keep_partial(&mut history);
                 }
                 on_update(AgentUpdate::RoundEnd {
                     messages: history[round_start..].to_vec(),
-                    usage: None,
+                    usage: round.usage,
                 });
                 break;
             }
@@ -466,22 +469,18 @@ pub fn run_agent(
                 || e.starts_with("stream idle ");
             // a drop after output was handed out is never replayed — the
             // answer on screen would duplicate — but the run need not die
-            // either: the partial text becomes a real assistant message and
-            // the model continues from it (assistant-last is a prefill for
-            // both wire shapes). Bounded: a link that drops every few KB
-            // would otherwise recover forever, each attempt with a fresh
-            // retry budget. The pending user message lands first so the
+            // either: partial output becomes a real assistant message, then
+            // an explicit continuation request asks for the rest. A trailing
+            // assistant alone is not a portable prefill. Bounded: a link
+            // dropping every few KB would otherwise recover forever, each
+            // attempt with a fresh retry budget. The pending user message lands first so the
             // order stays what happened: prompt, partial answer.
-            if !round.text.is_empty() {
+            if round.has_output() {
                 if has_pending {
                     history.push(pending.take().expect("checked above"));
                 }
-                history.push(Msg::Assistant {
-                    text: round.text.clone(),
-                    tool_calls: vec![],
-                    reasoning: None,
-                    reasoning_meta: None,
-                });
+                final_text = round.text.clone();
+                round.keep_partial(&mut history);
                 recoveries += 1;
                 // Replaying a long partial answer is expensive and visibly
                 // risks duplication; short pre-first-token drops retain the
@@ -501,30 +500,42 @@ pub fn run_agent(
                     // model actually said first
                     on_update(AgentUpdate::RoundEnd {
                         messages: history[round_start..].to_vec(),
-                        usage: None,
+                        usage: round.usage,
                     });
+                    pending = Some(Msg::user_with(
+                        "The previous response was interrupted. Continue from where it stopped \
+                         without repeating the text already provided. Any tool calls in that \
+                         response were not executed; re-issue them if still needed.",
+                        Vec::new(),
+                    ));
                     continue;
                 }
-            } else if round.text.is_empty()
-                && round.reasoning.is_none()
-                && round.tool_calls.is_empty()
-                && recoveries < MAX_STREAM_RECOVERIES
-                && recoverable_stream
-            {
+            } else if recoveries < MAX_STREAM_RECOVERIES && recoverable_stream {
                 // nothing was handed out — not one delta of text, reasoning
                 // or a tool call — so replaying the request cannot duplicate
                 // anything on screen. This is the shape of a gateway cutting
                 // a long-lived SSE connection before the first byte of its
                 // answer.
                 recoveries += 1;
+                if let Some(message) = pending.take() {
+                    history.push(message);
+                }
+                on_update(AgentUpdate::RoundEnd {
+                    messages: history[round_start..].to_vec(),
+                    usage: round.usage,
+                });
                 on_update(AgentUpdate::StreamRecovered { chars: 0, error: e });
                 continue;
+            }
+            if let Some(message) = pending.take() {
+                history.push(message);
             }
             return Err(AgentFailure {
                 message: e,
                 history,
                 final_text: final_text.clone(),
                 round_start,
+                usage: round.usage,
             });
         }
 
@@ -692,6 +703,38 @@ struct Round {
     error: Option<String>,
 }
 
+impl Round {
+    fn has_output(&self) -> bool {
+        !self.text.is_empty()
+            || self.reasoning.is_some()
+            || self.reasoning_meta.is_some()
+            || !self.tool_calls.is_empty()
+    }
+
+    /// Keep received state together, including native signed tool parts.
+    /// Calls from an unfinished response are recorded but never executed.
+    fn keep_partial(&self, history: &mut Vec<Msg>) {
+        history.push(Msg::Assistant {
+            text: self.text.clone(),
+            tool_calls: self.tool_calls.clone(),
+            reasoning: self.reasoning.clone(),
+            reasoning_meta: self.reasoning_meta.clone(),
+        });
+        for call in &self.tool_calls {
+            history.push(Msg::ToolResult {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: "Tool call was not executed: the response was interrupted before \
+                          completion, so its arguments may be incomplete. Re-issue the tool \
+                          call with complete arguments if still needed."
+                    .into(),
+                error: Some(crate::providers::ToolError::Interrupted),
+                attachments: Vec::new(),
+            });
+        }
+    }
+}
+
 /// Run one model round, reporting the stream as chrome updates.
 fn stream_round(
     model: &crate::providers::ResolvedModel,
@@ -731,6 +774,7 @@ fn stream_round(
                     on_update(AgentUpdate::ToolReceiving);
                 }
             }
+            crate::core::http::Event::Usage(u) => usage = Some(u),
             crate::core::http::Event::Done { usage: u, stop: s } => {
                 usage = u;
                 stop = s;

@@ -538,11 +538,10 @@ fn responses_stream(body: &str) -> (Result<(), String>, Vec<Value>) {
         body: "{}".into(),
     };
     let mut events = Vec::new();
-    let result = stream_events(
-        &req,
-        &std::sync::atomic::AtomicBool::new(false),
-        |_, value| events.push(value.clone()),
-    );
+    let result = stream_events(&req, |_, value| {
+        events.push(value.clone());
+        Ok(())
+    });
     server.join().unwrap();
     (result, events)
 }
@@ -601,4 +600,49 @@ fn malformed_stream_json_cannot_finish_successfully() {
 #[test]
 fn final_sse_frame_without_blank_line_is_processed() {
     assert_eq!(responses_stream("data: [DONE]").0, Ok(()));
+}
+
+/// Completion and error frames must finish even when the HTTP peer leaves
+/// its body open. The server's deadline bounds a regression to two seconds.
+#[test]
+fn terminal_sse_frames_do_not_wait_for_http_eof() {
+    use std::io::Write;
+    for (body, expected) in [
+        ("data: [DONE]\n\n", Ok(())),
+        (
+            "data: {\"reject\":true}\n\n",
+            Err("decoder rejected".into()),
+        ),
+        ("event: message_stop\ndata: {}\n\n", Ok(())),
+        ("data: {\"type\":\"response.completed\"}\n\n", Ok(())),
+        (
+            "data: {\"error\":{\"message\":\"failed\"}}\n\n",
+            Err("failed".into()),
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            crate::core::testutil::read_request(&mut conn);
+            write!(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}").unwrap();
+            wait.recv_timeout(std::time::Duration::from_secs(2)).is_ok()
+        });
+        let request = HttpRequest {
+            url: format!("http://{addr}/chat/completions"),
+            headers: vec![],
+            body: "{}".into(),
+        };
+        let result = stream_events(&request, |_, value| {
+            if value["reject"] == true {
+                Err("decoder rejected".into())
+            } else {
+                Ok(())
+            }
+        });
+        let _ = release.send(());
+        assert!(server.join().unwrap(), "stream waited for HTTP EOF: {body}");
+        assert_eq!(result, expected);
+    }
 }

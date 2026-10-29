@@ -2,7 +2,6 @@
 //! in reasoning_meta and replayed in their original order and boundaries.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
@@ -242,6 +241,7 @@ impl Decoder {
                 self.thoughts = n;
             }
             current.output = self.output + self.thoughts;
+            sink(Event::Usage(*current));
         }
         let candidates = chunk["candidates"].as_array();
         if candidates.is_some_and(|c| c.len() > 1) {
@@ -372,11 +372,8 @@ pub fn run(
     let request = HttpRequest { url, headers, body };
     let mut decoder = Decoder::default();
     if stream {
-        let handed = AtomicBool::new(false);
-        let mut error = None;
-        let result = super::stream_events_with_terminal(
+        super::stream_events_with_terminal(
             &request,
-            &handed,
             |_, chunk| {
                 chunk["candidates"]
                     .get(0)
@@ -384,22 +381,8 @@ pub fn run(
                     .filter(|r| *r != "FINISH_REASON_UNSPECIFIED")
                     .is_some()
             },
-            |_, chunk| {
-                if error.is_none() {
-                    let result = decoder.feed(&m.model_id, chunk, &mut |event| {
-                        handed.store(true, Ordering::Relaxed);
-                        sink(event);
-                    });
-                    if let Err(e) = result {
-                        error = Some(e);
-                    }
-                }
-            },
-        );
-        if let Some(error) = error {
-            return Err(error);
-        }
-        result?;
+            |_, chunk| decoder.feed(&m.model_id, chunk, sink),
+        )?;
     } else {
         decoder.feed(&m.model_id, &super::complete_json(&request)?, sink)?;
     }
@@ -581,6 +564,51 @@ mod tests {
             assert_eq!(result, Err(super::super::TRUNCATED_STREAM.into()));
             assert!(!done);
         }
+    }
+
+    fn stream_with_tail_after_finish(tail: Value) -> (Result<(), String>, Option<Usage>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let first =
+            json!({"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]});
+        let body = format!("data: {first}\n\ndata: {tail}\n\n");
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            crate::core::testutil::read_request(&mut connection);
+            write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let mut m = model("gemini");
+        m.base_url = format!("http://{address}");
+        let mut usage = None;
+        let result = run(&m, &input(&[], &[]), true, &mut |event| {
+            if let Event::Done {
+                usage: reported, ..
+            } = event
+            {
+                usage = reported;
+            }
+        });
+        server.join().unwrap();
+        (result, usage)
+    }
+
+    #[test]
+    fn gemini_reads_usage_after_finish_reason() {
+        let (result, usage) = stream_with_tail_after_finish(
+            json!({"usageMetadata":{"promptTokenCount":30,"candidatesTokenCount":7,"thoughtsTokenCount":3}}),
+        );
+        assert_eq!(result, Ok(()));
+        let usage = usage.expect("trailing usage must be consumed");
+        assert_eq!((usage.input, usage.output), (30, 10));
+    }
+
+    #[test]
+    fn gemini_rejects_content_after_finish_reason() {
+        let (result, _) = stream_with_tail_after_finish(
+            json!({"candidates":[{"content":{"parts":[{"text":"late"}]}}]}),
+        );
+        assert_eq!(result, Err("Gemini sent content after finishReason".into()));
     }
 
     #[test]
