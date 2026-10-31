@@ -46,7 +46,7 @@ cat error.log | yak "what broke?"   # the prompt can come from stdin
 
 Piped output is plain text (no colours, no control codes) so it drops straight into a file or another command.
 
-The first run needs a model: type `/login`, pick a provider from the shipped provider catalog (Anthropic, OpenAI, DeepSeek, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model — or name the provider up front (`/login openai`) to skip the list and its prefilled questions. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
+The first run needs a model: type `/login`, pick a provider from the shipped provider catalog (Anthropic, OpenAI, OpenCode Go, DeepSeek, MiniMax, Kimi Coding, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model — or name the provider up front (`/login openai`) to skip the list and its prefilled questions. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
 
 Use `/login openai-responses` for the API-key Responses API; `/login openai` keeps Chat Completions. Custom providers can select `responses` too. `/login google-native` uses native Gemini (including signed tool history); `/login google` keeps Google’s OpenAI-compatible endpoint.
 

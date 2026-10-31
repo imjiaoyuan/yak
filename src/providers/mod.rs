@@ -834,7 +834,7 @@ impl ResolvedModel {
         ResolvedModel {
             provider_name: provider_name.to_string(),
             kind: p.kind.clone(),
-            base_url: p.base_url.clone(),
+            base_url: catalog::current_base_url(&p.kind, &p.base_url).to_string(),
             api_key,
             model_id: model_id.to_string(),
             context_window: None,

@@ -1162,11 +1162,14 @@ fn repl_command(
             if let Err(e) = crate::commands::login::logout_picker() {
                 eprintln!("Error: {e}");
             }
-            // the default may have been cleared with it: re-resolve lazily on
-            // the next task, but warn now if the session model is orphaned
+            // Drop the resolved model and its credentials with the provider.
+            // Otherwise a subsequent /login keeps this stale model id/key
+            // instead of adopting the wizard's newly selected default.
             if let Some(qualified) = session.model.as_ref().map(|m| m.qualified_id())
                 && crate::providers::resolve_model_by_id(&qualified).is_err()
             {
+                session.model = None;
+                session.rebuild_tools();
                 eprintln!(
                     "{}current model {qualified} no longer resolves — run /model{}",
                     crate::theme::err().dim,

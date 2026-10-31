@@ -51,8 +51,19 @@ def write_thread(user_dir, thread_id, cwd, prompt):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        assert self.path == "/v1/models", self.path
+        body = json.dumps({"data": [{"id": "new-flash"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        seen["last_model"] = body.get("model")
+        seen["last_auth"] = self.headers.get("Authorization")
         msgs = body.get("messages", [])
         if msgs:
             # the agent appends a volatile `<context>…</context>` budget note
@@ -235,6 +246,67 @@ def install_lane(binary, work, env):
     clone = os.path.join(work, ".yak", "pkg", name)
     assert os.path.isdir(clone), f"install did not land in the project (screen {screen[-400:]!r})"
     return screen
+
+
+def provider_relogin_lane(binary, work, env):
+    """Removing and re-adding the active provider must discard the old model
+    and credentials, then adopt the new default without another /model."""
+    with tempfile.TemporaryDirectory() as user:
+        with open(os.path.join(user, "config.json"), "w") as f:
+            json.dump({
+                "providers": {"mock": {
+                    "kind": "openai-compat",
+                    "base_url": f"http://127.0.0.1:{PORT}/v1",
+                    "api_key": "old-key", "models": ["old-flash"],
+                }},
+                "models": {"default": "mock/old-flash"},
+            }, f)
+        OUT.clear()
+        OUT_DONE.clear()
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(work)
+            os.execve(binary, [binary], dict(env, YAK_USER_PATH=user))
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
+        try:
+            read_until(fd, rb">")
+            send(fd, b"/logout\r")
+            read_until(fd, rb"remove provider:")
+            send(fd, b"\r")
+            read_until(fd, rb"no longer resolves")
+            OUT.clear()
+            send(fd, b"/login custom\r")
+            read_until(fd, rb"Provider name")
+            send(fd, b"mock\r")
+            read_until(fd, rb"Kind \[")
+            send(fd, b"\r")
+            read_until(fd, rb"Base URL")
+            send(fd, f"http://127.0.0.1:{PORT}/v1\r".encode())
+            read_until(fd, rb"API key")
+            send(fd, b"new-key\r")
+            read_until(fd, rb"default model:")
+            send(fd, b"\r")
+            read_until(fd, rb"model \xe2\x86\x92 mock/new-flash")
+            OUT.clear()
+            send(fd, b"verify new flash\r")
+            read_until(fd, rb"ok from mock")
+            assert seen["last_model"] == "new-flash", seen["last_model"]
+            assert seen["last_auth"] == "Bearer new-key", seen["last_auth"]
+        finally:
+            send(fd, b"/exit\r")
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                child, status = os.waitpid(pid, os.WNOHANG)
+                if child:
+                    assert os.waitstatus_to_exitcode(status) == 0, status
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            OUT_DONE.wait(2)
+            os.close(fd)
 
 
 def main():
@@ -664,6 +736,7 @@ def main():
     screen = install_lane(binary, work, env)
     assert b"skills: " in screen, f"layout not recapped: {screen[-500:]!r}"
 
+    provider_relogin_lane(binary, work, env)
     print("repl pty smoke passed")
     return 0
 

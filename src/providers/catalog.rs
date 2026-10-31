@@ -1,13 +1,12 @@
 //! The built-in provider catalog, mirroring the provider registry: one row
 //! per known API-key provider with its canonical id, endpoint and env var.
-//! `yak models add` builds its wizard from it. OAuth-only and
-//! cloud-signature (Bedrock, Vertex) endpoints are not
-//! catalogued.
+//! `/login` builds its wizard from it. ChatGPT uses OAuth; cloud-signature
+//! (Bedrock, Vertex) endpoints are not catalogued.
 
 /// One catalogued provider.
 pub struct Entry {
     pub id: &'static str,
-    /// our adapter kind: openai-compat | anthropic
+    /// our adapter kind: openai-compat | anthropic | responses | gemini | codex
     pub kind: &'static str,
     /// the endpoint the request paths hang off, any version segment
     /// included: the adapters glue `/chat/completions` or `/v1/messages`
@@ -48,7 +47,7 @@ pub const ALL: &[Entry] = &[
     e(
         "minimax-cn",
         "anthropic",
-        "https://api.minimaxi.com/anthropic",
+        "https://api.minimax.cn/anthropic",
         "MINIMAX_CN_API_KEY",
     ),
     // openai-protocol vendors
@@ -67,47 +66,75 @@ pub const ALL: &[Entry] = &[
     // the ChatGPT Plus/Pro subscription login (OAuth, no API key): the
     // Codex channel
     e("chatgpt", "codex", "https://chatgpt.com/backend-api", ""),
-    // anthropic-named, but it serves the OpenAI shape: /v1/chat/completions
-    // answers while /v1/messages is an unrouted 404
+    // Ant Ling's OpenAI-compatible endpoint; its Anthropic endpoint lives
+    // under /anthropic rather than the host root.
     e(
         "ant-ling",
         "openai-compat",
         "https://api.ant-ling.com/v1",
         "ANT_LING_API_KEY",
     ),
-    // OpenCode's Go (and Zen) subscription gateway: one key, two wire
-    // formats. Most models ride the OpenAI /chat/completions path; a few
-    // (MiniMax and friends) speak the Anthropic /v1/messages shape, so the
-    // same endpoint is catalogued under both kinds.
+    e(
+        "ant-ling-anthropic",
+        "anthropic",
+        "https://api.ant-ling.com/anthropic",
+        "ANT_LING_API_KEY",
+    ),
+    // Console translates every text model across these protocols. Model
+    // discovery uses the shared /inference[/go]/v1/models endpoint.
     e(
         "opencode-go",
         "openai-compat",
-        "https://opencode.ai/zen/go/v1",
+        "https://opencode.ai/inference/go/openai/v1",
         "OPENCODE_API_KEY",
     ),
     e(
         "opencode-go-anthropic",
         "anthropic",
-        "https://opencode.ai/zen/go",
+        "https://opencode.ai/inference/go/anthropic",
         "OPENCODE_API_KEY",
     ),
-    // the same gateway without the Go subscription: Zen
+    e(
+        "opencode-go-responses",
+        "responses",
+        "https://opencode.ai/inference/go/openai/v1",
+        "OPENCODE_API_KEY",
+    ),
+    // the same gateway with pay-as-you-go billing
     e(
         "opencode",
         "openai-compat",
-        "https://opencode.ai/zen/v1",
+        "https://opencode.ai/inference/openai/v1",
         "OPENCODE_API_KEY",
     ),
     e(
         "opencode-anthropic",
         "anthropic",
-        "https://opencode.ai/zen",
+        "https://opencode.ai/inference/anthropic",
+        "OPENCODE_API_KEY",
+    ),
+    e(
+        "opencode-responses",
+        "responses",
+        "https://opencode.ai/inference/openai/v1",
         "OPENCODE_API_KEY",
     ),
     e(
         "deepseek",
         "openai-compat",
         "https://api.deepseek.com",
+        "DEEPSEEK_API_KEY",
+    ),
+    e(
+        "deepseek-responses",
+        "responses",
+        "https://api.deepseek.com",
+        "DEEPSEEK_API_KEY",
+    ),
+    e(
+        "deepseek-anthropic",
+        "anthropic",
+        "https://api.deepseek.com/anthropic",
         "DEEPSEEK_API_KEY",
     ),
     e(
@@ -173,6 +200,12 @@ pub const ALL: &[Entry] = &[
     ),
     e("xai", "openai-compat", "https://api.x.ai/v1", "XAI_API_KEY"),
     e(
+        "xai-responses",
+        "responses",
+        "https://api.x.ai/v1",
+        "XAI_API_KEY",
+    ),
+    e(
         "openrouter",
         "openai-compat",
         "https://openrouter.ai/api/v1",
@@ -200,6 +233,24 @@ pub const ALL: &[Entry] = &[
         "kimi-coding",
         "openai-compat",
         "https://api.kimi.com/coding/v1",
+        "KIMI_API_KEY",
+    ),
+    e(
+        "kimi-coding-global",
+        "openai-compat",
+        "https://api.kimi.ai/coding/v1",
+        "KIMI_API_KEY",
+    ),
+    e(
+        "kimi-coding-responses",
+        "responses",
+        "https://api.kimi.com/coding/v1",
+        "KIMI_API_KEY",
+    ),
+    e(
+        "kimi-coding-anthropic",
+        "anthropic",
+        "https://api.kimi.com/coding",
         "KIMI_API_KEY",
     ),
     e(
@@ -291,9 +342,37 @@ pub const ALL: &[Entry] = &[
     e("vllm", "openai-compat", "http://localhost:8000/v1", ""),
 ];
 
-/// The `/models` endpoint a provider kind serves. Anthropic mounts it under
-/// `/v1/models`; the openai-compat half talks to bare `/models`.
+/// Known retired preset URLs, resolved without rewriting user configuration.
+/// Match exact vendor paths only: custom gateways and proxies stay literal.
+pub(super) fn current_base_url<'a>(kind: &str, base_url: &'a str) -> &'a str {
+    match (kind, base_url.trim_end_matches('/')) {
+        ("openai-compat" | "responses", "https://opencode.ai/zen/go/v1") => {
+            "https://opencode.ai/inference/go/openai/v1"
+        }
+        ("anthropic", "https://opencode.ai/zen/go") => "https://opencode.ai/inference/go/anthropic",
+        ("openai-compat" | "responses", "https://opencode.ai/zen/v1") => {
+            "https://opencode.ai/inference/openai/v1"
+        }
+        ("anthropic", "https://opencode.ai/zen") => "https://opencode.ai/inference/anthropic",
+        ("anthropic", "https://api.minimaxi.com/anthropic") => "https://api.minimax.cn/anthropic",
+        _ => base_url,
+    }
+}
+
+/// Console has a shared model list independent of the selected wire protocol.
+/// Ordinary Anthropic providers mount `/v1/models`; other kinds use `/models`.
 pub fn models_url(kind: &str, base_url: &str) -> String {
+    let base_url = current_base_url(kind, base_url).trim_end_matches('/');
+    match base_url {
+        "https://opencode.ai/inference/go/openai/v1"
+        | "https://opencode.ai/inference/go/anthropic" => {
+            return "https://opencode.ai/inference/go/v1/models".into();
+        }
+        "https://opencode.ai/inference/openai/v1" | "https://opencode.ai/inference/anthropic" => {
+            return "https://opencode.ai/inference/v1/models".into();
+        }
+        _ => {}
+    }
     if kind == "anthropic" {
         format!("{}/v1/models", base_url.trim_end_matches('/'))
     } else {
@@ -409,6 +488,74 @@ pub fn fetch_models(kind: &str, base_url: &str, api_key: &str) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_protocol_presets_share_the_plan_model_list() {
+        for entry in ALL.iter().filter(|e| e.id.starts_with("opencode")) {
+            let expected = if entry.id.starts_with("opencode-go") {
+                "https://opencode.ai/inference/go/v1/models"
+            } else {
+                "https://opencode.ai/inference/v1/models"
+            };
+            assert_eq!(
+                models_url(entry.kind, entry.base_url),
+                expected,
+                "{}",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn retired_presets_resolve_to_current_endpoints_without_touching_custom_urls() {
+        for (kind, old, current) in [
+            (
+                "openai-compat",
+                "https://opencode.ai/zen/go/v1/",
+                "https://opencode.ai/inference/go/openai/v1",
+            ),
+            (
+                "responses",
+                "https://opencode.ai/zen/v1",
+                "https://opencode.ai/inference/openai/v1",
+            ),
+            (
+                "anthropic",
+                "https://opencode.ai/zen/go",
+                "https://opencode.ai/inference/go/anthropic",
+            ),
+            (
+                "anthropic",
+                "https://opencode.ai/zen",
+                "https://opencode.ai/inference/anthropic",
+            ),
+            (
+                "anthropic",
+                "https://api.minimaxi.com/anthropic",
+                "https://api.minimax.cn/anthropic",
+            ),
+        ] {
+            let provider = crate::core::config::Provider {
+                kind: kind.into(),
+                base_url: old.into(),
+                api_key: None,
+                models: vec![],
+            };
+            let resolved =
+                super::super::ResolvedModel::from_config("account-2", &provider, "model", None);
+            assert_eq!(resolved.base_url, current);
+            assert_eq!(resolved.model_id, "model");
+            assert_eq!(provider.base_url, old);
+        }
+        for url in [
+            "https://proxy.example/zen/go/v1",
+            "https://opencode.ai/zen/go/v1/custom",
+            "https://opencode.ai.example/zen/go/v1",
+            "http://localhost:8080/v1/",
+        ] {
+            assert_eq!(current_base_url("openai-compat", url), url);
+        }
+    }
 
     #[test]
     fn native_gemini_models_follow_pages_and_exclude_embedding_models() {
@@ -533,8 +680,11 @@ mod tests {
             ),
             ("meta", "https://api.meta.ai/v1/models"),
             ("siliconflow-com", "https://api.siliconflow.com/v1/models"),
-            ("opencode", "https://opencode.ai/zen/v1/models"),
-            ("opencode-anthropic", "https://opencode.ai/zen/v1/models"),
+            ("opencode", "https://opencode.ai/inference/v1/models"),
+            (
+                "opencode-anthropic",
+                "https://opencode.ai/inference/v1/models",
+            ),
         ] {
             assert_eq!(models(id), expected, "{id}");
         }
@@ -561,7 +711,7 @@ mod tests {
         // there — a bare "Bearer + user-agent" request cannot list them
         let (url, headers) =
             fetch_models_url("openai-compat", "https://opencode.ai/zen/go/v1", "sk-test");
-        assert_eq!(url, "https://opencode.ai/zen/go/v1/models");
+        assert_eq!(url, "https://opencode.ai/inference/go/v1/models");
         assert!(header(&headers, "x-opencode-session").is_some());
         assert!(header(&headers, "user-agent").is_some());
         assert_eq!(header(&headers, "authorization"), Some("Bearer sk-test"));
