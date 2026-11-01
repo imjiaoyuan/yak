@@ -575,12 +575,21 @@ def main():
     send(fd, b"/resume\r")          # the picker comes up
     read_until(fd, rb"enter select")
     send(fd, b"\r")              # a second enter loads the local session
-    time.sleep(0.5)
+    read_until_after(fd, rb"resumed 01localresumeprobe0000000",
+                     rb"\x1b\[1m>\x1b\[0m ")
+    # The picker already printed the thread id. Only fresh /status output
+    # proves that resume finished and the command ran on the loaded session.
+    with OUT_lock:
+        OUT.clear()
     send(fd, b"/status\r")
-    read_until(fd, rb"01localresumeprobe0000000")  # the session is live now
+    read_until_after(fd, rb"session\s+01localresumeprobe0000000",
+                     rb"\x1b\[1m>\x1b\[0m ")
     exported = os.path.join(user, "exported.md")
+    with OUT_lock:
+        OUT.clear()
     send(fd, ("/export " + exported).encode() + b"\r")
-    time.sleep(0.8)
+    read_until_after(fd, rb"exported 01localresumeprobe0000000",
+                     rb"\x1b\[1m>\x1b\[0m ")
     assert os.path.exists(exported), f"no export written; screen: {out_bytes()[-800:]!r}"
     md = open(exported).read()
     assert md.startswith("# local session marker"), f"export: {md[:200]!r}"
