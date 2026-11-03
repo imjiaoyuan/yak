@@ -118,7 +118,8 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
 - `blacklist`: the command blacklist file (plus a project `.yak/blacklist`).
 - `threads/thread-names.json`: the session-title table (`/name`), thread id → display name, shown by `yak threads` and the `/resume` picker (`agent/names.rs`; the transcript files are untouched).
 - `YAK.md`: global user memory, hand-edited or appended by the `memory` tool when the user
-  asks to note something durable; injected into the agent system prompt (`agent/memory.rs`).
+  asks to note something durable; injected into the agent system prompt by the
+  `examples/extensions/memory` extension).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories (skills are mounted by the `examples/extensions/skills` plugin — the core only knows the extension protocol).
 - `pkg/`: packages installed with `yak install`.
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers) and the rustc compile cache for `.rs` script tools (`tmp/rs-cache/`), swept of anything older than a week at every agent start (`core/tmp.rs`).
