@@ -1314,40 +1314,27 @@ def main():
     named = [f for f in os.listdir(here) if f.startswith("yak-") and f.endswith(".md")]
     assert named, f"no default-named export in {os.listdir(here)}"
 
-    # project trust: a project extension must NOT run before /trust records
-    # the project, and must load once it does
-    trust_proj = tempfile.mkdtemp()
-    trust_work = os.path.join(trust_proj, "repo")
-    os.makedirs(os.path.join(trust_work, ".yak", "extensions"))
+    # project extensions: a project's `.yak/extensions` loads without any
+    # trust record — discovery no longer gates the project's homes
+    proj_root = tempfile.mkdtemp()
+    proj_work = os.path.join(proj_root, "repo")
+    os.makedirs(os.path.join(proj_work, ".yak", "extensions"))
     # the project copy registers its own tool name, so the user-level echo
     # extension cannot mask whether it mounted
     proj_body = ECHO_EXT.replace('"name": "echo"', '"name": "projmark"')
-    write_extension(os.path.join(trust_work, ".yak", "extensions"),
+    write_extension(os.path.join(proj_work, ".yak", "extensions"),
                     "projmarker", proj_body)
     tp = run([binary, "--no-session", "-m", "mock/m-wc",
               "call the projmark tool with text 'from project'"],
-             env, cwd=trust_work, stdin=subprocess.DEVNULL)
-    assert tp.returncode == 0, f"untrusted run rc={tp.returncode} err={tp.stderr[-400:]}"
-    assert "not trusted" in tp.stdout + tp.stderr, \
-        "an untrusted project must say why its extensions stayed out"
-    assert "projmark" not in (seen.get("tools") or []), \
-        f"the untrusted project's tool leaked into the registry: {seen.get('tools')}"
-    # trust it: the same extension loads on the next start. the key is the
-    # path exactly as the agent's cwd spells it: getcwd() resolves macOS
-    # tempdir symlinks (/var -> /private/var) while mkdtemp hands back the
-    # logical one, and windows runners keep the 8.3 short name (RUNNER~1)
-    # where realpath spells the long one — record both spellings
-    with open(os.path.join(user, "trusted-projects.json"), "w") as f:
-        json.dump({trust_work: "ci", os.path.realpath(trust_work): "ci"}, f)
-    tp2 = run([binary, "--no-session", "-m", "mock/m-wc",
-               "call the projmark tool with text 'now trusted'"],
-              env, cwd=trust_work, stdin=subprocess.DEVNULL)
-    assert tp2.returncode == 0, f"trusted run rc={tp2.returncode} err={tp2.stderr[-400:]} out={tp2.stdout[-200:]}"
+             env, cwd=proj_work, stdin=subprocess.DEVNULL)
+    assert tp.returncode == 0, f"project run rc={tp.returncode} err={tp.stderr[-400:]}"
+    assert "not trusted" not in tp.stdout + tp.stderr, \
+        "project extensions load directly; no refusal notice may print"
     assert "projmark" in (seen.get("tools") or []), \
-        f"the trusted project's tool must mount: {seen.get('tools')}"
+        f"the project's tool must mount without a trust record: {seen.get('tools')}"
     log_now = open(fake_log).read() if os.path.exists(fake_log) else ""
-    assert "from model" in log_now or "now trusted" in log_now, \
-        f"the project extension call never ran after trust: log={log_now[-200:]!r} out={tp2.stdout[-300:]!r}"
+    assert "from model" in log_now or "from project" in log_now, \
+        f"the project extension call never ran: log={log_now[-200:]!r} out={tp.stdout[-300:]!r}"
 
     check_rpc(binary)
     check_codex(binary)
