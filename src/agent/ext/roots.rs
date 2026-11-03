@@ -3,37 +3,19 @@ use super::*;
 /// The extension homes, nearest-first within a root: project (walking up
 /// from cwd) then user. Same name in both → project wins.
 ///
-/// The project's homes load only when the user has vouched for the project
-/// (see `agent::trust`): plugin files execute with this process's
-/// permissions, so a cloned repository must not turn into code execution by
-/// a mere `cd`. Untrusted, the homes are skipped and the refusal is reported
-/// back so the entry point can say how to trust the project; a corrupt
-/// trust table is a loud error, never a quietly empty project surface.
-///
-/// Nothing fingerprints these directories anymore: plugin files are read
-/// at startup and re-read only on `/reload` (or a restart) — the per-task
-/// fingerprint probe walked every root twice each round and cost more
-/// than the plugins it watched.
+/// The project's homes load unconditionally: a `.yak/extensions` in the
+/// tree is a plugin home the moment it exists. Plugin files are read at
+/// startup and re-read only on `/reload` (or a restart) — the per-task
+/// fingerprint probe walked every root twice each round and cost more than
+/// the plugins it watched.
 pub fn discover_dirs(cwd: &Path) -> Result<Vec<PathBuf>, String> {
     let mut dirs = Vec::new();
-    let project_untrusted = match crate::agent::trust::is_trusted(cwd)? {
-        // no project homes exist: nothing to gate
-        None => false,
-        Some(true) => false,
-        Some(false) => true,
-    };
-    if project_untrusted {
-        eprintln!(
-            "{}project extensions not loaded — this project is not trusted; run /trust (or remove its .yak/extensions){}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-    } else if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".yak/extensions", true)
+    if let Some(d) = crate::core::paths::nearest_dir_up(cwd, ".yak/extensions", true)
         .or_else(|| crate::core::paths::nearest_dir_up(cwd, ".llm/extensions", true))
     {
         dirs.push(d);
-        // project-local packages ride the same trust decision: they are
-        // cloned code under the project's own `.yak`
+        // project-local packages ride the same root: they are code under the
+        // project's own `.yak`
         dirs.extend(crate::commands::pkg::extension_dirs(true)?);
     }
     // Packages follow project extensions, so an installed package cannot
@@ -41,4 +23,21 @@ pub fn discover_dirs(cwd: &Path) -> Result<Vec<PathBuf>, String> {
     dirs.extend(crate::commands::pkg::extension_dirs(false)?);
     dirs.push(crate::core::config::user_dir().join("extensions"));
     Ok(dirs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project's `.yak/extensions` is a plugin home on its own: no trust
+    /// record, no opt-in — existing is enough.
+    #[test]
+    fn project_extensions_load_without_a_trust_record() {
+        let root = crate::core::testutil::scratch_dir("ext-roots-project");
+        std::fs::create_dir_all(root.join(".yak/extensions")).unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        let dirs = discover_dirs(&root.join("src/deep")).unwrap();
+        assert_eq!(dirs.first(), Some(&root.join(".yak/extensions")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

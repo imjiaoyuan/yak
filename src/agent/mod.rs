@@ -12,7 +12,6 @@ pub mod session;
 pub mod settings;
 pub mod system_prompt;
 pub mod tools;
-pub mod trust;
 
 use crate::agent::ext::Extensions;
 use crate::core::http::{StopReason, Usage};

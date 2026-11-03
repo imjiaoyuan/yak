@@ -212,10 +212,6 @@ stdout is protocol records only; diagnostics go to stderr, like `--json`. The `r
 
 `/name TEXT` titles the current conversation; `/name` shows it, `/name off` clears it. The title replaces the preview quote in `yak threads` rows and the `/resume` picker, and rides the `--json` threads listing as `name` — the label a phone bridge pins its UI to. Names live in `thread-names.json` beside the threads directory; the transcript files are untouched.
 
-## Project trust
-
-A project's `.yak/extensions/` and `.yak/pkg/` are plugin homes: whatever they contain runs with your permissions the moment it loads. So a cloned repository is **untrusted by default** — `cd` into it and yak skips its project plugins with a notice, while your own `~/.yak/extensions/` loads as always. `/trust` records the project (by absolute path) in `~/.yak/trusted-projects.json` and its plugins load from the next start; `/reload` picks them up immediately; `/trust off` drops the decision again. A corrupt trust table is a loud error, never a silently widened one.
-
 ## HTML export
 
 `export_html` on the rpc wire (and `yak export --html [PATH]`) writes the conversation as one self-contained HTML file: the branch tree in a sidebar, the active branch as the transcript, images inline as base64, dark/light by the viewer's scheme, one column under a phone's width. No external assets — the file opens offline exactly as online.
