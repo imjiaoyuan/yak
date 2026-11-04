@@ -114,32 +114,44 @@ struct Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        // a polite shutdown first: hand the frame to the writer thread, then
-        // give it a moment to reach the child and the child a moment to flush
-        // and exit on its own — only then kill. Sending alone never worked:
-        // the writer writes asynchronously and the kill below always won the
-        // race, so the documented shutdown frame never actually arrived.
-        if self
-            .writer
-            .send("{\"type\":\"shutdown\"}\n".to_string())
-            .is_ok()
-        {
-            let deadline = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < deadline {
-                match self.child.try_wait() {
-                    Ok(Some(_)) => return, // exited cleanly, nothing to kill
-                    Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                    Err(_) => break,
+        self.request_shutdown();
+        self.settle(Instant::now() + SHUTDOWN_GRACE);
+    }
+}
+
+/// How long a shutdown frame may take to reach the child and the child to
+/// exit on its own before it is killed. One grace period covers the whole
+/// host (see `Extensions::drop`), not one per resident.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+
+impl Conn {
+    /// Hand the documented shutdown frame to the writer. Sending alone never
+    /// worked: the writer writes asynchronously, so the kill below always won
+    /// the race and the frame never actually arrived — hence the settle that
+    /// follows.
+    fn request_shutdown(&self) {
+        let _ = self.writer.send("{\"type\":\"shutdown\"}\n".to_string());
+    }
+
+    /// Give the child until `deadline` to exit on its own, then kill it and
+    /// reap it. A child that has already exited (including one reaped by an
+    /// earlier settle) is left alone: signalling a recycled pid is the one
+    /// way this could hurt somebody else.
+    fn settle(&mut self, deadline: Instant) {
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
                 }
+                Ok(None) | Err(_) => break,
             }
         }
         crate::platform::kill_process_tree(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
 
-impl Conn {
     /// Has the child exited? The reader thread marks `dead` only once it sees
     /// EOF, which can lag the process by a moment — and a request written
     /// into that gap waits out the whole timeout instead of respawning.
@@ -578,6 +590,29 @@ fn format_segments(items: &[Value]) -> String {
 pub struct Extensions {
     pub(crate) exts: Vec<Arc<Ext>>,
     pub(crate) script_tools: Vec<ExecToolSpec>,
+}
+
+impl Drop for Extensions {
+    /// Exit is one grace period for the whole install, not one per resident.
+    /// Every child gets the shutdown frame first, then all of them share a
+    /// single 250ms to exit on their own before the stragglers are killed: a
+    /// resident that only leaves on stdin EOF (most python examples) never
+    /// sees the frame in time on its own, so one-by-one dropping used to pay
+    /// the full grace per plugin — ten plugins meant 2.5s at every exit.
+    fn drop(&mut self) {
+        let mut conns: Vec<Conn> = self
+            .exts
+            .iter()
+            .filter_map(|ext| crate::core::sync::lock(&ext.conn).take())
+            .collect();
+        for conn in &conns {
+            conn.request_shutdown();
+        }
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        for conn in &mut conns {
+            conn.settle(deadline);
+        }
+    }
 }
 
 /// A background connect started by [`Extensions::connect_async`]: discovery

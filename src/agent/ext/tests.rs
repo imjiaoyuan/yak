@@ -812,6 +812,37 @@ done
     );
 }
 
+/// Exit is one grace period for the whole install, not one per plugin: a
+/// resident that only leaves on stdin EOF never sees the shutdown frame in
+/// time, so dropping the connections one by one used to pay 250ms each.
+#[test]
+#[cfg(unix)]
+fn shutdown_waits_once_for_every_resident() {
+    let stub = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *initialize*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+    let host = Extensions {
+        exts: (0..5)
+            .map(|i| connect_stub(&write_stub_extension(&format!("lingering_{i}"), stub)))
+            .collect(),
+        script_tools: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    drop(host);
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_millis(700),
+        "the host spent {took:?} at exit (a grace period per resident, not one for the batch)"
+    );
+}
+
 /// The model's tool_call_id rides the `call_tool` frame: a stateful
 /// extension keys per-call state on it, which the concurrent read-only
 /// batch makes necessary. The id is echoed back as the result here.
