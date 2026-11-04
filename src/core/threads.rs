@@ -166,14 +166,45 @@ fn same_dir(a: &str, b: &str) -> bool {
     Path::new(a) == Path::new(b)
 }
 
-/// The tail one summary reads. A thread's rows all come off the end — the
-/// newest timestamp, the last turn's cwd, the preview — so only the turn
-/// count needs the whole file; past this window it becomes a lower bound
-/// (the list shows `N+`) rather than a full read per row. No window growth
-/// hunts an older prompt: a task buried under megabytes of tool rounds is
-/// beyond any bounded tail, and the last answer identifies the conversation
-/// just as well.
+/// The window one summary reads before growing. A thread's rows all come off
+/// the end — the newest timestamp, the last turn's cwd, the preview — and a
+/// short read covers a typical turn line several times over, while reading and
+/// parsing a 256 KB window per thread is what a list of a few hundred threads
+/// actually pays. This is only the first read: [`Store::summarize_window`]
+/// grows it (as far as [`SUMMARY_TAIL`]) when the window stops mid-line,
+/// because one turn carrying a big tool result can be tens of KB on its own.
+/// It never grows for anything else — a task buried under megabytes of tool
+/// rounds is beyond any bounded tail, and the last answer identifies the
+/// conversation just as well.
+const SUMMARY_TAIL_SHORT: u64 = 16 * 1024;
+
+/// The furthest a summary window grows: past it the turn count is a lower
+/// bound (the list shows `N+`) rather than a full read per row.
 const SUMMARY_TAIL: u64 = 256 * 1024;
+
+/// A window holding fewer turn lines than this buys one growth step: a thread
+/// whose turns each carry a large tool result fits only a line or two in the
+/// short window, and `1+ turns` on a long conversation reads as a broken row.
+/// Growth stays bounded by [`SUMMARY_TAIL`].
+const MIN_COUNTED_TURNS: usize = 8;
+
+/// The only fields a list row reads off a turn line. Parsing the whole
+/// [`StoredTurn`] would materialize every message of every turn in the window
+/// — tens of megabytes of JSON for one preview line across a thread directory
+/// — so the scan lets serde skip the rest (`messages` above all) without
+/// allocating it.
+#[derive(Deserialize)]
+struct TailTurn {
+    /// required, so something that is not a turn line (a hand-edited object with
+    /// none of these fields) does not parse as a turn that is empty everywhere
+    ts: String,
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    response: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
 
 /// Scan summary bytes: the turn lines they hold, the newest turn that
 /// parses, and the newest prompt-bearing turn. Pieces are split on the
@@ -182,9 +213,9 @@ const SUMMARY_TAIL: u64 = 256 * 1024;
 /// that starts mid-line is a fragment — counted (it is the tail of a real
 /// turn) but never parseable. A torn final line fails to parse and the
 /// scan falls back to the line before it, as `read_thread` does.
-fn summary_from_tail(bytes: &[u8]) -> (usize, Option<StoredTurn>, Option<String>) {
+fn summary_from_tail(bytes: &[u8]) -> (usize, Option<TailTurn>, Option<String>) {
     let mut turns = 0usize;
-    let mut last: Option<StoredTurn> = None;
+    let mut last: Option<TailTurn> = None;
     let mut prompt: Option<String> = None;
     for line in bytes.split(|&b| b == b'\n') {
         if line.iter().all(u8::is_ascii_whitespace) {
@@ -192,7 +223,7 @@ fn summary_from_tail(bytes: &[u8]) -> (usize, Option<StoredTurn>, Option<String>
         }
         turns += 1;
         if let Ok(text) = std::str::from_utf8(line)
-            && let Ok(turn) = serde_json::from_str::<StoredTurn>(text)
+            && let Ok(turn) = serde_json::from_str::<TailTurn>(text)
         {
             // the newest prompt wins; a tool round's empty prompt keeps the
             // older task text standing
@@ -429,22 +460,45 @@ impl Store {
     }
 
     fn summarize(&self, id: &str) -> Option<ThreadSummary> {
-        self.summarize_tail(id, SUMMARY_TAIL)
+        self.summarize_window(id, None)
     }
 
-    /// Summarize from the file's tail: seek to `cap` bytes before the end
-    /// and read forward. A file smaller than the window is read entire and
-    /// its turn count is exact; a larger one gives a bound.
+    /// The fixed-window form the tests drive; production always grows.
+    #[cfg(test)]
     fn summarize_tail(&self, id: &str, cap: u64) -> Option<ThreadSummary> {
+        self.summarize_window(id, Some(cap))
+    }
+
+    /// Summarize from the file's tail: a short window read forward from
+    /// `window` bytes before the end. `cap` fixes the window (the tests drive
+    /// it); the list path passes `None` and starts at [`SUMMARY_TAIL_SHORT`],
+    /// growing up to [`SUMMARY_TAIL`] while the window ends mid-line, holds no
+    /// turn at all, or counts fewer than [`MIN_COUNTED_TURNS`] — one turn
+    /// carrying a big tool result can be tens of KB on its own, so a fixed
+    /// small window would leave whole threads with nothing to quote. A file
+    /// smaller than the window is read entire and its turn count is exact; a
+    /// larger one gives a bound.
+    fn summarize_window(&self, id: &str, cap: Option<u64>) -> Option<ThreadSummary> {
         let path = self.thread_path(id);
         let mut file = fs::File::open(&path).ok()?;
         let total = file.metadata().ok()?.len();
-        let cap = cap.min(total);
-        let start = total - cap;
-        file.seek(SeekFrom::Start(start)).ok()?;
-        let mut bytes = Vec::with_capacity(cap as usize);
-        file.read_to_end(&mut bytes).ok()?;
-        let (turns, last, prompt) = summary_from_tail(&bytes);
+        let max = cap.unwrap_or(SUMMARY_TAIL).min(total);
+        let mut window = cap.unwrap_or(SUMMARY_TAIL_SHORT).min(max);
+        let (start, turns, last, prompt) = loop {
+            let start = total - window;
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut bytes = Vec::with_capacity(window as usize);
+            file.read_to_end(&mut bytes).ok()?;
+            // a window that stops mid-line hides the newest turn behind a
+            // fragment of itself: grow until one whole turn line fits
+            let whole = bytes.last().is_none_or(|&b| b == b'\n');
+            let (turns, last, prompt) = summary_from_tail(&bytes);
+            if (!whole || last.is_none() || turns < MIN_COUNTED_TURNS) && window < max {
+                window = (window * 4).min(max);
+                continue;
+            }
+            break (start, turns, last, prompt);
+        };
         let last = last?;
         // the preview the lists show: the newest prompt in the window, else
         // the newest answer's first line
@@ -1137,6 +1191,30 @@ mod tests {
         assert!(!s.turns_exact, "the window never reached the file start");
         assert_eq!(s.preview, "task 4");
         assert_eq!(s.cwd.as_deref(), Some("/p/4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A list row needs the turn's head only, and a newest turn bigger than
+    /// the short window still fits: the scan grows its read instead of
+    /// quoting the turn before it. The message payload is skipped, so a line
+    /// whose `messages` no longer parse still lists — opening that thread is
+    /// where the corruption surfaces, loudly.
+    #[test]
+    fn a_list_row_reads_only_the_turn_head() {
+        let dir = scratch("tailhead");
+        let store = Store::open_path(&dir).unwrap();
+        let id = "tailhead";
+        let mut line = serde_json::to_value(turn_in("1", "/p/head", "the real task")).unwrap();
+        line["system"] = serde_json::json!("x".repeat(40 * 1024));
+        line["messages"] = serde_json::json!("not a message list");
+        let text = format!("{}\n", serde_json::to_string(&line).unwrap());
+        assert!(text.len() as u64 > 16 * 1024);
+        fs::write(store.thread_path(id), &text).unwrap();
+        let s = store.summarize(id).unwrap();
+        assert_eq!(s.turns, 1);
+        assert!(s.turns_exact, "the grown window reached the file start");
+        assert_eq!(s.preview, "the real task");
+        assert_eq!(s.cwd.as_deref(), Some("/p/head"));
         let _ = fs::remove_dir_all(&dir);
     }
 
