@@ -405,6 +405,30 @@ fn a_reasoning_only_drop_is_preserved_and_recovered() {
     );
 }
 
+/// A truncated round that never produced answer text has nothing to
+/// continue: the old wording told the model to resume a text it had not
+/// written, and on a long history it answered by recapping the whole
+/// conversation instead of resuming the task.
+#[test]
+fn a_reasoning_only_continuation_does_not_ask_to_continue_missing_text() {
+    let first =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished plan\"}}]}\n\n".into();
+    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
+    result.unwrap();
+    let continuation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !continuation.contains("Continue from where it stopped"),
+        "{continuation}"
+    );
+    assert!(
+        continuation.contains("before it produced an answer"),
+        "{continuation}"
+    );
+}
+
 #[test]
 fn tools_from_a_dropped_stream_are_never_executed() {
     let chunk = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"pending","function":{"name":"probe","arguments":"{\"unfinished\":"}}]}}]});

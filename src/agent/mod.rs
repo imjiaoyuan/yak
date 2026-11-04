@@ -501,12 +501,21 @@ pub fn run_agent(
                         messages: history[round_start..].to_vec(),
                         usage: round.usage,
                     });
-                    pending = Some(Msg::user_with(
+                    // a round that spent its whole output budget on
+                    // reasoning handed out no answer at all, so there is no
+                    // text to continue from: told to resume one anyway, a
+                    // model rebuilds the situation from scratch and recaps
+                    // the conversation instead of working
+                    let continuation = if round.text.is_empty() && round.tool_calls.is_empty() {
+                        "The previous response was interrupted before it produced an answer. \
+                         Pick the task up where you left off and continue it; do not restart \
+                         or summarize the conversation."
+                    } else {
                         "The previous response was interrupted. Continue from where it stopped \
                          without repeating the text already provided. Any tool calls in that \
-                         response were not executed; re-issue them if still needed.",
-                        Vec::new(),
-                    ));
+                         response were not executed; re-issue them if still needed."
+                    };
+                    pending = Some(Msg::user_with(continuation, Vec::new()));
                     continue;
                 }
             } else if recoveries < MAX_STREAM_RECOVERIES && recoverable_stream {
