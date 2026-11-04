@@ -722,7 +722,8 @@ done
 }
 
 /// A `session_before_tree` subscriber receives the turn ids about to be cut
-/// and answers null; the reply is fire-and-forget, so the host just moves on.
+/// and answers null; the host waits for that answer (a rollback must land
+/// before the jump), so the recorded frame is there when it returns.
 #[test]
 #[cfg(unix)]
 fn session_before_tree_reaches_a_subscriber_with_the_dropped_turns() {
@@ -735,7 +736,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
     *initialize*) printf '{{"id":%s,"result":{{"events":["session_before_tree"]}}}}\n' "$id" ;;
-    *session_before_tree*) printf '%s\n' "$line" >> "{}" ;;
+    *session_before_tree*) printf '%s\n' "$line" >> "{}" ; printf '{{"id":%s,"result":null}}\n' "$id" ;;
     *) printf '{{"id":%s,"result":null}}\n' "$id" ;;
   esac
 done
@@ -751,14 +752,63 @@ done
     };
     assert!(host.subscribes("session_before_tree"));
 
-    host.fire(
-        "session_before_tree",
+    host.before_tree(
         &json!({"thread": "t1", "kept_turns": 2, "dropped_turns": 1, "dropped_ids": ["t3"]}),
-    );
+    )
+    .unwrap();
     let seen = std::fs::read_to_string(&sink).unwrap_or_default();
     assert!(
         seen.contains("session_before_tree") && seen.contains("\"dropped_ids\":[\"t3\"]"),
         "the stub should have recorded the event; got: {seen:?}"
+    );
+}
+
+/// A subscriber that answers nothing is within the protocol for an
+/// observational event, so the host must not sit out the 5s event budget
+/// waiting for a reply nobody reads: `agent_start` would cost every run
+/// that, and `turn_start` every model round.
+#[test]
+#[cfg(unix)]
+fn an_observational_event_never_waits_for_a_silent_subscriber() {
+    let sink = crate::core::testutil::scratch_path("ext-silent-event-sink");
+    let silent = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*) printf '{{"id":%s,"result":{{"events":["turn_start"]}}}}\n' "$id" ;;
+    *turn_start*) printf '%s\n' "$line" >> "{}" ;;
+  esac
+done
+"#,
+        sink.display(),
+    );
+    let host = Extensions {
+        exts: vec![connect_stub(&write_stub_extension(
+            "silent_observer",
+            &silent,
+        ))],
+        script_tools: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    host.fire("turn_start", &json!({"turn": 1}));
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_millis(500),
+        "a silent subscriber held the event for {took:?}"
+    );
+    // fire-and-forget still means delivered: the frame has to reach the child
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = std::fs::read_to_string(&sink).unwrap_or_default();
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        seen.contains("turn_start"),
+        "the event never arrived: {seen:?}"
     );
 }
 

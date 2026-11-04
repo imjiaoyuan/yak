@@ -12,6 +12,10 @@ auto-pin from /model writes the same table, so the two agree.
 No slash command: to stop remembering in a project, delete the entry (or
 the file); to pin a directory you never run tasks in, write the JSON by
 hand. Removing the extension leaves the core reading the same file.
+
+`agent_start` is an observational event: it carries no reply, and a
+broken pins table is reported on stderr (the host's diagnostics tail)
+instead of vanishing.
 """
 
 import json
@@ -74,10 +78,8 @@ def main():
             if cwd and model:
                 try:
                     record(cwd, model)
-                except SystemExit as e:
-                    reply({"id": mid, "result": str(e)})
-                except Exception as e:
-                    reply({"id": mid, "result": f"error: {e}"})
+                except (SystemExit, OSError) as e:
+                    sys.stderr.write(f"model_pin: {e}\n")
         elif kind == "shutdown":
             return
 

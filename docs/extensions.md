@@ -180,7 +180,7 @@ The reply's `result` should be a string; a list lays out as **segments** — str
 
 `args` is everything after the command name, as one string. `context` carries the live session's thread id, cwd, model, usage, context estimate, tool count and mounted plugin rows; extensions that do not need it may ignore it. The reply prints dim in the session. A command whose answer is *work for the model* replies with a task instead of text — `{"result": {"task": "…", "system": "…"}}` — and the session submits that string as one agent task (the `/skill:<name>` shape: the `skills` example reads the SKILL.md off disk and hands back a `<skill name dir>` prompt). The optional `system` is appended only for this task and is restored afterwards. `task` wins over a printed `result` when both ride the reply.
 
-**`event`**: see the table below (deadline 5s). Only `tool_call`, `tool_result` and `compact` replies are interpreted; other events are fire-and-forget (reply `null` or nothing).
+**`event`**: see the table below. Only `tool_call`, `tool_result`, `compact` and `session_before_tree` replies are interpreted, and only those four wait for one (deadline 5s). Every other event is fire-and-forget: the host delivers it and moves on, so a subscriber answers `null` (or nothing at all) and a slow/no answer costs the session nothing.
 
 ```json
 → {"id": 4, "type": "event", "v": 1, "name": "tool_call",

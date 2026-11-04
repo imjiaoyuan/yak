@@ -430,9 +430,12 @@ impl Ext {
             .ok_or_else(|| format!("extension '{}' replied without a result", self.name))
     }
 
-    /// Fire an event hook. `tool_call` expects a reply — the extension may
-    /// deny the call (`{"decision":"deny","reason":..}`) or rewrite its
-    /// arguments (`{"args":{..}}`); every other event is fire-and-forget.
+    /// Fire an event hook and wait for its reply. `tool_call` expects one —
+    /// the extension may deny the call (`{"decision":"deny","reason":..}`)
+    /// or rewrite its arguments (`{"args":{..}}`) — and so do the three
+    /// other interpreted hooks (`tool_result`, `compact`,
+    /// `session_before_tree`); every observational event goes through
+    /// [`Ext::emit`] instead.
     pub fn fire(&self, name: &str, params: &Value) -> Result<Option<Value>, String> {
         let subscribed = crate::core::sync::lock(&self.state)
             .as_ref()
@@ -446,6 +449,48 @@ impl Ext {
             None,
         )?;
         Ok(result.get("result").cloned())
+    }
+
+    /// Deliver an observational event and return at once. The protocol
+    /// interprets no reply to these, so waiting for one charges every silent
+    /// subscriber the whole `EVENT_TIMEOUT` — 5s at `agent_start`, and 5s per
+    /// model round for a `turn_start` or `input` subscriber that answers
+    /// nothing, which the protocol explicitly allows. A reply a subscriber
+    /// sends anyway finds no waiter and lands in the reader loop's drop path,
+    /// exactly like a reply that arrives after its timeout.
+    pub fn emit(&self, name: &str, params: &Value) -> Result<(), String> {
+        let subscribed = crate::core::sync::lock(&self.state)
+            .as_ref()
+            .is_ok_and(|s| s.events.iter().any(|e| e == name));
+        if !subscribed {
+            return Ok(());
+        }
+        self.send(&json!({
+            "id": next_id(),
+            "type": "event",
+            "v": 1,
+            "name": name,
+            "params": params
+        }))
+    }
+
+    /// Write one frame and register no waiter: the transport half of
+    /// [`Ext::emit`]. The writer owns the pipe, so this only fails when the
+    /// connection is already gone — which the next request notices anyway.
+    fn send(&self, msg: &Value) -> Result<(), String> {
+        self.ensure_alive()?;
+        let mut guard = crate::core::sync::lock(&self.conn);
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| format!("extension '{}' is not running", self.name))?;
+        if conn.dead.load(Ordering::Relaxed) {
+            return Err(format!("extension '{}' is not running", self.name));
+        }
+        let mut frame = serde_json::to_string(msg).expect("host-built frame serializes");
+        frame.push('\n');
+        conn.writer
+            .send(frame)
+            .map_err(|_| format!("extension '{}' pipe closed", self.name))
     }
 
     /// A dim diagnostics line (extension errors at event boundaries).
@@ -821,15 +866,17 @@ impl Extensions {
     }
 
     /// Fire an event on every extension subscribed to it. Replies are
-    /// fire-and-forget: per the protocol only `tool_call`, `tool_result` and
-    /// `compact` replies are interpreted (here via
-    /// [`Extensions::gate_tool_call`], in `rewrite_tool_result` and in
-    /// `compact_reply`) — an extension answering any other event
-    /// with a `decision` is out of contract and the reply is dropped, not
-    /// acted on. Failures land in the extension's diagnostics tail.
+    /// fire-and-forget: per the protocol only `tool_call`, `tool_result`,
+    /// `compact` and `session_before_tree` replies are interpreted (here via
+    /// [`Extensions::gate_tool_call`], in `rewrite_tool_result`,
+    /// `compact_reply` and `before_tree`) — an extension answering any other
+    /// event with a `decision` is out of contract and the reply is dropped,
+    /// not acted on. Delivery never waits either: an observational event that
+    /// blocked on a reply nobody reads would bill every silent subscriber the
+    /// 5s event budget. Failures land in the extension's diagnostics tail.
     pub fn fire(&self, name: &str, params: &Value) {
         for ext in &self.exts {
-            if let Err(e) = ext.fire(name, params) {
+            if let Err(e) = ext.emit(name, params) {
                 ext.note(e);
             }
         }
