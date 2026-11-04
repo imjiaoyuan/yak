@@ -14,3 +14,8 @@ ureq = { version = "3.4.0", default-features = false, features = ["json", "rustl
 lto = "thin"
 strip = true
 codegen-units = 1
+# Dependency frames are rarely stepped through; their debug info was most of a
+# 54 MB dev artifact that every incremental build rewrote. yak's own code keeps
+# its full information.
+[profile.dev.package."*"]
+debug = false
