@@ -136,31 +136,26 @@ impl Drop for Ticker {
     }
 }
 
-/// Typewriter heartbeat: grants due pacing installments and flushes the
-/// renderer's write buffer on a timer, so text flows at a steady rate even
-/// while no SSE delta arrives. Exits on its own once the batch is drained;
-/// chrome boundaries `stop` it first so nothing prints over their output.
-pub struct DrainTicker {
+/// Flushes buffered stream bytes during network silence. Chrome boundaries
+/// stop and join the timer before printing.
+pub struct FlushTicker {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl DrainTicker {
+impl FlushTicker {
     pub fn start(
         renderer: std::sync::Arc<std::sync::Mutex<crate::term::render::Renderer>>,
-    ) -> DrainTicker {
+    ) -> FlushTicker {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let f2 = flag.clone();
         let handle = std::thread::spawn(move || {
             while !f2.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(12));
-                let more = renderer.lock().map(|mut r| r.pump_due()).unwrap_or(false);
-                if !more {
-                    break;
-                }
+                crate::core::sync::lock(&renderer).pump_due();
             }
         });
-        DrainTicker {
+        FlushTicker {
             flag,
             handle: Some(handle),
         }
@@ -176,7 +171,7 @@ impl DrainTicker {
     }
 }
 
-impl Drop for DrainTicker {
+impl Drop for FlushTicker {
     fn drop(&mut self) {
         self.stop();
     }

@@ -1650,14 +1650,6 @@ impl KeyWatcher {
                 match term.next_byte() {
                     RawByte::Timeout => continue,
                     RawByte::Key(b) => {
-                        // any non-interrupt keystroke means the user is
-                        // watching: flush the pacing backlog so they see
-                        // everything streamed so far, right now
-                        if !matches!(b, 0x03 | 0x1b) {
-                            super::screen()
-                                .flush_now
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
                         match b {
                             // raw mode disables ISIG, so ctrl-c arrives here
                             // as 0x03

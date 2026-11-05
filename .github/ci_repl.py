@@ -436,7 +436,7 @@ def main():
     # the answer area is append-only: printed once, never retracted
     # the wait spinner may own an empty row (its `\r\x1b[2K` frame lives and
     # dies before the first answer byte); from that byte on nothing may erase
-    # and no printed text may be written twice. the stream is paced, so wait
+    # and no printed text may be written twice. the stream is batched, so wait
     # for the last byte rather than reading a half-arrived answer
     for _ in range(100):
         if b"ok from mock" in out_bytes():

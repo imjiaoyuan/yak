@@ -13,17 +13,12 @@ pub struct Screen {
     /// the answer left a partial row on screen; a spinner frame's erase
     /// would retract it
     pub dangling: std::sync::atomic::AtomicBool,
-    /// the user pressed a key mid-stream — they are watching, so the render
-    /// thread flushes its pacing backlog on the next tick instead of typing
-    /// it out (write-once holds; pacing only decides when bytes are written)
-    pub flush_now: std::sync::atomic::AtomicBool,
 }
 
 pub fn screen() -> &'static Screen {
     static SCREEN: std::sync::OnceLock<Screen> = std::sync::OnceLock::new();
     SCREEN.get_or_init(|| Screen {
         dangling: std::sync::atomic::AtomicBool::new(false),
-        flush_now: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
