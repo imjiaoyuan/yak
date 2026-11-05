@@ -539,6 +539,47 @@ def probe_examples(ex_dir, env):
 
 def check_plugin_regressions():
     import runpy
+    from unittest.mock import patch
+
+    notify = runpy.run_path(os.path.join(os.path.dirname(__file__), "..", "examples", "extensions", "notify.py"))
+    with patch.dict(os.environ, {"KONSOLE_DBUS_SESSION": "/Sessions/7"}), \
+         patch("platform.system", return_value="Linux"), \
+         patch("shutil.which", return_value="/usr/bin/tput"), \
+         patch("os.getppid", return_value=123), \
+         patch.object(os, "O_NOCTTY", getattr(os, "O_NOCTTY", 0), create=True), \
+         patch("os.open", return_value=51) as opened, \
+         patch("os.isatty", return_value=True), \
+         patch("os.close") as closed, \
+         patch("subprocess.run") as bell, \
+         patch("subprocess.Popen") as desktop:
+        assert notify["notify"]("yak", "done") is None
+        assert opened.call_args.args[0] == "/proc/123/fd/2"
+        assert bell.call_args.args[0] == ["tput", "bel"]
+        assert bell.call_args.kwargs["stdout"] == 51
+        assert bell.call_args.kwargs["timeout"] == 2
+        closed.assert_called_once_with(51)
+        desktop.assert_not_called()
+    with patch.dict(os.environ, {"KONSOLE_DBUS_SESSION": "/Sessions/7"}), \
+         patch("platform.system", return_value="Linux"), \
+         patch("shutil.which", return_value="/usr/bin/notify-send"), \
+         patch.object(os, "O_NOCTTY", getattr(os, "O_NOCTTY", 0), create=True), \
+         patch("os.open", return_value=51), \
+         patch("os.isatty", return_value=False), \
+         patch("os.close"), \
+         patch("subprocess.run") as bell, \
+         patch("subprocess.Popen") as desktop:
+        assert notify["notify"]("yak", "a < b") is None
+        bell.assert_not_called()
+        assert desktop.call_args.args[0] == ["notify-send", "yak", "a &lt; b"]
+    with patch("subprocess.Popen") as desktop, patch("subprocess.run") as bell:
+        for name, params in [
+            ("agent_end", {"focused": True}),
+            ("approval", {"focused": True}),
+            ("agent_end", {"interrupted": True}),
+        ]:
+            notify["handle"]({"type": "event", "name": name, "params": params})
+        desktop.assert_not_called()
+        bell.assert_not_called()
 
     extensions = os.path.join(os.path.dirname(__file__), "..", "examples", "extensions")
     with tempfile.TemporaryDirectory(prefix="yak-plugin-ci-") as root:

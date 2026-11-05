@@ -4,7 +4,12 @@
 # about the approval prompt (and the finished answer) wherever you are, not
 # just in the window yak runs in.
 #
-# Every payload carries the working directory of the session that raised
+# On Linux/Konsole with a real parent tty, use its native bell notification:
+# clicking it returns to the originating window and tab, including on Wayland.
+# Konsole owns that notification's text (the terminal/tab title) and its bell
+# notification preferences. Without a tty or tput, use the desktop notifier.
+#
+# Desktop-notifier payloads carry the working directory of the session that raised
 # it, and the notification shows it underneath the answer's first line:
 # with more than one yak running, that path is what tells the notifications
 # apart (which project, which terminal to go back to). Both lines ride the
@@ -88,11 +93,40 @@ def escape(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def konsole_bell():
+    """Use the host's terminal stderr; our own stdout is the JSON protocol.
+
+    Extension children have no controlling tty. The parent's stderr is still
+    the exact terminal, and avoids contaminating even a TTY's --json stdout.
+    """
+    if not os.environ.get("KONSOLE_DBUS_SESSION") or not shutil.which("tput"):
+        return False
+    try:
+        fd = os.open(f"/proc/{os.getppid()}/fd/2", os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        return False
+    try:
+        if not os.isatty(fd):
+            return False
+        subprocess.run(
+            ["tput", "bel"], stdin=subprocess.DEVNULL, stdout=fd,
+            stderr=subprocess.PIPE, timeout=2, check=True,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError) as error:
+        sys.stderr.write(f"notify: Konsole bell failed: {error}; using desktop notifier\n")
+        return False
+    finally:
+        os.close(fd)
+
+
 def notify(title, body):
-    """Spawn the platform notifier, detached; return an error or None."""
+    """Notify through the terminal or a detached desktop notifier."""
     system = platform.system()
     try:
         if system == "Linux":
+            if konsole_bell():
+                return None
             if not shutil.which("notify-send"):
                 return "notify-send not found"
             subprocess.Popen(

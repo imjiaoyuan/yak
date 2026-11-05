@@ -27,7 +27,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `repeat_guard.py` | resident | a `tool_call` deny gate for stuck loops |
 | `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |
 | `workspace_checkpoint.py` | resident | a `turn_start`/`session_before_tree` pair that snapshots the workspace and offers to roll it back on `/tree` |
-| `notify.py` | resident | an `approval`/`agent_end` subscriber that raises a desktop notification; approval prompts and finished answers reach you outside the terminal |
+| `notify.py` | resident | an `approval`/`agent_end` subscriber that raises a desktop notification; approval prompts and finished answers reach you outside the terminal; in Konsole a native bell notification returns to its originating tab when clicked |
 | `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or held in an inbox until the session is free; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
 | `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
@@ -179,6 +179,8 @@ The reply's `result` should be a string; a list lays out as **segments** — str
 ```
 
 `args` is everything after the command name, as one string. `context` carries the live session's thread id, cwd, model, usage, context estimate, tool count and mounted plugin rows; extensions that do not need it may ignore it. The reply prints dim in the session. A command whose answer is *work for the model* replies with a task instead of text — `{"result": {"task": "…", "system": "…"}}` — and the session submits that string as one agent task (the `/skill:<name>` shape: the `skills` example reads the SKILL.md off disk and hands back a `<skill name dir>` prompt). The optional `system` is appended only for this task and is restored afterwards. `task` wins over a printed `result` when both ride the reply.
+
+The `notify.py` example uses native bell notifications on Linux/Konsole when the host has a real terminal and `tput` is available. Konsole owns the notification text (its tab title), the click action and Wayland activation, so no window-search helper or click-listener process is needed. Enable Konsole's popup for “Bell in Non-Visible Session” if it is disabled. The extension writes through the host's terminal stderr, never either process's JSON stdout. Runs without a terminal and other platforms retain desktop-notifier delivery with the answer's first line and working directory; those generic notifications do not promise click-to-terminal activation. Focus suppression, interrupted-task suppression, subagent suppression and the approval cooldown apply to both paths.
 
 **`event`**: see the table below. Only `tool_call`, `tool_result`, `compact` and `session_before_tree` replies are interpreted, and only those four wait for one (deadline 5s). Every other event is fire-and-forget: the host delivers it and moves on, so a subscriber answers `null` (or nothing at all) and a slow/no answer costs the session nothing.
 
