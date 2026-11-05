@@ -309,6 +309,100 @@ def provider_relogin_lane(binary, work, env):
             os.close(fd)
 
 
+def model_default_lane(binary, env):
+    """/model saves the global default; only the extension writes directory pins."""
+    for enabled in (False, True):
+        with tempfile.TemporaryDirectory(prefix="yak-model-default-") as root:
+            user = os.path.join(root, "user")
+            work = os.path.realpath(os.path.join(root, "project"))
+            other = os.path.join(root, "other")
+            for path in (user, work, other):
+                os.mkdir(path)
+            config_path = os.path.join(user, "config.json")
+            with open(config_path, "w") as f:
+                json.dump({
+                    "providers": {"mock": {
+                        "kind": "openai-compat", "base_url": f"http://127.0.0.1:{PORT}/v1",
+                        "api_key": "local-key", "models": ["m-a", "new-flash"],
+                    }},
+                    "models": {"default": "mock/m-a"},
+                }, f)
+            pins_path = os.path.join(user, "model-pins.json")
+            with open(pins_path, "w") as f:
+                json.dump({work: "mock/m-a"}, f)
+            with open(pins_path, "rb") as f:
+                original_pins = f.read()
+            if enabled:
+                extensions = os.path.join(user, "extensions")
+                os.mkdir(extensions)
+                source = os.path.join(os.path.dirname(__file__), "..", "examples", "extensions", "model_pin")
+                target = os.path.join(extensions, "model_pin")
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o755)
+            child_env = dict(env, YAK_USER_PATH=user)
+            child_env.pop("YAK_MODEL", None)
+            OUT.clear()
+            OUT_DONE.clear()
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.chdir(work)
+                os.execve(binary, [binary], child_env)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+            threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
+            try:
+                read_until(fd, rb">")
+                send(fd, b"/model\r")
+                read_until(fd, rb"models:")
+                send(fd, b"new-flash\r")
+                read_until(fd, rb"thinking:")
+                send(fd, b"\r")
+                read_until_after(fd, rb"model \xe2\x86\x92 mock/new-flash", rb">(?:\x1b\[[0-9;]*m)* ")
+                with open(config_path) as f:
+                    assert json.load(f)["models"]["default"] == "mock/new-flash"
+                with open(pins_path, "rb") as f:
+                    assert f.read() == original_pins, "/model must not write directory pins"
+                assert b"pinned for" not in out_bytes(), "the core must not claim to pin the directory"
+                OUT.clear()
+                send(fd, b"remember this model\r")
+                read_until_after(fd, rb"ok from mock", rb">(?:\x1b\[[0-9;]*m)* ")
+                assert seen["last_model"] == "new-flash", "the current session must switch too"
+                if enabled:
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        try:
+                            with open(pins_path) as f:
+                                if json.load(f).get(work) == "mock/new-flash":
+                                    break
+                        except json.JSONDecodeError:
+                            pass  # the extension may be finishing its write
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError("the extension did not remember the task's model")
+                else:
+                    with open(pins_path, "rb") as f:
+                        assert f.read() == original_pins, "without the extension, tasks must not write pins"
+            finally:
+                send(fd, b"/exit\r")
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    child, status = os.waitpid(pid, os.WNOHANG)
+                    if child:
+                        assert os.waitstatus_to_exitcode(status) == 0, status
+                        break
+                    time.sleep(0.05)
+                else:
+                    os.kill(pid, 9)
+                    os.waitpid(pid, 0)
+                OUT_DONE.wait(2)
+                os.close(fd)
+            for directory, expected in [(other, "new-flash"), (work, "new-flash" if enabled else "m-a")]:
+                run = subprocess.run([binary, "--no-session", "verify startup model"],
+                                     cwd=directory, env=child_env, stdin=subprocess.DEVNULL,
+                                     capture_output=True, text=True, timeout=15)
+                assert run.returncode == 0, run.stderr
+                assert seen["last_model"] == expected, (enabled, directory, expected, seen["last_model"])
+
+
 def main():
     if not hasattr(termios, "TIOCSWINSZ"):
         print("repl smoke: skipped (no pty on this platform)")
@@ -746,6 +840,7 @@ def main():
     assert b"skills: " in screen, f"layout not recapped: {screen[-500:]!r}"
 
     provider_relogin_lane(binary, work, env)
+    model_default_lane(binary, env)
     print("repl pty smoke passed")
     return 0
 

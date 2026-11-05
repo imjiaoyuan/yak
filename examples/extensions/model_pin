@@ -5,9 +5,10 @@ Copy to ~/.yak/extensions/model_pin, chmod +x, /reload. It listens to
 `agent_start` and writes `<cwd>: <model>` into `<user_dir>/model-pins.json`
 —the table yak's startup model resolution already reads (the nearest
 pinned ancestor of cwd wins). Every task thus records the model it ran on
-for its directory, and the next yak started there picks it up: /model in
-one directory moves the default for that directory alone. The core's own
-auto-pin from /model writes the same table, so the two agree.
+for its directory, and the next yak started there picks it up. `/model`
+changes the global default and the current session; this extension separately
+remembers the current directory when its next task starts. The core reads
+this table but never writes directory pins.
 
 No slash command: to stop remembering in a project, delete the entry (or
 the file); to pin a directory you never run tasks in, write the JSON by

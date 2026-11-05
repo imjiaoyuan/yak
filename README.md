@@ -48,6 +48,8 @@ Piped output is plain text (no colours, no control codes) so it drops straight i
 
 The first run needs a model: type `/login`, pick a provider from the shipped provider catalog (Anthropic, OpenAI, OpenCode Go, DeepSeek, MiniMax, Kimi Coding, Google, Groq, Mistral, xAI, OpenRouter, plus the local Ollama, LM Studio, llama.cpp and vLLM), paste the API key, pick the default model — or name the provider up front (`/login openai`) to skip the list and its prefilled questions. Or write the provider block into `config.json` by hand; see [Providers and models](docs/usage.md#providers-and-models).
 
+`/model` switches the current session and saves the global default. Optional directory memory is handled by the `model_pin` extension when a task starts; existing directory pins still take precedence over the global default for new sessions.
+
 Use `/login openai-responses` for the API-key Responses API; `/login openai` keeps Chat Completions. Custom providers can select `responses` too. `/login google-native` uses native Gemini (including signed tool history); `/login google` keeps Google’s OpenAI-compatible endpoint.
 
 Attachments ride along natively (images, PDFs, audio, text) and in a session ctrl+v pastes the clipboard image straight into the prompt. Ask "remember this preference: ..." and the `memory` tool files it in `~/.yak/YAK.md`, injected into every future session.
