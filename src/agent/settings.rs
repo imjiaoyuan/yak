@@ -1,9 +1,6 @@
 //! `[agent]` settings from config.json.
 
-use std::fs;
-
 use crate::agent::compact::CompactConfig;
-use crate::core::config::config_path;
 use crate::providers::CacheTtl;
 
 /// `[agent]` settings from config.json — everything optional, defaults live
@@ -57,39 +54,35 @@ impl AgentSettings {
 /// `agent` object) yields defaults; an unreadable or unparsable file fails
 /// loudly — the same file, the same rules as `core::config::load`.
 pub fn load() -> AgentSettings {
-    let path = config_path();
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AgentSettings::default(),
-        Err(e) => {
-            eprintln!("Error: cannot read {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    };
-    // an empty file behaves like a missing one; anything else must parse —
-    // silently defaulting here would hide a corrupt config from the run
-    if !raw.trim().is_empty() && serde_json::from_str::<serde_json::Value>(&raw).is_err() {
-        eprintln!("Error: failed to parse {}: not valid JSON", path.display());
-        std::process::exit(1);
-    }
-    let settings = parse(&raw);
-    // a lifetime no provider knows is a typo, and the request it shapes looks
-    // exactly like one that asked for nothing: refuse it here, where the file
-    // is read, rather than quietly caching for five minutes
-    if let Some(ttl) = settings.cache_ttl.as_deref()
-        && CacheTtl::parse(ttl).is_none()
-    {
-        eprintln!("Error: agent.cache_ttl is '{ttl}' (5m or 1h)");
+    let settings = from_value(&crate::core::config::read_root_or_die());
+    if let Err(error) = settings.validate() {
+        eprintln!("Error: {error}");
         std::process::exit(1);
     }
     settings
 }
 
+impl AgentSettings {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        // a lifetime no provider knows is a typo, and the request it shapes looks
+        // exactly like one that asked for nothing: refuse it here, where the file
+        // is read, rather than quietly caching for five minutes
+        if let Some(ttl) = self.cache_ttl.as_deref()
+            && CacheTtl::parse(ttl).is_none()
+        {
+            return Err(format!("agent.cache_ttl is '{ttl}' (5m or 1h)"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub fn parse(raw: &str) -> AgentSettings {
+    from_value(&serde_json::from_str(raw).unwrap_or(serde_json::Value::Null))
+}
+
+pub(crate) fn from_value(value: &serde_json::Value) -> AgentSettings {
     let mut s = AgentSettings::default();
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return s;
-    };
     let Some(agent) = value.get("agent") else {
         return s;
     };

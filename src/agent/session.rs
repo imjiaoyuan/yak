@@ -183,18 +183,6 @@ impl Session {
                     .to_string(),
             );
         };
-        let opts = agent_opts(
-            self.max_request_bytes,
-            self.system.as_deref(),
-            &self.cwd,
-            self.stream,
-            &self.compact,
-            self.thinking.as_deref(),
-            &self.extensions,
-            &self.cache_key,
-            self.cache_anchor(),
-            self.cache_ttl,
-        );
         let model_id = model.model_id.clone();
         // the shared TaskView owns the answer stream, spinner, thinking
         // trace and footer (indent 2); tool chrome stays local
@@ -280,41 +268,15 @@ impl Session {
             let _ = std::io::stderr().flush();
             lanes_painted.set(painted);
         };
-        let mut total = crate::core::http::Usage::default();
-        let mut last_usage: Option<crate::core::http::Usage> = None;
-        // the round in flight: its reasoning deltas and its clock, flushed at
-        // each `RoundEnd` and reset for the next round
-        let mut round_reasoning = String::new();
-        let mut round_started = std::time::Instant::now();
-        let identity = TaskIdentity {
-            model,
-            cwd: &self.cwd,
-            system: self.system.as_deref(),
-        };
         let mut on_update = |u: AgentUpdate| {
             match u {
                 AgentUpdate::Delta(text) => {
                     view.borrow_mut().delta(&text);
                 }
                 AgentUpdate::ReasoningDelta(text) => {
-                    round_reasoning.push_str(&text);
                     view.borrow_mut().reasoning_delta(&text);
                 }
-                AgentUpdate::RoundEnd { messages, usage } => {
-                    persist_round(
-                        self.store.as_ref(),
-                        &mut self.conversation_id,
-                        &mut self.branch_parent,
-                        &mut self.persist_error,
-                        &identity,
-                        &messages,
-                        usage,
-                        &round_reasoning,
-                        round_started,
-                    );
-                    round_reasoning.clear();
-                    round_started = std::time::Instant::now();
-                }
+                AgentUpdate::RoundEnd { .. } => {}
                 AgentUpdate::ToolStart {
                     name,
                     preview,
@@ -414,10 +376,6 @@ impl Session {
                     }
                 }
                 AgentUpdate::TurnEnd { usage, .. } => {
-                    if let Some(u) = usage {
-                        total.add(u);
-                        last_usage = Some(u);
-                    }
                     view.borrow_mut().turn_end(usage);
                 }
                 AgentUpdate::Compacting => {
@@ -507,32 +465,24 @@ impl Session {
             watcher = crate::term::lineedit::KeyWatcher::start();
             answer
         };
-        let result = run_agent(
-            RunRequest {
-                model,
-                tools: &self.tools,
-                prompt,
-                attachments,
-                seed: std::mem::take(&mut self.seed),
-                opts: &opts,
-            },
-            &mut self.approval,
+        let result = self.run_task_core(
+            prompt,
+            attachments,
             RunCallbacks {
                 on_update: &mut on_update,
                 on_approval: &mut on_approval,
                 steer: &mut no_steering,
             },
+            &mut |_| {},
         );
         watcher.stop();
+        // The input thread can observe one last key after core cleanup.
+        crate::core::http::clear_interrupt();
         // an interrupted task may never see TurnEnd: flush any partial
         // markdown line here too (abort is idempotent)
         view.borrow_mut().abort();
-        // the interrupt flag must not leak into the next prompt or task
-        crate::core::http::clear_interrupt();
-        self.usage.add(total);
-        self.last_usage = last_usage;
         match result {
-            Ok(mut outcome) => {
+            Ok(outcome) => {
                 // one footer per completed task: totals across rounds and
                 // wall time, right before the prompt returns. A user-initiated
                 // interrupt already shows its own "interrupted" line and
@@ -540,37 +490,10 @@ impl Session {
                 if !outcome.interrupted {
                     view.borrow_mut().footer(task_start.elapsed().as_secs_f64());
                 }
-                // the history moves into the seed (no clone of the whole
-                // conversation per task); every round is already on disk
-                let history = std::mem::take(&mut outcome.history);
                 let reasoning = view.into_inner().into_renderer().reasoning;
-                self.seed = history;
                 Ok((outcome, reasoning))
             }
-            // the failure carries what was already sent: the session
-            // survives without a defensive clone taken up front. The round
-            // in flight is the only thing not yet on disk — completed
-            // rounds wrote themselves at their round boundaries — so only
-            // the failed round's slice persists here.
-            Err(failure) => {
-                persist_round(
-                    self.store.as_ref(),
-                    &mut self.conversation_id,
-                    &mut self.branch_parent,
-                    &mut self.persist_error,
-                    &TaskIdentity {
-                        model,
-                        cwd: &self.cwd,
-                        system: self.system.as_deref(),
-                    },
-                    &failure.history[failure.round_start.min(failure.history.len())..],
-                    failure.usage,
-                    &round_reasoning,
-                    round_started,
-                );
-                self.seed = failure.history;
-                Err(failure.message)
-            }
+            Err(failure) => Err(failure.message),
         }
     }
 
@@ -732,11 +655,64 @@ impl Session {
         approval_sink: &mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
         steer: &mut dyn FnMut() -> Option<(String, Vec<crate::providers::Attachment>)>,
     ) -> Result<(crate::agent::AgentOutcome, String), String> {
+        // No KeyWatcher: stdin and approval delivery belong to the caller.
+        let wire = std::cell::RefCell::new(wire);
+        let cwd = self.cwd.clone();
+        let mut reasoning = String::new();
+        let mut on_update = |update: AgentUpdate| {
+            if let AgentUpdate::ReasoningDelta(text) = &update {
+                reasoning.push_str(text);
+            }
+            wire.borrow_mut()(&event_json(&update));
+        };
+        let mut on_session = |id: Option<&str>| {
+            wire.borrow_mut()(&session_json(id, &cwd));
+        };
+        let result = self.run_task_core(
+            prompt,
+            attachments,
+            RunCallbacks {
+                on_update: &mut on_update,
+                on_approval: approval_sink,
+                steer,
+            },
+            &mut on_session,
+        );
+        match result {
+            Ok(outcome) => {
+                wire.borrow_mut()(&serde_json::json!({
+                    "type": "result", "thread": self.conversation_id,
+                    "text": &outcome.final_text, "usage": usage_json(outcome.usage.as_ref()),
+                    "interrupted": outcome.interrupted,
+                }));
+                Ok((outcome, reasoning))
+            }
+            Err(failure) => {
+                wire.borrow_mut()(&serde_json::json!({
+                    "type": "error", "thread": self.conversation_id,
+                    "message": &failure.message, "text": &failure.text,
+                }));
+                Err(failure.message)
+            }
+        }
+    }
+
+    /// The shared task lifecycle: approvals and presentation are callbacks;
+    /// accounting, persistence, cancellation cleanup and seed ownership live here.
+    fn run_task_core(
+        &mut self,
+        prompt: &str,
+        attachments: Vec<crate::providers::Attachment>,
+        callbacks: RunCallbacks<'_>,
+        on_session: &mut dyn FnMut(Option<&str>),
+    ) -> Result<crate::agent::AgentOutcome, TaskFailure> {
         let Some(model) = self.model.as_ref() else {
-            return Err(
-                "No model configured. Run /login to add a provider, then /model to pick one."
-                    .to_string(),
-            );
+            return Err(TaskFailure {
+                message:
+                    "No model configured. Run /login to add a provider, then /model to pick one."
+                        .into(),
+                text: String::new(),
+            });
         };
         let opts = agent_opts(
             self.max_request_bytes,
@@ -750,39 +726,28 @@ impl Session {
             self.cache_anchor(),
             self.cache_ttl,
         );
-        // the terminal path renders the reasoning trace through TaskView;
-        // here it is only carried into the stored turn
-        let mut reasoning = String::new();
+        let RunCallbacks {
+            on_update,
+            on_approval,
+            steer,
+        } = callbacks;
         let mut round_reasoning = String::new();
         let mut round_started = std::time::Instant::now();
         let mut total = crate::core::http::Usage::default();
-        let mut last_usage: Option<crate::core::http::Usage> = None;
+        let mut last_usage = None;
         let identity = TaskIdentity {
             model,
             cwd: &self.cwd,
             system: self.system.as_deref(),
         };
-        // the supervisor's handle on the conversation: a resumed thread up
-        // front (and a fresh one below, the moment its first round lands),
-        // so a caller can label or continue what it started
-        wire(&session_json(self.conversation_id.as_deref(), &self.cwd));
-        let mut on_update = |u: AgentUpdate| {
-            match &u {
-                AgentUpdate::ReasoningDelta(text) => {
-                    reasoning.push_str(text);
-                    round_reasoning.push_str(text);
-                }
-                // same accounting as the terminal path, so the session totals
-                // and /status agree in both modes
+        on_session(self.conversation_id.as_deref());
+        let mut record_update = |update: AgentUpdate| {
+            match &update {
+                AgentUpdate::ReasoningDelta(text) => round_reasoning.push_str(text),
                 AgentUpdate::TurnEnd { usage: Some(usage) } => {
                     total.add(*usage);
                     last_usage = Some(*usage);
                 }
-                // the round lands in the thread file here and is not emitted:
-                // the event stream stays the UI surface, persistence is not
-                // part of the contract. The one exception is the id a fresh
-                // thread just got: it is the supervisor's only way to resume
-                // this run, so the `session` event repeats with it.
                 AgentUpdate::RoundEnd { messages, usage } => {
                     let created = self.conversation_id.is_none();
                     persist_round(
@@ -796,8 +761,8 @@ impl Session {
                         &round_reasoning,
                         round_started,
                     );
-                    if created && let Some(id) = self.conversation_id.as_deref() {
-                        wire(&session_json(Some(id), &self.cwd));
+                    if created && self.conversation_id.is_some() {
+                        on_session(self.conversation_id.as_deref());
                     }
                     round_reasoning.clear();
                     round_started = std::time::Instant::now();
@@ -805,11 +770,8 @@ impl Session {
                 }
                 _ => {}
             }
-            wire(&event_json(&u));
+            on_update(update);
         };
-        let mut on_approval = |req: ApprovalRequest| approval_sink(req);
-        // no KeyWatcher here: stdin belongs to the caller (usually a pipe),
-        // and ctrl-c kills this process like any other child
         let result = run_agent(
             RunRequest {
                 model,
@@ -821,8 +783,8 @@ impl Session {
             },
             &mut self.approval,
             RunCallbacks {
-                on_update: &mut on_update,
-                on_approval: &mut on_approval,
+                on_update: &mut record_update,
+                on_approval,
                 steer,
             },
         );
@@ -831,48 +793,35 @@ impl Session {
         self.last_usage = last_usage;
         match result {
             Ok(mut outcome) => {
-                wire(&serde_json::json!({
-                    "type": "result",
-                    "thread": self.conversation_id,
-                    "text": &outcome.final_text,
-                    "usage": usage_json(outcome.usage.as_ref()),
-                    "interrupted": outcome.interrupted,
-                }));
-                // the history moves into the seed (no clone of the whole
-                // conversation per task); every round is already on disk
-                let history = std::mem::take(&mut outcome.history);
-                self.seed = history;
-                Ok((outcome, reasoning))
+                self.seed = std::mem::take(&mut outcome.history);
+                Ok(outcome)
             }
-            // a failed round still saw real work: the stream reports it and
-            // the round in flight persists, exactly as in the terminal path
             Err(failure) => {
-                wire(&serde_json::json!({
-                    "type": "error",
-                    "thread": self.conversation_id,
-                    "message": &failure.message,
-                    "text": &failure.final_text,
-                }));
                 persist_round(
                     self.store.as_ref(),
                     &mut self.conversation_id,
                     &mut self.branch_parent,
                     &mut self.persist_error,
-                    &TaskIdentity {
-                        model,
-                        cwd: &self.cwd,
-                        system: self.system.as_deref(),
-                    },
+                    &identity,
                     &failure.history[failure.round_start.min(failure.history.len())..],
                     failure.usage,
                     &round_reasoning,
                     round_started,
                 );
                 self.seed = failure.history;
-                Err(failure.message)
+                Err(TaskFailure {
+                    message: failure.message,
+                    text: failure.final_text,
+                })
             }
         }
     }
+}
+
+/// Presentation needs the received text on error; history stays in the session.
+struct TaskFailure {
+    message: String,
+    text: String,
 }
 
 /// The per-task facts every round line carries.
@@ -1570,6 +1519,78 @@ mod tests {
             unattended_allow: false,
             persist_error: None,
         }
+    }
+
+    fn assert_task_surfaces_match(fail: bool) {
+        use std::io::Write;
+        let mut previous = None;
+        for json in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let chunk = serde_json::json!({
+                    "choices": [{"delta": {"content": "received answer", "reasoning_content": "plan"}}],
+                    "usage": {"prompt_tokens": 40, "completion_tokens": 5,
+                        "prompt_tokens_details": {"cached_tokens": 32}}
+                });
+                let ending = if fail {
+                    "data: {\"error\":{\"message\":\"failed\"}}\n\n"
+                } else {
+                    "data: [DONE]\n\n"
+                };
+                let body = format!("data: {chunk}\n\n{ending}");
+                let (mut connection, _) = listener.accept().unwrap();
+                read_request(&mut connection);
+                write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let dir = crate::core::testutil::scratch_dir("task-surfaces");
+            let mut session = tight_session(Vec::new());
+            session.cwd = dir.clone();
+            session.model.as_mut().unwrap().base_url = format!("http://{address}");
+            session.store = Some(threads::Store::open_path(&dir.join("threads")).unwrap());
+            session.json = json;
+            let result = session.run_task("go", vec![]);
+            assert_eq!(result.is_err(), fail);
+            server.join().unwrap();
+            let turns = session
+                .store
+                .as_ref()
+                .unwrap()
+                .read_thread(session.conversation_id.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(turns.len(), 1, "one persisted round on either surface");
+            let rebuilt = rebuild_turns(&turns).unwrap();
+            assert_eq!(rebuilt.messages, session.seed);
+            assert_eq!(rebuilt.usage, session.usage);
+            assert_eq!(
+                (
+                    session.usage.input,
+                    session.usage.output,
+                    session.usage.cached
+                ),
+                (40, 5, 32)
+            );
+            assert!(
+                matches!(session.seed.last(), Some(Msg::Assistant { text, reasoning: Some(reasoning), .. })
+                if text == "received answer" && reasoning == "plan")
+            );
+            let actual = (session.seed, session.usage, session.last_usage);
+            if let Some(expected) = previous {
+                assert_eq!(actual, expected);
+            }
+            previous = Some(actual);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_and_json_tasks_keep_identical_history_and_usage() {
+        assert_task_surfaces_match(false);
+    }
+
+    #[test]
+    fn terminal_and_json_failures_keep_identical_received_state() {
+        assert_task_surfaces_match(true);
     }
 
     /// A session with no model — a bare interactive start on a fresh install —

@@ -139,7 +139,10 @@ pub fn expand_env(value: &str) -> String {
 }
 
 pub fn load() -> Config {
-    let root = read_root_or_die();
+    from_root(&read_root_or_die())
+}
+
+pub(crate) fn from_root(root: &serde_json::Value) -> Config {
     // every side table rides the same parsed root (the struct skips
     // them): one read and one parse of the file, not a second full parse
     // per key
@@ -162,7 +165,7 @@ pub fn load() -> Config {
         std::process::exit(1);
     });
     config.aliases = aliases;
-    config.apply_models_side_tables(&root);
+    config.apply_models_side_tables(root);
     config
 }
 
@@ -255,7 +258,7 @@ pub fn extension_tool_timeout() -> Duration {
 /// The one loud reader: a missing or empty file is an empty object, anything
 /// unparsable or non-object aborts the process exactly like `load()` — no
 /// reader of this file may silently degrade past a corrupt config.
-fn read_root_or_die() -> serde_json::Value {
+pub(crate) fn read_root_or_die() -> serde_json::Value {
     match read_root() {
         Ok(root) => root,
         Err(e) => {

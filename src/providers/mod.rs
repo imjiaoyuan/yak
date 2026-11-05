@@ -252,9 +252,8 @@ fn path_pinned_model_at(
 pub fn resolve_run_model(
     args: &crate::core::args::ParsedArgs,
     context: Option<String>,
+    cfg: &crate::core::config::Config,
 ) -> Result<ResolvedModel, String> {
-    use crate::core::config;
-    let cfg = config::load();
     let stored_default = cfg.default_model.clone().filter(|m| {
         let resolves = cfg.resolve_model(m).ok().flatten().is_some();
         if !resolves {
@@ -267,8 +266,8 @@ pub fn resolve_run_model(
         .map(str::to_string)
         .or_else(|| std::env::var("YAK_MODEL").ok())
         .or(context)
-        .or_else(|| path_pinned_model(&cfg))
-        .or_else(|| project_default_model(&cfg))
+        .or_else(|| path_pinned_model(cfg))
+        .or_else(|| project_default_model(cfg))
         .or(stored_default);
     let Some(query) = query else {
         return Err(
@@ -278,7 +277,7 @@ pub fn resolve_run_model(
     };
     let cli_key = args.opt(&["key"]).map(str::to_string);
     let mut model =
-        resolve_model_tail(&cfg, &query, |p| cli_key.clone().or_else(|| cfg.api_key(p)))?;
+        resolve_model_tail(cfg, &query, |p| cli_key.clone().or_else(|| cfg.api_key(p)))?;
     // CLI `-o` pairs ride on top of whatever config stored, last write wins,
     // and `context_window` is re-read after the merge: a CLI override can
     // anchor compaction the same way a stored one does. A merge with no

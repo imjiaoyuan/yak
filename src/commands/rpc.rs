@@ -24,13 +24,10 @@
 //! stdin is commands until EOF, which ends the process cleanly.
 
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
 
-use crate::agent::approval::{ApprovalConfig, Policy};
-use crate::agent::blacklist;
 use crate::agent::session::Session;
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
-use crate::providers::{Attachment, Msg};
+use crate::providers::Attachment;
 use crate::{flag_spec, multi_spec, value_spec};
 
 const SPECS: &[OptSpec] = &[
@@ -229,180 +226,6 @@ impl Rpc {
             "tools": self.session.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(),
         })
     }
-}
-
-/// Build the Session exactly the way `commands::agent` does (the same flag
-/// meanings, the same store/approval/extensions wiring), minus the terminal
-/// UI assumptions: rpc mode is always headless.
-fn open_session(args: &ParsedArgs) -> Result<Session, String> {
-    let cwd: PathBuf = std::env::current_dir().map_err(|e| e.to_string())?;
-    let cwd_str = cwd.display().to_string();
-    crate::core::tmp::prune_user_tmp();
-    let extensions_connecting = crate::agent::ext::Extensions::connect_async(&cwd)?;
-    let settings = crate::agent::settings::load();
-
-    let mut conversation_id: Option<String> = None;
-    let mut seed: Vec<Msg> = Vec::new();
-    let mut resumed = false;
-    let mut conv_system: Option<String> = None;
-    let mut conv_model: Option<String> = None;
-    let mut conv_usage = crate::core::http::Usage::default();
-    let store = if args.flag(&["no-session"]) {
-        None
-    } else {
-        Some(crate::core::threads::Store::open()?)
-    };
-    if let Some(raw) = args.opt(&["session", "cid"]) {
-        let store = store
-            .as_ref()
-            .ok_or("--session requires a store (remove --no-session)?")?;
-        let Some(cid) = store.resolve_thread(raw, Some(&cwd_str))? else {
-            return Err(format!(
-                "session id or prefix '{raw}' matches nothing (or is ambiguous)"
-            ));
-        };
-        let turns = store.read_thread(&cid)?;
-        let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
-        seed = rebuilt.messages;
-        conv_system = rebuilt.system;
-        conv_usage = rebuilt.usage;
-        conv_model = turns.last().map(|t| t.model.clone());
-        conversation_id = Some(cid);
-        resumed = true;
-    } else if args.flag(&["continue"])
-        && let Some(store) = store.as_ref()
-    {
-        let local = store.latest_thread(Some(&cwd_str)).ok().flatten();
-        let from_here = local.is_some();
-        if let Some(cid) = local.or_else(|| store.latest_thread(None).ok().flatten()) {
-            let turns = store.read_thread(&cid)?;
-            if !from_here {
-                let from = turns
-                    .last()
-                    .and_then(|t| t.cwd.as_deref())
-                    .unwrap_or("another directory");
-                eprintln!("continuing {} from {from}", &cid[..cid.len().min(6)]);
-            }
-            let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
-            seed = rebuilt.messages;
-            conv_system = rebuilt.system;
-            conv_usage = rebuilt.usage;
-            conv_model = turns.last().map(|t| t.model.clone());
-            conversation_id = Some(cid);
-            resumed = true;
-        }
-    }
-    if args.flag(&["fork"]) {
-        let store = store
-            .as_ref()
-            .ok_or("--fork requires a store (remove --no-session)?")?;
-        let source = conversation_id
-            .take()
-            .ok_or("--fork found no session to fork")?;
-        let forked = store
-            .fork_thread(&source)?
-            .ok_or_else(|| format!("cannot fork session {source}"))?;
-        conversation_id = Some(forked);
-    }
-
-    let model = match crate::providers::resolve_run_model(args, conv_model.clone()) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            // rpc mode is unattended from the first byte: a missing model is
-            // a hard error, not a REPL that opens /login
-            return Err(e);
-        }
-    };
-
-    let mut approval_cfg = ApprovalConfig::default();
-    for (tool, policy) in &settings.tool_policies {
-        match Policy::parse(policy) {
-            Some(p) => {
-                approval_cfg.tool_policies.insert(tool.clone(), p);
-            }
-            None => eprintln!("Warning: invalid policy '{policy}' for tool '{tool}' in config"),
-        }
-    }
-    blacklist::Blacklist::ensure_default();
-    approval_cfg.blacklist = blacklist::Blacklist::load(&cwd);
-    let unattended_allow = match args.opt(&["approval"]) {
-        None => false,
-        Some("allow") => true,
-        Some(mode) => return Err(format!("invalid --approval '{mode}' (want allow)")),
-    };
-    let max_request_bytes: usize = args
-        .opt(&["max-request-bytes"])
-        .map(|s| s.parse::<usize>())
-        .transpose()
-        .map_err(|e| format!("invalid --max-request-bytes: {e}"))?
-        .or(settings.max_request_bytes)
-        .unwrap_or(crate::core::http::MAX_REQUEST_BYTES);
-    let thinking: Option<String> = match args.opt(&["thinking"]) {
-        Some(level) => crate::providers::parse_thinking_level(level)?,
-        None => {
-            let level = settings.default_thinking.clone();
-            match level.as_deref() {
-                Some(level) if crate::providers::is_valid_reasoning_level(level) => {
-                    Some(level.to_string())
-                }
-                Some(level) => {
-                    eprintln!("Warning: invalid thinking '{level}' in config, ignored");
-                    None
-                }
-                None => None,
-            }
-        }
-    };
-    let wanted: Option<Vec<&str>> = args.opt(&["tools"]).map(|csv| {
-        csv.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    let extensions = extensions_connecting.join();
-    let system = crate::agent::system_prompt::build_system_prompt(
-        &cwd,
-        args.opt(&["system-prompt"]),
-        args.opt(&["append-system-prompt"]),
-        conv_system.as_deref(),
-        &extensions.system_sections(),
-    );
-    let mut session = Session {
-        max_request_bytes,
-        compact: settings.compact_config(),
-        cache_ttl: settings.cache_ttl(),
-        unattended_allow,
-        model,
-        tools: Vec::new(),
-        system,
-        cwd,
-        stream: !args.flag(&["no-stream"]),
-        store,
-        approval: approval_cfg,
-        cache_key: conversation_id
-            .clone()
-            .unwrap_or_else(crate::core::db::ulid),
-        conversation_id,
-        branch_parent: None,
-        seed,
-        thinking,
-        extensions,
-        usage: conv_usage,
-        last_usage: None,
-        json: true,
-        persist_error: None,
-    };
-    if resumed {
-        session.prune_seed_to_fit();
-    }
-    session.rebuild_tools();
-    if let Some(wanted) = &wanted {
-        let available: Vec<String> = session.tools.iter().map(|t| t.name().to_string()).collect();
-        let wanted_owned: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
-        let keep = crate::agent::tools::select_tools(&available, &wanted_owned)?;
-        session.tools.retain(|t| keep.iter().any(|k| k == t.name()));
-    }
-    Ok(session)
 }
 
 /// One command off the wire, parsed: what a client asked for.
@@ -657,7 +480,7 @@ fn resolve_approval(pending: &mut Option<PendingApproval>, request: &str, answer
 
 /// The rpc process: commands in, events and responses out, one session.
 fn rpc(args: &ParsedArgs) -> Result<i32, String> {
-    let session = open_session(args)?;
+    let session = super::session::open(args, super::session::Mode::Rpc)?.session;
     let mut rpc = Rpc {
         session,
         queue: Vec::new(),

@@ -8,8 +8,8 @@ use std::io::{IsTerminal, Write};
 pub fn repl(
     mut session: crate::agent::session::Session,
     mut attachments: Vec<crate::providers::Attachment>,
+    mut settings: crate::agent::settings::AgentSettings,
 ) -> Result<i32, String> {
-    let mut settings = crate::agent::settings::load();
     let mut editor = crate::term::lineedit::LineEditor::new();
 
     // ctrl-c during a running task interrupts it instead of killing the REPL
