@@ -36,7 +36,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::approval::Tier;
-use super::tools::{MAX_BYTES, MAX_LINES, MAX_TOKENS, Tool, ToolOutput, truncate_marked_budgeted};
+#[cfg(test)]
+use super::tools::MAX_BYTES;
+use super::tools::{Tool, ToolOutput};
 use proto::{lossy_lines, reader_loop, writer_loop};
 use script::ScriptTool;
 
@@ -1392,18 +1394,7 @@ impl ExtTool {
         log: &mut dyn FnMut(crate::agent::tools::ToolProgress),
     ) -> ToolOutput {
         match self.ext.call_tool(&self.tool_name, args, call_id, log) {
-            Ok(text) => {
-                // Always route through the shared caps, not only when the
-                // raw bytes overflow: a short-line result can overrun the
-                // line cap and a dense CJK one the token estimate while
-                // sitting under 50 KB. Same cap shape as the builtin tools
-                // (lines, then bytes, then the token estimate), but marked:
-                // a silent cut would leave the model arguing with a tool
-                // that never said its answer was incomplete.
-                ToolOutput::ok(truncate_marked_budgeted(
-                    &text, MAX_LINES, MAX_BYTES, MAX_TOKENS,
-                ))
-            }
+            Ok(text) => ToolOutput::ok(super::tools::extension_output(&text, &self.tool_name)),
             Err(e) => ToolOutput::err(e),
         }
     }

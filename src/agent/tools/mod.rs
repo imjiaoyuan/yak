@@ -358,27 +358,36 @@ pub(crate) fn truncate_tail(
 
 /// Tail-truncate and mark, the shared ending for process-shaped tool output.
 pub(crate) fn truncate_marked(text: &str, max_lines: usize, max_bytes: usize) -> String {
-    let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes, MAX_TOKENS);
-    if truncated {
-        out.push_str("\n[output truncated]\n");
-    }
-    out
+    truncate_with_marker(text, max_lines, max_bytes, MAX_TOKENS, "output truncated")
 }
 
-/// Marked truncation with the caller's own token budget. Extension tools
-/// (MCP bridges included) route here: their results come from another
-/// process built with no opinion about this context window, so the host
-/// enforces the shared caps — and says so, because a silently cut answer
-/// reads as a complete one.
+/// Marked truncation with a caller-supplied token budget, including the
+/// structured query path where repeat folding must never change the data.
 pub(crate) fn truncate_marked_budgeted(
     text: &str,
     max_lines: usize,
     max_bytes: usize,
     max_tokens: u64,
 ) -> String {
+    truncate_with_marker(
+        text,
+        max_lines,
+        max_bytes,
+        max_tokens,
+        "output truncated to fit the context window",
+    )
+}
+
+fn truncate_with_marker(
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+    max_tokens: u64,
+    marker: &str,
+) -> String {
     let (mut out, truncated) = truncate_tail(text, max_lines, max_bytes, max_tokens);
     if truncated {
-        out.push_str("\n[output truncated to fit the context window]\n");
+        out.push_str(&format!("\n[{marker}]\n"));
     }
     out
 }
@@ -420,51 +429,86 @@ fn merge_process_output(stdout: &[u8], stderr: &[u8]) -> String {
     out
 }
 
-/// Tail-truncate process output and, when anything was cut, spill the full
-/// text to the user tmp dir and name the file in the note (the shape:
-/// `[Showing lines X-Y of N. Full output: path]`). The model can read the
-/// rest on demand instead of re-running the command.
+/// Keep command output concise while retaining the original in a private file.
 pub(crate) fn truncate_with_spill(text: &str) -> String {
     truncate_with_spill_in(&crate::core::config::user_dir().join("tmp"), text)
 }
 
-/// [`truncate_with_spill`] against an explicit scratch dir (the test seam).
 pub(crate) fn truncate_with_spill_in(dir: &Path, text: &str) -> String {
-    let (out, truncated) = truncate_tail(text, MAX_LINES, MAX_BYTES, MAX_TOKENS);
-    if !truncated {
-        return out;
-    }
-    match spill_full_output(dir, text) {
-        Some(path) => {
-            let total = text.lines().count();
-            let kept = out.lines().count().max(1);
-            let start = total.saturating_sub(kept) + 1;
-            let mut out = out;
-            out.push_str(&format!(
-                "\n\n[Showing lines {start}-{total} of {total}. Full output: {path}]"
-            ));
-            out
-        }
-        None => {
-            let mut out = out;
-            out.push_str("\n[output truncated]\n");
-            out
-        }
-    }
+    format_output_in(dir, text, true, false)
 }
 
-/// Save the full output of a truncated command to the scratch dir (the
-/// weekly sweep ages it out like every other scratch file there); the
-/// truncation note names the file, the spill. `None` when the write fails —
-/// the caller falls back to the plain truncation mark rather than losing the
-/// output twice.
-fn spill_full_output(dir: &Path, text: &str) -> Option<String> {
-    // a command's full output is the most sensitive thing yak writes down:
-    // private dir, private file
-    crate::core::fsx::create_private_dir_all(dir).ok()?;
-    let path = dir.join(format!("bash-{}.log", crate::core::db::ulid()));
-    crate::core::fsx::write_private(&path, text.as_bytes()).ok()?;
-    Some(path.display().to_string())
+/// Extension results share the command caps and artifact handling. Only grep
+/// is log-shaped; structured results and file reads must not be folded.
+pub(crate) fn extension_output(text: &str, name: &str) -> String {
+    format_output_in(
+        &crate::core::config::user_dir().join("tmp"),
+        text,
+        name == "grep",
+        true,
+    )
+}
+
+/// Fold only long, byte-identical runs, keeping every unique line and naming
+/// the count removed. Preserve the original unless folding actually saves bytes.
+fn fold_repeated_lines(text: &str) -> Option<String> {
+    if text.chars().take(4001).count() <= 4000 {
+        return None;
+    }
+    let mut lines = text.split('\n').peekable();
+    let mut out = Vec::new();
+    while let Some(line) = lines.next() {
+        let mut run = 1;
+        while lines.peek() == Some(&line) {
+            lines.next();
+            run += 1;
+        }
+        out.push(line.to_string());
+        if run >= 3 {
+            out.push(format!("[... {} more identical lines folded ...]", run - 1));
+        } else if run == 2 {
+            out.push(line.to_string());
+        }
+    }
+    let folded = out.join("\n");
+    (folded.len() < text.len()).then_some(folded)
+}
+
+fn format_output_in(dir: &Path, text: &str, fold: bool, context_marker: bool) -> String {
+    let folded = fold.then(|| fold_repeated_lines(text)).flatten();
+    let visible = folded.as_deref().unwrap_or(text);
+    let (mut out, truncated) = truncate_tail(visible, MAX_LINES, MAX_BYTES, MAX_TOKENS);
+    if folded.is_none() && !truncated {
+        return out;
+    }
+    let note = if truncated && folded.is_none() {
+        let total = text.lines().count();
+        let kept = out.lines().count().max(1);
+        format!(
+            "Showing lines {}-{total} of {total}",
+            total.saturating_sub(kept) + 1
+        )
+    } else if truncated {
+        "Repeated lines folded; output truncated".to_string()
+    } else {
+        "Repeated lines folded".to_string()
+    };
+    if truncated && context_marker {
+        out.push_str("\n[output truncated to fit the context window]");
+    }
+    match spill_full_output(dir, text) {
+        Ok(path) => out.push_str(&format!("\n\n[{note}. Full output: {path}]")),
+        Err(e) => out.push_str(&format!("\n\n[{note}; cannot save full output: {e}]")),
+    }
+    out
+}
+
+/// The full output is recoverable on demand, including before repeat folding.
+fn spill_full_output(dir: &Path, text: &str) -> std::io::Result<String> {
+    crate::core::fsx::create_private_dir_all(dir)?;
+    let path = dir.join(format!("output-{}.log", crate::core::db::ulid()));
+    crate::core::fsx::write_private(&path, text.as_bytes())?;
+    Ok(path.display().to_string())
 }
 
 /// Finish a spawned-command result: merge stderr under stdout, note the

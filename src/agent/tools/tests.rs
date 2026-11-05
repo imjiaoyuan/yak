@@ -759,3 +759,96 @@ fn json_escaped_len_matches_serde_for_the_hot_characters() {
         assert_eq!(json_escaped_len(s), serde_len, "{s:?}");
     }
 }
+
+#[test]
+fn repeat_folding_preserves_unique_lines_and_the_full_original() {
+    let dir = crate::core::testutil::scratch_dir("fold-output");
+    let text = format!(
+        "start\n{}warning: unique diagnostic\n",
+        "进度相同\n".repeat(1200)
+    );
+    let out = truncate_with_spill_in(&dir, &text);
+    assert!(out.contains("1199 more identical lines folded"));
+    assert!(out.contains("warning: unique diagnostic"));
+    assert!(out.len() < text.len() / 10);
+    let path = out
+        .split("Full output: ")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(']');
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn repeat_folding_leaves_short_runs_and_small_results_alone() {
+    assert!(fold_repeated_lines(&"same\n".repeat(20)).is_none());
+    let text = format!("{}\n{}\nunique", "x".repeat(2500), "x".repeat(2500));
+    assert!(
+        fold_repeated_lines(&text).is_none(),
+        "two identical lines survive"
+    );
+    let text = format!(
+        "{}\n{}\n{}",
+        "x".repeat(1500),
+        "y".repeat(1500),
+        "x".repeat(1500)
+    );
+    assert!(
+        fold_repeated_lines(&text).is_none(),
+        "nonconsecutive duplicates survive"
+    );
+}
+
+#[test]
+fn structured_output_is_capped_without_repeat_folding() {
+    let dir = crate::core::testutil::scratch_dir("structured-output");
+    let text = "identical\n".repeat(600);
+    let out = format_output_in(&dir, &text, false, true);
+    assert_eq!(out, text.trim_end());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_output_archive_is_reported_without_losing_the_tail() {
+    let dir = crate::core::testutil::scratch_dir("failed-spill");
+    let blocked = dir.join("file");
+    std::fs::write(&blocked, "not a directory").unwrap();
+    let text: String = (0..3000).map(|i| format!("row {i}\n")).collect();
+    let out = truncate_with_spill_in(&blocked, &text);
+    assert!(out.contains("row 2999"));
+    assert!(out.contains("cannot save full output:"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn folding_and_truncation_keep_the_original_and_mark_both_changes() {
+    let dir = crate::core::testutil::scratch_dir("fold-and-cut");
+    let text = format!(
+        "{}{}",
+        "same\n".repeat(1000),
+        (0..3000)
+            .map(|i| format!("diagnostic {i}\n"))
+            .collect::<String>()
+    );
+    let out = format_output_in(&dir, &text, true, true);
+    assert!(out.contains("Repeated lines folded; output truncated"));
+    assert!(out.contains("[output truncated to fit the context window]"));
+    assert!(out.contains("diagnostic 2999"));
+    let path = out
+        .split("Full output: ")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(']');
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    std::fs::remove_dir_all(dir).unwrap();
+}

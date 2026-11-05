@@ -305,3 +305,5 @@ Models are named `provider/model`. Short aliases can be mapped in the `aliases` 
 Rendering is on only for a real terminal: answers stream as markdown with a left margin, and piped output is the raw text. Reasoning is never printed: a dim `thinking ... end` line just marks that it happened.
 
 Approval tiers are read, write and exec. Yolo mode (the default) auto-approves everything; the hardcoded refusals (privilege escalation, filesystem/machine destruction, a fork bomb, a write into a device node, `rm` at `/` or `~`) apply in either mode, and your blacklist file only adds to them. Ask mode prompts for writes and exec-tier calls with `y/n/a`, where `a` allows that tool for the rest of the session. Session ids are ULIDs.
+
+Large command and search results fold repeated lines and explicitly mark any cut. A `Full output:` path points to the original output; use `read` with `offset` and `limit` to inspect it without re-running the command. If saving the full output fails, the result says so. File reads and JSON queries are not repeat-folded.
