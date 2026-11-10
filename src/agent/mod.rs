@@ -272,9 +272,8 @@ pub fn run_agent(
     let mut cache_stable: Option<usize> = usable_anchor(opts.cache_anchor, history.len());
     let mut final_text = String::new();
     let mut interrupted = false;
-    // mid-stream drops recovered so far; the cap keeps a link that drops
-    // every few KB from looping forever (each recovery re-enters the model
-    // call with a fresh transport-level retry budget)
+    // Stream failures before any output may retry unchanged. Bound these
+    // separately from transport retries so an empty stream cannot loop.
     let mut recoveries = 0;
     const MAX_STREAM_RECOVERIES: usize = 5;
 
@@ -438,7 +437,7 @@ pub fn run_agent(
             // history now, whatever the trigger says, and retry the round.
             // Bounded: a provider that refuses everything ends the run
             // instead of looping.
-            if round.text.is_empty()
+            if !round.has_output()
                 && overflow_compactions < MAX_OVERFLOW_COMPACTIONS
                 && crate::core::http::context_overflow(&e)
                 && let Some(cfg) = cfg_now.as_ref()
@@ -466,58 +465,14 @@ pub fn run_agent(
             let recoverable_stream = crate::providers::is_truncation(&e)
                 || e.starts_with("stream: ")
                 || e.starts_with("stream idle ");
-            // a drop after output was handed out is never replayed — the
-            // answer on screen would duplicate — but the run need not die
-            // either: partial output becomes a real assistant message, then
-            // an explicit continuation request asks for the rest. A trailing
-            // assistant alone is not a portable prefill. Bounded: a link
-            // dropping every few KB would otherwise recover forever, each
-            // attempt with a fresh retry budget. The pending user message lands first so the
-            // order stays what happened: prompt, partial answer.
+            // Output already received belongs to this failed round. Save it
+            // and surface the error; do not invent another user request.
             if round.has_output() {
                 if has_pending {
                     history.push(pending.take().expect("checked above"));
                 }
                 final_text = round.text.clone();
                 round.keep_partial(&mut history);
-                recoveries += 1;
-                // Replaying a long partial answer is expensive and visibly
-                // risks duplication; short pre-first-token drops retain the
-                // wider retry budget.
-                let recovery_limit = if round.text.chars().count() > 2_000 {
-                    2
-                } else {
-                    MAX_STREAM_RECOVERIES
-                };
-                if recoveries <= recovery_limit && recoverable_stream {
-                    on_update(AgentUpdate::StreamRecovered {
-                        chars: round.text.chars().count(),
-                        error: e,
-                    });
-                    // the partial answer is a real round record: the retry
-                    // continues from it, but the transcript keeps what the
-                    // model actually said first
-                    on_update(AgentUpdate::RoundEnd {
-                        messages: history[round_start..].to_vec(),
-                        usage: round.usage,
-                    });
-                    // a round that spent its whole output budget on
-                    // reasoning handed out no answer at all, so there is no
-                    // text to continue from: told to resume one anyway, a
-                    // model rebuilds the situation from scratch and recaps
-                    // the conversation instead of working
-                    let continuation = if round.text.is_empty() && round.tool_calls.is_empty() {
-                        "The previous response was interrupted before it produced an answer. \
-                         Pick the task up where you left off and continue it; do not restart \
-                         or summarize the conversation."
-                    } else {
-                        "The previous response was interrupted. Continue from where it stopped \
-                         without repeating the text already provided. Any tool calls in that \
-                         response were not executed; re-issue them if still needed."
-                    };
-                    pending = Some(Msg::user_with(continuation, Vec::new()));
-                    continue;
-                }
             } else if recoveries < MAX_STREAM_RECOVERIES && recoverable_stream {
                 // nothing was handed out — not one delta of text, reasoning
                 // or a tool call — so replaying the request cannot duplicate
@@ -642,6 +597,21 @@ pub fn run_agent(
                 messages: history[round_start..].to_vec(),
                 usage,
             });
+            if tool_calls.is_empty() {
+                // The completed round was already persisted and its usage
+                // counted above. Do not append it again on the failure path.
+                let round_start = history.len();
+                return Err(AgentFailure {
+                    message: "model hit the output token limit; the response is saved. \
+                              Adjust the model's output limit or thinking settings, \
+                              or continue the task explicitly"
+                        .into(),
+                    history,
+                    final_text,
+                    round_start,
+                    usage: None,
+                });
+            }
             continue;
         }
         if stop != StopReason::ToolUse || tool_calls.is_empty() {

@@ -7,14 +7,7 @@ use super::ResolvedModel;
 
 pub(super) fn normalize_tools(model: &ResolvedModel, body: &mut Value) {
     let deepseek = super::is_host(&model.base_url, "api.deepseek.com");
-    let kimi = [
-        "api.moonshot.ai",
-        "api.moonshot.cn",
-        "api.kimi.com",
-        "api.kimi.ai",
-    ]
-    .iter()
-    .any(|host| super::is_host(&model.base_url, host));
+    let kimi = super::is_kimi_api(model);
     if !deepseek && !kimi {
         return;
     }

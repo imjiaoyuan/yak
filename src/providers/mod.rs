@@ -84,6 +84,14 @@ fn is_opencode(url: &str) -> bool {
     is_host(url, "opencode.ai")
 }
 
+/// Only auto-send the cache key where the endpoint documents it. Explicit
+/// wire options still pass through for custom gateways and future providers.
+fn supports_prompt_cache_key(m: &ResolvedModel) -> bool {
+    is_host(&m.base_url, "api.openai.com")
+        || (m.kind == "codex" && is_host(&m.base_url, "chatgpt.com"))
+        || (m.kind == "responses" && is_host(&m.base_url, "api.x.ai"))
+}
+
 /// One session id per process, so every turn and retry of a run shares it.
 fn session_id() -> String {
     static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -384,6 +392,23 @@ pub(crate) fn apply_options(body: &mut Value, options: &[(String, String)]) {
     }
 }
 
+/// Official GLM endpoints; custom gateways keep their own defaults.
+pub(crate) fn is_glm_api(m: &ResolvedModel) -> bool {
+    m.model_id.to_ascii_lowercase().starts_with("glm-")
+        && (is_host(&m.base_url, "api.z.ai") || is_host(&m.base_url, "open.bigmodel.cn"))
+}
+
+pub(super) fn is_kimi_api(m: &ResolvedModel) -> bool {
+    [
+        "api.moonshot.ai",
+        "api.moonshot.cn",
+        "api.kimi.com",
+        "api.kimi.ai",
+    ]
+    .iter()
+    .any(|host| is_host(&m.base_url, host))
+}
+
 /// Whether assistant `reasoning_content` must be replayed on later turns.
 /// Thinking-mode hosts reject a history that drops it — OpenCode's gateway and
 /// DeepSeek's V4 models (`deepseek-flash`, `deepseek-v4-pro`, ...) both 400
@@ -391,10 +416,13 @@ pub(crate) fn apply_options(body: &mut Value, options: &[(String, String)]) {
 /// the API". The retired `deepseek-chat`/`deepseek-reasoner` ids are the
 /// exception: they reject the field when sent back. `-o replay_reasoning=...`
 /// (or the per-model options table) overrides either default.
+/// GLM and Kimi interleaved thinking also need the original reasoning with tool results.
 pub(crate) fn replay_reasoning(m: &ResolvedModel) -> bool {
     fn default(m: &ResolvedModel) -> bool {
         const LEGACY_DEEPSEEK: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
-        is_opencode(&m.base_url)
+        is_glm_api(m)
+            || is_kimi_api(m)
+            || is_opencode(&m.base_url)
             || (is_host(&m.base_url, "api.deepseek.com")
                 && !LEGACY_DEEPSEEK.contains(&m.model_id.as_str()))
     }

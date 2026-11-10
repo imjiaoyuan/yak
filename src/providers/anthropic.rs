@@ -247,7 +247,9 @@ pub fn build_body(
 
     let mut body = json!({
         "model": m.model_id,
-        "max_tokens": 4096,
+        // Messages requires an explicit output limit. Retain the original
+        // compatibility default; optional-limit protocols use server defaults.
+        "max_tokens": 8192,
         "messages": messages,
         "stream": stream,
     });
@@ -274,24 +276,20 @@ pub fn build_body(
             last["cache_control"] = marker(input.cache_ttl);
         }
         body["tools"] = Value::Array(tools);
-        // no parallel flag here: Anthropic allows parallel tool use by
-        // default (`tool_choice.disable_parallel_tool_use` is false), unlike
-        // the OpenAI-compat wire which wants an explicit
-        // `parallel_tool_calls: true`.
     }
-    super::apply_options(&mut body, &m.options);
-    super::schema::normalize_tools(m, &mut body);
-    // effort level → thinking budget; applied after the -o loop so a
-    // hand-set max_tokens is respected unless the budget needs more room
+    // Build defaults for an explicitly selected effort first. Raw wire
+    // options below have the last word, including thinking and max_tokens.
     if let Some(level) = input.reasoning
         && let Some(budget) = super::thinking_budget(level)
     {
         body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
-        let max = body["max_tokens"].as_u64().unwrap_or(4096);
+        let max = body["max_tokens"].as_u64().unwrap_or(8192);
         if max <= budget {
             body["max_tokens"] = json!(budget + 4096);
         }
     }
+    super::apply_options(&mut body, &m.options);
+    super::schema::normalize_tools(m, &mut body);
     Ok(body)
 }
 
@@ -877,6 +875,30 @@ mod tests {
         // unset → no thinking block at all
         let body = build_body(&model("anthropic"), &input(&[], &[]), false).unwrap();
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn explicit_anthropic_thinking_and_output_limits_are_never_replaced() {
+        let mut m = model("anthropic");
+        let mut i = input(&[], &[]);
+        i.reasoning = Some("medium");
+        for thinking in [
+            json!({"type":"disabled"}),
+            json!({"type":"adaptive"}),
+            json!({"type":"enabled","budget_tokens":1024}),
+        ] {
+            m.options = vec![
+                ("thinking".into(), thinking.to_string()),
+                ("max_tokens".into(), "2048".into()),
+            ];
+            let body = build_body(&m, &i, false).unwrap();
+            assert_eq!(body["thinking"], thinking);
+            assert_eq!(body["max_tokens"], 2048);
+        }
+        m.options = vec![("max_tokens".into(), "2048".into())];
+        let body = build_body(&m, &i, false).unwrap();
+        assert_eq!(body["max_tokens"], 2048);
+        assert_eq!(body["thinking"]["budget_tokens"], 16384);
     }
 
     #[test]

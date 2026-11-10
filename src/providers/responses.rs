@@ -183,8 +183,6 @@ pub fn build_body(
         "input": items,
         "stream": if m.kind == "codex" { true } else { stream },
         "store": false,
-        "parallel_tool_calls": true,
-        "tool_choice": "auto",
         "instructions": input.system.unwrap_or("You are a helpful assistant."),
     });
     if !input.tools.is_empty() {
@@ -206,14 +204,12 @@ pub fn build_body(
     }
     if let Some(effort) = input.reasoning {
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
-    } else if m.kind == "codex" {
-        body["reasoning"] = json!({"effort": "medium", "summary": "auto"});
-    }
-    if m.kind == "codex" {
-        body["text"] = json!({"verbosity": "low"});
     }
     body["include"] = json!(["reasoning.encrypted_content"]);
-    if let Some(key) = input.cache_key {
+    if let Some(key) = input
+        .cache_key
+        .filter(|_| super::supports_prompt_cache_key(m))
+    {
         body["prompt_cache_key"] = json!(key);
     }
     super::apply_options(&mut body, &m.options);
@@ -637,6 +633,64 @@ mod tests {
         assert_eq!(body["tools"][0]["strict"], false);
         assert!(body.get("text").is_none());
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn codex_leaves_effort_verbosity_and_tool_policy_unset_by_default() {
+        let m = codex_model();
+        let body = build_body(&m, &input(&[], &[tool_def()]), true).unwrap();
+        for field in ["reasoning", "text", "parallel_tool_calls", "tool_choice"] {
+            assert!(body.get(field).is_none(), "{field}: {body}");
+        }
+        assert_eq!(body["store"], false);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    #[test]
+    fn explicit_responses_options_override_selected_effort() {
+        let mut m = codex_model();
+        m.options = vec![
+            ("reasoning".into(), r#"{"effort":"low"}"#.into()),
+            ("text".into(), r#"{"verbosity":"high"}"#.into()),
+            ("parallel_tool_calls".into(), "false".into()),
+            ("tool_choice".into(), "none".into()),
+        ];
+        let mut i = input(&[], &[]);
+        i.reasoning = Some("high");
+        let body = build_body(&m, &i, true).unwrap();
+        assert_eq!(body["reasoning"], json!({"effort":"low"}));
+        assert_eq!(body["text"], json!({"verbosity":"high"}));
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["tool_choice"], "none");
+    }
+
+    #[test]
+    fn responses_cache_key_is_scoped_to_documented_endpoints() {
+        let mut m = codex_model();
+        let mut i = input(&[], &[]);
+        i.cache_key = Some("conversation-key");
+        for (kind, url, supported) in [
+            ("codex", "https://chatgpt.com/backend-api", true),
+            ("responses", "https://api.openai.com/v1", true),
+            ("responses", "https://api.x.ai/v1", true),
+            ("responses", "https://api.deepseek.com", false),
+            (
+                "responses",
+                "https://opencode.ai/inference/openai/v1",
+                false,
+            ),
+            ("responses", "https://custom.example/v1", false),
+            ("responses", "https://api.openai.com.evil.example/v1", false),
+        ] {
+            m.kind = kind.into();
+            m.base_url = url.into();
+            let body = build_body(&m, &i, true).unwrap();
+            assert_eq!(body.get("prompt_cache_key").is_some(), supported, "{url}");
+        }
+        m.options
+            .push(("prompt_cache_key".into(), "custom-key".into()));
+        let body = build_body(&m, &i, true).unwrap();
+        assert_eq!(body["prompt_cache_key"], "custom-key");
     }
 
     fn codex_model() -> ResolvedModel {

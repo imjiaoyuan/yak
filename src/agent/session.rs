@@ -406,15 +406,11 @@ impl Session {
                     view.borrow_mut().resume_wait();
                 }
                 AgentUpdate::StreamRecovered { chars, error } => {
-                    // settle the partial answer, then say why the wait
-                    // continues; the model picks up from the partial text
+                    // Only failures before any output can retry automatically.
+                    debug_assert_eq!(chars, 0);
                     view.borrow_mut().pause();
                     let p = crate::theme::err();
-                    let what = if chars == 0 {
-                        "no answer text received, retrying".to_string()
-                    } else {
-                        format!("keeping the partial answer ({chars} chars), continuing")
-                    };
+                    let what = "no output received, retrying";
                     if crate::providers::is_truncation(&error) {
                         // the transport closed cleanly but the provider never
                         // said it was done: that is a warning about the answer
@@ -1379,7 +1375,7 @@ mod tests {
             } else {
                 format!("{partial}data: {{\"error\":{{\"message\":\"failed\"}}}}\n\n")
             }];
-            if recover {
+            if recover && !with_partial {
                 bodies.push("data: {\"choices\":[{\"delta\":{\"content\":\"rest\"}}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n".into());
             }
             for body in bodies {
@@ -1400,7 +1396,7 @@ mod tests {
             &mut |_| ApprovalResponse::Deny,
             &mut || None,
         );
-        assert_eq!(result.is_ok(), recover);
+        assert_eq!(result.is_ok(), recover && !with_partial);
         server.join().unwrap();
         let turns = session
             .store
@@ -1428,17 +1424,17 @@ mod tests {
     }
 
     #[test]
-    fn recovered_round_usage_is_added_once_before_the_next_attempt() {
+    fn a_dropped_partial_round_is_saved_and_counted_once() {
         let (usage, turns, events) = failed_usage_fixture(true, true);
-        assert_eq!((usage.input, usage.output), (90, 12));
-        assert_eq!(turns.len(), 2);
+        assert_eq!((usage.input, usage.output), (40, 5));
+        assert_eq!(turns.len(), 1);
         assert_eq!(rebuild_turns(&turns).unwrap().usage, usage);
         assert_eq!(
             events
                 .iter()
                 .filter(|event| event["type"] == "turn_end")
                 .count(),
-            2
+            1
         );
     }
 

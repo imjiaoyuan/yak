@@ -191,9 +191,6 @@ pub fn build_body(
         "model": m.model_id,
         "messages": messages,
         "stream": stream,
-        // Keep tool rounds and ordinary answers bounded; explicit -o values
-        // are applied below and retain full control.
-        "max_tokens": 4096,
     });
     if stream {
         body["stream_options"] = json!({"include_usage": true});
@@ -210,13 +207,6 @@ pub fn build_body(
                 })
                 .collect(),
         );
-        // Explicitly allow the model to batch independent tool calls into one
-        // assistant message. Without it, a
-        // gateway may let the model emit only one call per turn, so an
-        // exploratory task costs a full round-trip per lookup. The agent loop
-        // runs read-only calls from one batch concurrently. Applied before the
-        // -o loop so a provider that must opt out can override it.
-        body["parallel_tool_calls"] = json!(true);
     } else if messages.iter().any(|m| m["role"] == "tool") {
         // proxies fronting Anthropic reject tool-result history without the
         // key — checked on the serialized messages so a synthetic orphan
@@ -228,11 +218,11 @@ pub fn build_body(
     if let Some(effort) = input.reasoning {
         body["reasoning_effort"] = json!(effort);
     }
-    // automatic prefix caching is per-replica on most gateways, so a
-    // round-robin hop serves the next round cold and re-bills the whole
-    // prompt. The key pins the conversation to one replica; it is opaque to
-    // the model, so it costs no tokens and does not enter the cached prefix.
-    if let Some(key) = input.cache_key {
+    // Cache routing is a vendor capability, not part of Chat Completions.
+    if let Some(key) = input
+        .cache_key
+        .filter(|_| super::supports_prompt_cache_key(m))
+    {
         body["prompt_cache_key"] = json!(key);
     }
     // apply -o options; json values pass through, others are sent as strings
@@ -430,14 +420,103 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tools_declare_parallel_calls_but_a_toolless_body_does_not() {
-        // the model may batch independent reads into one message; the flag is
-        // what lets a gateway emit more than one tool call per turn, and the
-        // agent loop executes those read-only calls concurrently.
+    fn official_glm_and_kimi_replay_original_thinking_with_tools() {
+        let history = [
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "noop".into(),
+                    arguments: json!({}),
+                }],
+                reasoning: Some("original\n\nthinking".into()),
+                reasoning_meta: None,
+            },
+            Msg::tool_result("c1", "noop", "ok"),
+        ];
+        for url in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.z.ai/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "https://api.moonshot.ai/v1",
+            "https://api.moonshot.cn/v1",
+            "https://api.kimi.com/coding/v1",
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            let mut m = model("openai-compat");
+            m.model_id = if url.contains("bigmodel") || url.contains("z.ai") {
+                "glm-5.3-flash"
+            } else {
+                "kimi-k2.6"
+            }
+            .into();
+            m.base_url = url.into();
+            let body = build_body(&m, &input(&history, &[]), true).unwrap();
+            assert_eq!(
+                body["messages"][0]["reasoning_content"],
+                "original\n\nthinking"
+            );
+            m.options = vec![
+                ("max_tokens".into(), "64000".into()),
+                ("replay_reasoning".into(), "false".into()),
+            ];
+            let body = build_body(&m, &input(&history, &[]), true).unwrap();
+            assert_eq!(body["max_tokens"], 64000);
+            assert!(body["messages"][0].get("reasoning_content").is_none());
+            m.base_url = "https://custom.example/v1".into();
+            m.options.clear();
+            let body = build_body(&m, &input(&history, &[]), true).unwrap();
+            assert!(body["messages"][0].get("reasoning_content").is_none());
+        }
+    }
+
+    #[test]
+    fn compatible_providers_leave_output_limits_to_the_server() {
+        for entry in crate::providers::catalog::ALL
+            .iter()
+            .filter(|e| e.kind == "openai-compat")
+        {
+            let mut m = model("openai-compat");
+            m.base_url = entry.base_url.into();
+            m.provider_name = entry.id.into();
+            let body = build_body(&m, &input(&[], &[]), true).unwrap();
+            assert!(body.get("max_tokens").is_none(), "{}: {body}", entry.id);
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{}: {body}",
+                entry.id
+            );
+            assert!(body.get("thinking").is_none(), "{}: {body}", entry.id);
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "{}: {body}",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_output_limit_uses_the_callers_parameter_name() {
+        for key in ["max_tokens", "max_completion_tokens"] {
+            let mut m = model("openai-compat");
+            m.options.push((key.into(), "64000".into()));
+            let body = build_body(&m, &input(&[], &[]), true).unwrap();
+            assert_eq!(body[key], 64000);
+            let other = if key == "max_tokens" {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert!(body.get(other).is_none());
+        }
+    }
+
+    #[test]
+    fn tools_leave_parallel_call_policy_to_the_provider() {
         let tools = [tool_def()];
         let body = build_body(&model("openai-compat"), &input(&[], &tools), false).unwrap();
-        assert_eq!(body["parallel_tool_calls"], json!(true));
-        // a toolless request must not carry the key: some gateways reject it
+        assert!(body.get("parallel_tool_calls").is_none());
         let body = build_body(&model("openai-compat"), &input(&[], &[]), false).unwrap();
         assert!(body.get("parallel_tool_calls").is_none(), "{body}");
     }
@@ -797,25 +876,44 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
-    /// The cache key pins a conversation to one gateway replica; it is
-    /// opaque, so it must ride outside the cached prefix and stay absent
-    /// when there is no stable conversation (a one-shot call).
     #[test]
-    fn cache_key_sent_when_the_conversation_is_stable() {
+    fn automatic_cache_key_is_limited_to_documented_chat_endpoints() {
         let mut i = input(&[], &[]);
         i.cache_key = Some("01HZ-conversation");
-        let body = build_body(&model("openai-compat"), &i, true).unwrap();
-        assert_eq!(body["prompt_cache_key"], json!("01HZ-conversation"));
-        assert!(
-            body["prompt_cache_key"]
-                .as_str()
-                .is_some_and(|k| !k.is_empty()),
-            "an empty key would be sent as an empty string"
-        );
-
-        // unset → the parameter is absent, byte-compatible with before
-        let body = build_body(&model("openai-compat"), &input(&[], &[]), true).unwrap();
+        let mut m = model("openai-compat");
+        for entry in crate::providers::catalog::ALL
+            .iter()
+            .filter(|e| e.kind == "openai-compat")
+        {
+            m.base_url = entry.base_url.into();
+            let body = build_body(&m, &i, true).unwrap();
+            if entry.id == "openai" {
+                assert_eq!(body["prompt_cache_key"], "01HZ-conversation");
+            } else {
+                assert!(
+                    body.get("prompt_cache_key").is_none(),
+                    "{}: {body}",
+                    entry.id
+                );
+            }
+        }
+        m.base_url = "https://api.openai.com/v1".into();
+        let body = build_body(&m, &input(&[], &[]), true).unwrap();
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn custom_gateways_can_explicitly_select_cache_and_tool_policy() {
+        let mut m = model("openai-compat");
+        m.options = vec![
+            ("prompt_cache_key".into(), "custom-key".into()),
+            ("parallel_tool_calls".into(), "false".into()),
+            ("tool_choice".into(), "auto".into()),
+        ];
+        let body = build_body(&m, &input(&[], &[tool_def()]), true).unwrap();
+        assert_eq!(body["prompt_cache_key"], "custom-key");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["tool_choice"], "auto");
     }
 
     #[test]

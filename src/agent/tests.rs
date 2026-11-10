@@ -214,80 +214,18 @@ fn read_request(c: &mut std::net::TcpStream) {
     crate::core::testutil::read_request(c)
 }
 
-/// A mock SSE server that drops the first connection after one delta
-/// (no [DONE]) and completes the second: the agent loop must keep the
-/// partial answer as a real assistant message and finish the task on
-/// the continued request — the order stays prompt, partial, continuation.
+/// A dropped reply stays in the failed round; no synthetic user turn follows.
 #[test]
-fn a_dropped_stream_continues_from_its_partial_answer() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let hits2 = hits.clone();
-    let server = std::thread::spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut c = conn;
-            // read past the request head + body (content-length)
-            read_request(&mut c);
-            if n == 0 {
-                // one delta, then the connection dies mid-answer
-                let _ = c.write_all(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".as_bytes(),
-                );
-                let _ = c.write_all(
-                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan before answer\",\"content\":\"partial ans\"}}]}\n\n",
-                );
-                drop(c); // no [DONE]: the stream is cut
-            } else {
-                let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ued cleanly\"}}]}\n\n\
-                            data: [DONE]\n\n";
-                let _ = c.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-                break;
-            }
-        }
-    });
-    use std::io::Write as _;
-
-    let model = mock_model(port);
-    let tools: Vec<Box<dyn tools::Tool>> = vec![];
-    let opts = test_opts();
-    let mut approval = approval::ApprovalConfig::default();
-    let outcome = run_agent(
-        RunRequest {
-            model: &model,
-            tools: &tools,
-            prompt: "go",
-            attachments: vec![],
-            seed: vec![],
-            opts: &opts,
-        },
-        &mut approval,
-        deny_callbacks(),
-    )
-    .expect("the run must recover from the dropped stream");
-    server.join().unwrap();
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "exactly one recovery request"
-    );
-    assert!(!outcome.interrupted);
-    assert_eq!(outcome.final_text, "ued cleanly");
-    assert_eq!(
-        outcome.history.len(),
-        4,
-        "prompt, partial, continuation request, answer"
-    );
+fn a_dropped_stream_keeps_its_partial_answer_without_continuing() {
+    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"partial ans\",\"reasoning_content\":\"plan before answer\"}}]}\n\n".into();
+    let (result, requests, _) = stream_recovery_fixture(vec![first]);
+    let failure = result.err().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(failure.final_text, "partial ans");
+    assert_eq!(failure.history.len(), 2);
     assert!(
-        matches!(&outcome.history[1], Msg::Assistant { text, tool_calls, reasoning, .. } if text == "partial ans" && tool_calls.is_empty() && reasoning.as_deref() == Some("plan before answer")),
-        "the partial answer and reasoning ride the history as a real assistant message"
+        matches!(&failure.history[1], Msg::Assistant { text, reasoning, .. }
+        if text == "partial ans" && reasoning.as_deref() == Some("plan before answer"))
     );
 }
 
@@ -365,86 +303,59 @@ fn stream_recovery_fixture_with_kind(
     (result, requests, count)
 }
 
-fn recovery_answer() -> String {
-    "data: {\"choices\":[{\"delta\":{\"content\":\"rest\"}}]}\n\ndata: [DONE]\n\n".into()
-}
-
 #[test]
-fn a_recovery_request_explicitly_asks_for_continuation() {
-    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\",\"reasoning_content\":\"plan\"}}]}\n\n".into();
-    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
-    let outcome = result.unwrap();
-    let messages = requests[1]["messages"].as_array().unwrap();
-    assert_eq!(messages[1]["content"], "partial");
-    assert_eq!(messages[1]["reasoning_content"], "plan");
-    assert_eq!(messages.last().unwrap()["role"], "user");
+fn thinking_exhausting_the_output_budget_stops_without_another_request() {
+    let body = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"still thinking\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":4096}}\n\ndata: [DONE]\n\n";
+    let (result, requests, executed) = stream_recovery_fixture(vec![body.into()]);
+    let failure = result.err().expect("thinking without an answer must fail");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(executed, 0);
+    assert!(failure.message.contains("output token limit"));
     assert!(
-        messages.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .contains("Continue from where it stopped")
+        matches!(&failure.history[1], Msg::Assistant { reasoning: Some(text), .. } if text == "still thinking")
     );
+    assert_eq!(failure.round_start, failure.history.len());
     assert!(
-        matches!(&outcome.history[2], Msg::User { text, .. } if text.contains("Continue from where it stopped"))
+        failure.usage.is_none(),
+        "completed round usage was already reported"
     );
 }
 
 #[test]
-fn a_reasoning_only_drop_is_preserved_and_recovered() {
+fn a_length_stop_with_text_does_not_invent_a_continuation_request() {
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial answer\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+    let (result, requests, _) = stream_recovery_fixture(vec![body.into()]);
+    let failure = result.err().expect("truncation must be visible");
+    assert!(failure.message.contains("output token limit"));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(failure.final_text, "partial answer");
+}
+
+#[test]
+fn a_reasoning_only_drop_is_preserved_without_another_request() {
     let first =
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished plan\"}}]}\n\n".into();
-    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
-    let outcome = result.unwrap();
-    assert_eq!(outcome.final_text, "rest");
-    assert_eq!(
-        requests[1]["messages"][1]["reasoning_content"],
-        "unfinished plan"
-    );
+    let (result, requests, _) = stream_recovery_fixture(vec![first]);
+    let failure = result.err().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(failure.history.len(), 2);
     assert!(
-        matches!(&outcome.history[1], Msg::Assistant { reasoning: Some(text), .. } if text == "unfinished plan")
-    );
-}
-
-/// A truncated round that never produced answer text has nothing to
-/// continue: the old wording told the model to resume a text it had not
-/// written, and on a long history it answered by recapping the whole
-/// conversation instead of resuming the task.
-#[test]
-fn a_reasoning_only_continuation_does_not_ask_to_continue_missing_text() {
-    let first =
-        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished plan\"}}]}\n\n".into();
-    let (result, requests, _) = stream_recovery_fixture(vec![first, recovery_answer()]);
-    result.unwrap();
-    let continuation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(
-        !continuation.contains("Continue from where it stopped"),
-        "{continuation}"
-    );
-    assert!(
-        continuation.contains("before it produced an answer"),
-        "{continuation}"
+        matches!(&failure.history[1], Msg::Assistant { reasoning: Some(text), .. } if text == "unfinished plan")
     );
 }
 
 #[test]
 fn tools_from_a_dropped_stream_are_never_executed() {
     let chunk = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"pending","function":{"name":"probe","arguments":"{\"unfinished\":"}}]}}]});
-    let (result, requests, executed) =
-        stream_recovery_fixture(vec![format!("data: {chunk}\n\n"), recovery_answer()]);
-    let outcome = result.unwrap();
+    let (result, requests, executed) = stream_recovery_fixture(vec![format!("data: {chunk}\n\n")]);
+    let outcome = result.err().unwrap();
+    assert_eq!(requests.len(), 1);
     assert_eq!(executed, 0);
     assert!(
         matches!(&outcome.history[2], Msg::ToolResult { call_id, error: Some(crate::providers::ToolError::Interrupted), .. } if call_id == "pending")
     );
-    assert_eq!(requests[1]["messages"][2]["tool_call_id"], "pending");
     assert!(
-        requests[1]["messages"][2]["content"]
-            .as_str()
-            .unwrap()
-            .contains("not executed")
+        matches!(&outcome.history[2], Msg::ToolResult { content, .. } if content.contains("not executed"))
     );
 }
 
@@ -472,16 +383,23 @@ fn a_failure_before_output_still_keeps_the_user_prompt() {
 fn a_dropped_gemini_stream_pairs_signed_calls_with_interrupted_results() {
     let signed_call = json!({"functionCall":{"id":"pending","name":"probe","args":{}},"thoughtSignature":"signed-call"});
     let first = json!({"candidates":[{"content":{"parts":[{"text":"partial"},signed_call]}}]});
-    let last =
-        json!({"candidates":[{"content":{"parts":[{"text":"rest"}]},"finishReason":"STOP"}]});
-    let (result, requests, executed) = stream_recovery_fixture_with_kind(
-        "gemini",
-        vec![format!("data: {first}\n\n"), format!("data: {last}\n\n")],
-    );
-    result.unwrap();
+    let (result, requests, executed) =
+        stream_recovery_fixture_with_kind("gemini", vec![format!("data: {first}\n\n")]);
+    let failure = result.err().unwrap();
+    assert_eq!(requests.len(), 1);
+    let mut model = mock_model(0);
+    model.kind = "gemini".into();
+    let replay = crate::providers::gemini::build_body(
+        &model,
+        &PromptInput {
+            history: &failure.history,
+            ..crate::providers::testutil::input(&[], &[])
+        },
+    )
+    .unwrap();
     assert_eq!(executed, 0);
-    assert_eq!(requests[1]["contents"][1]["parts"][1], signed_call);
-    let response = &requests[1]["contents"][2]["parts"][0]["functionResponse"];
+    assert_eq!(replay["contents"][1]["parts"][1], signed_call);
+    let response = &replay["contents"][2]["parts"][0]["functionResponse"];
     assert_eq!(response["id"], "pending");
     assert!(
         response["response"]["error"]
