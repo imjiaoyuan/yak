@@ -598,14 +598,22 @@ def check_plugin_regressions():
             checkpoint["restore"](work, 1)
             with open(original) as f:
                 assert f.read(1) == "a", "large snapshot must not alias the live file"
-            os.unlink(os.path.join(checkpoint["project_root"](work),
-                                   os.listdir(checkpoint["project_root"](work))[0], "large.txt"))
+            os.unlink(os.path.join(checkpoint["turns_root"](work),
+                                   os.listdir(checkpoint["turns_root"](work))[0], "large.txt"))
             try:
                 checkpoint["restore"](work, 1)
             except OSError:
                 pass
             else:
                 raise AssertionError("a missing snapshot file must fail loudly")
+            # pre-tool snapshots: /undo rolls the named file back and is consumed
+            checkpoint["pre_tool_snapshot"](
+                work, checkpoint["targets_of"]("edit", {"path": "large.txt"}, work))
+            with open(original, "w") as f:
+                f.write("c" * 10)
+            assert "large.txt" in checkpoint["undo"](work, 1)
+            with open(original) as f:
+                assert f.read(1) == "a", "/undo must restore the pre-call contents"
         finally:
             if before is None:
                 os.environ.pop("YAK_CHECKPOINT_DIR", None)

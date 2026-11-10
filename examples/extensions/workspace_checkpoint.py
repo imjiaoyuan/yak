@@ -10,20 +10,35 @@
 #                          turn, named for the wall-clock moment it was
 #                          taken), after pruning checkpoints older
 #                          than KEEP_DAYS
+#   tool_call            — before the write / edit tool runs: copy the file
+#                          it is about to touch into a pre-tool snapshot (a
+#                          cheap, precise mirror of just the named targets,
+#                          recording whether each existed). This is what
+#                          `/undo` rolls back
 #   session_before_tree  — /tree picked a jump point: merge the snapshots
 #                          the dropped turns began with, oldest winning,
 #                          back into the working tree
 #
-# The merge is additive by design: files the dropped turns edited come back
-# as they were at the oldest selected snapshot (the moment the first dropped
-# turn began), files untouched since the cut point stay as they are now, and
-# nothing is ever deleted — files the dropped turns created stay behind. This
-# example assumes the project's dropped turns own the newest snapshots; do not
-# run two sessions against the same workspace if you need reliable /tree restore.
+# The tree merge is additive by design: files the dropped turns edited come
+# back as they were at the oldest selected snapshot (the moment the first
+# dropped turn began), files untouched since the cut point stay as they are
+# now, and nothing is ever deleted — files the dropped turns created stay
+# behind. This example assumes the project's dropped turns own the newest
+# snapshots; do not run two sessions against the same workspace if you need
+# reliable /tree restore.
+#
+# /undo [N] restores the last N pre-tool snapshots (default 1), oldest of
+# the N winning per file; files a snapshot recorded as not-yet-existing are
+# removed again. Turn mirrors and pre-tool snapshots live in separate
+# folders (`turns/`, `pre/`) under the project's shadow dir, so the two
+# restore paths never pick up each other's snapshots.
 #
 # Install into ~/.yak/extensions/ (or .yak/extensions/), chmod +x, /reload.
 # The shadow root lives in the system temp dir; override with
-# YAK_CHECKPOINT_DIR. Turn it off for a session by removing the file.
+# YAK_CHECKPOINT_DIR. Set YAK_CHECKPOINT_BASH=1 to also mirror the whole
+# tree before every bash call (faithful but heavy; the per-turn mirror
+# already bounds what an undo-less bash can lose). Turn it off for a
+# session by removing the file.
 import json
 import os
 import shutil
@@ -60,6 +75,20 @@ def project_key(cwd):
 
 def project_root(cwd):
     root = os.path.join(shadow_root(), project_key(cwd))
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def turns_root(cwd):
+    """Per-turn full mirrors; what a /tree restore folds back."""
+    root = os.path.join(project_root(cwd), "turns")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def pre_root(cwd):
+    """Pre-tool snapshots (write/edit targets); what /undo rolls back."""
+    root = os.path.join(project_root(cwd), "pre")
     os.makedirs(root, exist_ok=True)
     return root
 
@@ -129,7 +158,7 @@ def mirror(src, dst):
             shutil.copy2(s, d)
 
 def take_snapshot(cwd, stamp):
-    root = project_root(cwd)
+    root = turns_root(cwd)
     prune(root)
     final = snapshot_dir(root, stamp)
     staging = tempfile.mkdtemp(prefix=".snapshot-", dir=root)
@@ -155,7 +184,7 @@ def restore(cwd, dropped_count):
     so their begin-of-turn snapshots are the newest ones on disk for the
     project; the oldest of them is the state the first dropped turn found,
     which is the state the jump returns the workspace to."""
-    root = project_root(cwd)
+    root = turns_root(cwd)
     stamps = sorted(s for s in os.listdir(root) if is_stamp(s))
     if dropped_count > len(stamps):
         raise FileNotFoundError(
@@ -195,20 +224,169 @@ def restore(cwd, dropped_count):
         shutil.rmtree(staging)
 
 
+PRE_MANIFEST = ".yak-pretool.json"
+SNAPSHOT_TOOLS = {"write", "edit"}  # tools whose named targets are snapshotted
+
+
+def targets_of(tool, args, cwd):
+    """The workspace files a tool call is about to touch: write and edit name
+    a `path`; bash names nothing (a whole-tree mirror per call is opt-in via
+    YAK_CHECKPOINT_BASH=1). Paths that escape the workspace or are symlinks
+    are skipped — a snapshot must never follow a link out of the tree."""
+    if tool in SNAPSHOT_TOOLS and isinstance(args, dict):
+        raw = args.get("path")
+        paths = [raw] if isinstance(raw, str) else []
+    elif tool == "bash" and os.environ.get("YAK_CHECKPOINT_BASH") == "1":
+        paths = ["*"]  # whole tree
+    else:
+        return []
+    real_cwd = os.path.realpath(cwd)
+    out = []
+    for raw in paths:
+        if raw == "*":
+            out.append("*")
+            continue
+        abs_path = os.path.realpath(os.path.join(cwd, raw)) if not os.path.isabs(raw) \
+            else os.path.realpath(raw)
+        if os.path.commonpath((abs_path, real_cwd)) != real_cwd:
+            continue  # outside the workspace: not ours to snapshot
+        if os.path.islink(os.path.join(cwd, raw)):
+            continue
+        out.append(os.path.relpath(abs_path, real_cwd))
+    return out
+
+
+def pre_tool_snapshot(cwd, targets):
+    """Copy the named files (or the whole tree for `*`) into a pre snapshot:
+    one stamp-ordered folder per tool call, each with a manifest recording
+    per file whether it existed — that bit is what lets /undo remove again
+    a file the tool created. Nothing here can fail the tool call: a snapshot
+    that cannot be taken is skipped with a stderr note (fail-open, like the
+    host's hooks)."""
+    if not targets:
+        return
+    root = pre_root(cwd)
+    prune(root)
+    final = snapshot_dir(root, stamp_now())
+    staging = tempfile.mkdtemp(prefix=".pre-", dir=root)
+    try:
+        entries = []
+        if targets == ["*"]:
+            mirror(cwd, staging)
+            if os.path.exists(os.path.join(staging, PRE_MANIFEST)):
+                raise ValueError("reserved checkpoint name in workspace")
+            for dirpath, _, filenames in os.walk(staging):
+                for name in filenames:
+                    rel = os.path.relpath(os.path.join(dirpath, name), staging)
+                    entries.append({"path": rel, "existed": True})
+        else:
+            for rel in targets:
+                src = os.path.join(cwd, rel)
+                existed = os.path.isfile(src) and not os.path.islink(src)
+                if existed:
+                    dst = os.path.join(staging, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                entries.append({"path": rel, "existed": existed})
+        with open(os.path.join(staging, PRE_MANIFEST), "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        os.replace(staging, final)
+    except BaseException as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        sys.stderr.write("checkpoint: skipped (%s)\n" % e)
+
+
+def undo(cwd, count):
+    """Fold the last `count` pre-tool snapshots back, oldest of them winning
+    per file; a file the oldest snapshot recorded as not existing is removed.
+    Returns the human summary."""
+    root = pre_root(cwd)
+    stamps = sorted(s for s in os.listdir(root) if is_stamp(s))
+    if not stamps:
+        return "nothing to undo: no pre-tool snapshots for this workspace"
+    selected = stamps[-min(count, len(stamps)):]
+    merged = {}  # rel -> (snapshot dir, existed); the oldest stamp wins
+    for stamp in selected:
+        snap = snapshot_dir(root, stamp)
+        with open(os.path.join(snap, PRE_MANIFEST), encoding="utf-8") as f:
+            entries = json.load(f)
+        if not isinstance(entries, list):
+            raise ValueError(f"invalid pre-tool manifest: {snap}")
+        for entry in entries:
+            rel, existed = entry.get("path"), entry.get("existed")
+            if not isinstance(rel, str) or not isinstance(existed, bool):
+                raise ValueError(f"invalid pre-tool manifest entry: {snap}")
+            if rel not in merged:
+                merged[rel] = (snap, existed)
+    real_cwd = os.path.realpath(cwd)
+    restored, removed = [], []
+    staging = tempfile.mkdtemp(prefix=".undo-", dir=cwd)
+    try:
+        staged = {}
+        for rel, (snap, existed) in merged.items():
+            if os.path.islink(rel) or os.path.commonpath(
+                    (os.path.realpath(os.path.join(cwd, rel)), real_cwd)) != real_cwd:
+                raise ValueError(f"undo path escapes the workspace: {rel}")
+            if existed:
+                src = os.path.join(snap, rel)
+                if not os.path.isfile(src):
+                    raise FileNotFoundError(f"checkpoint file missing: {src}")
+                path = os.path.join(staging, str(len(staged)))
+                shutil.copy2(src, path)
+                staged[os.path.join(cwd, rel)] = path
+                restored.append(rel)
+            else:
+                removed.append(rel)
+        for dst, path in staged.items():
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(path, dst)
+        for rel in removed:
+            target = os.path.join(cwd, rel)
+            if os.path.isfile(target):
+                os.remove(target)
+        # consumed: a second /undo walks one step further back, not the
+        # same step again — the snapshots rolled back are gone
+        for stamp in selected:
+            shutil.rmtree(snapshot_dir(root, stamp), ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    lines = ["undid %d tool call(s): restored %s" % (len(selected),
+                                                     ", ".join(restored) or "nothing")]
+    if removed:
+        lines.append("removed: %s" % ", ".join(removed))
+    return "\n".join(lines)
+
+
 def handle(msg):
     kind = msg.get("type")
     if kind == "initialize":
-        return {"events": ["turn_start", "session_before_tree"]}
-    if kind != "event":
+        return {"events": ["turn_start", "tool_call", "session_before_tree"],
+                "commands": ["undo"]}
+    if kind == "call_tool":
+        return None  # no tools mounted; never happens
+    if kind != "event" and kind != "run_command":
         return None
     name = msg.get("name")
     params = msg.get("params", {})
     cwd = os.getcwd()
+    if kind == "run_command":
+        if name != "undo":
+            return None
+        try:
+            count = max(1, int((msg.get("args") or "").strip() or 1))
+        except ValueError:
+            return "usage: /undo [N] — how many tool calls to roll back (default 1)"
+        return undo(cwd, count)
     if name == "turn_start":
         # turn_start carries only the round number, so the snapshot is keyed
         # on the wall clock; ordering is what matters, and the stamp sorts
         # the way turn ids do
         take_snapshot(cwd, stamp_now())
+    elif name == "tool_call":
+        # before the tool runs: snapshot what it names. Replying null leaves
+        # the decision to the approval matrix — this is a snapshot, not a gate
+        pre_tool_snapshot(cwd, targets_of(params.get("tool"),
+                                         params.get("args"), cwd))
     elif name == "session_before_tree":
         # the turns leaving the active branch: restore the workspace to
         # where the oldest of them began. `dropped_turns` is the payload's
