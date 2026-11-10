@@ -650,9 +650,6 @@ def check_plugin_regressions():
             pass
         else:
             raise AssertionError("failed tools/list must not look like an empty catalog")
-        notion = runpy.run_path(os.path.join(extensions, "mcp_notion.py"))
-        assert [t["name"] for t in notion["mount"](Pages(pages))[0]] == [
-            "notion__first", "notion__second"]
     print("plugin regressions passed")
 
 
@@ -991,7 +988,7 @@ def main():
     # extension answers `initialize` — the net under the per-example lanes
     ex_dir = os.path.join(root, "examples", "extensions")
     ran, skipped = probe_examples(ex_dir, env)
-    assert "subagent.py" in ran and "fold_repeats.py" in ran, \
+    assert "subagent.py" in ran, \
         f"the examples lane lost coverage: ran={ran} skipped={skipped}"
     print(f"examples: {len(ran)} probed, {len(skipped)} skipped {skipped}")
 

@@ -206,7 +206,7 @@ Commands: `prompt` (with `attachments` by path or URL), `steer` (delivered betwe
 
 Approval over the wire is the mode's reason to exist: an ask blocks the run and emits `approval_request` carrying the ask's own id; `approval_response` names that id and the run continues. If stdin closes with an ask waiting, the ask fails closed (deny) exactly like a terminal prompt with no terminal. `--approval allow` still answers everything unattended without asking the wire.
 
-stdout is protocol records only; diagnostics go to stderr, like `--json`. The `remote_rpc.py` example extension is this protocol's phone gateway: Telegram or email replies become prompts, steers and approval answers.
+stdout is protocol records only; diagnostics go to stderr, like `--json`.
 
 ## Session names
 
@@ -226,7 +226,7 @@ Add a few comment lines at the top and any script becomes a tool. The host runs 
 
 ```python
 #!/usr/bin/env python3
-# --- yak-tool: wordcount
+# --- yak-tool: charcount
 # description: count characters in a text
 # args: text (string) the text
 # arg-mode: argv
@@ -258,7 +258,7 @@ A slow or broken extension prints a dim warning and mounts nothing; it never blo
 
 Two self-contained templates ship in `examples/extensions/`: `template.js` (a JavaScript runtime whose user section uses a familiar extension API (`registerTool` / `registerCommand` / `on("tool_call", ...)`) so most existing tool/command/hook extensions paste straight in; APIs that need the process, like UI, editors and hotkeys, raise with a clear message) and `template.py` (the same shape in Python). `template.rs` is the script-tool shape in Rust: single-file source with a manifest header, compiled by the host on first call (needs rustc installed; without it the tool call returns install instructions). Copy one into the extensions directory and edit its user section.
 
-The full reference is [`extensions.md`](extensions.md) (manifest fields, every message and event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has runnable examples to copy: `wordcount` (a script tool), `template.rs` (a Rust script tool: the host compiles it with rustc, content-hash cached), `websearch` (a resident extension offering `web_search` plus a `/web` command; DeepSeek's Search API when the session's model is a deepseek one, else `BRAVE_API_KEY` when set, otherwise keyless DuckDuckGo/Wikipedia), `repeat_guard.py` (denies a `tool_call` loop), `fold_repeats.py` (folds repeated lines in a tool result), `mcp_bridge.py` (mounts MCP servers as `server__tool` tools from an `mcp.json` beside the script: stdio or streamable HTTP; this is the MCP support), `jev.js` (a JS resident tool wrapping TypeSafe's Jev: typed judgment questions with probabilities, `TYPESAFE_API_KEY`), `ssh.py` (remote access over hardened `ssh` subprocesses: `ssh_exec`/`ssh_read`/`ssh_write`, hosts named in `ssh.json`, host keys pinned in the extension's own known_hosts), `workflow.py` (resumable graph orchestration: JSON graphs where every agent node runs its own model and tool subset as a child yak — append-only run logs under `~/.yak/workflows/`, routing expressions, parallel branches, human gates, subgraphs; `/workflow` commands plus a `workflow_run` tool, graphs and their format in `examples/workflows/`), `skills` (SKILL.md discovery as a plugin: the `<available_skills>` system-prompt block, `/skill:<name>` commands — see [Skills](#skills)) and `subagent.py` (below).
+The full reference is [`extensions.md`](extensions.md) (manifest fields, every message and event, the `tool_call` gate, timeouts and config keys. `examples/extensions/` has runnable examples to copy: `template.rs` (a Rust script tool: the host compiles it with rustc, content-hash cached), `websearch` (a resident extension offering `web_search` plus a `/web` command; DeepSeek's Search API when the session's model is a deepseek one, else `BRAVE_API_KEY` when set, otherwise keyless DuckDuckGo/Wikipedia), `repeat_guard.py` (denies a `tool_call` loop), `mcp_bridge.py` (mounts MCP servers as `server__tool` tools from an `mcp.json` beside the script: stdio or streamable HTTP; this is the MCP support), `ssh.py` (remote access over hardened `ssh` subprocesses: `ssh_exec`/`ssh_read`/`ssh_write`, hosts named in `ssh.json`, host keys pinned in the extension's own known_hosts), `workflow.py` (resumable graph orchestration: JSON graphs where every agent node runs its own model and tool subset as a child yak — append-only run logs under `~/.yak/workflows/`, routing expressions, parallel branches, human gates, subgraphs; `/workflow` commands plus a `workflow_run` tool, graphs and their format in `examples/workflows/`), `skills` (SKILL.md discovery as a plugin: the `<available_skills>` system-prompt block, `/skill:<name>` commands — see [Skills](#skills)) and `subagent.py` (below).
 
 Here is a whole resident extension: a tool that shells out to `deploy.sh`:
 

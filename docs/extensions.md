@@ -18,18 +18,13 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `export` | resident | `/export` command forwarding the current thread to the core `yak export --thread` implementation |
 | `status` | resident | `/status` command rendering the live session context supplied to `run_command` |
 | `webfetch` | resident | the page fetcher; the one way off the machine; exec-tier. On a deepseek-model session a failed or JS-hollow direct GET retries via DeepSeek's Fetch API (server-rendered Markdown, `markdown: true` forces it; key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json) |
-| `wordcount` | script tool | the minimal `# --- yak-tool` starter, one stdin/stdout round |
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
 | `mcp_bridge.py` | resident | mounts an MCP server (stdio or streamable HTTP) as one `<server>__<tool>` per MCP tool; config in `mcp.json` |
-| `mcp_notion.py` | resident | Notion's remote MCP endpoint, OAuth-only; the login runs by the human, not the agent (§ Notion below) |
 | `subagent.py` | resident | runs another `yak` in its own context window against an agent definition from `~/.yak/agents/` or `.yak/agents/`; `fork: true` runs the child on a forked branch of this conversation instead (`--session <id> --fork`, thread found newest-first among recent threads whose tail records the working directory) |
 | `skills` | resident | SKILL.md discovery as a plugin: the `<available_skills>` system-prompt section, the banner/`/help` skill list and every `/skill:<name>` command — global (`~/.yak/skills`, `~/.agents/skills`, `~/.yak/pkg`) and project-level (nearest `.yak/skills`/`.agents/skills`, `.yak/pkg`) homes, project shadowing user by name |
 | `repeat_guard.py` | resident | a `tool_call` deny gate for stuck loops |
-| `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |
 | `workspace_checkpoint.py` | resident | workspace snapshots, no git required: a `turn_start` full mirror + `session_before_tree` roll-back that `/tree` rides, plus a `tool_call` observer that snapshots the files `write`/`edit` are about to touch (`YAK_CHECKPOINT_BASH=1` mirrors the whole tree before `bash` too) and an `/undo [N]` command that walks those pre-tool snapshots back (consumed as it goes; files the rolled-back call created are removed again) |
 | `notify.py` | resident | an `approval`/`agent_end` subscriber that raises a desktop notification; approval prompts and finished answers reach you outside the terminal; in Konsole a native bell notification returns to its originating tab when clicked |
-| `remote.py` | resident | the phone bridge: notifications out to Telegram/email/WeCom/ServerChan/Bark, instructions back in over Telegram or mailbox polling, typed into the session's tmux pane or held in an inbox until the session is free; keep-awake hold on the machine while it lives; config in `remote.json`, written by `remote init` |
-| `jev.js` | resident | TypeSafe's System One model as a `jev` tool: typed choice/noul/score questions about a text, answered with probabilities; `TYPESAFE_API_KEY`, no keyless fallback |
 | `model_here` | resident | the project-model pin: `/model-here` reads and writes `models.default` in `<project>/.yak/config.json`, honored inside the project |
 | `model_pin` | resident | the per-directory model pin, kept automatically: an `agent_start` subscriber that writes `<cwd>: <model>` into `<user_dir>/model-pins.json` for every task, so the next yak in that directory starts on the model the last one ran |
 | `websearch` | resident | a `/web` command plus `web_search` tool; DeepSeek's Search API (model-facing summaries, query operators like `site:`/`lang:`/`after:` pass through) when the session's model is a deepseek one — key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json — then Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
@@ -65,7 +60,7 @@ A comment header on any script makes it a tool. The host spawns it **per call**,
 
 ```python
 #!/usr/bin/env python3
-# --- yak-tool: wordcount
+# --- yak-tool: charcount
 # description: count characters, words and lines of a text
 # args: text (string) the text to measure
 # arg-mode: argv
@@ -319,18 +314,7 @@ The MCP support lives here rather than in the binary: `examples/extensions/mcp_b
 
 The HTTP transport is streamable HTTP: one POST per JSON-RPC message, a JSON body or an SSE stream back, and the server's `Mcp-Session-Id` echoed once it hands one out (DELETE ends the session). Requests carry a real `User-Agent` (CDN firewalls drop the python-urllib default — Cloudflare's own edge answers it with error 1010). `tools/list` follows the server's `nextCursor` pagination, so a server with more tools than fit one page still mounts them all. An entry may carry a `"tools": {"only": [...], "except": [...]}` filter (fnmatch against the MCP-side names) that cuts tools at the mount: schemas ride every request, so a tool the session never wants costs tokens whether or not it is called. Servers that only do the older two-endpoint SSE dance, or OAuth without a static token, are out of scope: a server that fails its handshake is skipped with a dim warning on stderr and the rest stay up.
 
-The token-cost shape of a server is the server's own choice. Notion's endpoint advertises every workspace action with a long usage guide per tool; Cloudflare went the other way: its API server (2,500+ endpoints behind OAuth) exposes two tools — `search` and `execute` (the search-and-execute Code Mode pattern, ~1k tokens where full schemas would cost ~1.17M) — and its docs server at `https://docs.mcp.cloudflare.com/mcp` needs no auth at all, two tools, under 1k tokens of schema. Pick servers that respect the injection; disable the rest per session with `extensions.disabled`.
-
-## Notion in one file: the `mcp_notion.py` example
-
-Where the bridge stops — an OAuth-only server with no static token — `examples/extensions/mcp_notion.py` picks up: Notion's remote MCP endpoint, with the login run by the human instead of the agent. Copy it into `~/.yak/extensions/` (executable, no `mcp.json` needed) and log in once from a terminal:
-
-```bash
-python3 ~/.yak/extensions/mcp_notion login    # prints the URL, opens the browser
-python3 ~/.yak/extensions/mcp_notion status   # token left? tools cached?
-```
-
-No tool call ever opens a browser: the extension answers the host's `initialize` purely from disk (`token.json` + `tools.json` beside the file, 0600, both written by `login`), so startup is network-free and cannot blow the host's 10s window. With a token cached it mounts the full `notion__*` tool list (search, fetch, create-pages, comments, ...); without one it mounts nothing and every yak start says how to log in. The MCP session itself opens lazily on the first tool call. A token lives ~8h; when it expires every call says so, and another `login` + `/reload` fixes it. The login round is the same spec chain (RFC 9728 discovery → RFC 7591 dynamic registration → PKCE S256 → form-encoded exchange) the bridge declines to run.
+The token-cost shape of a server is the server's own choice. Cloudflare's API server (2,500+ endpoints behind OAuth) exposes two tools — `search` and `execute` (the search-and-execute Code Mode pattern, ~1k tokens where full schemas would cost ~1.17M) — and its docs server at `https://docs.mcp.cloudflare.com/mcp` needs no auth at all, two tools, under 1k tokens of schema. Pick servers that respect the injection; disable the rest per session with `extensions.disabled`.
 
 ## Running another yak: the `subagent.py` example
 
@@ -343,7 +327,7 @@ yak --json --no-session --tools read,grep \
 
 - The child's *agent definition* is markdown with frontmatter, from `~/.yak/agents/<name>.md` or the project's `.yak/agents/<name>.md` (nearest wins): `name`, `description`, `tools`, `model`, `thinking`, and the body becomes the appended system prompt. Discovery, parsing and the depth guard live in the extension: the core knows nothing about agents.
 - `--json` is what makes the child observable: one JSON object per line (`text`, `reasoning`, `tool_start`, `tool_log`, `tool_end`, `turn_end`, `result`). The extension turns those into the parent's live tool log and reads the final answer off the `result` object, which is why it needs no parsing of human-facing text.
-- The child is stopped on the host's `interrupt` and on its own deadline, `YAK_SUBAGENT_DEPTH` refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all. The env var doubles as a child marker for user extensions: a subagent child inherits `~/.yak/extensions/`, so `notify.py` and `remote.py` read `YAK_SUBAGENT_DEPTH` and stay silent inside one (a child's `agent_end` is subagent machinery, not work you submitted — without the gate every child in a `$TMPDIR` worktree would raise its own notification).
+- The child is stopped on the host's `interrupt` and on its own deadline, `YAK_SUBAGENT_DEPTH` refuses nesting, and the `--tools` whitelist keeps it from calling `subagent` at all. The env var doubles as a child marker for user extensions: a subagent child inherits `~/.yak/extensions/`, so `notify.py` reads `YAK_SUBAGENT_DEPTH` and stays silent inside one (a child's `agent_end` is subagent machinery, not work you submitted — without the gate every child in a `$TMPDIR` worktree would raise its own notification).
 - The `subagent` call runs free like any exec tool (there is no ask mode); the definition's `tools:` line is what bounds the child.
 - **Worktree isolation**: when the child is a *writer* — its definition's `tools:` line names a mutating tool (`write`, `edit` or `bash`) and the parent's cwd is a git repo with at least one commit — it does not run in place. The extension forks a fresh `git worktree` (`$TMPDIR/yak-wt-<pid>/wt-<n>`, branch `yak/subagent-<pid>-<n>`), runs the child there, commits the diff, and merges the branch back into the parent repo under a lock (parallel writers merge serially; their runs stay parallel). The verdict rides the tool result — `merge merged: <git line>`, `merge conflict: <CONFLICT line> — branch <name> kept; resolve with git merge <name>`, or `merge none: no changes`. A conflict is aborted (`merge --abort`) so the parent tree is never left mid-merge; the branch and its worktree are **kept** for the human, as is anything from a failed run (“kept for inspection”). Nothing a writer did is ever silently dropped. Set `YAK_SUBAGENT_WORKTREES=0` to disable and run writers in place; readers and non-repo cwds always run in place.
 
