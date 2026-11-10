@@ -22,7 +22,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `template.py` / `template.rs` / `template.js` | templates | starter templates in the three languages; `template.js` runs as-is under node >= 23.6 (native type stripping), bun and deno work too; `template.rs` is compiled by the host with rustc, content-hash cached |
 | `mcp_bridge.py` | resident | mounts an MCP server (stdio or streamable HTTP) as one `<server>__<tool>` per MCP tool; config in `mcp.json` |
 | `mcp_notion.py` | resident | Notion's remote MCP endpoint, OAuth-only; the login runs by the human, not the agent (§ Notion below) |
-| `subagent.py` | resident | runs another `yak` in its own context window against an agent definition from `~/.yak/agents/` or `.yak/agents/` |
+| `subagent.py` | resident | runs another `yak` in its own context window against an agent definition from `~/.yak/agents/` or `.yak/agents/`; `fork: true` runs the child on a forked branch of this conversation instead (`--session <id> --fork`, thread found newest-first among recent threads whose tail records the working directory) |
 | `skills` | resident | SKILL.md discovery as a plugin: the `<available_skills>` system-prompt section, the banner/`/help` skill list and every `/skill:<name>` command — global (`~/.yak/skills`, `~/.agents/skills`, `~/.yak/pkg`) and project-level (nearest `.yak/skills`/`.agents/skills`, `.yak/pkg`) homes, project shadowing user by name |
 | `repeat_guard.py` | resident | a `tool_call` deny gate for stuck loops |
 | `fold_repeats.py` | resident | a `tool_result` rewriter that folds repeated log lines |

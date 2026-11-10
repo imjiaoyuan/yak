@@ -36,6 +36,12 @@ How a child runs
     yak --json --no-session --tools <definition> \
         [--model M] [--thinking L] --append-system-prompt <body> "Task: ..."
 
+With `fork: true` the child continues this conversation instead:
+    yak --json --session <this thread> --fork "Task: ..."
+inheriting the discussion so far on a branch of its own (the parent
+transcript is untouched); the thread is found newest-first among threads
+whose tail records this working directory.
+
 `--json` is the line-delimited event stream this extension parses: tool calls
 become progress lines, the closing `result` object is the answer. Because the
 child is a plain yak, everything the CLI can do (models, thinking levels,
@@ -140,7 +146,10 @@ TOOL = {
         "that would flood this context, or to run one task several ways at "
         "once. Modes (pass exactly one): `task` plus optional `agent` for a "
         "single subagent; `tasks` for a parallel batch; `chain` for a "
-        "pipeline where each step receives the previous answer. A subagent "
+        "pipeline where each step receives the previous answer; add `fork` "
+        "(single task only) to run the child on a FORKED BRANCH of this "
+        "conversation instead of a blank window, so it inherits the "
+        "discussion so far (the parent transcript is untouched). A subagent "
         "cannot ask questions, cannot spawn another subagent, and its tool "
         "access comes from its agent definition (read-only unless the "
         "definition says otherwise). You get its final answer, not its "
@@ -175,6 +184,13 @@ TOOL = {
                         "task": {"type": "string"},
                     },
                 },
+            },
+            "fork": {
+                "type": "boolean",
+                "description": (
+                    "run the child on a forked branch of this conversation "
+                    "so it inherits the context so far (single task only)"
+                ),
             },
         },
     },
@@ -307,6 +323,67 @@ def stop_ticker(stop):
 # agents
 def user_dir():
     return os.environ.get("YAK_USER_PATH") or os.path.join(os.path.expanduser("~"), ".yak")
+
+
+# A fork child inherits this conversation. The extension protocol does not
+# carry the live thread id into a tool call, so the child's thread is found
+# the same way the /resume picker finds threads: the thread store under the
+# user dir, newest first. A thread line records the cwd it ran in, so only
+# threads whose tail names THIS working directory are candidates — another
+# session elsewhere in another directory never matches. Child yaks spawned
+# by this extension run --no-session and write no threads, so they cannot
+# shadow the parent; a second interactive session in the same directory is
+# the one ambiguity, resolved by mtime (the freshest tail is almost always
+# the session that spawned us). Threads whose tail is unreadable are
+# skipped; a thread untouched for THREAD_MAX_AGE_DAYS is assumed closed.
+THREAD_MAX_AGE_DAYS = 7
+
+
+def find_parent_thread(cwd):
+    """The newest thread whose active-chain tail ran in `cwd`, or None."""
+    store = os.path.join(user_dir(), "threads")
+    try:
+        names = os.listdir(store)
+    except OSError:
+        return None, "no thread store at %s" % store
+    now = time.time()
+    candidates = []
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(store, name)
+        try:
+            if now - os.path.getmtime(path) > THREAD_MAX_AGE_DAYS * 86400:
+                continue
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(max(0, size - 65536))  # the tail is enough for a line
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            continue
+        # walk back over a possibly torn final line to the last parseable one
+        tail = None
+        for raw in reversed([ln for ln in lines if ln.strip()]):
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                tail = obj
+            break
+        if tail and os.path.abspath(tail.get("cwd") or "") == os.path.abspath(cwd):
+            # the thread id is the file's ULID stem, not the tail line's id
+            # (every line carries its own round id)
+            candidates.append((os.path.getmtime(path), name[:-6], path))
+    if not candidates:
+        return None, "no session in %s has a recent thread here" % cwd
+    candidates.sort(reverse=True)
+    newest = candidates[0]
+    if len(candidates) > 1:
+        # say so: the fresh fork rides the newest thread, name it in progress
+        note("[fork] %d recent threads in this directory; forking the newest (%s)"
+             % (len(candidates), newest[1]))
+    return newest[1], None
 
 
 def project_agent_dirs(start):
@@ -557,10 +634,14 @@ def drop_worktree(root, path):
 
 
 # one child
-def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=None):
+def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=None,
+              session=None):
     """Run one child to completion. Returns (ok, text). With `isolate` the
     child runs in a fresh git worktree whose diff is committed and merged
-    back (see the module docstring); the merge verdict lands in the text."""
+    back (see the module docstring); the merge verdict lands in the text.
+    With `session` the child continues that thread on a FORKED BRANCH
+    (`--session ID --fork`): it starts from this conversation's context
+    and appends only its own branch — the parent transcript is untouched."""
     tools = child_tools(agent)
     cwd = None
     wt = None  # (path, branch, root) when isolated
@@ -581,7 +662,12 @@ def run_child(binary, agent, prompt, label, depth, isolate=False, merge_lock=Non
         else:
             lane(label, "not a git repo: the writer runs in place (%s)"
                  % first_line(why_not))
-    cmd = [binary, "--json", "--no-session"]
+    if session:
+        # a fork child keeps its session (its branch must persist in the
+        # thread file, that is what a fork is) — so no --no-session here
+        cmd = [binary, "--json", "--session", session, "--fork"]
+    else:
+        cmd = [binary, "--json", "--no-session"]
     if os.environ.get("YAK_SUBAGENT_APPROVAL") == "allow":
         # opt-in: answer the ask-list prompts with allow (hardcoded
         # refusals still deny); without it a child hitting `rm` fails
@@ -830,6 +916,18 @@ def handle(args):
     chain, batch = args.get("chain") or [], args.get("tasks") or []
     if chain and batch:
         return "error: pass either `tasks` (parallel) or `chain` (sequential), not both"
+    fork = bool(args.get("fork"))
+    if fork and (chain or batch):
+        return "error: `fork` works with a single `task` only — a batch or chain of children would fork the same conversation repeatedly"
+    fork_session = None
+    if fork:
+        fork_session, why = find_parent_thread(os.getcwd())
+        if not fork_session:
+            return (
+                "error: cannot fork — %s. Run without `fork` for a fresh-context "
+                "subagent, or start the session first (a --no-session parent has "
+                "no thread to fork)." % why
+            )
     if chain or batch:
         raw, mode = (chain, "chain") if chain else (batch, "parallel")
         steps, problem = steps_of(raw, default_agent)
@@ -847,11 +945,12 @@ def handle(args):
             return unknown(agents, step["agent"])
 
     if mode != "chain":
-        return run_batch(binary, agents, steps, mode, depth, isolate)
+        return run_batch(binary, agents, steps, mode, depth, isolate,
+                         fork_session=fork_session)
     return run_chain(binary, agents, steps, depth, isolate)
 
 
-def run_batch(binary, agents, steps, mode, depth, isolate=False):
+def run_batch(binary, agents, steps, mode, depth, isolate=False, fork_session=None):
     results = [None] * len(steps)
     gate = threading.Semaphore(MAX_PARALLEL)
     # parallel writers each edit their own worktree concurrently; only the
@@ -868,7 +967,8 @@ def run_batch(binary, agents, steps, mode, depth, isolate=False):
             try:
                 results[index] = run_child(
                     binary, agents[step["agent"]], "Task: " + step["task"], label, depth,
-                    isolate=writer, merge_lock=merge_gate if writer else None)
+                    isolate=writer, merge_lock=merge_gate if writer else None,
+                    session=fork_session)
             except Exception as e:  # a crashed thread must not read as "never ran"
                 results[index] = (False, "[%s] the subagent runner crashed: %r" % (label, e))
 
@@ -892,7 +992,7 @@ def run_batch(binary, agents, steps, mode, depth, isolate=False):
     return out
 
 
-def run_chain(binary, agents, steps, depth, isolate=False):
+def run_chain(binary, agents, steps, depth, isolate=False, fork_session=None):
     blocks, prior = [], None
     ticker = start_ticker()
     for index, step in enumerate(steps):
@@ -903,7 +1003,8 @@ def run_chain(binary, agents, steps, depth, isolate=False):
         if prior is not None:
             prompt += "\n\nWork from the previous subagent's result:\n\n" + prior
         ok, text = run_child(binary, agents[step["agent"]], prompt, label, depth,
-                             isolate=isolate and is_writer(agents[step["agent"]]))
+                             isolate=isolate and is_writer(agents[step["agent"]]),
+                             session=fork_session)
         if not ok:
             stop_ticker(ticker)
             return "error: %s\n\n%s" % (text, clamp("\n\n".join(blocks)))
