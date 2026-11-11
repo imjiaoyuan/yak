@@ -766,12 +766,12 @@ def main():
         time.sleep(0.1)
     assert restored == "from smoke\n", \
         f"the checkpoint extension did not restore the pre-jump workspace: {restored!r}"
-    # the shadow root only ever holds this project's snapshots, each named
-    # by a ULID-ordering stamp
+    # turn mirrors live under turns/, separate from pre-tool snapshots;
+    # each mirror is named by a ULID-ordering stamp
     shadow_project = os.listdir(ckpt_shadow)[0]
-    assert all(len(s) == 10 for s in
-               os.listdir(os.path.join(ckpt_shadow, shadow_project))), \
-        "snapshot dirs must be stamp-named"
+    turn_snapshots = os.listdir(os.path.join(ckpt_shadow, shadow_project, "turns"))
+    assert turn_snapshots and all(len(s) == 10 for s in turn_snapshots), \
+        f"turn snapshot dirs must be stamp-named: {turn_snapshots!r}"
     OUT.clear()
     time.sleep(0.2)
     send(fd2, b"after the jump\r")
