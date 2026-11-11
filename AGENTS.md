@@ -29,7 +29,7 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 ```bash
 cargo build                  # debug
 cargo build --release        # release profile: thin LTO, strip, codegen-units=1
-cargo test                   # inline #[cfg(test)] modules across the tree
+cargo test                   # inline #[cfg(test)] modules plus tests/readme_help.rs
 cargo test <name>            # one test by name
 cargo fmt                    # before committing
 cargo clippy --all-targets   # keep at zero warnings
@@ -73,7 +73,7 @@ Everything else is handwritten in-tree:
 | `core/db.rs` | monotonic ULIDs and the turn-timestamp format |
 | `jsonfmt.rs` | reference-style JSON serialization |
 | `core/text.rs` | string helpers (char boundaries, truncation, ANSI strip) |
-| `core/paths.rs` | directory walks (`ancestors`/`nearest_dir_up`/`dirs_up`, shared by commands-dir and extension discovery) |
+| `core/paths.rs` | directory walks (`ancestors`/`nearest_dir_up`/`nearest_project_dir`, shared by project-dir and extension discovery) |
 | `term/render.rs` | ANSI rendering + the shared TaskView |
 | `core/render_md/` | terminal markdown incl. CJK cell widths (one streaming engine; replay resolves its setext lookahead up front) |
 | `theme.rs` | the color theme (one cached `Palette` per stream) |
@@ -99,11 +99,11 @@ Module map:
 | `main.rs` | entry: console init, the broken-pipe hook, `dispatch(argv)` |
 | `providers/` | wire adapters (openai-compat, anthropic, responses, gemini, codex + the ChatGPT OAuth login), the unified `Msg`/`ToolDef`/`ToolCall` model, the provider catalog |
 | `core/http.rs` | sync POST + SSE, the retry/error taxonomy |
-| `core/` | config, threads store, attachments, text, render_md, paths, templates, export |
+| `core/` | config, threads store, attachments, text, render_md, paths, fsx, tmp, export |
 | `term/` | line editor, picker, render/TaskView, ticker |
-| `agent/` | the loop, tools, approval, session, compact, ext host, memory, system_prompt |
+| `agent/` | the loop, tools, approval/blacklist, session, compact, ext host, names, settings, system_prompt |
 | `read/` | streaming text-file reading behind the read tool |
-| `commands/` | CLI entries: agent, pkg, export, threads (plus library-only login/models) |
+| `commands/` | CLI entries: agent, pkg, export, threads, rpc (plus library-only login/models and the shared session startup) |
 
 Deep detail on any of these (request flow, loop discipline, tool/approval rules, the extension host and the rendering contract) is in `docs/architecture.md`.
 
@@ -120,7 +120,7 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
 - `YAK.md`: global user memory, hand-edited or appended by the `memory` tool when the user
   asks to note something durable; injected into the agent system prompt by the
   `examples/extensions/memory` extension).
-- `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt directories (skills are mounted by the `examples/extensions/skills` plugin — the core only knows the extension protocol).
+- `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt-template directories (skills and prompt templates are mounted by the `examples/extensions/skills` and `examples/extensions/commands` plugins — the core only knows the extension protocol).
 - `pkg/`: packages installed with `yak install`.
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers) and the rustc compile cache for `.rs` script tools (`tmp/rs-cache/`), swept of anything older than a week at every agent start (`core/tmp.rs`).
 
