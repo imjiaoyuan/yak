@@ -229,6 +229,7 @@ impl Rpc {
 }
 
 /// One command off the wire, parsed: what a client asked for.
+#[derive(Debug)]
 enum Command {
     Prompt {
         id: Option<String>,
@@ -282,11 +283,17 @@ enum Command {
     GetTree {
         id: Option<String>,
     },
+    /// pi-parity: the last persisted assistant text, so a supervisor that
+    /// attached late (or dropped a delta) can still read the answer
+    GetLastAssistantText {
+        id: Option<String>,
+    },
     ExportHtml {
         id: Option<String>,
         path: Option<String>,
     },
     ApprovalResponse {
+        id: Option<String>,
         request: String,
         answer: String,
     },
@@ -382,23 +389,24 @@ fn parse_command(line: &str) -> Result<Command, String> {
             name: v.get("name").and_then(|n| n.as_str()).map(str::to_string),
         }),
         "get_tree" => Ok(Command::GetTree { id }),
+        "get_last_assistant_text" => Ok(Command::GetLastAssistantText { id }),
         "export_html" => Ok(Command::ExportHtml {
             id,
             path: v.get("path").and_then(|p| p.as_str()).map(str::to_string),
         }),
-        "approval_response" => {
-            let request = v
+        "approval_response" => Ok(Command::ApprovalResponse {
+            id,
+            request: v
                 .get("request")
                 .and_then(|r| r.as_str())
                 .ok_or("approval_response needs the \"request\" id it answers")?
-                .to_string();
-            let answer = v
+                .to_string(),
+            answer: v
                 .get("answer")
                 .and_then(|a| a.as_str())
                 .unwrap_or("deny")
-                .to_string();
-            Ok(Command::ApprovalResponse { request, answer })
-        }
+                .to_string(),
+        }),
         "exit" | "quit" => Ok(Command::Quit),
         other => Err(format!("unknown command type '{other}'")),
     }
@@ -419,6 +427,11 @@ type CmdRx = std::sync::mpsc::Receiver<CmdItem>;
 /// Set by the reader thread when stdin closes: the one way an abandoned
 /// client's approval wait can end without an answer.
 static STDIN_EOF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The wire protocol version, stamped on the up-front `session` event: a
+/// client that sees a number it does not know can refuse early instead of
+/// mis-parsing records later.
+const RPC_PROTOCOL: u32 = 1;
 
 fn spawn_stdin_reader() -> CmdRx {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -462,10 +475,10 @@ fn spawn_stdin_reader() -> CmdRx {
     rx
 }
 
-/// Deliver one approval answer: the waiter exists only while its ask is
-/// live, so a late or unknown id is a no-op (the client may have raced the
-/// run's own end).
-fn resolve_approval(pending: &mut Option<PendingApproval>, request: &str, answer: &str) {
+/// Deliver one approval answer: true when a live ask took it. The waiter
+/// exists only while its ask is live, so a late or unknown id is a no-op
+/// (the client may have raced the run's own end) — the ack says "dropped".
+fn resolve_approval(pending: &mut Option<PendingApproval>, request: &str, answer: &str) -> bool {
     if pending.as_ref().is_some_and(|p| p.wire_id == request)
         && let Some(p) = pending.take()
     {
@@ -475,7 +488,9 @@ fn resolve_approval(pending: &mut Option<PendingApproval>, request: &str, answer
             _ => crate::agent::ApprovalResponse::Deny,
         };
         let _ = p.reply.send(verdict);
+        return true;
     }
+    false
 }
 
 /// The rpc process: commands in, events and responses out, one session.
@@ -487,9 +502,11 @@ fn rpc(args: &ParsedArgs) -> Result<i32, String> {
         deferred: Vec::new(),
     };
     let rx = spawn_stdin_reader();
-    // the session event up front: the thread a client may address
+    // the session event up front: the thread a client may address, and the
+    // protocol stamp it pins its parser to (bumped when a record changes)
     emit(&serde_json::json!({
         "type": "session",
+        "protocol": RPC_PROTOCOL,
         "thread": rpc.session.conversation_id,
         "cwd": rpc.session.cwd.display().to_string(),
     }));
@@ -549,10 +566,17 @@ fn dispatch_idle(rpc: &mut Rpc, cmd: Command, exit_code: &mut i32) -> bool {
                 respond_err(id.as_deref(), "prompt", "the message is empty");
                 return true;
             }
+            // the disposition tells the truth about what happens next: a
+            // task already in flight (or queued ahead) means this one waits
+            let disposition = if rpc.queue.is_empty() {
+                "started"
+            } else {
+                "queued"
+            };
             respond(
                 id.as_deref(),
                 "prompt",
-                serde_json::json!({"disposition": "started"}),
+                serde_json::json!({ "disposition": disposition }),
             );
             rpc.queue.push(QueuedMessage { text, attachments });
             true
@@ -712,6 +736,42 @@ fn dispatch_idle(rpc: &mut Rpc, cmd: Command, exit_code: &mut i32) -> bool {
             }
             true
         }
+        Command::GetLastAssistantText { id } => {
+            match rpc.session.conversation_id.as_deref() {
+                Some(cid) => match rpc.session.store.as_ref() {
+                    Some(store) => match store.read_thread(cid) {
+                        // turns are oldest-first; the last non-empty response
+                        // is the active chain's final answer (abandoned
+                        // branches sit earlier in the file)
+                        Ok(turns) => {
+                            let text = turns
+                                .iter()
+                                .rev()
+                                .find(|t| !t.response.is_empty())
+                                .map(|t| t.response.clone());
+                            respond(
+                                id.as_deref(),
+                                "get_last_assistant_text",
+                                serde_json::json!({ "text": text }),
+                            );
+                        }
+                        Err(e) => respond_err(id.as_deref(), "get_last_assistant_text", &e),
+                    },
+                    // --no-session: no transcript to read back
+                    None => respond(
+                        id.as_deref(),
+                        "get_last_assistant_text",
+                        serde_json::json!({ "text": null }),
+                    ),
+                },
+                None => respond(
+                    id.as_deref(),
+                    "get_last_assistant_text",
+                    serde_json::json!({ "text": null }),
+                ),
+            }
+            true
+        }
         Command::ExportHtml { id, path } => {
             match rpc.session.conversation_id.as_deref() {
                 Some(cid) => {
@@ -732,8 +792,16 @@ fn dispatch_idle(rpc: &mut Rpc, cmd: Command, exit_code: &mut i32) -> bool {
             }
             true
         }
-        // no ask is live; a stray answer changes nothing
-        Command::ApprovalResponse { .. } => true,
+        // no ask is live; ack the stray answer so the client knows it landed
+        // nowhere rather than wondering
+        Command::ApprovalResponse { id, .. } => {
+            respond(
+                id.as_deref(),
+                "approval_response",
+                serde_json::json!({ "disposition": "dropped" }),
+            );
+            true
+        }
         Command::Quit => {
             *exit_code = 0;
             false
@@ -923,6 +991,7 @@ fn run_one_task(rpc: &mut Rpc, rx: &CmdRx, next: QueuedMessage) {
     if let Some(cid) = rpc.session.conversation_id.as_deref() {
         emit(&serde_json::json!({
             "type": "session",
+            "protocol": RPC_PROTOCOL,
             "thread": cid,
             "cwd": rpc.session.cwd.display().to_string(),
         }));
@@ -965,24 +1034,29 @@ fn drain_run_commands_shared(rx: &CmdRx, live: &std::cell::RefCell<LiveRun>) {
                     l.steer_queue.push(QueuedMessage { text, attachments });
                 }
             }
-            Ok(Command::Prompt {
-                id,
-                text,
-                attachments,
-            })
-            | Ok(Command::FollowUp {
-                id,
-                text,
-                attachments,
-            }) => {
+            Ok(cmd @ (Command::Prompt { .. } | Command::FollowUp { .. })) => {
                 // a prompt sent mid-run behaves as a follow-up: the queue
-                // keeps arrival order across both
+                // keeps arrival order across both. The response names the
+                // command the client actually sent.
+                let (id, text, attachments, name) = match cmd {
+                    Command::Prompt {
+                        id,
+                        text,
+                        attachments,
+                    } => (id, text, attachments, "prompt"),
+                    Command::FollowUp {
+                        id,
+                        text,
+                        attachments,
+                    } => (id, text, attachments, "follow_up"),
+                    _ => unreachable!(),
+                };
                 if text.trim().is_empty() {
-                    respond_err(id.as_deref(), "follow_up", "the message is empty");
+                    respond_err(id.as_deref(), name, "the message is empty");
                 } else {
                     respond(
                         id.as_deref(),
-                        "follow_up",
+                        name,
                         serde_json::json!({"disposition": "queued"}),
                     );
                     l.prompts.push(QueuedMessage { text, attachments });
@@ -991,8 +1065,19 @@ fn drain_run_commands_shared(rx: &CmdRx, live: &std::cell::RefCell<LiveRun>) {
             Ok(Command::Interrupt { .. }) | Ok(Command::Abort { .. }) => {
                 crate::core::http::request_interrupt();
             }
-            Ok(Command::ApprovalResponse { request, answer }) => {
-                resolve_approval(&mut l.pending_approval, &request, &answer);
+            Ok(Command::ApprovalResponse {
+                id,
+                request,
+                answer,
+            }) => {
+                // an ack either way: a client that raced the run's end must
+                // learn its answer landed nowhere rather than hang
+                let delivered = resolve_approval(&mut l.pending_approval, &request, &answer);
+                respond(
+                    id.as_deref(),
+                    "approval_response",
+                    serde_json::json!({ "disposition": if delivered { "delivered" } else { "dropped" } }),
+                );
             }
             Ok(other) => l.deferred.push(other),
             Err((id, msg)) => respond_err(id.as_deref(), "parse", &msg),
@@ -1004,4 +1089,132 @@ fn drain_run_commands_shared(rx: &CmdRx, live: &std::cell::RefCell<LiveRun>) {
 /// approval waits, so an abandoned client cannot leave a run parked forever.
 fn stdin_closed() -> bool {
     STDIN_EOF.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(line: &str) -> Command {
+        parse_command(line).expect("parse")
+    }
+
+    fn error(line: &str) -> String {
+        parse_command(line).expect_err("parse error")
+    }
+
+    #[test]
+    fn prompt_parse_carries_text_and_id() {
+        let Command::Prompt { id, text, .. } =
+            command(r#"{"id":"7","type":"prompt","message":"fix it"}"#)
+        else {
+            panic!("prompt arm");
+        };
+        assert_eq!(id.as_deref(), Some("7"));
+        assert_eq!(text, "fix it");
+    }
+
+    #[test]
+    fn unreadable_attachment_fails_the_command() {
+        // attachments load at parse time: an unreadable path fails the
+        // command rather than billing the model for a dropped image
+        assert!(
+            error(r#"{"type":"prompt","message":"x","attachments":["/nonexistent/a.png"]}"#)
+                .contains("attachment")
+        );
+    }
+
+    #[test]
+    fn unknown_type_names_the_offender() {
+        assert!(error(r#"{"type":"reboot"}"#).contains("reboot"));
+    }
+
+    #[test]
+    fn missing_type_is_a_parse_error() {
+        assert!(error(r#"{"id":"1"}"#).contains("type"));
+    }
+
+    #[test]
+    fn malformed_json_is_a_parse_error() {
+        assert!(error("{oops").contains("cannot parse"));
+    }
+
+    #[test]
+    fn approval_response_defaults_to_deny_without_an_answer() {
+        let Command::ApprovalResponse {
+            request, answer, ..
+        } = command(r#"{"type":"approval_response","request":"ap1"}"#)
+        else {
+            panic!("approval arm");
+        };
+        assert_eq!(request, "ap1");
+        assert_eq!(answer, "deny");
+    }
+
+    #[test]
+    fn approval_response_without_a_request_is_a_parse_error() {
+        assert!(error(r#"{"type":"approval_response","answer":"allow"}"#).contains("request"));
+    }
+
+    fn pending(
+        id: &str,
+    ) -> (
+        Option<PendingApproval>,
+        std::sync::mpsc::Receiver<crate::agent::ApprovalResponse>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            Some(PendingApproval {
+                wire_id: id.to_string(),
+                reply: tx,
+            }),
+            rx,
+        )
+    }
+
+    #[test]
+    fn matching_answer_resolves_and_says_so() {
+        let (mut pending, rx) = pending("ap1");
+        assert!(resolve_approval(&mut pending, "ap1", "allow"));
+        assert_eq!(rx.recv().unwrap(), crate::agent::ApprovalResponse::Allow);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn unknown_request_id_drops_the_answer() {
+        let (mut pending, _rx) = pending("ap1");
+        assert!(!resolve_approval(&mut pending, "ap9", "allow"));
+        assert!(pending.is_some(), "the live ask stays live");
+    }
+
+    #[test]
+    fn unknown_answer_word_is_a_deny() {
+        let (mut pending, rx) = pending("ap1");
+        assert!(resolve_approval(&mut pending, "ap1", "sure"));
+        assert_eq!(rx.recv().unwrap(), crate::agent::ApprovalResponse::Deny);
+    }
+
+    #[test]
+    fn only_the_first_ask_takes_a_second_answer() {
+        let (mut first, first_rx) = pending("ap1");
+        assert!(resolve_approval(&mut first, "ap1", "allow_session"));
+        let (mut second, second_rx) = pending("ap2");
+        assert!(resolve_approval(&mut second, "ap2", "deny"));
+        assert_eq!(
+            first_rx.recv().unwrap(),
+            crate::agent::ApprovalResponse::AllowSession
+        );
+        assert_eq!(
+            second_rx.recv().unwrap(),
+            crate::agent::ApprovalResponse::Deny
+        );
+    }
+
+    #[test]
+    fn get_last_assistant_text_parses_without_payload() {
+        assert!(matches!(
+            command(r#"{"id":"3","type":"get_last_assistant_text"}"#),
+            Command::GetLastAssistantText { .. }
+        ));
+    }
 }

@@ -1479,7 +1479,8 @@ def check_rpc(binary):
                     return v
             raise AssertionError(f"rpc timeout waiting for {what}: {json.dumps(seen)[:1500]}")
 
-        expect(lambda v: v.get("type") == "session", "the opening session event")
+        first = expect(lambda v: v.get("type") == "session", "the opening session event")
+        assert first.get("protocol") == 1, first
         send({"id": "r1", "type": "prompt", "message": "run the echo"})
         expect(lambda v: v.get("id") == "r1" and v.get("success"), "the prompt acceptance")
         ap = expect(lambda v: v.get("type") == "approval_request", "the remote approval ask")
@@ -1487,8 +1488,10 @@ def check_rpc(binary):
         # steer first: the approval answer releases the run, and the steer
         # must already be queued for the drain to pick it up between rounds
         send({"id": "s1", "type": "steer", "message": "do it in french"})
-        send({"type": "approval_response", "request": ap["id"], "answer": "allow"})
+        send({"id": "a1", "type": "approval_response", "request": ap["id"], "answer": "allow"})
         expect(lambda v: v.get("id") == "s1" and v.get("success"), "the steer ack")
+        ack = expect(lambda v: v.get("id") == "a1", "the approval ack")
+        assert ack["data"]["disposition"] == "delivered", ack
         res = expect(lambda v: v.get("type") == "result", "the steered result")
         assert "steered" in res["text"], res
         # the steer queue must be empty when the dust settles: no second task
@@ -1501,6 +1504,13 @@ def check_rpc(binary):
         thread_id = st["data"]["thread"]
         send({"id": "n1", "type": "name", "name": "rpc smoke"})
         expect(lambda v: v.get("id") == "n1" and v.get("success"), "the name ack")
+        send({"id": "t1", "type": "get_last_assistant_text"})
+        lt = expect(lambda v: v.get("id") == "t1", "the last assistant text")
+        assert "steered" in lt["data"]["text"], lt
+        # a late answer to a gone ask is acked as dropped, not silently eaten
+        send({"id": "a2", "type": "approval_response", "request": "ap999", "answer": "deny"})
+        late = expect(lambda v: v.get("id") == "a2", "the late-approval ack")
+        assert late["data"]["disposition"] == "dropped", late
         send({"id": "e1", "type": "export_html"})
         ex = expect(lambda v: v.get("id") == "e1", "the html export")
         html = open(ex["data"]["path"], encoding="utf-8").read()
@@ -1515,7 +1525,7 @@ def check_rpc(binary):
         assert rc == 0, f"rpc exit {rc}: {proc.stderr.read()[-400:] if proc.stderr else ''}"
         srv.shutdown()
         srv.server_close()
-    print("rpc e2e passed (prompt, remote approval, steer, state, name, html export)")
+    print("rpc e2e passed (prompt, remote approval+ack, steer, state, last text, name, html export)")
 
 
 if __name__ == "__main__":

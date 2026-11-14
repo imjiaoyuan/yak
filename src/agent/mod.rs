@@ -89,6 +89,7 @@ pub enum AgentUpdate {
 }
 
 /// What the UI answered to an approval request.
+#[derive(Debug, PartialEq)]
 pub enum ApprovalResponse {
     Allow,
     /// allow this tool for the rest of the session

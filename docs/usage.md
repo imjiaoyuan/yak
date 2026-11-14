@@ -198,13 +198,16 @@ Model traffic goes through the proxies in `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`
 ← {"type":"text","text":"..."}                      events, the --json shapes
 ← {"type":"approval_request","id":"ap1","tool":"bash","preview":"rm -rf build","reason":"..."}
 → {"id":"2","type":"approval_response","request":"ap1","answer":"allow"}
+← {"id":"2","type":"response","command":"approval_response","success":true,"data":{"disposition":"delivered"}}
 → {"id":"3","type":"steer","message":"also update the changelog"}
 ← {"type":"result","thread":"01JD...","text":"done","usage":{...}}
 ```
 
-Commands: `prompt` (with `attachments` by path or URL), `steer` (delivered between the running task's tool round and its next model request; queued as the next prompt when nothing runs), `follow_up` (queued for after the task settles), `clear_queue`, `interrupt`/`abort` (the cooperative interrupt), `get_state`, `set_model`, `compact`, `new_session`, `switch_session` (id or unambiguous prefix), `fork`, `name`, `get_tree` (every branch, the active chain marked), `export_html`, `approval_response` (`allow`, `allow_session`, `deny`), `exit`. Every command may carry a string `id`; the response repeats it, so a client can correlate under concurrency. Events carry no id — they describe session activity.
+The first record on stdout is a `session` event carrying the thread id, the working directory and a `protocol` stamp: a client that sees a protocol number it does not understand can refuse early instead of mis-parsing records later. A `prompt` response's `disposition` tells the truth about what happens next — `started` when the task begins now, `queued` when a run or an earlier queue entry is still ahead of it.
 
-Approval over the wire is the mode's reason to exist: an ask blocks the run and emits `approval_request` carrying the ask's own id; `approval_response` names that id and the run continues. If stdin closes with an ask waiting, the ask fails closed (deny) exactly like a terminal prompt with no terminal. `--approval allow` still answers everything unattended without asking the wire.
+Commands: `prompt` (with `attachments` by path or URL), `steer` (delivered between the running task's tool round and its next model request; queued as the next prompt when nothing runs), `follow_up` (queued for after the task settles), `clear_queue`, `interrupt`/`abort` (the cooperative interrupt), `get_state`, `set_model`, `compact`, `new_session`, `switch_session` (id or unambiguous prefix), `fork`, `name`, `get_tree` (every branch, the active chain marked), `get_last_assistant_text` (the last persisted assistant answer; `null` when there is none — a supervisor that attached late or lost a delta reads the final text back from the transcript), `export_html`, `approval_response` (`allow`, `allow_session`, `deny`), `exit`. Every command may carry a string `id`; the response repeats it, so a client can correlate under concurrency. Events carry no id — they describe session activity.
+
+Approval over the wire is the mode's reason to exist: an ask blocks the run and emits `approval_request` carrying the ask's own id; `approval_response` names that id and the run continues, and the command is acked with `disposition: "delivered"` — or `"dropped"` when the answer landed after the ask was already gone (a race with the run's own end), so a client always knows whether its verdict took effect rather than guessing. If stdin closes with an ask waiting, the ask fails closed (deny) exactly like a terminal prompt with no terminal. `--approval allow` still answers everything unattended without asking the wire.
 
 stdout is protocol records only; diagnostics go to stderr, like `--json`.
 
