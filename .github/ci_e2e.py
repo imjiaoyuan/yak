@@ -638,9 +638,10 @@ def check_plugin_regressions():
             def request(self, method, params, timeout):
                 assert method == "tools/list"
                 return self.data[params.get("cursor")]
+        mcp = runpy.run_path(os.path.join(extensions, "mcp_bridge.py"))
         pages = {None: {"tools": [{"name": "first"}], "nextCursor": "more"},
                  "more": {"tools": [{"name": "second"}]}}
-        bridge = runpy.run_path(os.path.join(extensions, "mcp_bridge.py"))["Server"]("mock", {})
+        bridge = mcp["Server"]("mock", {})
         bridge.transport = Pages(pages)
         assert [t["name"] for t in bridge.list_tools()] == ["first", "second"]
         bridge.transport = Pages({None: None})
@@ -650,6 +651,15 @@ def check_plugin_regressions():
             pass
         else:
             raise AssertionError("failed tools/list must not look like an empty catalog")
+        # the listing cache keys on the whole entry, so any edit invalidates it
+        key = mcp["spec_key"]
+        assert key({"command": "a"}) == key({"command": "a"})
+        assert key({"command": "a"}) != key({"command": "a", "args": ["b"]})
+        # ...and round-trips through the cache file beside the bridge
+        mcp["__file__"] = os.path.join(root, "mcp_bridge.py")
+        entry = {"mock": {"key": key({"command": "a"}), "tools": [{"name": "first"}]}}
+        mcp["save_cache"](entry)
+        assert mcp["load_cache"]() == entry
     print("plugin regressions passed")
 
 

@@ -1,3 +1,4 @@
 /target
 .yak/
 __pycache__/
+examples/extensions/mcp_cache.json

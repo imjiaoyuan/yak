@@ -31,6 +31,14 @@ server that fails to start or to finish its initialize handshake is
 skipped with a dim warning on stderr — the bridge and the remaining
 servers stay up.
 
+Startup is lazy: a server's tool listing is cached in `mcp_cache.json`,
+keyed by a hash of its entry, and a warm cache mounts the tools instantly
+without spawning the server — the child starts on its first tools/call
+instead, so a cold host start touches no MCP child. An entry whose hash
+misses (first run, or a changed config) starts right away as before, and
+a lazily started server refreshes its cached listing whenever it has
+drifted from a fresh tools/list.
+
 Honest limits, by design:
   - HTTP means the streamable-HTTP transport: one POST per JSON-RPC
     message, the reply either a JSON body or an SSE stream carrying it,
@@ -59,6 +67,7 @@ late reply is dropped as unknown).
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -71,6 +80,7 @@ import urllib.request
 INIT_TIMEOUT = 10.0     # seconds: a server's initialize handshake
 CALL_TIMEOUT = 30.0     # seconds: one tools/call round
 CONFIG_NAME = "mcp.json"
+CACHE_NAME = "mcp_cache.json"
 PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
 # CDN firewalls (Cloudflare's own, error 1010) drop the python-urllib
@@ -338,6 +348,25 @@ class Server:
         self.name = name
         self.spec = spec
         self.transport = None
+        self.slock = threading.Lock()
+        self.listing = None      # fresh tools/list of the latest lazy start
+
+    def ensure(self):
+        """Spawn and handshake a lazily mounted server on its first call.
+        True means requests can go through; a failure is logged here and
+        answered as a call error by the caller."""
+        if self.transport is not None:
+            return True
+        with self.slock:
+            if self.transport is not None:
+                return True
+            try:
+                self.listing = self.start()
+                return True
+            except RuntimeError as e:
+                log(f"server '{self.name}' failed to start: {e}")
+                self.stop()
+                return False
 
     def start(self):
         """Connect, initialize, tools/list. Returns the tool list (may be
@@ -436,6 +465,36 @@ def load_config():
     return inner if isinstance(inner, dict) else cfg
 
 
+def spec_key(spec):
+    """Identity of a server entry: any config change — command, args,
+    env, url, tools filter — produces a new hash and invalidates the
+    cached listing for that server."""
+    blob = json.dumps(spec, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def load_cache():
+    """Cached tool listings beside this script. Missing or unreadable
+    cache costs nothing: every server just starts eagerly once."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CACHE_NAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def save_cache(cache):
+    """Write-through with an atomic rename, so a killed bridge never
+    leaves a half-written cache behind."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CACHE_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
+    os.replace(tmp, path)
+
+
 def tool_filter(spec, name):
     """The per-server include/exclude from its entry, as a predicate.
     `"tools": {"only": [...], "except": [...]}` — `only` admits the
@@ -457,20 +516,30 @@ def tool_filter(spec, name):
 
 def main():
     cfg = load_config()
+    cache = load_cache()
     servers = {}
     tools = []
+    dirty = False
     for name, spec in cfg.items():
         if not isinstance(spec, dict):
             log(f"server '{name}': entry must be an object, skipped")
             continue
         admit = tool_filter(spec, name)
         srv = Server(name, spec)
-        try:
-            listing = srv.start()
-        except RuntimeError as e:
-            log(f"server '{name}' skipped: {e}")
-            srv.stop()
-            continue
+        key = spec_key(spec)
+        entry = cache.get(name)
+        listing = (entry.get("tools")
+                   if isinstance(entry, dict) and entry.get("key") == key
+                   else None)
+        if listing is None:
+            try:
+                listing = srv.start()
+            except RuntimeError as e:
+                log(f"server '{name}' skipped: {e}")
+                srv.stop()
+                continue
+            cache[name] = {"key": key, "tools": listing}
+            dirty = True
         for t in listing or []:
             tname = t.get("name")
             if not isinstance(tname, str) or not tname:
@@ -492,6 +561,8 @@ def main():
                 "tool": tname,
             })
         servers[name] = srv
+    if dirty:
+        save_cache(cache)
 
     by_tool = {t["name"]: t for t in tools}
 
@@ -539,6 +610,16 @@ def main():
             if not srv:
                 reply({"id": mid, "error": f"server '{spec['server']}' is down"})
                 continue
+            if not srv.ensure():
+                reply({"id": mid,
+                       "error": f"mcp server '{spec['server']}' failed to start"})
+                continue
+            if srv.listing is not None:
+                entry = cache.get(srv.name)
+                if isinstance(entry, dict) and entry.get("tools") != srv.listing:
+                    entry["tools"] = srv.listing
+                    save_cache(cache)
+                srv.listing = None
             result = srv.request(
                 "tools/call",
                 {"name": spec["tool"], "arguments": msg.get("args") or {}},
