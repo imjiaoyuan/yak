@@ -678,6 +678,12 @@ def main():
     send(fd, b"/status\r")
     read_until_after(fd, rb"session\s+01localresumeprobe0000000",
                      rb"\x1b\[1m>\x1b\[0m ")
+    screen = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", out_bytes())
+    assert re.search(rb"(?:\r?\n)  model\s+[^\r\n]+\r?\n  session\s+01localresumeprobe0000000\r?\n  context", screen), \
+        f"/status must print separate text rows: {screen[-1600:]!r}"
+    assert " · ".encode() in screen, "/status must preserve Unicode text"
+    assert b"\\n" not in screen and b"\\u00b7" not in screen, \
+        f"/status must not print JSON escapes: {screen[-1600:]!r}"
     exported = os.path.join(user, "exported.md")
     with OUT_lock:
         OUT.clear()

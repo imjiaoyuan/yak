@@ -975,6 +975,15 @@ fn command_context(session: &Session) -> serde_json::Value {
     })
 }
 
+/// The rows a `/command` reply prints: a string result verbatim, its line
+/// breaks and Unicode intact, any other value as its pretty JSON form.
+fn command_reply_text(reply: &serde_json::Value) -> String {
+    match reply.as_str() {
+        Some(text) => text.to_string(),
+        None => crate::jsonfmt::dumps_indent(reply, 2),
+    }
+}
+
 fn repl_command(
     session: &mut Session,
     settings: &mut crate::agent::settings::AgentSettings,
@@ -1271,23 +1280,14 @@ fn repl_command(
                             }
                             run_task_logged(session, task, &mut Vec::new(), false);
                             session.system = base;
-                        } else if let Some(text) =
-                            reply.get("result").and_then(serde_json::Value::as_str)
-                        {
-                            for line in text.lines() {
+                        } else {
+                            for line in command_reply_text(&reply).lines() {
                                 eprintln!(
                                     "  {}{line}{}",
                                     crate::theme::err().dim,
                                     crate::theme::err().reset
                                 );
                             }
-                        } else {
-                            let text = crate::jsonfmt::dumps_indent(&reply, 2);
-                            eprintln!(
-                                "  {}{text}{}",
-                                crate::theme::err().dim,
-                                crate::theme::err().reset
-                            );
                         }
                     }
                     Err(e) => eprintln!("Error: {e}"),
@@ -1306,6 +1306,18 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_replies_print_strings_as_text_and_other_values_as_json() {
+        let text = command_reply_text(&serde_json::json!("model   m · 12 tokens\nsession 01"));
+        assert_eq!(text, "model   m · 12 tokens\nsession 01");
+        assert!(
+            !text.contains("\\n"),
+            "string replies must not print JSON escapes"
+        );
+        let json = command_reply_text(&serde_json::json!({"a": 1}));
+        assert_eq!(json, "{\n  \"a\": 1\n}");
+    }
 
     #[test]
     fn name_row_lists_the_plugin_surface_and_caps_it() {

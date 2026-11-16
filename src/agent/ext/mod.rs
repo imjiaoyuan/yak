@@ -417,8 +417,8 @@ impl Ext {
         })
     }
 
-    /// Run one extension-registered slash command. The whole reply object
-    /// comes back: `result` prints, `task` submits as one agent task (the
+    /// Run one extension-registered slash command. The envelope's `result`
+    /// comes back: a string prints, `task` submits as one agent task (the
     /// `/skill:<name>` shape — a command whose answer is work for the model,
     /// not text for the terminal), so the caller, not the host, interprets.
     pub fn run_command(
