@@ -660,15 +660,85 @@ def check_plugin_regressions():
             pass
         else:
             raise AssertionError("failed tools/list must not look like an empty catalog")
-        # the listing cache keys on the whole entry, so any edit invalidates it
-        key = mcp["spec_key"]
+        # the listing cache lives beside the bridge, so exercise it on a copy
+        lazy = os.path.join(root, "bridge")
+        os.makedirs(lazy)
+        shutil.copyfile(os.path.join(extensions, "mcp_bridge.py"),
+                        os.path.join(lazy, "mcp_bridge.py"))
+        local = runpy.run_path(os.path.join(lazy, "mcp_bridge.py"))
+        key = local["spec_key"]
         assert key({"command": "a"}) == key({"command": "a"})
         assert key({"command": "a"}) != key({"command": "a", "args": ["b"]})
-        # ...and round-trips through the cache file beside the bridge
-        mcp["__file__"] = os.path.join(root, "mcp_bridge.py")
         entry = {"mock": {"key": key({"command": "a"}), "tools": [{"name": "first"}]}}
-        mcp["save_cache"](entry)
-        assert mcp["load_cache"]() == entry
+        local["save_cache"](entry)
+        assert local["load_cache"]() == entry
+
+        # lazy start: the cold run spawns and caches, a warm run mounts from
+        # the cache without a child, and the first call spawns it
+        spawns = os.path.join(lazy, "spawns.log")
+        fake = os.path.join(lazy, "fake_mcp.py")
+        fake_src = (
+            "import json, sys\n"
+            "open(%r, 'a').write('spawn\\n')\n"
+            "for line in sys.stdin:\n"
+            "    msg = json.loads(line)\n"
+            "    method = msg.get('method')\n"
+            "    if method == 'initialize':\n"
+            "        result = {'protocolVersion': '2025-06-18', 'capabilities': {},\n"
+            "                  'serverInfo': {'name': 'fake', 'version': '1'}}\n"
+            "    elif method == 'tools/list':\n"
+            "        result = {'tools': [{'name': 'ping', 'description': 'p',\n"
+            "                  'inputSchema': {'type': 'object', 'properties': {}}}]}\n"
+            "    elif method == 'tools/call':\n"
+            "        result = {'content': [{'type': 'text', 'text': 'pong'}]}\n"
+            "    else:\n"
+            "        continue\n"
+            "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg['id'],"
+            " 'result': result}) + '\\n')\n"
+            "    sys.stdout.flush()\n"
+        ) % spawns
+        with open(fake, "w") as f:
+            f.write(fake_src)
+        with open(os.path.join(lazy, "mcp.json"), "w") as f:
+            json.dump({"fake": {"command": sys.executable, "args": [fake]}}, f)
+
+        def drive(frames):
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(lazy, "mcp_bridge.py")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True)
+            replies = []
+            try:
+                for frame in frames:
+                    proc.stdin.write(json.dumps(frame) + "\n")
+                    proc.stdin.flush()
+                    replies.append(json.loads(proc.stdout.readline()))
+                proc.stdin.write('{"type": "shutdown"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=20)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+            return replies
+
+        def spawn_count():
+            try:
+                return open(spawns).read().count("spawn")
+            except OSError:
+                return 0
+
+        cold = drive([{"type": "initialize", "id": 1, "v": 1}])
+        names = [t["name"] for t in cold[0]["result"]["tools"]]
+        assert names == ["fake__ping"], names
+        assert spawn_count() == 1, "a cold cache starts the server eagerly"
+        warm = drive([{"type": "initialize", "id": 1, "v": 1}])
+        assert [t["name"] for t in warm[0]["result"]["tools"]] == ["fake__ping"]
+        assert spawn_count() == 1, "a warm cache must not spawn the server"
+        called = drive([{"type": "initialize", "id": 1, "v": 1},
+                        {"type": "call_tool", "id": 2, "v": 1,
+                         "name": "fake__ping", "args": {}}])
+        assert called[1].get("result") == "pong", called[1]
+        assert spawn_count() == 2, "the first call starts the lazily mounted server"
     print("plugin regressions passed")
 
 
