@@ -5,7 +5,10 @@ Copy to ~/.yak/extensions/skills (global) or .yak/extensions/skills
 (project) , chmod +x. This is the built-in skills surface moved onto the
 extension protocol: the same discovery order, the same spec validation, the
 same <available_skills> block in the system prompt, the same /skill:<name>
-slash commands. Nothing mounts unless this file is installed.
+slash commands. Nothing mounts unless this file is installed. The block
+lists each skill's capability sentences (whole sentences up to 300
+characters), not the trigger list a pack writes for its own host: the
+full description stays in the file and the body loads on demand.
 
 Discovery, lowest priority first so later entries shadow earlier by name:
 
@@ -37,6 +40,7 @@ FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.S)
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
+PROMPT_DESCRIPTION_MAX = 300
 
 SYSTEM_HEAD = (
     "The following skills provide specialized instructions for specific tasks.\n"
@@ -55,21 +59,44 @@ def warn(msg):
 
 
 def parse_frontmatter(text):
-    """The flat subset core parsed: `key: value` pairs with indented
-    continuation folded in. Returns a dict or None when the file carries no
-    parseable frontmatter."""
+    """The flat subset core parsed: `key: value` pairs, quoted scalars, and
+    the `>`/`|` block scalars packs use for a long description (a folded
+    block joins its lines with spaces, a literal one keeps the newlines).
+    Returns a dict or None when the file carries no parseable frontmatter."""
     m = FRONT.match(text)
     if not m:
         return None
     meta = {}
     key = None
+    block = None          # (literal, lines) while a block scalar is open
+
+    def close():
+        if block is None or key is None:
+            return
+        literal, lines = block
+        meta[key] = ("\n".join(lines) if literal
+                     else " ".join(part for part in lines if part)).strip()
+
     for line in m.group(1).splitlines():
+        if block is not None and (not line.strip() or line.startswith((" ", "\t"))):
+            block[1].append(line.strip())
+            continue
+        close()
+        block = None
         kv = re.match(r"(\w[\w-]*):\s?(.*)", line)
         if kv:
             key = kv.group(1)
-            meta[key] = kv.group(2).strip()
-        elif key and line.startswith((" ", "\t")) and isinstance(meta.get(key), str):
-            meta[key] += " " + line.strip()
+            rest = kv.group(2).strip()
+            if rest in (">", ">-", ">+", "|", "|-", "|+"):
+                block = (rest[0] == "|", [])
+                meta[key] = ""
+            else:
+                if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+                    rest = rest[1:-1]
+                meta[key] = rest
+        elif key and isinstance(meta.get(key), str):
+            meta[key] = (meta[key] + " " + line.strip()).strip()
+    close()
     return meta
 
 
@@ -187,6 +214,19 @@ def xml_escape(value):
             .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
+def prompt_description(description):
+    """The prompt index keeps the capability sentences, not the trigger
+    list a pack writes for its own host: whole sentences up to
+    PROMPT_DESCRIPTION_MAX characters, the rest loads with the body."""
+    if len(description) <= PROMPT_DESCRIPTION_MAX:
+        return description.strip()
+    cut = description[:PROMPT_DESCRIPTION_MAX]
+    ends = [m.end() for m in re.finditer(r"[.。!?！？](?=\s|$)", cut)]
+    if ends:
+        return cut[:ends[-1]].strip()
+    return cut.rstrip() + "…"
+
+
 def system_section(skills):
     """The <available_skills> block for the agent system prompt: one entry
     per model-invocable skill, name + description + location."""
@@ -197,7 +237,7 @@ def system_section(skills):
     for s in visible:
         out.append("  <skill>\n")
         out.append(f"    <name>{xml_escape(s['name'])}</name>\n")
-        out.append(f"    <description>{xml_escape(s['description'])}</description>\n")
+        out.append(f"    <description>{xml_escape(prompt_description(s['description']))}</description>\n")
         out.append(f"    <location>{xml_escape(s['path'])}</location>\n")
         out.append("  </skill>\n")
     out.append(SYSTEM_TAIL)

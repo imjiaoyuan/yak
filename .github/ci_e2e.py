@@ -631,6 +631,15 @@ def check_plugin_regressions():
             pass
         else:
             raise AssertionError("skills config must be an object")
+        # frontmatter: quotes stripped, both block scalar styles unfolded
+        front = skills["parse_frontmatter"]
+        assert front("---\nname: x\ndescription: >-\n  folded\n  text\n---\n")["description"] == "folded text"
+        assert front("---\ndescription: |\n  one\n  two\n---\n")["description"] == "one\ntwo"
+        assert front('---\ndescription: "quoted text"\n---\n')["description"] == "quoted text"
+        # the prompt gets whole capability sentences, never a trigger dump
+        cap = skills["prompt_description"]
+        assert cap("Short capability sentence.") == "Short capability sentence."
+        assert cap("First sentence. " + "x" * 500) == "First sentence."
 
         class Pages:
             def __init__(self, data):

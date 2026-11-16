@@ -111,7 +111,18 @@ The rewind is transcript-only: files the agent wrote stay written. To take the w
 
 Skills are `SKILL.md` folders. They are mounted by the skills extension ([`examples/extensions/skills`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/skills), the sixth migrated agent surface moved onto the plugin system): install it once — globally into `~/.yak/extensions/` or project-local into `.yak/extensions/` — and it discovers skills from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name, so a project copy shadows a global one). Installed packages carrying `skills/` or a root `SKILL.md` mount through it too.
 
-A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `[agent] disabled_skills`.
+A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `"agent": {"disabled_skills": ["name", ...]}`. The prompt index lists each skill's capability sentences (whole sentences up to 300 characters), not the trigger list a pack writes for its own host: the full description stays in the file and the body loads when the skill runs.
+
+A collection written for another host usually assumes its repository root is the skill's parent — several skills sharing one `shared/` and `scripts/`. Keep a stable clone and link each skill folder one level deep, because `~/.yak/skills/<name>` must be the folder that holds `SKILL.md`; repository-root shares go beside the links (they carry no `SKILL.md`, so they mount nothing):
+
+```bash
+git clone --depth 1 <repo> ~/.yak/skills-src/<repo>
+ln -s ~/.yak/skills-src/<repo>/<skill> ~/.yak/skills/<skill>   # one per skill
+ln -s ~/.yak/skills-src/<repo>/shared  ~/.yak/skills/shared
+ln -s ~/.yak/skills-src/<repo>/scripts ~/.yak/skills/scripts
+```
+
+`git pull` in the clone updates every link.
 
 Both levels work for everything: the extension in `.yak/extensions/` mounts project skills for that repo only, the one in `~/.yak/extensions/` mounts them everywhere; drop the same extension in both and the project copy wins by name.
 
