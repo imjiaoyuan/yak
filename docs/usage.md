@@ -264,7 +264,7 @@ Without a header, the file is started once per session and you talk to it in one
 
 At startup the host asks what the extension offers: tools (with JSON Schema parameters), slash commands, and events it wants to hear about. After that it calls back when the model uses a tool, when you type a matching `/command`, and at turn and tool boundaries. The `tool_call` event is the useful one for gating: your extension can deny a call or rewrite its arguments. Two other events carry decisions back: `tool_result` can replace what the model reads, and `compact` can replace a whole automatic compaction with your own summary (which then ends the task).
 
-Extension tools run freely like `bash`; a `[agent] tools` policy or the blacklist still gates them.
+Extension tools run freely like `bash`; an `"agent": {"tools": ...}` policy or the blacklist still gates them.
 
 Anything an extension prints to stderr is a human channel: it lands in the diagnostics tail, and while a call is in flight it streams into that call's tool log line by line, so a long tool can report progress without polluting its own result. A resident extension can also stream **lane frames** on stdout while a call runs — id-less `{"type":"lane","lane":..,"text":..}` lines, each rendered as a status row rewritten in place, one per lane name, so parallel work (two subagents, one row each) reads at a glance; the rows live only on screen, never in the transcript, and `--json` carries them as `lane` events. Lane frames are an extension protocol feature: see [`extensions.md`](extensions.md#lane-frames).
 
