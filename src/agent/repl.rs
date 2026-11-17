@@ -467,15 +467,7 @@ fn resume(session: &mut Session, arg: &str) -> Result<(), String> {
     };
     let store = crate::core::threads::Store::open()?;
     let turns = store.read_thread(&cid)?;
-    // only the active branch replays, and the conversation continues
-    // linearly from its end — jumping into a resumed thread is /tree's
-    // business, not the resume's
-    let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
-    session.seed = rebuilt.messages;
-    session.system = rebuilt.system;
-    session.usage = rebuilt.usage;
-    session.conversation_id = Some(cid.clone());
-    session.branch_parent = None;
+    session.restore_thread(&cid, &turns)?;
     render_history(&session.seed, &session.tools);
     // a remote reply or a scripted `/resume <prefix>` remembers what it
     // landed on; the picker's row was already on screen
@@ -487,84 +479,12 @@ fn resume(session: &mut Session, arg: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The action(s) a round ran, read off its assistant message's `tool_calls` —
-/// the same `$ <verb> <preview>` the terminal printed. Empty for a round that
-/// called no tool.
-fn round_actions(messages: &[crate::providers::Msg]) -> Vec<String> {
-    use crate::providers::Msg;
-    let tools = crate::agent::tools::builtin_tools();
-    let mut actions = Vec::new();
-    for msg in messages {
-        if let Msg::Assistant { tool_calls, .. } = msg {
-            for call in tool_calls {
-                let verb = crate::agent::tools::display_verb(&call.name);
-                // an extension tool has no preview shape here, so its row is
-                // the verb alone: "webfetch" reads as an action, while
-                // "webfetch webfetch" (name twice) reads as a stutter
-                let preview = tools
-                    .iter()
-                    .find(|t| t.name() == call.name)
-                    .map(|t| t.preview(&call.arguments))
-                    .unwrap_or_default();
-                let sep = if preview.is_empty() { "" } else { " " };
-                actions.push(format!("{verb}{sep}{preview}"));
-            }
-        }
-    }
-    actions
-}
-
-/// One `/tree` row label: the user's text when the round carried one,
-/// otherwise the action(s) it ran, otherwise its answer's first line. A tool
-/// round used to render as `--`, which made a long task's rounds
-/// indistinguishable.
-fn turn_label(t: &crate::core::threads::StoredTurn) -> String {
-    let clip = |s: &str| -> String { s.replace('\n', " ").chars().take(50).collect() };
-    if !t.prompt.trim().is_empty() {
-        return clip(&t.prompt);
-    }
-    let actions = round_actions(&t.messages);
-    if !actions.is_empty() {
-        return clip(&actions.join(" · "));
-    }
-    let text = clip(&t.response);
-    if text.trim().is_empty() {
-        "--".to_string()
-    } else {
-        text
-    }
-}
-
-/// Depth per turn: a turn without a `parent` (or whose parent is the line
-/// before it) continues the previous line at its depth; a `parent` naming
-/// an earlier line starts a sibling branch one level under that parent.
-/// Every turn of the file gets a depth, so the whole tree renders.
-fn tree_depths(turns: &[StoredTurn]) -> Vec<usize> {
-    let mut by_id = std::collections::HashMap::new();
-    for (i, t) in turns.iter().enumerate() {
-        by_id.insert(t.id.as_str(), i);
-    }
-    let mut depths = vec![0usize; turns.len()];
-    for i in 0..turns.len() {
-        depths[i] = match &turns[i].parent {
-            None => i.checked_sub(1).map(|p| depths[p]).unwrap_or(0),
-            Some(parent) => match by_id.get(parent.as_str()) {
-                Some(&p) if p < i => depths[p] + 1,
-                // an edge chain_indices would refuse; the tree view is not
-                // the place to fail, so a bad edge sits at the top level
-                _ => 0,
-            },
-        };
-    }
-    depths
-}
-
 /// The picker rows for `/tree`: one per turn in file order, indented to its
 /// branch depth, the active branch marked with `*`. Rows are plain text —
 /// the picker filters on them, so the depth indent keeps a branch's rows
 /// matching a query together.
 fn tree_rows(turns: &[StoredTurn], chain: &[usize]) -> Vec<String> {
-    let depths = tree_depths(turns);
+    let depths = crate::core::threads::tree_depths(turns);
     let on_chain: std::collections::HashSet<usize> = chain.iter().copied().collect();
     turns
         .iter()
@@ -575,7 +495,10 @@ fn tree_rows(turns: &[StoredTurn], chain: &[usize]) -> Vec<String> {
             format!(
                 "{mark}{indent}{} · \"{}\"",
                 &t.ts[..t.ts.len().min(19)],
-                turn_label(t)
+                crate::term::render::turn_label(t)
+                    .chars()
+                    .take(50)
+                    .collect::<String>()
             )
         })
         .collect()
@@ -1283,6 +1206,8 @@ fn repl_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::threads::tree_depths;
+    use crate::term::render::turn_label;
 
     #[test]
     fn command_replies_print_strings_as_text_and_other_values_as_json() {

@@ -215,8 +215,7 @@ fn thread_item(t: &ThreadSummary, now: &str, with_dir: bool) -> String {
     )
 }
 
-/// Pick from recent conversations; `Y` on the enter question continues the
-/// chosen one by re-entering the agent with `--session <id>`.
+/// Pick a conversation and enter it directly; the REPL replays it once.
 pub fn browse() -> i32 {
     let cwd = match std::env::current_dir() {
         Ok(c) => c,
@@ -233,78 +232,8 @@ pub fn browse() -> i32 {
             return 1;
         }
     };
-    show_transcript(&cid);
-    eprint!(
-        "{}enter this conversation? [Y/n]{} ",
-        crate::theme::err().dim,
-        crate::theme::err().reset
-    );
-    match crate::term::lineedit::read_approval_key() {
-        Some(crate::term::lineedit::ApprovalKey::Yes)
-        | Some(crate::term::lineedit::ApprovalKey::Always) => {
-            let argv: Vec<String> = vec!["--session".into(), cid];
-            crate::commands::agent::run(&argv)
-        }
-        _ => 0,
-    }
-}
-
-/// A clean conversation view: just the user prompt and the assistant
-/// response per turn, indented in the answer block.
-pub fn show_transcript(cid: &str) -> i32 {
-    let store = match Store::open() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-    let turns = match store.read_thread(cid) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-    // the preview is the conversation as it stands — the active branch,
-    // not the sibling branches a /tree jump left in the file
-    let chain = match crate::core::threads::chain_indices(&turns, turns.len().saturating_sub(1)) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-    let active: Vec<&crate::core::threads::StoredTurn> = chain.iter().map(|&i| &turns[i]).collect();
-    let p = crate::theme::out();
-    if let Some(first) = active.first() {
-        let where_ = match first.cwd.as_deref() {
-            Some(cwd) => format!(" · {cwd}"),
-            None => String::new(),
-        };
-        println!(
-            "{}conversation: {cid} · {}{where_}{}",
-            p.dim, first.model, p.reset
-        );
-    }
-    for turn in &active {
-        let p = crate::theme::out();
-        println!("{}{} {}", p.dim, turn.ts, p.reset);
-        if !turn.prompt.is_empty() {
-            for line in turn.prompt.lines() {
-                println!("{}>{} {line}", p.bold, p.reset);
-            }
-        }
-        if !turn.response.is_empty() {
-            let shown = crate::core::render_md::render_once(&turn.response, 2);
-            print!("{shown}");
-            if !shown.ends_with('\n') {
-                println!();
-            }
-        }
-        println!();
-    }
-    0
+    let argv = vec!["--session".into(), cid];
+    crate::commands::agent::run(&argv)
 }
 
 #[cfg(test)]

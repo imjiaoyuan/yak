@@ -12,6 +12,29 @@ use serde::{Deserialize, Serialize};
 use crate::core::config;
 use crate::providers::Msg;
 
+/// Depth per turn: an implicit parent continues the previous line at its
+/// depth; an explicit parent starts a branch one level under that parent.
+/// Every turn of the file gets a depth, so the whole tree renders.
+pub(crate) fn tree_depths(turns: &[StoredTurn]) -> Vec<usize> {
+    let mut by_id = std::collections::HashMap::new();
+    for (i, t) in turns.iter().enumerate() {
+        by_id.insert(t.id.as_str(), i);
+    }
+    let mut depths = vec![0usize; turns.len()];
+    for i in 0..turns.len() {
+        depths[i] = match &turns[i].parent {
+            None => i.checked_sub(1).map(|p| depths[p]).unwrap_or(0),
+            Some(parent) => match by_id.get(parent.as_str()) {
+                Some(&p) if p < i => depths[p] + 1,
+                // an edge chain_indices would refuse; the tree view is not
+                // the place to fail, so a bad edge sits at the top level
+                _ => 0,
+            },
+        };
+    }
+    depths
+}
+
 /// The on-disk turn format this binary writes and reads. The stamp lives on
 /// every stored line; a line without one (written before versioning
 /// existed) reads as version 0. A higher number on read means a newer yak

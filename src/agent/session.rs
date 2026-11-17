@@ -147,6 +147,19 @@ impl Session {
         self.last_usage = None;
     }
 
+    /// Restore the active branch atomically; callers render before applying
+    /// their context-size projection. A failed rebuild leaves this session intact.
+    pub fn restore_thread(&mut self, cid: &str, turns: &[StoredTurn]) -> Result<(), String> {
+        let rebuilt = rebuild_turns(turns)?;
+        self.seed = rebuilt.messages;
+        self.system = rebuilt.system;
+        self.usage = rebuilt.usage;
+        self.conversation_id = Some(cid.to_string());
+        self.branch_parent = None;
+        self.last_usage = None;
+        Ok(())
+    }
+
     /// Switch the session's model (the `/model` command): re-resolve,
     /// keep history, rebuild the tool registry.
     pub fn switch_model(&mut self, qualified: &str) -> Result<(), String> {
@@ -1506,6 +1519,50 @@ mod tests {
             unattended_allow: false,
             persist_error: None,
         }
+    }
+
+    #[test]
+    fn restoring_a_thread_replaces_branch_state_and_clears_last_usage() {
+        let mut session = tight_session(vec![Msg::user("previous")]);
+        session.conversation_id = Some("old".into());
+        session.system = Some("old system".into());
+        session.branch_parent = Some("old branch".into());
+        session.last_usage = Some(crate::core::http::Usage {
+            input: 999,
+            ..Default::default()
+        });
+        let turn: StoredTurn = serde_json::from_value(serde_json::json!({
+            "id": "root", "ts": "now", "mode": "agent", "model": "mock/m",
+            "system": "restored system", "usage": [10, 2, 8, 0],
+            "messages": [{"role": "user", "text": "restored"}], "response": "done"
+        }))
+        .unwrap();
+        session.restore_thread("new", &[turn]).unwrap();
+        assert_eq!(session.conversation_id.as_deref(), Some("new"));
+        assert_eq!(session.system.as_deref(), Some("restored system"));
+        assert_eq!(session.seed.len(), 2);
+        assert!(matches!(&session.seed[0], Msg::User { text, .. } if text == "restored"));
+        assert_eq!(session.usage.input, 10);
+        assert_eq!(session.usage.cached, 8);
+        assert!(session.branch_parent.is_none());
+        assert!(session.last_usage.is_none());
+    }
+
+    #[test]
+    fn a_broken_thread_does_not_replace_the_live_session() {
+        let mut session = tight_session(vec![Msg::user("previous")]);
+        session.conversation_id = Some("old".into());
+        let turn: StoredTurn = serde_json::from_value(serde_json::json!({
+            "id": "bad", "parent": "missing", "ts": "now", "mode": "agent", "model": "mock/m", "messages": []
+        }))
+        .unwrap();
+        let root: StoredTurn = serde_json::from_value(serde_json::json!({
+            "id": "root", "ts": "now", "mode": "agent", "model": "mock/m", "messages": []
+        }))
+        .unwrap();
+        assert!(session.restore_thread("new", &[root, turn]).is_err());
+        assert_eq!(session.conversation_id.as_deref(), Some("old"));
+        assert!(matches!(&session.seed[0], Msg::User { text, .. } if text == "previous"));
     }
 
     fn assert_task_surfaces_match(fail: bool) {

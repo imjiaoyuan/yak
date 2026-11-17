@@ -35,7 +35,7 @@ pub fn export_thread(cid: &str, cwd: &Path, path: Option<&str>) -> Result<PathBu
     let chain = crate::core::threads::chain_indices(&turns, turns.len().saturating_sub(1))?;
     let active: Vec<&StoredTurn> = chain.iter().map(|&i| &turns[i]).collect();
     let md = to_markdown(cid, &active);
-    let target = output_path(cwd, path, cid);
+    let target = output_path(cwd, path, cid, "md");
     crate::core::fsx::write_atomic(&target, md.as_bytes(), None)
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     Ok(target)
@@ -43,20 +43,13 @@ pub fn export_thread(cid: &str, cwd: &Path, path: Option<&str>) -> Result<PathBu
 
 /// `yak-<id>.md` unless a file name was given; a directory argument gets
 /// that name inside it.
-fn output_path(cwd: &Path, path: Option<&str>, cid: &str) -> PathBuf {
-    let default = || cwd.join(format!("yak-{cid}.md"));
-    match path {
-        None => default(),
-        Some(raw) => {
-            let p = Path::new(raw);
-            if p.is_dir() {
-                p.join(format!("yak-{cid}.md"))
-            } else if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            }
-        }
+fn output_path(cwd: &Path, path: Option<&str>, cid: &str, extension: &str) -> PathBuf {
+    let filename = format!("yak-{cid}.{extension}");
+    let target = path.map_or_else(|| cwd.join(&filename), |raw| cwd.join(raw));
+    if target.is_dir() {
+        target.join(filename)
+    } else {
+        target
     }
 }
 
@@ -255,29 +248,10 @@ pub fn export_html_thread(cid: &str, cwd: &Path, path: Option<&str>) -> Result<P
     let turns = store.read_thread(cid)?;
     let chain = crate::core::threads::chain_indices(&turns, turns.len().saturating_sub(1))?;
     let html = to_html(cid, &turns, &chain);
-    let target = html_output_path(cwd, path, cid);
+    let target = output_path(cwd, path, cid, "html");
     crate::core::fsx::write_atomic(&target, html.as_bytes(), None)
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     Ok(target)
-}
-
-/// `yak-<id>.html` unless a name was given; same resolution rules as the
-/// markdown export.
-fn html_output_path(cwd: &Path, path: Option<&str>, cid: &str) -> PathBuf {
-    let default = || cwd.join(format!("yak-{cid}.html"));
-    match path {
-        None => default(),
-        Some(raw) => {
-            let p = Path::new(raw);
-            if p.is_dir() {
-                p.join(format!("yak-{cid}.html"))
-            } else if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            }
-        }
-    }
 }
 
 /// The minimal HTML-escaper: the five characters that change meaning.
@@ -346,7 +320,7 @@ pub fn to_html(id: &str, turns: &[StoredTurn], chain: &[usize]) -> String {
     }
     // the sidebar: every turn of every branch, the active chain marked
     let mut nav = String::new();
-    let depths = html_depths(turns);
+    let depths = crate::core::threads::tree_depths(turns);
     for (i, t) in turns.iter().enumerate() {
         let mark = if active.contains(&i) {
             " class=\"on\""
@@ -358,7 +332,7 @@ pub fn to_html(id: &str, turns: &[StoredTurn], chain: &[usize]) -> String {
             mark,
             depths[i],
             esc(&t.ts[..t.ts.len().min(10)]),
-            esc(&flatten(&turn_label(t), 34)),
+            esc(&flatten(&crate::term::render::turn_label(t), 34)),
         ));
     }
     // the transcript: the active branch only
@@ -470,36 +444,6 @@ fn html_message(m: &Msg) -> String {
     }
 }
 
-/// Depth per turn for the sidebar indent, mirroring the /tree view.
-fn html_depths(turns: &[StoredTurn]) -> Vec<usize> {
-    let mut by_id = std::collections::HashMap::new();
-    for (i, t) in turns.iter().enumerate() {
-        by_id.insert(t.id.as_str(), i);
-    }
-    let mut depths = vec![0usize; turns.len()];
-    for i in 0..turns.len() {
-        depths[i] = match &turns[i].parent {
-            None => i.checked_sub(1).map(|p| depths[p]).unwrap_or(0),
-            Some(parent) => match by_id.get(parent.as_str()) {
-                Some(&p) if p < i => depths[p] + 1,
-                _ => 0,
-            },
-        };
-    }
-    depths
-}
-
-/// One sidebar label: prompt, actions, or the answer's head.
-fn turn_label(t: &StoredTurn) -> String {
-    if !t.prompt.trim().is_empty() {
-        return t.prompt.clone();
-    }
-    if !t.response.trim().is_empty() {
-        return t.response.clone();
-    }
-    "--".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,22 +460,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // no argument: the session-named default in cwd
-        assert_eq!(output_path(&cwd, None, "01ABC"), cwd.join("yak-01ABC.md"));
+        assert_eq!(
+            output_path(&cwd, None, "01ABC", "md"),
+            cwd.join("yak-01ABC.md")
+        );
         // a relative name resolves against cwd
         assert_eq!(
-            output_path(&cwd, Some("notes.md"), "01ABC"),
+            output_path(&cwd, Some("notes.md"), "01ABC", "md"),
             cwd.join("notes.md")
         );
         // an existing directory takes the default name inside it
         let as_dir = dir.display().to_string();
         assert_eq!(
-            output_path(&cwd, Some(&as_dir), "01ABC"),
+            output_path(&cwd, Some(&as_dir), "01ABC", "md"),
             dir.join("yak-01ABC.md")
         );
         // an absolute path to a file is used as given
         let abs = root.join("elsewhere.md");
         let as_abs = abs.display().to_string();
-        assert_eq!(output_path(&cwd, Some(&as_abs), "01ABC"), abs);
+        assert_eq!(output_path(&cwd, Some(&as_abs), "01ABC", "md"), abs);
+        // Both formats resolve directory arguments relative to the supplied cwd.
+        std::fs::create_dir(cwd.join("relative-dir")).unwrap();
+        for extension in ["md", "html"] {
+            assert_eq!(
+                output_path(&cwd, Some("relative-dir"), "01ABC", extension),
+                cwd.join("relative-dir")
+                    .join(format!("yak-01ABC.{extension}"))
+            );
+        }
+        assert_eq!(
+            output_path(&cwd, None, "01ABC", "html"),
+            cwd.join("yak-01ABC.html")
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

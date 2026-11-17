@@ -1063,6 +1063,18 @@ def main():
     # protocol natively (initialize -> advertised tools), so the reference-style
     # extensions can ride the same host
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Verify the shipped status extension, rather than a test-only Rust replica.
+    status_context = {"model": "mock/m", "thread": "status-probe", "usage": {
+        "input": 1000, "output": 20, "cached": 960}, "last_usage": {
+        "input": 100, "output": 2, "cached": 0}}
+    status = subprocess.run([sys.executable, os.path.join(root, "examples", "extensions", "status")],
+        input=json.dumps({"id": 1, "type": "run_command", "context": status_context}) + "\n",
+        capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert status.returncode == 0, status.stderr
+    text = json.loads(status.stdout)["result"]
+    assert "session status-probe" in text, text
+    assert "cumulative input 1000 · output 20 · cached 960" in text, text
+    assert "round input 100 · output 2 · cached 0" in text, text
     tpl = os.path.join(root, "examples", "extensions", "template.js")
     if shutil.which("node"):
         out = subprocess.run(
@@ -1604,6 +1616,28 @@ def check_rpc(binary):
         ex = expect(lambda v: v.get("id") == "e1", "the html export")
         html = open(ex["data"]["path"], encoding="utf-8").read()
         assert "run the echo" in html and "echo hi" in html, html[:200]
+        # A tool-only saved round must have the same action label in RPC and HTML.
+        with open(os.path.join(user, "threads", thread_id + ".jsonl"), encoding="utf-8") as f:
+            tool_round = json.loads(f.readline())
+        tool_round["prompt"] = ""
+        label_thread = "01rpctoollabel0000000000000"
+        with open(os.path.join(user, "threads", label_thread + ".jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(tool_round) + "\n")
+        send({"id": "label-switch", "type": "switch_session", "thread": label_thread})
+        expect(lambda v: v.get("id") == "label-switch" and v.get("success"), "tool-label session")
+        send({"id": "label-export", "type": "export_html"})
+        label_export = expect(lambda v: v.get("id") == "label-export", "tool-label HTML")
+        html = open(label_export["data"]["path"], encoding="utf-8").read()
+        send({"id": "tree1", "type": "get_tree"})
+        tree = expect(lambda v: v.get("id") == "tree1", "the conversation tree")
+        labels = [row["label"] for row in tree["data"]["turns"]]
+        assert any("run echo hi" in label for label in labels), labels
+        assert "run echo hi" in html, "HTML and RPC must both label tool-only rounds"
+        send({"id": "reload1", "type": "switch_session", "thread": thread_id})
+        expect(lambda v: v.get("id") == "reload1" and v.get("success"), "session restore")
+        send({"id": "reload-state", "type": "get_state"})
+        restored = expect(lambda v: v.get("id") == "reload-state", "restored state")
+        assert restored["data"]["thread"] == thread_id, restored
         # the name shows in the threads list json
         ls = run([binary, "threads", "-a", "--json"], env, cwd=work, stdin=subprocess.DEVNULL)
         rows = json.loads(ls.stdout)

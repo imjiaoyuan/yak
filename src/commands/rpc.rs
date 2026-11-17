@@ -823,12 +823,7 @@ fn switch_session(session: &mut Session, raw: &str) -> Result<(), String> {
         ));
     };
     let turns = store.read_thread(&cid)?;
-    let rebuilt = crate::agent::session::rebuild_turns(&turns)?;
-    session.seed = rebuilt.messages;
-    session.system = rebuilt.system;
-    session.usage = rebuilt.usage;
-    session.conversation_id = Some(cid);
-    session.branch_parent = None;
+    session.restore_thread(&cid, &turns)?;
     session.prune_seed_to_fit();
     Ok(())
 }
@@ -843,21 +838,7 @@ fn tree_json(cid: &str) -> Result<serde_json::Value, String> {
     }
     let active = crate::core::threads::chain_indices(&turns, turns.len() - 1)?;
     let on_chain: std::collections::HashSet<usize> = active.iter().copied().collect();
-    // depth per turn, mirroring the /tree view's walk
-    let mut by_id = std::collections::HashMap::new();
-    for (i, t) in turns.iter().enumerate() {
-        by_id.insert(t.id.as_str(), i);
-    }
-    let mut depths = vec![0usize; turns.len()];
-    for i in 0..turns.len() {
-        depths[i] = match &turns[i].parent {
-            None => i.checked_sub(1).map(|p| depths[p]).unwrap_or(0),
-            Some(parent) => match by_id.get(parent.as_str()) {
-                Some(&p) if p < i => depths[p] + 1,
-                _ => 0,
-            },
-        };
-    }
+    let depths = crate::core::threads::tree_depths(&turns);
     let rows: Vec<serde_json::Value> = turns
         .iter()
         .enumerate()
@@ -867,24 +848,12 @@ fn tree_json(cid: &str) -> Result<serde_json::Value, String> {
                 "id": t.id,
                 "ts": t.ts,
                 "depth": depths[i],
-                "label": label_of(t),
+                "label": crate::term::render::turn_label(t).chars().take(80).collect::<String>(),
                 "active": on_chain.contains(&i),
             })
         })
         .collect();
     Ok(serde_json::json!({"turns": rows, "active": active}))
-}
-
-/// One row's label: the round's prompt, its actions, or its answer's head.
-fn label_of(t: &crate::core::threads::StoredTurn) -> String {
-    let clip = |s: &str| -> String { s.replace('\n', " ").chars().take(80).collect() };
-    if !t.prompt.trim().is_empty() {
-        return clip(&t.prompt);
-    }
-    if !t.response.trim().is_empty() {
-        return clip(&t.response);
-    }
-    "--".to_string()
 }
 
 /// Run one queued message as a task, handling the commands that matter

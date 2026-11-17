@@ -403,6 +403,43 @@ def model_default_lane(binary, env):
                 assert seen["last_model"] == expected, (enabled, directory, expected, seen["last_model"])
 
 
+def resume_picker_lane(binary, work, env):
+    """-r enters directly and replays the selected thread exactly once."""
+    OUT.clear()
+    OUT_DONE.clear()
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(work)
+        os.execve(binary, [binary, "-r"], env)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    threading.Thread(target=drain_reader, args=(fd,), daemon=True).start()
+    try:
+        read_until(fd, rb"conversations:")
+        send(fd, b"01loca")
+        time.sleep(0.15)
+        OUT.clear()
+        send(fd, b"\r")
+        screen = read_until_after(fd, rb"local session marker", rb"\x1b\[1m>\x1b\[0m ")
+        assert b"enter this conversation?" not in screen, screen[-1000:]
+        assert screen.count(b"ok from mock") == 1, screen[-1000:]
+    finally:
+        send(fd, b"\x03")
+        time.sleep(0.2)
+        send(fd, b"\x03")
+        for _ in range(60):
+            child, status = os.waitpid(pid, os.WNOHANG)
+            if child:
+                assert os.waitstatus_to_exitcode(status) == 0, status
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            raise AssertionError("resume picker child did not exit")
+        OUT_DONE.wait(2)
+        os.close(fd)
+
+
 def main():
     if not hasattr(termios, "TIOCSWINSZ"):
         print("repl smoke: skipped (no pty on this platform)")
@@ -845,6 +882,7 @@ def main():
     screen = install_lane(binary, work, env)
     assert b"skills: " in screen, f"layout not recapped: {screen[-500:]!r}"
 
+    resume_picker_lane(binary, work, env)
     provider_relogin_lane(binary, work, env)
     model_default_lane(binary, env)
     print("repl pty smoke passed")

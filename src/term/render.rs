@@ -153,20 +153,49 @@ pub fn cache_label(u: Usage) -> Option<String> {
     })
 }
 
-/// The `/status` cache note: the session's cache shares, plus the last round's
-/// read share whenever it differs. A round that read nothing back reports 0%
-/// here, which is the figure worth seeing the moment it happens — a compaction
-/// or a prefix change invalidates the whole cached prefix — while the session
-/// average lags behind it.
-#[cfg(test)]
-pub fn cache_note(total: Usage, last: Option<Usage>) -> String {
-    let Some(label) = cache_label(total) else {
-        return String::new();
-    };
-    let last = last.filter(|u| u.input > 0).map(|u| u.cache_percent());
-    match last.filter(|l| *l != total.cache_percent()) {
-        Some(l) => format!(" · {label} (last round {l}%)"),
-        None => format!(" · {label}"),
+/// The action(s) a round ran, read off its assistant message's `tool_calls` —
+/// the same `$ <verb> <preview>` the terminal printed. Empty for a round that
+/// called no tool.
+fn round_actions(messages: &[crate::providers::Msg]) -> Vec<String> {
+    use crate::providers::Msg;
+    let tools = crate::agent::tools::builtin_tools();
+    let mut actions = Vec::new();
+    for msg in messages {
+        if let Msg::Assistant { tool_calls, .. } = msg {
+            for call in tool_calls {
+                let verb = crate::agent::tools::display_verb(&call.name);
+                // an extension tool has no preview shape here, so its row is
+                // the verb alone: "webfetch" reads as an action, while
+                // "webfetch webfetch" (name twice) reads as a stutter
+                let preview = tools
+                    .iter()
+                    .find(|t| t.name() == call.name)
+                    .map(|t| t.preview(&call.arguments))
+                    .unwrap_or_default();
+                let sep = if preview.is_empty() { "" } else { " " };
+                actions.push(format!("{verb}{sep}{preview}"));
+            }
+        }
+    }
+    actions
+}
+
+/// Shared tree label content: prompt, actions, answer, then a placeholder.
+/// Each surface applies its own display-length limit.
+pub(crate) fn turn_label(t: &crate::core::threads::StoredTurn) -> String {
+    let single_line = |s: &str| s.replace('\n', " ");
+    if !t.prompt.trim().is_empty() {
+        return single_line(&t.prompt);
+    }
+    let actions = round_actions(&t.messages);
+    if !actions.is_empty() {
+        return single_line(&actions.join(" · "));
+    }
+    let text = single_line(&t.response);
+    if text.trim().is_empty() {
+        "--".to_string()
+    } else {
+        text
     }
 }
 
@@ -488,40 +517,6 @@ mod tests {
             }),
             None
         );
-    }
-
-    /// `/status` adds the last round's read share only when it differs from
-    /// the session's: it is where a compaction or a prefix change shows up
-    /// first, while the average lags behind it.
-    #[test]
-    fn the_status_note_adds_the_last_round_only_when_it_differs() {
-        let session = Usage {
-            input: 1000,
-            output: 20,
-            cached: 960,
-            cached_write: 30,
-        };
-        let note = " · cache 96% read · 3% write";
-        let same = Usage {
-            input: 100,
-            output: 2,
-            cached: 96,
-            cached_write: 3,
-        };
-        assert_eq!(cache_note(session, Some(same)), note);
-        assert_eq!(cache_note(session, None), note);
-        // a round that read nothing back says so, even under a healthy average
-        let missed = Usage {
-            input: 100,
-            output: 2,
-            cached: 0,
-            cached_write: 100,
-        };
-        assert_eq!(
-            cache_note(session, Some(missed)),
-            format!("{note} (last round 0%)")
-        );
-        assert_eq!(cache_note(Usage::default(), Some(missed)), "");
     }
 
     #[test]
