@@ -99,6 +99,8 @@ yak export notes.md                        # write the newest session here as ma
 
 `-c` looks in the current directory first and falls back to the newest session anywhere, telling you which directory it used. `-r` opens one filterable list, newest first; typing filters across the preview and the id. `/resume` inside the session opens the same list, and `/resume <id|prefix>` loads one without the picker — the shape a script or a remote client drives (an ambiguous prefix is an error listing the candidates, never a guess). `/export [PATH]` writes the conversation you are in (tool calls and results included) as markdown, `yak-<id>.md` in the working directory by default (the same renderer backs `yak export`).
 
+On resume, the full restored conversation replays in order using the live display's Markdown answers, `$` tool action lines and result previews. Long lines wrap to the current terminal width. Failed results retain their error styling. Original diff previews, intermediate progress logs and timing were not stored and cannot be reconstructed; replay shows final tool-result previews and never runs tools. `/export` includes full stored tool results.
+
 `yak threads` prints the same summaries without a picker: this directory's newest 20 by default, `-a` for every directory, `-n N` for a different cap, and `--json` for one array of `{id, turns, turns_exact, last, preview, cwd}` objects (the full id, so it can be fed straight back to `--session` or `/resume`; `turns_exact` says whether the count covers the whole file or only the tail the listing reads).
 
 ## Session tree

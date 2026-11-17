@@ -16,7 +16,7 @@ pub fn repl(
     crate::term::install_sigint_handler();
 
     print_banner(&session);
-    render_history(&session.seed);
+    render_history(&session.seed, &session.tools);
     let (mut skill_names, mut command_names, mut command_set) = completion_data(&session);
 
     let mut exit_presses = crate::term::DoubleInterrupt::new();
@@ -476,7 +476,7 @@ fn resume(session: &mut Session, arg: &str) -> Result<(), String> {
     session.usage = rebuilt.usage;
     session.conversation_id = Some(cid.clone());
     session.branch_parent = None;
-    render_history(&session.seed);
+    render_history(&session.seed, &session.tools);
     // a remote reply or a scripted `/resume <prefix>` remembers what it
     // landed on; the picker's row was already on screen
     let p = crate::theme::err();
@@ -696,107 +696,84 @@ fn print_banner(session: &Session) {
     eprint!("{}{}{}", p.dim, info_rows(session, " "), p.reset);
 }
 
-/// Replay the loaded conversation on resume, so the user actually sees what
-/// was there before the prompt (bounded to the most recent stretch).
-fn render_history(seed: &[crate::providers::Msg]) {
-    let width = crate::term::columns().saturating_sub(1).max(20);
+/// Replay the stored conversation through the same static chrome as live turns.
+/// Never execute tools (including filesystem-based diff generation) on replay.
+fn render_history(seed: &[crate::providers::Msg], tools: &[Box<dyn super::tools::Tool>]) {
     let p = crate::theme::err();
-    for row in history_rows(seed, width) {
-        match row.style {
-            RowStyle::User => eprintln!("{}{}{}", p.bold, row.text, p.reset),
-            RowStyle::Plain => eprintln!("{}", row.text),
-            RowStyle::Dim => eprintln!("{}{}{}", p.dim, row.text, p.reset),
+    for entry in history_entries(seed, tools) {
+        match entry {
+            HistoryEntry::User(text) => {
+                let width = crate::term::columns().saturating_sub(2).max(20);
+                let wrapped = crate::core::render_md::wrap_plain(&text, width, 2);
+                eprintln!("{}> {wrapped}{}", p.bold, p.reset);
+            }
+            HistoryEntry::Answer(text) => {
+                let shown = crate::core::render_md::render_once(&text, 2);
+                print!("{shown}");
+                let _ = std::io::stdout().flush();
+            }
+            HistoryEntry::Action { name, preview } => {
+                super::tools::print_action_line(super::tools::display_verb(&name), &preview, None);
+            }
+            HistoryEntry::Result { summary, is_error } => {
+                super::tools::print_result_block(&summary, is_error);
+            }
+            HistoryEntry::Summary(text) => {
+                super::tools::print_output_block(&format!("<summary> {text}"));
+            }
         }
     }
 }
 
-/// How a replayed row is painted; the text itself is style-free so the
-/// clipping can be tested without a terminal or a palette.
-enum RowStyle {
-    User,
-    Plain,
-    Dim,
+#[derive(Debug, PartialEq)]
+enum HistoryEntry {
+    User(String),
+    Answer(String),
+    Action { name: String, preview: String },
+    Result { summary: String, is_error: bool },
+    Summary(String),
 }
 
-struct Row {
-    style: RowStyle,
-    text: String,
-}
-
-/// The replay's rows, each clipped to `width` cells. History is a scan, not
-/// an answer: a row that wraps would bury the next one under a long tool
-/// payload, so every entry gets exactly one line and the payload is cut with
-/// an ellipsis instead. `width` is a parameter (and callers pass one column
-/// less than the terminal) because a row landing on the last cell can trip
-/// the terminal's autowrap and double-space the whole replay.
-fn history_rows(seed: &[crate::providers::Msg], width: usize) -> Vec<Row> {
-    use crate::core::render_md::{cell_width, truncate_cells};
+/// No message cap: a long tool sequence must not hide its initiating prompt.
+/// A removed extension still gets its generic argument preview; built-in
+/// previews remain available even when the current tool selection excludes them.
+fn history_entries(
+    seed: &[crate::providers::Msg],
+    tools: &[Box<dyn super::tools::Tool>],
+) -> Vec<HistoryEntry> {
     use crate::providers::Msg;
-    const CAP: usize = 40; // messages shown on resume; older history is noted
-    let mut rows = Vec::new();
-    if seed.is_empty() {
-        return rows;
-    }
-    let clip = |payload: &str, used: usize| truncate_cells(payload, width.saturating_sub(used));
-    let skip = seed.len().saturating_sub(CAP);
-    if skip > 0 {
-        rows.push(Row {
-            style: RowStyle::Dim,
-            text: format!("── {skip} earlier message(s) omitted ──"),
-        });
-    }
-    for m in &seed[skip..] {
-        match m {
-            Msg::User { text, .. } => {
-                for line in text.split('\n') {
-                    rows.push(Row {
-                        style: RowStyle::User,
-                        text: format!("> {}", clip(line, 2)),
-                    });
-                }
-            }
+    let builtins = super::tools::builtin_tools();
+    let mut entries = Vec::new();
+    for message in seed {
+        match message {
+            Msg::User { text, .. } => entries.push(HistoryEntry::User(text.clone())),
             Msg::Assistant {
                 text, tool_calls, ..
             } => {
-                for line in text.lines() {
-                    rows.push(Row {
-                        style: RowStyle::Plain,
-                        text: format!("  {}", clip(line, 2)),
+                if !text.is_empty() {
+                    entries.push(HistoryEntry::Answer(text.clone()));
+                }
+                for call in tool_calls {
+                    let preview = tools
+                        .iter()
+                        .chain(&builtins)
+                        .find(|tool| tool.name() == call.name)
+                        .map(|tool| tool.preview(&call.arguments))
+                        .unwrap_or_else(|| super::tools::args_preview(&call.name, &call.arguments));
+                    entries.push(HistoryEntry::Action {
+                        name: call.name.clone(),
+                        preview,
                     });
                 }
-                for c in tool_calls {
-                    let head = format!("  [tool: {}] ", c.name);
-                    let used = cell_width(&head);
-                    rows.push(Row {
-                        style: RowStyle::Dim,
-                        text: format!("{head}{}", clip(&c.arguments.to_string(), used)),
-                    });
-                }
             }
-            Msg::ToolResult {
-                name,
-                content,
-                error,
-                ..
-            } => {
-                let first = content.lines().next().unwrap_or("");
-                let flag = if error.is_some() { " ✗" } else { "" };
-                let head = format!("  [result{flag} · {name}] ");
-                let used = cell_width(&head);
-                rows.push(Row {
-                    style: RowStyle::Dim,
-                    text: format!("{head}{}", clip(first, used)),
-                });
-            }
-            Msg::Summary { text } => {
-                rows.push(Row {
-                    style: RowStyle::Dim,
-                    text: format!("  <summary> {}", clip(text, 12)),
-                });
-            }
+            Msg::ToolResult { content, error, .. } => entries.push(HistoryEntry::Result {
+                summary: super::summarize(content),
+                is_error: error.is_some(),
+            }),
+            Msg::Summary { text } => entries.push(HistoryEntry::Summary(text.clone())),
         }
     }
-    rows
+    entries
 }
 
 fn completions(buf: &str, skill_names: &[String], cwd: &str) -> Vec<String> {
@@ -1360,57 +1337,133 @@ mod tests {
     }
 
     #[test]
-    fn history_replay_clips_every_row_to_the_terminal_width() {
+    fn history_replay_preserves_the_complete_ordered_conversation() {
         use crate::providers::{Msg, ToolCall};
-        let long = "x".repeat(400);
-        let seed = vec![
-            Msg::user("a user line that is quite long indeed\nsecond line"),
-            Msg::Assistant {
-                text: long.clone(),
+        let answer = format!("**发布完成**\n\n{}", "长回答".repeat(100));
+        let mut seed = vec![Msg::user("发布")];
+        for i in 0..50 {
+            seed.push(Msg::Assistant {
+                text: String::new(),
                 tool_calls: vec![ToolCall {
-                    id: "c1".into(),
+                    id: i.to_string(),
                     name: "bash".into(),
-                    arguments: serde_json::json!({ "command": long.clone() }),
+                    arguments: serde_json::json!({"command": "echo hello"}),
+                }],
+                reasoning: None,
+                reasoning_meta: None,
+            });
+            seed.push(Msg::ToolResult {
+                call_id: i.to_string(),
+                name: "bash".into(),
+                content: "hello".into(),
+                error: None,
+                attachments: vec![],
+            });
+        }
+        seed.push(Msg::assistant(&answer));
+        let entries = history_entries(&seed, &[]);
+        assert_eq!(entries.len(), 102);
+        assert_eq!(entries[0], HistoryEntry::User("发布".into()));
+        for pair in entries[1..101].as_chunks::<2>().0 {
+            assert_eq!(
+                pair[0],
+                HistoryEntry::Action {
+                    name: "bash".into(),
+                    preview: "echo hello".into()
+                }
+            );
+            assert_eq!(
+                pair[1],
+                HistoryEntry::Result {
+                    summary: "hello".into(),
+                    is_error: false
+                }
+            );
+        }
+        assert_eq!(entries[101], HistoryEntry::Answer(answer));
+        assert!(history_entries(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn history_replay_uses_live_previews_and_result_limits() {
+        use crate::providers::{Msg, ToolCall, ToolError};
+        let tools = super::super::tools::builtin_tools();
+        let args = serde_json::json!({"path": "absent.txt", "offset": 8, "limit": 3});
+        let output = (0..15)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let seed = vec![
+            Msg::Assistant {
+                text: "Checking".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c".into(),
+                    name: "read".into(),
+                    arguments: args.clone(),
                 }],
                 reasoning: None,
                 reasoning_meta: None,
             },
             Msg::ToolResult {
-                call_id: "c1".into(),
-                name: "bash".into(),
-                content: format!("{long}\nmore"),
-                error: Some(crate::providers::ToolError::Failed),
-                attachments: Vec::new(),
+                call_id: "c".into(),
+                name: "read".into(),
+                content: output.clone(),
+                error: Some(ToolError::Denied),
+                attachments: vec![],
             },
-            Msg::Summary { text: long.clone() },
         ];
-        let width = 40;
-        let rows = history_rows(&seed, width);
-        // every row fits, wide glyphs charged their real cells
-        for r in &rows {
-            assert!(
-                crate::core::render_md::cell_width(&r.text) <= width,
-                "row overflows {width} cells: {}",
-                r.text
-            );
-        }
-        assert_eq!(rows.len(), 6); // two user lines, assistant text, tool, result, summary
-        assert!(rows[0].text.starts_with("> a user line"));
-        assert!(rows[3].text.contains("[tool: bash]"));
-        assert!(rows[4].text.contains("[result ✗ · bash]"));
-        assert!(rows[5].text.starts_with("  <summary>"));
-        // a short history is replayed whole, with no omission note
-        assert!(history_rows(&[Msg::user("hi")], width)[0].text == "> hi");
-        assert!(history_rows(&[], width).is_empty());
+        let entries = history_entries(&seed, &tools);
+        assert_eq!(entries[0], HistoryEntry::Answer("Checking".into()));
+        assert_eq!(
+            entries[1],
+            HistoryEntry::Action {
+                name: "read".into(),
+                preview: tools
+                    .iter()
+                    .find(|t| t.name() == "read")
+                    .unwrap()
+                    .preview(&args)
+            }
+        );
+        assert_eq!(
+            entries[2],
+            HistoryEntry::Result {
+                summary: super::super::summarize(&output),
+                is_error: true
+            }
+        );
     }
 
     #[test]
-    fn history_replay_notes_the_dropped_prefix() {
-        use crate::providers::Msg;
-        let seed: Vec<Msg> = (0..45).map(|i| Msg::user(format!("m{i}"))).collect();
-        let rows = history_rows(&seed, 80);
-        assert!(rows[0].text.contains("5 earlier message(s) omitted"));
-        assert_eq!(rows.len(), 41);
+    fn history_replay_retains_removed_extension_calls_and_summaries() {
+        use crate::providers::{Msg, ToolCall};
+        let args = serde_json::json!({"query": "hello"});
+        let entries = history_entries(
+            &[
+                Msg::Summary {
+                    text: "earlier context".into(),
+                },
+                Msg::Assistant {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "c".into(),
+                        name: "removed".into(),
+                        arguments: args.clone(),
+                    }],
+                    reasoning: None,
+                    reasoning_meta: None,
+                },
+            ],
+            &[],
+        );
+        assert_eq!(entries[0], HistoryEntry::Summary("earlier context".into()));
+        assert_eq!(
+            entries[1],
+            HistoryEntry::Action {
+                name: "removed".into(),
+                preview: super::super::tools::args_preview("removed", &args)
+            }
+        );
     }
 
     #[test]

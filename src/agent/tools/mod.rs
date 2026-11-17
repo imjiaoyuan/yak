@@ -306,6 +306,22 @@ pub(crate) fn print_output_block(text: &str) {
     }
 }
 
+/// Shared final-result chrome for live execution and stored history replay.
+pub(crate) fn print_result_block(summary: &str, is_error: bool) {
+    if is_error {
+        let p = crate::theme::err();
+        for (i, line) in summary.lines().enumerate() {
+            if i == 0 {
+                eprintln!("{}{}  ✗ {line}{}", p.dim, p.red, p.reset);
+            } else {
+                eprintln!("{}  {line}{}", p.red, p.reset);
+            }
+        }
+    } else {
+        print_output_block(summary);
+    }
+}
+
 pub(crate) fn truncate_tail(
     text: &str,
     max_lines: usize,

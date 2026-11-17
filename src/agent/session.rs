@@ -353,17 +353,8 @@ impl Session {
                             // the streamed lines are already on screen and
                             // the spinner's own stop retracted its row:
                             // nothing to add
-                        } else if is_error {
-                            let p = crate::theme::err();
-                            for (i, line) in summary.lines().enumerate() {
-                                if i == 0 {
-                                    eprintln!("{}{}  ✗ {line}{}", p.dim, p.red, p.reset);
-                                } else {
-                                    eprintln!("{}  {line}{}", p.red, p.reset);
-                                }
-                            }
                         } else {
-                            crate::agent::tools::print_output_block(&summary);
+                            crate::agent::tools::print_result_block(&summary, is_error);
                         }
                         // the measured duration stays on the `--json`
                         // `durationMs` event; the terminal shows the whole
