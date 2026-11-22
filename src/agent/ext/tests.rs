@@ -140,7 +140,7 @@ fn an_inert_file_does_not_shadow_a_lower_extension() {
         1,
         "the user copy must surface: the inert project file is not an extension"
     );
-    assert_eq!(found.resident[0], user_ext);
+    assert_eq!(found.resident[0].path, user_ext);
     let _ = std::fs::remove_dir_all(&project);
     let _ = std::fs::remove_dir_all(&user);
 }
@@ -573,14 +573,18 @@ done
 /// it; the reason still rides the assertion below.
 #[cfg(unix)]
 pub(crate) fn connect_stub(path: &Path) -> Arc<Ext> {
-    let mut ext = connect_one(path);
+    let entry = ResidentFile {
+        path: path.to_path_buf(),
+        manifest: None,
+    };
+    let mut ext = connect_one(&entry);
     for _ in 0..20 {
         let busy = matches!(crate::core::sync::lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));
         if !busy {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        ext = connect_one(path);
+        ext = connect_one(&entry);
     }
     ext
 }
@@ -1273,6 +1277,7 @@ fn plugin_listings_lead_with_the_newest_file() {
             interpreter: None,
             timeout: 120,
             tier: crate::agent::approval::Tier::Read,
+            manifest: None,
         }
     }
     let host = Extensions {
@@ -1299,3 +1304,87 @@ fn plugin_listings_lead_with_the_newest_file() {
     assert_eq!(rows[0].0, "veteran");
     assert!(rows[0].4.contains("never connected"));
 }
+
+/// A `<stem>.yak.json` sidecar declares version and an environment
+/// whitelist; it reaches both residents (through the discovered entry)
+/// and script tools (through the spec), and the sidecar file itself is
+/// never scanned as an extension.
+#[test]
+fn a_sidecar_manifest_declares_version_and_environment() {
+    let dir = crate::core::testutil::scratch_dir("ext-sidecar");
+    #[cfg(unix)]
+    let resident = dir.join("deploy");
+    #[cfg(windows)]
+    let resident = dir.join("deploy.bat");
+    std::fs::write(&resident, b"#!/bin/sh\n:").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&resident, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        dir.join("deploy.yak.json"),
+        r#"{"version": "1.2.0", "env": ["AWS_*", "DEPLOY_TOKEN"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tool.py"),
+        "# --- yak-tool: count\n# description: c\n# interpreter: python3\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("tool.yak.json"), r#"{"version": "0.9"}"#).unwrap();
+
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    assert_eq!(found.resident.len(), 1, "the sidecar is not an extension");
+    assert_eq!(found.resident[0].path, resident);
+    let manifest = found.resident[0].manifest.as_ref().expect("sidecar parsed");
+    assert_eq!(manifest.version.as_deref(), Some("1.2.0"));
+    assert_eq!(
+        manifest.env.as_deref(),
+        Some(&["AWS_*".to_string(), "DEPLOY_TOKEN".to_string()][..])
+    );
+    assert_eq!(found.script_tools.len(), 1);
+    assert_eq!(
+        found.script_tools[0]
+            .manifest
+            .as_ref()
+            .and_then(|m| m.version.as_deref()),
+        Some("0.9")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A malformed sidecar fails discovery loudly: it declares a security
+/// boundary, and silently dropping it would run the plugin wider than
+/// its author declared.
+#[test]
+fn a_malformed_sidecar_fails_discovery() {
+    let dir = crate::core::testutil::scratch_dir("ext-sidecar-bad");
+    #[cfg(unix)]
+    let resident = dir.join("broken");
+    #[cfg(windows)]
+    let resident = dir.join("broken.bat");
+    std::fs::write(&resident, b"#!/bin/sh\n:").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&resident, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(dir.join("broken.yak.json"), r#"{"env": "not-a-list"}"#).unwrap();
+    let error = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap_err();
+    assert!(error.contains("broken.yak.json"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The whitelist matcher: exact names match exactly, `*` covers any run.
+#[test]
+fn environment_patterns_match_names_with_wildcards() {
+    use super::manifest::env_pattern_matches;
+    assert!(env_pattern_matches("AWS_PROFILE", "AWS_PROFILE"));
+    assert!(!env_pattern_matches("AWS_PROFILE", "AWS_REGION"));
+    assert!(env_pattern_matches("AWS_*", "AWS_PROFILE"));
+    assert!(env_pattern_matches("*_TOKEN", "GITHUB_TOKEN"));
+    assert!(env_pattern_matches("*", "ANYTHING"));
+    assert!(!env_pattern_matches("AWS_*", "AZURE_TOKEN"));
+}
+

@@ -4,9 +4,136 @@ use super::*;
 /// (spawned once, speaking the protocol) and manifest script tools (one
 /// comment header on any script in any language; the host runs the
 /// protocol around each call). Project wins by stem name across both.
+#[derive(Debug)]
 pub struct Discovered {
-    pub resident: Vec<PathBuf>,
+    pub resident: Vec<ResidentFile>,
     pub script_tools: Vec<crate::agent::ext::ExecToolSpec>,
+}
+
+/// One resident candidate: its file plus the optional sidecar manifest
+/// (`<stem>.yak.json`) that declares version and an environment whitelist.
+#[derive(Debug)]
+pub struct ResidentFile {
+    pub path: PathBuf,
+    pub manifest: Option<ExtManifest>,
+}
+
+/// The optional sidecar manifest beside an extension file: `<stem>.yak.json`
+/// in the same directory. Everything in it is opt-in — a file without one
+/// runs exactly as before, inheriting the full environment.
+#[derive(Clone, Debug, Default)]
+pub struct ExtManifest {
+    /// informational; `/status` and the banner show it as `stem@version`
+    pub version: Option<String>,
+    /// glob patterns (`*` wildcard) naming the environment variables the
+    /// extension may see; when present, the child gets a small baseline
+    /// (PATH, HOME, TMPDIR, LANG, TERM) plus the matches, and nothing else.
+    /// Absent = inherit the full environment, the historical behavior.
+    pub env: Option<Vec<String>>,
+}
+
+impl ExtManifest {
+    /// Parse a sidecar. Unknown keys are ignored (forward compatibility);
+    /// wrong-typed known keys fail loudly — a manifest is a security
+    /// declaration, and guessing one into a weaker shape is wrong.
+    pub(super) fn parse(text: &str, path: &Path) -> Result<ExtManifest, String> {
+        let value: Value = serde_json::from_str(text)
+            .map_err(|e| format!("invalid manifest {}: {e}", path.display()))?;
+        let mut out = ExtManifest::default();
+        if let Some(v) = value.get("version") {
+            out.version = Some(
+                v.as_str()
+                    .ok_or_else(|| {
+                        format!("manifest {}: \"version\" must be a string", path.display())
+                    })?
+                    .to_string(),
+            );
+        }
+        if let Some(v) = value.get("env") {
+            let list = v.as_array().ok_or_else(|| {
+                format!(
+                    "manifest {}: \"env\" must be a list of variable-name patterns",
+                    path.display()
+                )
+            })?;
+            let mut patterns = Vec::new();
+            for item in list {
+                patterns.push(
+                    item.as_str()
+                        .ok_or_else(|| {
+                            format!(
+                                "manifest {}: \"env\" entries must be strings",
+                                path.display()
+                            )
+                        })?
+                        .to_string(),
+                );
+            }
+            out.env = Some(patterns);
+        }
+        Ok(out)
+    }
+}
+
+/// The sidecar manifest path for an extension file: `<stem>.yak.json`
+/// beside it. None when the stem is not representable (never in practice).
+pub(super) fn sidecar_path(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    Some(path.with_file_name(format!("{stem}.yak.json")))
+}
+
+/// Read and parse the sidecar manifest, if one sits beside the file.
+/// A malformed manifest fails discovery loudly: it declares a security
+/// boundary, and half-applying one is worse than refusing the plugin.
+pub(super) fn sidecar_manifest(path: &Path) -> Result<Option<ExtManifest>, String> {
+    let Some(sidecar) = sidecar_path(path) else {
+        return Ok(None);
+    };
+    let text = match std::fs::read_to_string(&sidecar) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read manifest {}: {e}", sidecar.display())),
+    };
+    ExtManifest::parse(&text, &sidecar).map(Some)
+}
+
+/// Environment variables every extension sees even under a whitelist: a
+/// child that cannot find `PATH` or learn the terminal shape is broken,
+/// not contained.
+const ENV_BASELINE: &[&str] = &["PATH", "HOME", "TMPDIR", "LANG", "TERM"];
+
+/// `true` when `name` matches `pattern` (`*` matches any run of characters).
+pub(super) fn env_pattern_matches(pattern: &str, name: &str) -> bool {
+    fn inner(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => inner(&p[1..], s) || (!s.is_empty() && inner(p, &s[1..])),
+            (Some(&c), Some(&d)) if c == d => inner(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    inner(pattern.as_bytes(), name.as_bytes())
+}
+
+/// Apply the manifest's environment declaration to a child process. `None`
+/// (no declaration) inherits everything; `Some(patterns)` narrows the child
+/// to the baseline plus the variables the patterns name.
+pub(super) fn apply_env_filter(command: &mut std::process::Command, env: Option<&[String]>) {
+    let Some(patterns) = env else {
+        return;
+    };
+    command.env_clear();
+    for key in ENV_BASELINE {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in std::env::vars_os() {
+        let Some(key) = key.to_str() else { continue };
+        if patterns.iter().any(|p| env_pattern_matches(p, key)) {
+            command.env(key, value);
+        }
+    }
 }
 
 /// Scan the home directories for extension files. `extensions.disabled`
@@ -56,6 +183,15 @@ pub(super) fn discover_in(
             if !path.is_file() {
                 continue;
             }
+            // the sidecar manifests themselves are not extensions: they
+            // declare one, and must not claim the stem or shadow anything
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".yak.json"))
+            {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
@@ -69,16 +205,21 @@ pub(super) fn discover_in(
             if spec.is_none() && !is_executable(&path) {
                 // neither a manifest script tool nor an executable: not an
                 // extension, so it must not claim the stem and shadow a
-                // real one in a lower-priority home
+                // real one in a lower-priority home (a sidecar manifest
+                // without its extension file stays inert the same way)
                 continue;
             }
+            let manifest = sidecar_manifest(&path)?;
             seen.insert(stem.to_string());
-            if let Some(spec) = spec {
+            if let Some(mut spec) = spec {
+                if spec.manifest.is_none() {
+                    spec.manifest = manifest;
+                }
                 if !is_disabled(&spec.name) {
                     out.script_tools.push(spec);
                 }
             } else {
-                out.resident.push(path);
+                out.resident.push(ResidentFile { path, manifest });
             }
         }
     }
@@ -101,6 +242,9 @@ pub struct ExecToolSpec {
     pub timeout: u64,
     /// declared trust tier (`# tier: write`); defaults to exec
     pub tier: Tier,
+    /// the sidecar manifest (`<stem>.yak.json`), when one sits beside the
+    /// script: version display and the environment whitelist
+    pub manifest: Option<ExtManifest>,
 }
 
 /// Parse the manifest header off a script. A manifest starts at a comment
@@ -175,6 +319,7 @@ pub fn parse_tool_manifest(text: &str, path: &Path, default_timeout: u64) -> Opt
         interpreter,
         timeout: timeout.unwrap_or(default_timeout),
         tier,
+        manifest: None, // the sidecar is attached by the discovery scan
     })
 }
 

@@ -58,6 +58,12 @@ impl Tool for ScriptTool {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        // the sidecar's environment declaration narrows this spawn the same
+        // way it narrows a resident extension's
+        super::manifest::apply_env_filter(
+            &mut command,
+            self.spec.manifest.as_ref().and_then(|m| m.env.as_deref()),
+        );
         // argv mode: the single declared argument rides as plain argv[1],
         // so shell scripts never need to parse JSON. Picked by the declared
         // name — the model's key order (or a stray extra key) must not

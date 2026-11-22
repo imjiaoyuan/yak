@@ -1138,10 +1138,10 @@ fn repl_command(
                 crate::theme::err().reset
             ),
         },
-        "/reload" => match crate::agent::ext::Extensions::connect(&session.cwd) {
-            Ok(extensions) => {
+        "/reload" => match crate::agent::ext::Extensions::connect_async(&session.cwd) {
+            Ok(connecting) => {
                 *settings = crate::agent::settings::load();
-                session.extensions = extensions;
+                session.extensions = connecting.join();
                 session.rebuild_tools();
                 eprintln!(
                     "{}reloaded plugin tools and settings{}",

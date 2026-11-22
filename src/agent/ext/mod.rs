@@ -179,6 +179,11 @@ pub struct Ext {
     target: String,
     /// the discovered file; `None` for a placeholder that never connected
     path: Option<PathBuf>,
+    /// the sidecar manifest's declared version, shown by the listings
+    pub version: Option<String>,
+    /// the sidecar's environment whitelist; `Some` narrows every spawn of
+    /// this extension to the baseline plus the declared variables
+    env: Option<Vec<String>>,
     state: Mutex<Result<ExtState, String>>,
     tail: Arc<Mutex<VecDeque<String>>>,
     conn: Mutex<Option<Conn>>,
@@ -681,21 +686,31 @@ impl Extensions {
     }
 
     /// Every mounted plugin, for the banner: a resident extension's stem
-    /// (marked when it never connected) followed by each manifest script
-    /// tool's declared name — both live in the same registry, so both
-    /// belong in the one row. Newest first: the row reads as "what landed
-    /// lately", so a freshly added plugin leads instead of hiding behind
-    /// the veterans in an arbitrary directory order.
+    /// (marked when it never connected, suffixed with its sidecar-declared
+    /// version) followed by each manifest script tool's declared name —
+    /// both live in the same registry, so both belong in the one row.
+    /// Newest first: the row reads as "what landed lately", so a freshly
+    /// added plugin leads instead of hiding behind the veterans in an
+    /// arbitrary directory order.
     pub fn plugin_names(&self) -> Vec<String> {
+        let display = |name: &str, version: &Option<String>| match version {
+            Some(v) => format!("{name}@{v}"),
+            None => name.to_string(),
+        };
         let mut names: Vec<String> = self
             .exts
             .iter()
             .map(|ext| match &*crate::core::sync::lock(&ext.state) {
-                Ok(_) => ext.name.clone(),
+                Ok(_) => display(&ext.name, &ext.version),
                 Err(_) => format!("{} (failed)", ext.name),
             })
             .collect();
-        names.extend(self.script_tools.iter().map(|s| s.name.clone()));
+        names.extend(self.script_tools.iter().map(|s| {
+            display(
+                &s.name,
+                &s.manifest.as_ref().and_then(|m| m.version.clone()),
+            )
+        }));
         let paths: Vec<Option<std::path::PathBuf>> = self
             .exts
             .iter()
@@ -740,12 +755,18 @@ impl Extensions {
     /// not join instead: a flag error would then block on a slow handshake.
     pub fn connect_async(cwd: &Path) -> Result<ExtensionsConnecting, String> {
         let found = discover(cwd)?;
-        let resident = found.resident;
+        Ok(Self::connecting(found))
+    }
+
+    /// Shared body of connect/reload: discovery has run, the handshakes of
+    /// the given residents are still in flight.
+    fn connecting(found: Discovered) -> ExtensionsConnecting {
         let handle = std::thread::spawn(move || {
             std::thread::scope(|scope| {
-                let handles: Vec<_> = resident
+                let handles: Vec<_> = found
+                    .resident
                     .iter()
-                    .map(|p| scope.spawn(|| connect_one(p)))
+                    .map(|entry| scope.spawn(|| connect_one(entry)))
                     .collect();
                 handles
                     .into_iter()
@@ -757,15 +778,10 @@ impl Extensions {
                     .collect::<Vec<_>>()
             })
         });
-        Ok(ExtensionsConnecting {
+        ExtensionsConnecting {
             handle: Some(handle),
             script_tools: found.script_tools,
-        })
-    }
-
-    /// The synchronous form: discovery plus handshake, all on this thread.
-    pub fn connect(cwd: &Path) -> Result<Extensions, String> {
-        Ok(Self::connect_async(cwd)?.join())
+        }
     }
 
     /// Append one `ExtTool` per tool of every ready extension, plus one
@@ -1012,15 +1028,21 @@ impl Extensions {
         let rows: Vec<_> = self
             .exts
             .iter()
-            .map(|ext| match &*crate::core::sync::lock(&ext.state) {
-                Ok(state) => (
-                    ext.name.clone(),
-                    ext.target.clone(),
-                    state.tools.len(),
-                    state.commands.len(),
-                    String::new(),
-                ),
-                Err(reason) => (ext.name.clone(), ext.target.clone(), 0, 0, reason.clone()),
+            .map(|ext| {
+                let name = match &ext.version {
+                    Some(v) => format!("{}@{v}", ext.name),
+                    None => ext.name.clone(),
+                };
+                match &*crate::core::sync::lock(&ext.state) {
+                    Ok(state) => (
+                        name,
+                        ext.target.clone(),
+                        state.tools.len(),
+                        state.commands.len(),
+                        String::new(),
+                    ),
+                    Err(reason) => (name, ext.target.clone(), 0, 0, reason.clone()),
+                }
             })
             .collect();
         // the same newest-first order the banner's plugin row shows, so the
@@ -1079,6 +1101,8 @@ fn failed(name: &str, reason: String) -> Arc<Ext> {
         name: name.to_string(),
         target: String::new(),
         path: None,
+        version: None,
+        env: None,
         state: Mutex::new(Err(reason)),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
@@ -1086,7 +1110,8 @@ fn failed(name: &str, reason: String) -> Arc<Ext> {
     })
 }
 
-fn connect_one(path: &Path) -> Arc<Ext> {
+fn connect_one(entry: &ResidentFile) -> Arc<Ext> {
+    let path = &entry.path;
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1096,6 +1121,8 @@ fn connect_one(path: &Path) -> Arc<Ext> {
         name,
         target: path.display().to_string(),
         path: Some(path.to_path_buf()),
+        version: entry.manifest.as_ref().and_then(|m| m.version.clone()),
+        env: entry.manifest.as_ref().and_then(|m| m.env.clone()),
         state: Mutex::new(Err("connecting".to_string())),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
@@ -1183,6 +1210,9 @@ impl Ext {
     fn spawn_conn(&self, path: &Path) -> Result<Conn, String> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         let mut command = Command::new(path);
+        // the sidecar's environment declaration, before anything else adds
+        // its own variables (YAK_BIN below must survive the narrowing)
+        apply_env_filter(&mut command, self.env.as_deref());
         // Children launched by an extension must use this harness build,
         // rather than an unrelated (possibly older) yak found on PATH.
         if std::env::var_os("YAK_BIN").is_none() {
@@ -1405,7 +1435,8 @@ mod proto;
 mod roots;
 mod script;
 
-pub use manifest::{ExecToolSpec, discover};
+use manifest::{Discovered, apply_env_filter};
+pub use manifest::{ExecToolSpec, ResidentFile, discover};
 pub use roots::discover_dirs;
 
 #[cfg(test)]
