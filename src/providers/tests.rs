@@ -41,6 +41,7 @@ fn orphan_pairing_follows_the_last_result_index() {
             }],
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         },
         Msg::Assistant {
             text: "done".into(),
@@ -51,6 +52,7 @@ fn orphan_pairing_follows_the_last_result_index() {
             }],
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         },
         Msg::tool_result("b", "read", "content"),
     ];

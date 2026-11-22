@@ -103,6 +103,7 @@ pub fn build_body(
                 tool_calls,
                 reasoning,
                 reasoning_meta: _,
+                effort: _,
             } => {
                 flush_images(&mut messages, &mut pending_images);
                 if tool_calls.is_empty() {
@@ -443,6 +444,7 @@ mod tests {
                 }],
                 reasoning: Some("original\n\nthinking".into()),
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("c1", "noop", "ok"),
         ];
@@ -623,6 +625,7 @@ mod tests {
                 ],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -757,6 +760,7 @@ mod tests {
             tool_calls: Vec::new(),
             reasoning: Some("chain of thought".into()),
             reasoning_meta: None,
+            effort: None,
         }];
         // plain host: reasoning is dropped (the legacy DeepSeek ids and other
         // non-thinking hosts reject it back)
@@ -789,6 +793,7 @@ mod tests {
             tool_calls: Vec::new(),
             reasoning: Some(String::new()),
             reasoning_meta: None,
+            effort: None,
         }];
         let body = build_body(&ds, &input(&empty, &[]), false).unwrap();
         assert_eq!(body["messages"][0]["reasoning_content"], json!(""));
@@ -814,6 +819,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("call_1", "noop", "ok"),
         ];
@@ -852,6 +858,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("call_1", "ls", "a\nb"),
         ];
@@ -939,6 +946,7 @@ mod tests {
             }],
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         }];
         let body = build_body(&model("openai-compat"), &input(&history, &[]), true).unwrap();
         assert_eq!(body["tools"], json!([]));
@@ -957,6 +965,7 @@ mod tests {
             }],
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         }];
         let body = build_body(
             &model("openai-compat"),
@@ -981,6 +990,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("c1", "ls", "a\nb"),
         ];

@@ -140,6 +140,7 @@ pub fn build_body(
                 tool_calls,
                 reasoning,
                 reasoning_meta,
+                effort: _,
             } => {
                 flush_results(&mut messages, &mut pending_results);
                 // An interrupted, unsigned thinking-only response stays in
@@ -503,6 +504,7 @@ mod tests {
                 tool_calls: vec![],
                 reasoning: Some("unfinished".into()),
                 reasoning_meta: None,
+                effort: None,
             },
         ];
         let mut request = input(&history, &[]);
@@ -604,6 +606,7 @@ mod tests {
                 }],
                 reasoning: Some("weighing options".into()),
                 reasoning_meta: Some(json!({"signature": "sig-abc"})),
+                effort: None,
             },
             Msg::tool_result("t1", "ls", "a"),
         ];
@@ -630,6 +633,7 @@ mod tests {
                 tool_calls: vec![],
                 reasoning: Some("hmm".into()),
                 reasoning_meta: None,
+                effort: None,
             },
         ];
         let mut i = input(&history, &[]);
@@ -689,6 +693,7 @@ mod tests {
                 ],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("t1", "ls", "a"),
             Msg::ToolResult {
@@ -751,6 +756,7 @@ mod tests {
                 tool_calls: vec![],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
         ];
         i.history = &history;
@@ -993,6 +999,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("t1", "bash", "out"),
         ];
@@ -1218,6 +1225,7 @@ mod tests {
             }],
             reasoning,
             reasoning_meta: meta,
+            effort: None,
         }];
         let body = build_body(&model("anthropic"), &input(&history, &[]), false).unwrap();
         assert_eq!(

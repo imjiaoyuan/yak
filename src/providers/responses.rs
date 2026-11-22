@@ -66,6 +66,20 @@ pub fn build_body(
     stream: bool,
 ) -> Result<Value, String> {
     let last_result = last_result_index(input.history);
+    // mid-conversation effort: the thinking level rides `configuration_update`
+    // input items instead of the `reasoning` parameter, whose change would
+    // invalidate the provider's prompt cache. One item precedes every reply
+    // that recorded its level (the level it ran at), and one with the current
+    // request's level ends the input, so the prefix stays byte-identical
+    // across a `/thinking` change. The ChatGPT Codex channel rejects the
+    // items and never asks for the mechanism.
+    let mid_convo = m.kind != "codex" && super::mid_convo_effort(m) && input.reasoning.is_some();
+    let push_configuration_update = |items: &mut Vec<Value>, level: &str| {
+        items.push(json!({
+            "type": "configuration_update",
+            "reasoning": {"effort": level},
+        }));
+    };
     let mut items: Vec<Value> = Vec::new();
     // tool-result images batch into a following user message (a Responses
     // function_call_output takes plain-text output only)
@@ -95,8 +109,12 @@ pub fn build_body(
                 tool_calls,
                 reasoning: _,
                 reasoning_meta,
+                effort,
             } => {
                 flush_images(&mut items, &mut pending_images);
+                if mid_convo && let Some(level) = effort {
+                    push_configuration_update(&mut items, level);
+                }
                 // Encrypted reasoning is replayable even without a visible
                 // summary. Keep every item's id and opaque payload together.
                 if let Some(meta) = reasoning_meta {
@@ -177,6 +195,9 @@ pub fn build_body(
             "content": user_content(m.supports_images(), input.prompt, input.attachments)?,
         }));
     }
+    if mid_convo {
+        push_configuration_update(&mut items, input.reasoning.expect("checked above"));
+    }
 
     let mut body = json!({
         "model": m.model_id,
@@ -202,7 +223,7 @@ pub fn build_body(
                 .collect(),
         );
     }
-    if let Some(effort) = input.reasoning {
+    if let Some(effort) = input.reasoning.filter(|_| !mid_convo) {
         body["reasoning"] = json!({"effort": effort, "summary": "auto"});
     }
     body["include"] = json!(["reasoning.encrypted_content"]);
@@ -697,6 +718,80 @@ mod tests {
         assert_eq!(body["prompt_cache_key"], "custom-key");
     }
 
+    #[test]
+    fn mid_convo_effort_rides_configuration_update_items() {
+        let call = crate::providers::ToolCall {
+            id: "call_1".into(),
+            name: "read".into(),
+            arguments: json!({"path": "x"}),
+        };
+        let history = vec![
+            Msg::user("go"),
+            Msg::Assistant {
+                text: String::new(),
+                tool_calls: vec![call.clone()],
+                reasoning: Some("thinking…".into()),
+                reasoning_meta: None,
+                effort: Some("low".into()),
+            },
+            Msg::tool_result("call_1", "read", "contents"),
+        ];
+        let mut m = crate::providers::testutil::model("responses");
+        m.options = vec![("mid_convo_effort".into(), "true".into())];
+        let tools = [tool_def()];
+        let mut i = input(&history, &tools);
+        i.reasoning = Some("high");
+        let body = build_body(&m, &i, true).unwrap();
+        // the parameter stays home: only the items carry the level
+        assert!(body.get("reasoning").is_none());
+        let items = body["input"].as_array().unwrap();
+        // user → config(low) → function_call → output → config(high)
+        assert_eq!(items[0]["role"], json!("user"));
+        assert_eq!(items[1]["type"], json!("configuration_update"));
+        assert_eq!(items[1]["reasoning"]["effort"], json!("low"));
+        assert_eq!(items[2]["type"], json!("function_call"));
+        assert_eq!(items[3]["type"], json!("function_call_output"));
+        let last = items.last().unwrap();
+        assert_eq!(last["type"], json!("configuration_update"));
+        assert_eq!(last["reasoning"]["effort"], json!("high"));
+    }
+
+    #[test]
+    fn mid_convo_effort_stays_off_without_the_option_or_on_codex() {
+        let history = vec![Msg::Assistant {
+            text: "done".into(),
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_meta: None,
+            effort: Some("medium".into()),
+        }];
+        let tools = [tool_def()];
+        let mut i = input(&history, &tools);
+        i.reasoning = Some("high");
+        // no option: the parameter, no items
+        let body = build_body(&crate::providers::testutil::model("responses"), &i, true).unwrap();
+        assert_eq!(body["reasoning"]["effort"], json!("high"));
+        assert!(
+            !body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == json!("configuration_update"))
+        );
+        // the ChatGPT channel rejects the items: the option is ignored there
+        let mut codex = crate::providers::testutil::model("codex");
+        codex.options = vec![("mid_convo_effort".into(), "true".into())];
+        let body = build_body(&codex, &i, true).unwrap();
+        assert_eq!(body["reasoning"]["effort"], json!("high"));
+        assert!(
+            !body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == json!("configuration_update"))
+        );
+    }
+
     fn codex_model() -> ResolvedModel {
         ResolvedModel {
             provider_name: "chatgpt".into(),
@@ -722,6 +817,7 @@ mod tests {
                 }],
                 reasoning: Some("thinking…".into()),
                 reasoning_meta: Some(json!({"id": "rs_1", "encrypted_content": "opaque"})),
+                effort: None,
             },
             Msg::tool_result("call_1", "read", "contents"),
         ];
@@ -963,6 +1059,7 @@ mod tests {
             tool_calls: vec![],
             reasoning: None,
             reasoning_meta: meta,
+            effort: None,
         }];
         let body = build_body(&codex_model(), &input(&history, &[]), true).unwrap();
         assert_eq!(body["input"][0], items[0]);
@@ -1057,6 +1154,7 @@ mod tests {
                 tool_calls: calls,
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("call_1|fc_1", "read", "contents"),
         ];

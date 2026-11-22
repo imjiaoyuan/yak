@@ -420,7 +420,7 @@ pub fn run_agent(
                 }
                 if round.has_output() {
                     final_text = round.text.clone();
-                    round.keep_partial(&mut history);
+                    round.keep_partial(&mut history, opts.reasoning.clone());
                 }
                 on_round_end(&history[round_start..], round.usage);
                 break;
@@ -465,7 +465,7 @@ pub fn run_agent(
                     history.push(pending.take().expect("checked above"));
                 }
                 final_text = round.text.clone();
-                round.keep_partial(&mut history);
+                round.keep_partial(&mut history, opts.reasoning.clone());
             } else if recoveries < MAX_STREAM_RECOVERIES && recoverable_stream {
                 // nothing was handed out — not one delta of text, reasoning
                 // or a tool call — so replaying the request cannot duplicate
@@ -504,6 +504,7 @@ pub fn run_agent(
             tool_calls: tool_calls.clone(),
             reasoning: round.reasoning,
             reasoning_meta: round.reasoning_meta,
+            effort: opts.reasoning.clone(),
         });
         final_text = text;
         last_usage = usage;
@@ -669,12 +670,13 @@ impl Round {
 
     /// Keep received state together, including native signed tool parts.
     /// Calls from an unfinished response are recorded but never executed.
-    fn keep_partial(&self, history: &mut Vec<Msg>) {
+    fn keep_partial(&self, history: &mut Vec<Msg>, effort: Option<String>) {
         history.push(Msg::Assistant {
             text: self.text.clone(),
             tool_calls: self.tool_calls.clone(),
             reasoning: self.reasoning.clone(),
             reasoning_meta: self.reasoning_meta.clone(),
+            effort,
         });
         for call in &self.tool_calls {
             history.push(Msg::ToolResult {

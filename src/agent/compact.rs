@@ -604,6 +604,7 @@ mod tests {
                 tool_calls: vec![call("1")],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("1", "bash", "a\nb\nc"),
             user(&"y".repeat(400)),
@@ -622,6 +623,7 @@ mod tests {
                 tool_calls: vec![call("1")],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("1", "bash", "r".repeat(4000)),
             Msg::Assistant {
@@ -629,6 +631,7 @@ mod tests {
                 tool_calls: vec![call("2")],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::tool_result("2", "bash", "r".repeat(4000)),
         ];
@@ -657,6 +660,7 @@ mod tests {
             tool_calls: vec![],
             reasoning: Some("thinking the answer through at length".into()),
             reasoning_meta: None,
+            effort: None,
         };
         // the trace rides the wire on replay hosts, so it must ride the
         // estimate too, or compaction lags the real prompt size
@@ -666,6 +670,7 @@ mod tests {
             tool_calls: vec![],
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         };
         assert!(msg_tokens(&trace) > msg_tokens(&without));
     }

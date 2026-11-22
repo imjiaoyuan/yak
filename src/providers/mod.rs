@@ -378,7 +378,19 @@ pub(crate) fn tool_result_images(
 /// lifted off the list at resolution and `replay_reasoning` is consumed by the
 /// openai-compat adapter. A provider never documented either key, so neither
 /// may reach its body even when the user wrote it into the options table.
-const CLIENT_ONLY_OPTIONS: &[&str] = &["context_window", "replay_reasoning"];
+const CLIENT_ONLY_OPTIONS: &[&str] = &["context_window", "replay_reasoning", "mid_convo_effort"];
+
+/// `true` when the model's options table asks for mid-conversation effort:
+/// the Responses wire keeps `reasoning.effort` fixed and carries the thinking
+/// level as `configuration_update` input items instead, so a `/thinking`
+/// change keeps the provider's prompt cache. The ChatGPT Codex channel
+/// rejects the items and never asks for the mechanism.
+pub(crate) fn mid_convo_effort(m: &ResolvedModel) -> bool {
+    m.options
+        .iter()
+        .find(|(k, _)| k == "mid_convo_effort")
+        .is_some_and(|(_, v)| v == "1" || v.eq_ignore_ascii_case("true"))
+}
 
 /// Merge `-o KEY=VALUE` options into a request body: JSON values pass
 /// through, others ride as strings. The client-side knobs above stay home.

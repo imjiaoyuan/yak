@@ -88,6 +88,15 @@ pub enum Msg {
         /// when the visible text is empty.
         #[serde(default)]
         reasoning_meta: Option<Value>,
+        /// reasoning effort this reply ran at (`minimal`..`xhigh`). Recorded
+        /// when the task carried a thinking level, so the Responses wire can
+        /// replay the level as `configuration_update` items instead of a
+        /// changing `reasoning.effort` parameter — the parameter change
+        /// invalidates the provider's prompt cache, the items do not. None
+        /// on unset levels and legacy histories; older builds reading a
+        /// newer thread ignore the field, which only costs the cache boost.
+        #[serde(default)]
+        effort: Option<String>,
     },
     ToolResult {
         call_id: String,
@@ -125,6 +134,7 @@ impl Msg {
             tool_calls: Vec::new(),
             reasoning: None,
             reasoning_meta: None,
+            effort: None,
         }
     }
 

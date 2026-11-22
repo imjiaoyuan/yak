@@ -532,6 +532,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -598,6 +599,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
         ]);
         t.response = "the final answer".into();
@@ -613,6 +615,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
         ]);
         t.response = "the final answer".into();

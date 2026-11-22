@@ -436,6 +436,7 @@ mod tests {
                 reasoning: Some("inspect".into()),
                 reasoning_meta: meta,
                 tool_calls: calls.clone(),
+                effort: None,
             },
             Msg::tool_result(&calls[0].id, "read", "a contents"),
             Msg::tool_result(&calls[1].id, "read", "b contents"),
@@ -627,6 +628,7 @@ mod tests {
                 name: "read".into(),
                 arguments: json!({}),
             }],
+            effort: None,
         }];
         let body = build_body(&m, &input(&history, &[])).unwrap();
         assert_eq!(

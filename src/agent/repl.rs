@@ -1253,6 +1253,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             });
             seed.push(Msg::ToolResult {
                 call_id: i.to_string(),
@@ -1305,6 +1306,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::ToolResult {
                 call_id: "c".into(),
@@ -1354,6 +1356,7 @@ mod tests {
                     }],
                     reasoning: None,
                     reasoning_meta: None,
+                    effort: None,
                 },
             ],
             &[],
@@ -1519,6 +1522,7 @@ mod tests {
                 ],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             }],
         );
         assert_eq!(turn_label(&tool_round), "read R/cli.R · webfetch");

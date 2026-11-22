@@ -1232,6 +1232,7 @@ pub fn rebuild_chain(turns: &[StoredTurn], chain: &[usize]) -> Result<Rebuilt, S
                 tool_calls: Vec::new(),
                 reasoning: turn.reasoning.clone(),
                 reasoning_meta: None,
+                effort: None,
             });
         }
     }
@@ -1352,6 +1353,7 @@ mod tests {
                 reasoning_meta: Some(
                     serde_json::json!({"gemini_model":"m", "gemini_parts":[{"text":"answer", "thoughtSignature":"opaque"}]}),
                 ),
+                effort: None,
             },
         ];
         persist_test_round(&mut session, &messages);
@@ -1380,6 +1382,7 @@ mod tests {
                     tool_calls: vec![],
                     reasoning: Some("plan".into()),
                     reasoning_meta: None,
+                    effort: None,
                 },
             ];
             persist_test_round(&mut session, &messages);
@@ -1959,6 +1962,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The recorded effort level survives the store round-trip and the
+    /// replay: the Responses wire rebuilds its `configuration_update` items
+    /// from exactly this field, so losing it would silently bust the cache.
+    #[test]
+    fn a_replay_keeps_the_assistant_effort_for_the_cache_items() {
+        let dir = crate::core::testutil::scratch_dir("replay-effort");
+        let store = threads::Store::open_path(&dir).unwrap();
+        let turn = StoredTurn {
+            v: crate::core::threads::THREAD_FORMAT_VERSION,
+            id: crate::core::db::ulid(),
+            parent: None,
+            ts: crate::core::db::now_turn_datetime(),
+            mode: "agent".into(),
+            model: "mock/m".into(),
+            cwd: None,
+            system: None,
+            prompt: "go".into(),
+            response: String::new(),
+            reasoning: None,
+            usage: None,
+            duration_ms: None,
+            options: Vec::new(),
+            messages: vec![
+                Msg::user("go"),
+                Msg::Assistant {
+                    text: String::new(),
+                    tool_calls: vec![crate::providers::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "x"}),
+                    }],
+                    reasoning: None,
+                    reasoning_meta: None,
+                    effort: Some("low".into()),
+                },
+                Msg::tool_result("c1", "read", "x"),
+            ],
+        };
+        let cid = store.append_turn(None, &turn).unwrap();
+        let turns = store.read_thread(&cid).unwrap();
+        let rebuilt = rebuild_turns(&turns).unwrap();
+        let effort = rebuilt.messages.iter().find_map(|m| match m {
+            Msg::Assistant { effort, .. } => effort.clone(),
+            _ => None,
+        });
+        assert_eq!(effort.as_deref(), Some("low"), "effort survives the store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Replaying an explicit chain prefix is what a `/tree` jump seeds the
     /// session with: the abandoned sibling never enters the wire history,
     /// even though it stays in the file.
@@ -2131,6 +2183,7 @@ mod tests {
                 }],
                 reasoning: None,
                 reasoning_meta: None,
+                effort: None,
             },
             Msg::ToolResult {
                 call_id: "c1".into(),
@@ -2608,6 +2661,7 @@ mod tests {
                     }],
                     reasoning: None,
                     reasoning_meta: None,
+                    effort: None,
                 },
                 Msg::ToolResult {
                     call_id: "c1".into(),
