@@ -203,6 +203,7 @@ fn test_opts() -> AgentOptions<'static> {
 fn deny_callbacks() -> RunCallbacks<'static> {
     RunCallbacks {
         on_update: Box::leak(Box::new(|_| {})),
+        on_round_end: Box::leak(Box::new(|_, _| {})),
         on_approval: Box::leak(Box::new(|_| ApprovalResponse::Deny)),
         steer: Box::leak(Box::new(|| None)),
     }
@@ -677,15 +678,14 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         keep_recent_tokens: 500,
     });
     let mut approval = approval::ApprovalConfig::default();
-    // the ending RoundEnd is the turn persistence writes, so it must carry
-    // the whole rebuilt history (the summary plus the kept tail), not just
-    // its last message
+    // the ending round boundary is what turn persistence writes, so it must
+    // carry the whole rebuilt history (the summary plus the kept tail), not
+    // just its last message
     let mut rounds: Vec<Vec<Msg>> = Vec::new();
-    let mut on_update = |u: AgentUpdate| {
-        if let AgentUpdate::RoundEnd { messages, .. } = u {
-            rounds.push(messages);
-        }
+    let mut on_round_end = |messages: &[Msg], _: Option<Usage>| {
+        rounds.push(messages.to_vec());
     };
+    let mut on_update = |_| {};
     let outcome = run_agent(
         RunRequest {
             model: &mock_model(port),
@@ -698,6 +698,7 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         &mut approval,
         RunCallbacks {
             on_update: &mut on_update,
+            on_round_end: &mut on_round_end,
             on_approval: &mut |_| ApprovalResponse::Deny,
             steer: &mut || None,
         },
@@ -716,11 +717,11 @@ fn an_extension_compaction_replaces_the_builtin_and_ends_the_task() {
         matches!(&outcome.history[1], Msg::User { text, .. } if text.starts_with('x')),
         "the kept tail survives the fold in memory"
     );
-    let stored = rounds.last().expect("the ending RoundEnd");
+    let stored = rounds.last().expect("the ending round boundary");
     assert_eq!(
         stored.len(),
         2,
-        "the ending RoundEnd carries the whole rebuilt history"
+        "the ending round boundary carries the whole rebuilt history"
     );
     assert!(matches!(stored.first(), Some(Msg::Summary { .. })));
     assert!(!outcome.interrupted);
@@ -1192,6 +1193,7 @@ fn an_approval_ask_reaches_a_subscribed_extension_and_auto_allows_stay_silent() 
         &mut approval,
         RunCallbacks {
             on_update: &mut |_| {},
+            on_round_end: &mut |_, _| {},
             on_approval: &mut |_| ApprovalResponse::Allow,
             steer: &mut || None,
         },
@@ -1418,6 +1420,7 @@ fn an_unknown_provider_fails_without_stream_recovery() {
         &mut approval,
         RunCallbacks {
             on_update: &mut update,
+            on_round_end: &mut |_, _| {},
             on_approval: &mut deny,
             steer: &mut || None,
         },
@@ -1553,6 +1556,7 @@ fn a_steered_message_runs_as_the_next_rounds_prompt() {
         &mut approval,
         RunCallbacks {
             on_update: &mut update,
+            on_round_end: &mut |_, _| {},
             on_approval: &mut deny,
             steer: &mut steer,
         },

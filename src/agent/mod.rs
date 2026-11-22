@@ -60,16 +60,6 @@ pub enum AgentUpdate {
     Compacted {
         removed: usize,
     },
-    /// one agent round is complete: everything it added to the history is in
-    /// place (the pending prompt, the assistant message, the tool results).
-    /// The session persists the slice here — at each round boundary, not at
-    /// task end — so a crash loses only the round in flight. Internal:
-    /// the terminal UI renders nothing for it and the `--json` stream does
-    /// not emit it.
-    RoundEnd {
-        messages: Vec<Msg>,
-        usage: Option<Usage>,
-    },
     /// compaction was due and could not be applied: the session keeps growing
     /// over the window, and that must not happen silently
     CompactStalled {
@@ -164,7 +154,7 @@ pub struct AgentFailure {
     pub history: Vec<Msg>,
     pub final_text: String,
     /// where the failed round's own messages start: every earlier round was
-    /// already persisted at its [`AgentUpdate::RoundEnd`], so this is the
+    /// already persisted at its `on_round_end` callback, so this is the
     /// only slice a failure still has to write
     pub round_start: usize,
     /// Usage already reported for the failed round, if any.
@@ -187,6 +177,13 @@ pub struct RunRequest<'a> {
 /// questions.
 pub struct RunCallbacks<'a> {
     pub on_update: &'a mut dyn FnMut(AgentUpdate),
+    /// a round boundary: the history slice this round added and the round's
+    /// usage. The session persists here (at each round boundary, not at task
+    /// end, so a crash loses only the round in flight). The borrow avoids
+    /// the whole-history deep copy the old `RoundEnd` event carried every
+    /// round. Internal: nothing renders for it and the `--json` stream does
+    /// not emit it.
+    pub on_round_end: &'a mut dyn FnMut(&[Msg], Option<Usage>),
     pub on_approval: &'a mut dyn FnMut(ApprovalRequest) -> ApprovalResponse,
     /// a message that arrives while the run is between rounds: polled after
     /// each assistant turn's tool calls and before the next model request,
@@ -224,6 +221,7 @@ pub fn run_agent(
     } = req;
     let RunCallbacks {
         on_update,
+        on_round_end,
         on_approval,
         steer,
     } = cb;
@@ -241,7 +239,7 @@ pub fn run_agent(
 
     let mut history: Vec<Msg> = seed;
     // where the round in flight starts: everything from here on is the round
-    // the next `RoundEnd` reports. Assigned fresh after the loop-top
+    // the next `on_round_end` reports. Assigned fresh after the loop-top
     // compaction check (a rebuild shifts every index); the recovery and
     // overflow paths keep their pushes inside the round they belong to.
     let mut round_start;
@@ -260,7 +258,7 @@ pub fn run_agent(
     const MAX_OVERFLOW_COMPACTIONS: usize = 2;
     let mut overflow_compactions = 0usize;
     // set when a replacement compaction (an extension's `compact` reply) ends
-    // the task: the loop emits the final RoundEnd and breaks without a round
+    // the task: the loop reports the final round and breaks without a round
     let mut skip_round = false;
     // a caller continuing a conversation (a resumed thread, the next task of a
     // REPL session) names the seed here, so the first request of the task
@@ -293,7 +291,7 @@ pub fn run_agent(
     loop {
         turn += 1;
         if turn > MAX_ROUNDS {
-            // every completed round was already persisted at its RoundEnd;
+            // every completed round was already persisted at its round boundary;
             // the empty slice from here persists nothing on top
             let round_start = history.len();
             return Err(AgentFailure {
@@ -380,14 +378,11 @@ pub fn run_agent(
             if let Some(Msg::Summary { text }) = history.first() {
                 final_text = text.clone();
             }
-            on_update(AgentUpdate::RoundEnd {
-                messages: history.clone(),
-                usage: None,
-            });
+            on_round_end(&history, None);
             break;
         }
         // the round boundary: a compaction above may have rebuilt the
-        // history, so the slice the next `RoundEnd` reports starts here
+        // history, so the slice the next `on_round_end` reports starts here
         round_start = history.len();
         // the system prompt stays byte-identical every round: it is the head
         // of the request, and providers cache by input prefix (DeepSeek
@@ -427,10 +422,7 @@ pub fn run_agent(
                     final_text = round.text.clone();
                     round.keep_partial(&mut history);
                 }
-                on_update(AgentUpdate::RoundEnd {
-                    messages: history[round_start..].to_vec(),
-                    usage: round.usage,
-                });
+                on_round_end(&history[round_start..], round.usage);
                 break;
             }
             // The provider refusing a prompt that does not fit its window is
@@ -484,10 +476,7 @@ pub fn run_agent(
                 if let Some(message) = pending.take() {
                     history.push(message);
                 }
-                on_update(AgentUpdate::RoundEnd {
-                    messages: history[round_start..].to_vec(),
-                    usage: round.usage,
-                });
+                on_round_end(&history[round_start..], round.usage);
                 on_update(AgentUpdate::StreamRecovered { chars: 0, error: e });
                 continue;
             }
@@ -549,10 +538,7 @@ pub fn run_agent(
                 // the round's own record is on disk before the rewrite: the
                 // transcript keeps what actually happened, compaction only
                 // reshapes the in-memory context
-                on_update(AgentUpdate::RoundEnd {
-                    messages: history[round_start..].to_vec(),
-                    usage,
-                });
+                on_round_end(&history[round_start..], usage);
                 let mut sink = StallSink::new(&mut compact_stalled, on_update);
                 let mut ch = CompactHooks {
                     hooks: opts.hooks,
@@ -594,10 +580,7 @@ pub fn run_agent(
                     attachments: Vec::new(),
                 });
             }
-            on_update(AgentUpdate::RoundEnd {
-                messages: history[round_start..].to_vec(),
-                usage,
-            });
+            on_round_end(&history[round_start..], usage);
             if tool_calls.is_empty() {
                 // The completed round was already persisted and its usage
                 // counted above. Do not append it again on the failure path.
@@ -616,10 +599,7 @@ pub fn run_agent(
             continue;
         }
         if stop != StopReason::ToolUse || tool_calls.is_empty() {
-            on_update(AgentUpdate::RoundEnd {
-                messages: history[round_start..].to_vec(),
-                usage,
-            });
+            on_round_end(&history[round_start..], usage);
             break;
         }
         // Read-only calls from one assistant message have no ordering
@@ -636,10 +616,7 @@ pub fn run_agent(
             },
             &mut history,
         );
-        on_update(AgentUpdate::RoundEnd {
-            messages: history[round_start..].to_vec(),
-            usage,
-        });
+        on_round_end(&history[round_start..], usage);
         if interrupted {
             break;
         }

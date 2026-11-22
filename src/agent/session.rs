@@ -289,7 +289,6 @@ impl Session {
                 AgentUpdate::ReasoningDelta(text) => {
                     view.borrow_mut().reasoning_delta(&text);
                 }
-                AgentUpdate::RoundEnd { .. } => {}
                 AgentUpdate::ToolStart {
                     name,
                     preview,
@@ -470,6 +469,7 @@ impl Session {
             attachments,
             RunCallbacks {
                 on_update: &mut on_update,
+                on_round_end: &mut |_, _| {},
                 on_approval: &mut on_approval,
                 steer: &mut no_steering,
             },
@@ -673,6 +673,7 @@ impl Session {
             attachments,
             RunCallbacks {
                 on_update: &mut on_update,
+                on_round_end: &mut |_, _| {},
                 on_approval: approval_sink,
                 steer,
             },
@@ -728,11 +729,16 @@ impl Session {
         );
         let RunCallbacks {
             on_update,
+            on_round_end: _, // run_task_core persists at its own round boundary
             on_approval,
             steer,
         } = callbacks;
-        let mut round_reasoning = String::new();
-        let mut round_started = std::time::Instant::now();
+        // per-round state shared between the two callbacks: reasoning deltas
+        // land through `record_update`, the round boundary consumes and
+        // clears it. Interior mutability keeps both closures borrowable at
+        // once (they are handed to `run_agent` together).
+        let round_reasoning = std::cell::RefCell::new(String::new());
+        let round_started = std::cell::Cell::new(std::time::Instant::now());
         let mut total = crate::core::http::Usage::default();
         let mut last_usage = None;
         let identity = TaskIdentity {
@@ -743,35 +749,35 @@ impl Session {
         on_session(self.conversation_id.as_deref());
         let mut record_update = |update: AgentUpdate| {
             match &update {
-                AgentUpdate::ReasoningDelta(text) => round_reasoning.push_str(text),
+                AgentUpdate::ReasoningDelta(text) => round_reasoning.borrow_mut().push_str(text),
                 AgentUpdate::TurnEnd { usage: Some(usage) } => {
                     total.add(*usage);
                     last_usage = Some(*usage);
-                }
-                AgentUpdate::RoundEnd { messages, usage } => {
-                    let created = self.conversation_id.is_none();
-                    persist_round(
-                        self.store.as_ref(),
-                        &mut self.conversation_id,
-                        &mut self.branch_parent,
-                        &mut self.persist_error,
-                        &identity,
-                        messages,
-                        *usage,
-                        &round_reasoning,
-                        round_started,
-                    );
-                    if created && self.conversation_id.is_some() {
-                        on_session(self.conversation_id.as_deref());
-                    }
-                    round_reasoning.clear();
-                    round_started = std::time::Instant::now();
-                    return;
                 }
                 _ => {}
             }
             on_update(update);
         };
+        let mut on_round_end =
+            |messages: &[crate::providers::Msg], usage: Option<crate::core::http::Usage>| {
+                let created = self.conversation_id.is_none();
+                persist_round(
+                    self.store.as_ref(),
+                    &mut self.conversation_id,
+                    &mut self.branch_parent,
+                    &mut self.persist_error,
+                    &identity,
+                    messages,
+                    usage,
+                    &round_reasoning.borrow(),
+                    round_started.get(),
+                );
+                if created && self.conversation_id.is_some() {
+                    on_session(self.conversation_id.as_deref());
+                }
+                round_reasoning.borrow_mut().clear();
+                round_started.set(std::time::Instant::now());
+            };
         let result = run_agent(
             RunRequest {
                 model,
@@ -784,6 +790,7 @@ impl Session {
             &mut self.approval,
             RunCallbacks {
                 on_update: &mut record_update,
+                on_round_end: &mut on_round_end,
                 on_approval,
                 steer,
             },
@@ -805,8 +812,8 @@ impl Session {
                     &identity,
                     &failure.history[failure.round_start.min(failure.history.len())..],
                     failure.usage,
-                    &round_reasoning,
-                    round_started,
+                    &round_reasoning.borrow(),
+                    round_started.get(),
                 );
                 self.seed = failure.history;
                 Err(TaskFailure {
@@ -945,10 +952,6 @@ fn persist_round(
 pub(crate) fn event_json(u: &AgentUpdate) -> serde_json::Value {
     match u {
         AgentUpdate::Delta(text) => serde_json::json!({"type": "text", "text": text}),
-        // internal persistence marker: run_task_json intercepts it before
-        // this map (it drives the thread file, not the event stream), so it
-        // never reaches a consumer; the arm keeps the mapping total
-        AgentUpdate::RoundEnd { .. } => serde_json::json!({"type": "round"}),
         AgentUpdate::ReasoningDelta(text) => {
             serde_json::json!({"type": "reasoning", "text": text})
         }
