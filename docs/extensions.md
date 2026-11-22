@@ -30,6 +30,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `websearch` | resident | a `/web` command plus `web_search` tool; DeepSeek's Search API (model-facing summaries, query operators like `site:`/`lang:`/`after:` pass through) when the session's model is a deepseek one — key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json — then Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 | `workflow.py` | resident | resumable graph orchestration: JSON graphs of agent/tool/router/parallel/human/subgraph nodes, each agent node its own model and tool subset run as a `yak --json` child; append-only event logs under `~/.yak/workflows/`, replay-based resume, `/workflow` commands and a `workflow_run` tool; graphs and their format live in `examples/workflows/` (see its README) |
+| `usage_tracker` | resident | `turn_end` writes one ledger line to `~/.yak/usage.jsonl`; `/usage [today|month|all]` totals tokens by model and, with a `prices.json` beside the script, an estimated cost |
 
 ## Discovery
 
@@ -52,7 +53,22 @@ Every file (not directory) in these homes is scanned. Project extensions take pr
 
 `disabled` matches a file's stem or a script tool's declared manifest name, either spelling disables it.
 
-`/reload` re-discovers and respawns everything. A broken or slow extension degrades alone: it warns dimly and mounts nothing; `/status` shows the failure reason. Extension stderr is kept in a 20-line diagnostics tail: stray stdout that is not valid protocol lands there too.
+### The sidecar manifest: `<stem>.yak.json`
+
+An extension file may declare its identity and its environment in an optional sidecar, `<stem>.yak.json` beside it (for both residents and script tools):
+
+```json
+{
+  "version": "1.2.0",
+  "env": ["AWS_*", "DEPLOY_TOKEN"]
+}
+```
+
+- `version` is informational: `/status` and the banner show the plugin as `stem@version`.
+- `env` narrows every spawn of the extension to a small baseline (`PATH`, `HOME`, `TMPDIR`, `LANG`, `TERM`) plus the variables matching the patterns (`*` wildcard, exact otherwise). Absent — or no sidecar at all — inherits the full environment, as always. Declare only what the extension genuinely reads: a whitelist is a trust statement, and a sidecar without the extension file itself stays inert.
+- Unknown keys are ignored; a malformed sidecar fails discovery loudly (it declares a security boundary — half-applying one is worse than refusing the plugin). The sidecar file is never scanned as an extension and does not claim the stem.
+
+`/reload` re-discovers and respawns everything, incrementally: a resident whose file and sidecar still carry the same fingerprint keeps running untouched (its child process, tool state and live progress survive the reload) — only new, changed and removed files are spawned and shut down. A broken or slow extension degrades alone: it warns dimly and mounts nothing; `/status` shows the failure reason. Extension stderr is kept in a 20-line diagnostics tail: stray stdout that is not valid protocol lands there too.
 
 ## Script tools
 
