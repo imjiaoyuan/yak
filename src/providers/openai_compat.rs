@@ -395,7 +395,11 @@ pub fn run(
         other => on_event(other),
     };
     super::dispatch(
-        HttpRequest { url, headers, body },
+        HttpRequest {
+            url,
+            headers,
+            body: std::sync::Arc::new(body),
+        },
         stream,
         |_event_type, chunk, usage, stop, on_event| {
             feed_chunk(chunk, usage, stop, on_event);

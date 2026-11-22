@@ -65,7 +65,11 @@ pub fn run(
     // The subscription endpoint requires SSE even when the user asks to
     // buffer the answer. Only presentation changes with --no-stream.
     let result = super::dispatch(
-        HttpRequest { url, headers, body },
+        HttpRequest {
+            url,
+            headers,
+            body: std::sync::Arc::new(body),
+        },
         true,
         |event_type, chunk, usage, stop, on_event| {
             decoder.feed(event_type, chunk, usage, stop, on_event)

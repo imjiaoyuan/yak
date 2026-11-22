@@ -114,7 +114,9 @@ pub enum StopReason {
 pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    /// Shared, not owned: the attempt worker needs `'static`, and the body
+    /// can be tens of MB — an `Arc` keeps every retry from memcpy-ing it.
+    pub body: std::sync::Arc<String>,
 }
 
 #[derive(Debug)]
@@ -633,10 +635,11 @@ pub fn post_json(req: &HttpRequest) -> Result<String, HttpError> {
         // the whole attempt (send + body read) runs on the worker: a body
         // read stalled by a dead peer would otherwise hang to the global
         // ceiling with the interrupt flag unreachable, same as the dial
+        // (identical every retry: built once, shared via the body `Arc`)
         let owned = HttpRequest {
             url: req.url.clone(),
             headers: req.headers.clone(),
-            body: req.body.clone(),
+            body: std::sync::Arc::clone(&req.body),
         };
         let result = attempt_interruptible(crate::platform::interrupt::flag(), move || {
             send_raw(a, &owned).and_then(|r| {
@@ -720,7 +723,7 @@ fn send_raw_interruptible_flag(
     let owned = HttpRequest {
         url: req.url.clone(),
         headers: req.headers.clone(),
-        body: req.body.clone(),
+        body: std::sync::Arc::clone(&req.body),
     };
     attempt_interruptible(flag, move || send_raw(agent, &owned))
 }
@@ -733,7 +736,7 @@ fn send_raw(
     for (k, v) in req.headers.iter().chain(identity_headers().iter()) {
         request = request.header(k, v);
     }
-    let response = request.send(&req.body).map_err(map_error)?;
+    let response = request.send(req.body.as_str()).map_err(map_error)?;
     let status = response.status().as_u16();
     if status >= 400 {
         // keep what bug reports need: the body, the server's retry hint and
@@ -1131,7 +1134,7 @@ mod tests {
         let req = HttpRequest {
             url: "http://127.0.0.1:9/v1/chat/completions".into(),
             headers: vec![],
-            body: "{}".into(),
+            body: std::sync::Arc::new("{}".to_string()),
         };
         let e = send_raw_interruptible_flag(agent(), &req, &flag).unwrap_err();
         assert_eq!(e.class(), Class::Interrupted);
@@ -1170,7 +1173,7 @@ mod tests {
         let request = HttpRequest {
             url: format!("http://{address}/stream"),
             headers: vec![],
-            body: "{}".into(),
+            body: std::sync::Arc::new("{}".to_string()),
         };
         let result = post_sse(&request, |_, data| data == "[DONE]");
         release.send(()).unwrap();

@@ -369,7 +369,11 @@ pub fn run(
     headers.extend(super::gateway_headers(&url));
     let body = build_body(m, input)?.to_string();
     super::check_request_body(&body, input)?;
-    let request = HttpRequest { url, headers, body };
+    let request = HttpRequest {
+        url,
+        headers,
+        body: std::sync::Arc::new(body),
+    };
     let mut decoder = Decoder::default();
     if stream {
         super::stream_events_with_terminal(

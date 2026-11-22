@@ -582,7 +582,11 @@ pub fn run(
     headers.extend(super::gateway_headers(&url));
     let body = build_body(m, input, stream)?.to_string();
     super::check_request_body(&body, input)?;
-    let req = HttpRequest { url, headers, body };
+    let req = HttpRequest {
+        url,
+        headers,
+        body: std::sync::Arc::new(body),
+    };
     let mut decoder = ResponseStream::default();
     if stream {
         super::dispatch(

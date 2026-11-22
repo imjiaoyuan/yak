@@ -466,7 +466,11 @@ pub fn run(
     let body = build_body(m, input, stream)?.to_string();
     super::check_request_body(&body, input)?;
     super::dispatch(
-        HttpRequest { url, headers, body },
+        HttpRequest {
+            url,
+            headers,
+            body: std::sync::Arc::new(body),
+        },
         stream,
         |event_type, chunk, usage, stop, on_event| {
             feed_event(event_type, chunk, usage, stop, on_event);

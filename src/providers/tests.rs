@@ -477,7 +477,7 @@ fn responses_stream(body: &str) -> (Result<(), String>, Vec<Value>) {
     let req = HttpRequest {
         url: format!("http://{addr}/responses"),
         headers: vec![],
-        body: "{}".into(),
+        body: std::sync::Arc::new("{}".to_string()),
     };
     let mut events = Vec::new();
     let result = stream_events(&req, |_, value| {
@@ -574,7 +574,7 @@ fn terminal_sse_frames_do_not_wait_for_http_eof() {
         let request = HttpRequest {
             url: format!("http://{addr}/chat/completions"),
             headers: vec![],
-            body: "{}".into(),
+            body: std::sync::Arc::new("{}".to_string()),
         };
         let result = stream_events(&request, |_, value| {
             if value["reject"] == true {
