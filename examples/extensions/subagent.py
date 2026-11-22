@@ -39,8 +39,8 @@ How a child runs
 With `fork: true` the child continues this conversation instead:
     yak --json --session <this thread> --fork "Task: ..."
 inheriting the discussion so far on a branch of its own (the parent
-transcript is untouched); the thread is found newest-first among threads
-whose tail records this working directory.
+transcript is untouched); the parent thread id rides every `call_tool`
+frame's `context` — the extension never guesses it.
 
 `--json` is the line-delimited event stream this extension parses: tool calls
 become progress lines, the closing `result` object is the answer. Because the
@@ -189,7 +189,9 @@ TOOL = {
                 "type": "boolean",
                 "description": (
                     "run the child on a forked branch of this conversation "
-                    "so it inherits the context so far (single task only)"
+                    "so it inherits the context so far (single task only; "
+                    "needs a persisted session — a --no-session parent has "
+                    "no thread to fork)"
                 ),
             },
         },
@@ -323,67 +325,6 @@ def stop_ticker(stop):
 # agents
 def user_dir():
     return os.environ.get("YAK_USER_PATH") or os.path.join(os.path.expanduser("~"), ".yak")
-
-
-# A fork child inherits this conversation. The extension protocol does not
-# carry the live thread id into a tool call, so the child's thread is found
-# the same way the /resume picker finds threads: the thread store under the
-# user dir, newest first. A thread line records the cwd it ran in, so only
-# threads whose tail names THIS working directory are candidates — another
-# session elsewhere in another directory never matches. Child yaks spawned
-# by this extension run --no-session and write no threads, so they cannot
-# shadow the parent; a second interactive session in the same directory is
-# the one ambiguity, resolved by mtime (the freshest tail is almost always
-# the session that spawned us). Threads whose tail is unreadable are
-# skipped; a thread untouched for THREAD_MAX_AGE_DAYS is assumed closed.
-THREAD_MAX_AGE_DAYS = 7
-
-
-def find_parent_thread(cwd):
-    """The newest thread whose active-chain tail ran in `cwd`, or None."""
-    store = os.path.join(user_dir(), "threads")
-    try:
-        names = os.listdir(store)
-    except OSError:
-        return None, "no thread store at %s" % store
-    now = time.time()
-    candidates = []
-    for name in names:
-        if not name.endswith(".jsonl"):
-            continue
-        path = os.path.join(store, name)
-        try:
-            if now - os.path.getmtime(path) > THREAD_MAX_AGE_DAYS * 86400:
-                continue
-            size = os.path.getsize(path)
-            with open(path, "rb") as f:
-                f.seek(max(0, size - 65536))  # the tail is enough for a line
-                lines = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
-            continue
-        # walk back over a possibly torn final line to the last parseable one
-        tail = None
-        for raw in reversed([ln for ln in lines if ln.strip()]):
-            try:
-                obj = json.loads(raw)
-            except ValueError:
-                continue
-            if isinstance(obj, dict):
-                tail = obj
-            break
-        if tail and os.path.abspath(tail.get("cwd") or "") == os.path.abspath(cwd):
-            # the thread id is the file's ULID stem, not the tail line's id
-            # (every line carries its own round id)
-            candidates.append((os.path.getmtime(path), name[:-6], path))
-    if not candidates:
-        return None, "no session in %s has a recent thread here" % cwd
-    candidates.sort(reverse=True)
-    newest = candidates[0]
-    if len(candidates) > 1:
-        # say so: the fresh fork rides the newest thread, name it in progress
-        note("[fork] %d recent threads in this directory; forking the newest (%s)"
-             % (len(candidates), newest[1]))
-    return newest[1], None
 
 
 def project_agent_dirs(start):
@@ -888,7 +829,7 @@ def unknown(agents, name):
     return "error: no agent named '%s'; available: %s" % (name, known)
 
 
-def handle(args):
+def handle(args, session_thread=None):
     _abandoned.clear()
     depth = int(os.environ.get("YAK_SUBAGENT_DEPTH") or 0)
     if depth >= MAX_DEPTH:
@@ -921,13 +862,16 @@ def handle(args):
         return "error: `fork` works with a single `task` only — a batch or chain of children would fork the same conversation repeatedly"
     fork_session = None
     if fork:
-        fork_session, why = find_parent_thread(os.getcwd())
-        if not fork_session:
+        # the host stamps every call_tool frame with the live session
+        # context: the parent thread id, or null before the first round has
+        # persisted (and on --no-session, which keeps no store at all)
+        if not session_thread:
             return (
-                "error: cannot fork — %s. Run without `fork` for a fresh-context "
-                "subagent, or start the session first (a --no-session parent has "
-                "no thread to fork)." % why
+                "error: cannot fork — no persisted session thread yet. Run "
+                "without `fork` for a fresh-context subagent, or complete one "
+                "round first (a --no-session parent has no thread to fork)."
             )
+        fork_session = session_thread
     if chain or batch:
         raw, mode = (chain, "chain") if chain else (batch, "parallel")
         steps, problem = steps_of(raw, default_agent)
@@ -1073,7 +1017,10 @@ def main():
             )
         elif kind == "call_tool":
             try:
-                out = handle(request.get("args") or {})
+                out = handle(
+                    request.get("args") or {},
+                    (request.get("context") or {}).get("thread"),
+                )
             except Exception as e:  # a tool error is a result, never a crash
                 out = "error: subagent extension failed: %s" % e
             reply({"id": request["id"], "result": out})

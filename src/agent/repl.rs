@@ -476,6 +476,7 @@ fn resume(session: &mut Session, arg: &str) -> Result<(), String> {
     // the replay above shows the thread as stored; the projection happens
     // before the next request, where it belongs
     session.prune_seed_to_fit();
+    session.refresh_extension_context();
     Ok(())
 }
 
@@ -556,6 +557,7 @@ fn tree_jump(session: &mut Session) -> Result<(), String> {
     session.seed = rebuilt.messages;
     session.usage = rebuilt.usage;
     session.branch_parent = Some(turns[picked].id.clone());
+    session.refresh_extension_context();
     let side = if picked + 1 == turns.len() {
         "on the active branch's newest turn"
     } else if active.contains(&picked) {
@@ -839,40 +841,7 @@ fn path_files(word: &str, cwd: &str) -> Vec<String> {
 
 /// Handle a /command. Returns true when the REPL should exit.
 fn command_context(session: &Session) -> serde_json::Value {
-    let used = crate::agent::compact::estimate_tokens(
-        &session.seed,
-        session.last_usage.map(|usage| (session.seed.len(), usage)),
-    );
-    serde_json::json!({
-        "thread": session.conversation_id.as_deref(),
-        "cwd": session.cwd,
-        "model": session.model.as_ref().map(|model| model.model_id.clone()),
-        "context_tokens": used,
-        "messages": session.seed.len(),
-        "usage": {
-            "input": session.usage.input,
-            "output": session.usage.output,
-            "cached": session.usage.cached,
-            "cached_write": session.usage.cached_write,
-        },
-        "last_usage": session.last_usage.map(|usage| serde_json::json!({
-            "input": usage.input,
-            "output": usage.output,
-            "cached": usage.cached,
-            "cached_write": usage.cached_write,
-        })),
-        "tools": session.tools.len(),
-        "thinking": session.thinking.as_deref(),
-        "plugins": session.extensions.rows().into_iter().map(|(name, target, tools, commands, reason)| {
-            serde_json::json!({
-                "name": name,
-                "target": target,
-                "tools": tools,
-                "commands": commands,
-                "error": (!reason.is_empty()).then_some(reason),
-            })
-        }).collect::<Vec<_>>(),
-    })
+    session.context_json()
 }
 
 /// The rows a `/command` reply prints: a string result verbatim, its line
@@ -949,6 +918,7 @@ fn repl_command(
             };
             match session.switch_model(&choice.model) {
                 Ok(()) => {
+                    session.refresh_extension_context();
                     eprintln!(
                         "{}model → {}{}",
                         crate::theme::err().dim,
@@ -963,6 +933,7 @@ fn repl_command(
             }
             if let Some(thinking) = choice.thinking {
                 session.thinking = thinking.clone();
+                session.refresh_extension_context();
                 if let Err(e) = crate::core::config::try_set_default_thinking(thinking.as_deref()) {
                     eprintln!("Warning: could not save thinking: {e}");
                 }
@@ -977,6 +948,7 @@ fn repl_command(
                 crate::commands::models::thinking_picker(session.thinking.as_deref())
             {
                 session.thinking = level.clone();
+                session.refresh_extension_context();
                 if let Err(e) = crate::core::config::try_set_default_thinking(level.as_deref()) {
                     eprintln!("Warning: could not save thinking: {e}");
                 }
@@ -1146,6 +1118,7 @@ fn repl_command(
                 Ok(()) => {
                     *settings = crate::agent::settings::load();
                     session.rebuild_tools();
+                    session.refresh_extension_context();
                     eprintln!(
                         "{}reloaded plugin tools and settings{}",
                         crate::theme::err().dim,

@@ -193,6 +193,11 @@ pub struct Ext {
     /// serializes respawns: two concurrent tool calls on a dead extension
     /// must not race two children into the same slot
     respawn: Mutex<()>,
+    /// the live session context every `call_tool` frame carries (`thread`,
+    /// `cwd`, `model`, usage — the same shape `run_command`'s context has).
+    /// Shared with the [`Extensions`] container, so the session refreshes
+    /// it once and every resident sees the update.
+    context: Arc<Mutex<Value>>,
 }
 
 impl Ext {
@@ -405,6 +410,10 @@ impl Ext {
             // per-call state (calls in the read-only batch run concurrently)
             frame["tool_call_id"] = json!(call_id);
         }
+        // the live session context (thread id, cwd, model, usage): the same
+        // shape `run_command` frames carry. `thread` is null until the first
+        // round persists — a tool that needs the thread says so, never guesses.
+        frame["context"] = crate::core::sync::lock(&self.context).clone();
         let result = self.request(&frame, timeout, Some(log))?;
         Ok(match result.get("result") {
             Some(Value::String(s)) => s.clone(),
@@ -598,6 +607,9 @@ fn format_segments(items: &[Value]) -> String {
 
 #[derive(Clone)]
 pub struct Extensions {
+    /// the live session context shared with every resident: the session
+    /// writes it (`set_context`), the residents read it per tool call
+    pub(crate) context: Arc<Mutex<Value>>,
     pub(crate) exts: Vec<Arc<Ext>>,
     pub(crate) script_tools: Vec<ExecToolSpec>,
 }
@@ -632,13 +644,18 @@ impl Drop for Extensions {
 pub struct ExtensionsConnecting {
     handle: Option<std::thread::JoinHandle<Vec<Arc<Ext>>>>,
     script_tools: Vec<ExecToolSpec>,
+    context: Arc<Mutex<Value>>,
 }
 
 impl ExtensionsConnecting {
     pub fn join(mut self) -> Extensions {
         let exts = match self.handle.take() {
             Some(h) => h.join().unwrap_or_else(|_| {
-                vec![failed("extension", "connect thread panicked".to_string())]
+                vec![failed(
+                    "extension",
+                    "connect thread panicked".to_string(),
+                    Arc::clone(&self.context),
+                )]
             }),
             None => Vec::new(),
         };
@@ -656,10 +673,17 @@ impl ExtensionsConnecting {
             }
         }
         Extensions {
+            context: self.context,
             exts,
             script_tools: self.script_tools,
         }
     }
+}
+
+/// A context cell for a hand-built test host: empty, never refreshed.
+#[cfg(test)]
+pub(crate) fn test_host_context() -> Arc<Mutex<Value>> {
+    Arc::new(Mutex::new(serde_json::json!({})))
 }
 
 impl Extensions {
@@ -726,24 +750,17 @@ impl Extensions {
             .collect();
         sorted
     }
-    /// An empty host: no residents, no script tools. The agent loop holds
-    /// one unconditionally — with nothing discovered it fires no events and
-    /// mounts nothing, which replaces the old `Option<&Extensions>`.
-    /// Production paths always hold a real connected host; only tests need
-    /// the empty one.
+    /// The host with no extensions: fires nothing, mounts nothing (the
+    /// function form of the old const — the shared context cannot live in a
+    /// const). Tests only; production paths always hold a connected host.
     #[cfg(test)]
     pub fn empty() -> Extensions {
-        Self::EMPTY
+        Extensions {
+            context: Arc::new(Mutex::new(serde_json::json!({}))),
+            exts: Vec::new(),
+            script_tools: Vec::new(),
+        }
     }
-
-    /// The host with no extensions: fires nothing, mounts nothing (the
-    /// const form of [`Extensions::empty`], usable where a `&'static` is
-    /// not needed).
-    #[cfg(test)]
-    pub(crate) const EMPTY: Extensions = Extensions {
-        exts: Vec::new(),
-        script_tools: Vec::new(),
-    };
 
     /// Discover everything, and spawn+handshake the resident extensions on
     /// a background thread while the caller keeps doing startup work
@@ -761,21 +778,35 @@ impl Extensions {
         Ok(Self::connecting(found))
     }
 
+    /// Publish the live session context every `call_tool` frame carries.
+    /// The session calls this where the context can change: session build,
+    /// each persisted round (the fresh thread id lands there), `/clear`,
+    /// `/resume`. One write, all residents see it.
+    pub fn set_context(&self, context: Value) {
+        *crate::core::sync::lock(&self.context) = context;
+    }
+
     /// Shared body of connect/reload: discovery has run, the handshakes of
     /// the given residents are still in flight.
     fn connecting(found: Discovered) -> ExtensionsConnecting {
+        let context = Arc::new(Mutex::new(serde_json::json!({})));
+        let handle_context = Arc::clone(&context);
         let handle = std::thread::spawn(move || {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = found
                     .resident
                     .iter()
-                    .map(|entry| scope.spawn(|| connect_one(entry)))
+                    .map(|entry| scope.spawn(|| connect_one(entry, Arc::clone(&handle_context))))
                     .collect();
                 handles
                     .into_iter()
                     .map(|h| {
                         h.join().unwrap_or_else(|_| {
-                            failed("extension", "connect thread panicked".to_string())
+                            failed(
+                                "extension",
+                                "connect thread panicked".to_string(),
+                                Arc::clone(&handle_context),
+                            )
                         })
                     })
                     .collect::<Vec<_>>()
@@ -784,6 +815,7 @@ impl Extensions {
         ExtensionsConnecting {
             handle: Some(handle),
             script_tools: found.script_tools,
+            context,
         }
     }
 
@@ -817,17 +849,23 @@ impl Extensions {
                 None => fresh.push(entry),
             }
         }
-        // the handshakes run concurrently, like startup's
+        // the handshakes run concurrently, like startup's; fresh residents
+        // share the container's context Arc, so a later `set_context`
+        // reaches them too
         let spawned: Vec<Arc<Ext>> = std::thread::scope(|scope| {
             let handles: Vec<_> = fresh
                 .iter()
-                .map(|entry| scope.spawn(|| connect_one(entry)))
+                .map(|entry| scope.spawn(|| connect_one(entry, Arc::clone(&self.context))))
                 .collect();
             handles
                 .into_iter()
                 .map(|h| {
                     h.join().unwrap_or_else(|_| {
-                        failed("extension", "connect thread panicked".to_string())
+                        failed(
+                            "extension",
+                            "connect thread panicked".to_string(),
+                            Arc::clone(&self.context),
+                        )
                     })
                 })
                 .collect()
@@ -1149,7 +1187,7 @@ fn parse_tool_timeout(result: &Value) -> Option<Duration> {
     Some(Duration::from_secs(secs.min(MAX)))
 }
 
-fn failed(name: &str, reason: String) -> Arc<Ext> {
+fn failed(name: &str, reason: String, context: Arc<Mutex<Value>>) -> Arc<Ext> {
     Arc::new(Ext {
         name: name.to_string(),
         target: String::new(),
@@ -1161,10 +1199,11 @@ fn failed(name: &str, reason: String) -> Arc<Ext> {
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
         respawn: Mutex::new(()),
+        context,
     })
 }
 
-fn connect_one(entry: &ResidentFile) -> Arc<Ext> {
+fn connect_one(entry: &ResidentFile, context: Arc<Mutex<Value>>) -> Arc<Ext> {
     let path = &entry.path;
     let name = path
         .file_stem()
@@ -1182,6 +1221,7 @@ fn connect_one(entry: &ResidentFile) -> Arc<Ext> {
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
         respawn: Mutex::new(()),
+        context,
     });
     ext.spawn_and_handshake(path);
     ext

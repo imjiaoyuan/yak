@@ -122,7 +122,7 @@ fn a_stalled_compaction_is_reported_once() {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
         let mut ch = CompactHooks {
-            hooks: &Extensions::EMPTY,
+            hooks: empty_extensions(),
             skip_round: &mut no_skip,
             reason: "trigger",
             focus: None,
@@ -154,7 +154,7 @@ fn a_stalled_compaction_is_reported_once() {
         let mut push = |u: AgentUpdate| updates.push(u);
         let mut sink = StallSink::new(&mut warned, &mut push);
         let mut ch = CompactHooks {
-            hooks: &Extensions::EMPTY,
+            hooks: empty_extensions(),
             skip_round: &mut no_skip,
             reason: "trigger",
             focus: None,
@@ -1162,6 +1162,7 @@ fn an_approval_ask_reaches_a_subscribed_extension_and_auto_allows_stay_silent() 
     let dir = crate::core::testutil::scratch_dir("approval-event");
     let log = dir.join("seen.jsonl");
     let host = Extensions {
+        context: crate::agent::ext::test_host_context(),
         exts: vec![crate::agent::ext::tests::connect_stub(&event_recorder(
             "approvals",
             &["approval"],

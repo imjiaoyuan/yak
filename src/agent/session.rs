@@ -145,6 +145,55 @@ impl Session {
         self.branch_parent = None;
         self.usage = crate::core::http::Usage::default();
         self.last_usage = None;
+        self.refresh_extension_context();
+    }
+
+    /// The live session context resident extensions see on every `call_tool`
+    /// frame (and `run_command` command): thread id (null until the first
+    /// round persists — a tool that needs the transcript says so, never
+    /// guesses), cwd, model, context estimate, usage. One shape for both
+    /// frame kinds.
+    pub fn context_json(&self) -> serde_json::Value {
+        let used = crate::agent::compact::estimate_tokens(
+            &self.seed,
+            self.last_usage.map(|usage| (self.seed.len(), usage)),
+        );
+        serde_json::json!({
+            "thread": self.conversation_id.as_deref(),
+            "cwd": self.cwd,
+            "model": self.model.as_ref().map(|model| model.model_id.clone()),
+            "context_tokens": used,
+            "messages": self.seed.len(),
+            "usage": {
+                "input": self.usage.input,
+                "output": self.usage.output,
+                "cached": self.usage.cached,
+                "cached_write": self.usage.cached_write,
+            },
+            "last_usage": self.last_usage.map(|usage| serde_json::json!({
+                "input": usage.input,
+                "output": usage.output,
+                "cached": usage.cached,
+                "cached_write": usage.cached_write,
+            })),
+            "tools": self.tools.len(),
+            "thinking": self.thinking.as_deref(),
+            "plugins": self.extensions.rows().into_iter().map(|(name, target, tools, commands, reason)| {
+                serde_json::json!({
+                    "name": name,
+                    "target": target,
+                    "tools": tools,
+                    "commands": commands,
+                    "error": (!reason.is_empty()).then_some(reason),
+                })
+            }).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Publish [`Session::context_json`] to the extension host. One shared
+    /// cell, one write, every resident's next tool call sees it.
+    pub fn refresh_extension_context(&self) {
+        self.extensions.set_context(self.context_json());
     }
 
     /// Restore the active branch atomically; callers render before applying
@@ -747,6 +796,7 @@ impl Session {
             system: self.system.as_deref(),
         };
         on_session(self.conversation_id.as_deref());
+        self.refresh_extension_context();
         let mut record_update = |update: AgentUpdate| {
             match &update {
                 AgentUpdate::ReasoningDelta(text) => round_reasoning.borrow_mut().push_str(text),
@@ -798,6 +848,9 @@ impl Session {
         crate::core::http::clear_interrupt();
         self.usage.add(total);
         self.last_usage = last_usage;
+        // the task's rounds (and the fresh thread id a first task created)
+        // reach the residents' next `call_tool` frames from here
+        self.refresh_extension_context();
         match result {
             Ok(mut outcome) => {
                 self.seed = std::mem::take(&mut outcome.history);

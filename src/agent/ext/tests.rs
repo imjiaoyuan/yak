@@ -545,6 +545,7 @@ done
         compact_reply,
     );
     Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension("compactor", &body))],
         script_tools: Vec::new(),
     }
@@ -573,18 +574,23 @@ done
 /// it; the reason still rides the assertion below.
 #[cfg(unix)]
 pub(crate) fn connect_stub(path: &Path) -> Arc<Ext> {
+    connect_stub_ctx(path, test_host_context())
+}
+
+#[cfg(unix)]
+pub(crate) fn connect_stub_ctx(path: &Path, context: Arc<Mutex<Value>>) -> Arc<Ext> {
     let entry = ResidentFile {
         path: path.to_path_buf(),
         manifest: None,
     };
-    let mut ext = connect_one(&entry);
+    let mut ext = connect_one(&entry, std::sync::Arc::clone(&context));
     for _ in 0..20 {
         let busy = matches!(crate::core::sync::lock(&ext.state).as_ref(), Err(e) if e.contains("Text file busy"));
         if !busy {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        ext = connect_one(&entry);
+        ext = connect_one(&entry, std::sync::Arc::clone(&context));
     }
     ext
 }
@@ -593,6 +599,7 @@ pub(crate) fn connect_stub(path: &Path) -> Arc<Ext> {
 #[cfg(unix)]
 fn a_tool_result_subscriber_can_replace_the_result() {
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension("rewriter", REWRITER))],
         script_tools: Vec::new(),
     };
@@ -623,6 +630,7 @@ fn a_dead_extension_cannot_swallow_a_tool_result() {
     // failure must leave the result untouched (fail-open)
     let crashes = "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  case \"$line\" in\n    *initialize*) printf '{\"id\":%s,\"result\":{\"events\":[\"tool_result\"]}}\\n' \"$id\" ;;\n    *event*) exit 1 ;;\n  esac\ndone\n";
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension("crashy", crashes))],
         script_tools: Vec::new(),
     };
@@ -651,6 +659,7 @@ while IFS= read -r line; do
 done
 "#;
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension(
             "compactor",
             compact_stub,
@@ -670,6 +679,7 @@ done
         r#""note":"observed""#,
     );
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension("observer", &observer))],
         script_tools: Vec::new(),
     };
@@ -691,6 +701,7 @@ while IFS= read -r line; do
 done
 "#;
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension("crashy", crashes))],
         script_tools: Vec::new(),
     };
@@ -715,6 +726,7 @@ while IFS= read -r line; do
 done
 "#;
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension(
             "missing_snapshot",
             stub,
@@ -748,6 +760,7 @@ done
         sink.display(),
     );
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension(
             "tree_observer",
             &observer,
@@ -788,6 +801,7 @@ done
         sink.display(),
     );
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&write_stub_extension(
             "silent_observer",
             &silent,
@@ -833,6 +847,7 @@ while IFS= read -r line; do
 done
 "#;
     let host = Extensions {
+        context: test_host_context(),
         exts: (0..5)
             .map(|i| connect_stub(&write_stub_extension(&format!("lingering_{i}"), stub)))
             .collect(),
@@ -937,6 +952,49 @@ done
         out.content.lines().count() < 2500,
         "the line cap must cut a result the byte cap alone would keep"
     );
+}
+
+/// The live session context rides every `call_tool` frame (the same shape
+/// `run_command` carries): the thread id a transcript-reading tool needs —
+/// null until the first round persists, never guessed from the directory.
+#[cfg(unix)]
+#[test]
+fn a_call_tool_frame_carries_the_session_context() {
+    let context = test_host_context();
+    *crate::core::sync::lock(&context) = json!({"thread": "01ABC", "cwd": "/tmp/proj"});
+    let body = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *initialize*)
+      printf '{"id":%s,"result":{"tools":[{"name":"ping","parameters":{}}]}}\n' "$id"
+      ;;
+    *call_tool*)
+      thread=$(printf '%s' "$line" | sed -n 's/.*"thread":"\([^"]*\)".*/\1/p')
+      printf '{"id":%s,"result":"thread=%s"}\n' "$id" "$thread"
+      ;;
+  esac
+done
+"#;
+    let ext = connect_stub_ctx(
+        &write_stub_extension("ctx_echo", body),
+        std::sync::Arc::clone(&context),
+    );
+    let tool = ExtTool {
+        ext,
+        tool_name: "ping".into(),
+        exposed: "ping".into(),
+        description: String::new(),
+        schema: json!({"type": "object", "properties": {}}),
+        tier: Tier::Exec,
+    };
+    let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
+    assert!(out.content.contains("thread=01ABC"), "{}", out.content);
+    // before the first round persists the id is null, not a guess
+    *crate::core::sync::lock(&context) = json!({"thread": serde_json::Value::Null});
+    let out = tool.execute(&json!({}), Path::new("."), &mut |_| {});
+    assert!(out.content.contains("thread="), "{}", out.content);
+    assert!(!out.content.contains("thread=0"), "{}", out.content);
 }
 
 /// The model's tool_call_id rides the `call_tool` frame: a stateful
@@ -1281,9 +1339,18 @@ fn plugin_listings_lead_with_the_newest_file() {
         }
     }
     let host = Extensions {
+        context: test_host_context(),
         exts: vec![
-            failed("veteran", "never connected".to_string()),
-            failed("middling", "never connected".to_string()),
+            failed(
+                "veteran",
+                "never connected".to_string(),
+                test_host_context(),
+            ),
+            failed(
+                "middling",
+                "never connected".to_string(),
+                test_host_context(),
+            ),
         ],
         script_tools: vec![spec_at("brand-new", 0), spec_at("older-tool", 3600)],
     };
@@ -1397,6 +1464,7 @@ fn reload_keeps_unchanged_residents_and_respawns_changed_ones() {
     let steady = write_stub_extension("steady", r#"{"tools":[],"commands":[],"events":[]}"#);
     let changing = write_stub_extension("changing", r#"{"tools":[],"commands":[],"events":[]}"#);
     let mut host = Extensions {
+        context: test_host_context(),
         exts: vec![connect_stub(&steady), connect_stub(&changing)],
         script_tools: Vec::new(),
     };

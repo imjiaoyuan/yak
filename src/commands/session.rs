@@ -296,6 +296,9 @@ pub(super) fn open(args: &ParsedArgs, mode: Mode) -> Result<OpenedSession, Strin
         let keep = crate::agent::tools::select_tools(&available, &wanted_owned)?;
         session.tools.retain(|t| keep.iter().any(|k| k == t.name()));
     }
+    // residents see the live session (thread id, model, usage) on their
+    // first tool call already; kept fresh per round from here
+    session.refresh_extension_context();
 
     Ok(OpenedSession {
         session,
