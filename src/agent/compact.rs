@@ -52,6 +52,11 @@ impl CompactConfig {
 /// per char (a space-free Chinese sentence would otherwise be undercounted
 /// 3-4x, making `/status` and compaction trigger too late).
 pub(crate) fn text_tokens(text: &str) -> u64 {
+    // pure-ASCII text is the common case (and the bulk of most histories):
+    // every ASCII char is narrow, so skip the per-char width lookup
+    if text.is_ascii() {
+        return (text.len() as u64).div_ceil(4);
+    }
     let mut ascii = 0u64;
     let mut wide = 0u64;
     for ch in text.chars() {
