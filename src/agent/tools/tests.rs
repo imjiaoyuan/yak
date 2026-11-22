@@ -1,4 +1,4 @@
-use super::edit::change_hunks;
+use super::edit::{change_hunks, plan_edits};
 use super::*;
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -71,6 +71,45 @@ fn test_change_hunks_deletion_has_no_empty_addition() {
     let spans = [(start, start + 2, "")]; // "y\n" removed
     let out = change_hunks(original, &spans, 0, 30);
     assert_eq!(out, "@@ line 2\n- y");
+}
+
+#[test]
+fn not_found_edit_names_the_closest_region() {
+    let content = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
+    let edits = [("six\nseven!", "six\nseven")];
+    let err = match plan_edits(content, &edits, Path::new("f.txt")) {
+        Err(e) => e,
+        Ok(_) => panic!("expected a not-found error"),
+    };
+    assert!(err.contains("Could not find the exact text"), "{err}");
+    assert!(
+        err.contains("closest matching region is lines 6–7 of 7"),
+        "{err}"
+    );
+    assert!(err.contains("\nsix\nseven"), "{err}");
+}
+
+#[test]
+fn not_found_edit_stays_silent_when_no_line_resembles() {
+    let content = "aaaa\nbbbb\ncccc\n";
+    let edits = [("zzzzzz\nqqqqqq\nwwwwww", "x")];
+    let err = match plan_edits(content, &edits, Path::new("f.txt")) {
+        Err(e) => e,
+        Ok(_) => panic!("expected a not-found error"),
+    };
+    assert!(!err.contains("closest matching region"), "{err}");
+}
+
+#[test]
+fn duplicate_edit_names_the_occurrence_lines() {
+    let content = "a\nrepeat\nb\nrepeat\nc\n";
+    let edits = [("repeat", "x")];
+    let err = match plan_edits(content, &edits, Path::new("f.txt")) {
+        Err(e) => e,
+        Ok(_) => panic!("expected a duplicate error"),
+    };
+    assert!(err.contains("Found 2 occurrences"), "{err}");
+    assert!(err.contains("(at lines 2, 4)"), "{err}");
 }
 
 #[test]

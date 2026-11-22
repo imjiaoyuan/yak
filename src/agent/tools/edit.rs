@@ -233,18 +233,26 @@ pub(super) fn plan_edits<'a>(
     let mut spans: Vec<LocatedEdit> = Vec::with_capacity(normalized_edits.len());
     for (i, (old, new)) in normalized_edits.iter().enumerate() {
         let Some((start, len, _)) = fuzzy_find(&match_base, old, &fuzzy_base) else {
-            return Err(not_found_error(path, i, normalized_edits.len()));
+            let hint = nearest_region_hint(&normalized, old);
+            return Err(not_found_error(
+                path,
+                i,
+                normalized_edits.len(),
+                hint.as_deref(),
+            ));
         };
         // ambiguity is judged in fuzzy space : two
         // occurrences differing only in trailing whitespace are already two
         // regions the model cannot tell apart
         let occurrences = count_occurrences(&fuzzy_base, &normalize_for_fuzzy_match(old));
         if occurrences > 1 {
+            let lines = occurrence_lines(&fuzzy_base, &normalize_for_fuzzy_match(old));
             return Err(duplicate_error(
                 path,
                 i,
                 normalized_edits.len(),
                 occurrences,
+                &lines,
             ));
         }
         spans.push(LocatedEdit {
@@ -313,6 +321,147 @@ fn count_occurrences(fuzzy_content: &str, fuzzy_old: &str) -> usize {
         return fuzzy_content.chars().count() + 1;
     }
     fuzzy_content.split(fuzzy_old).count() - 1
+}
+
+/// 1-based line number of every occurrence of `needle` in `base` — the
+/// "which of the N copies did you mean" anchors a duplicate-match error
+/// names instead of leaving the model to re-derive them.
+fn occurrence_lines(base: &str, needle: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() {
+        return out;
+    }
+    let mut offset = 0usize;
+    while let Some(found) = base[offset..].find(needle) {
+        let at = offset + found;
+        out.push(base[..at].matches('\n').count() + 1);
+        offset = at + needle.len();
+    }
+    out
+}
+
+/// Where the text the edit missed almost is: a line-anchored nearest-region
+/// search. Each needle line finds its best matching file line (Sørensen–Dice
+/// over character bigrams); every file line then accumulates the scores of
+/// the anchors that would fall inside a window starting there, and the
+/// strongest window is reported with its lines so the next oldText can be
+/// corrected in one round instead of re-deriving the region by reading the
+/// file again. Best-effort: `None` on huge files or when no line pair
+/// resembles at all — a confident wrong hint is worse than none.
+fn nearest_region_hint(content: &str, old: &str) -> Option<String> {
+    const MAX_HINT_CHARS: usize = 400_000;
+    const MAX_HINT_LINES: usize = 20_000;
+    const MIN_MEAN_SCORE: f64 = 0.35;
+    if content.len() > MAX_HINT_CHARS || content.matches('\n').count() + 1 > MAX_HINT_LINES {
+        return None;
+    }
+    let mut old_lines: Vec<&str> = old.split('\n').collect();
+    if old_lines.last().is_some_and(|l| l.is_empty()) {
+        old_lines.pop();
+    }
+    old_lines.retain(|l| !l.trim().is_empty());
+    if old_lines.is_empty() {
+        return None;
+    }
+    let mut content_lines: Vec<&str> = content.split('\n').collect();
+    if content_lines.last().is_some_and(|l| l.is_empty()) {
+        // a trailing newline is a terminator, not an eighth line
+        content_lines.pop();
+    }
+    let window = old_lines.len().min(content_lines.len());
+    let old_sets: Vec<Vec<u64>> = old_lines.iter().map(|l| line_bigrams(l)).collect();
+    let content_sets: Vec<Vec<u64>> = content_lines.iter().map(|l| line_bigrams(l)).collect();
+    // anchor[i] = (best content line for old line i, its dice score)
+    let mut anchors: Vec<(usize, f64)> = Vec::with_capacity(old_lines.len());
+    for set in &old_sets {
+        let mut best = (0usize, 0.0f64);
+        for (j, other) in content_sets.iter().enumerate() {
+            let score = dice(set, other);
+            if score > best.1 {
+                best = (j, score);
+            }
+        }
+        anchors.push(best);
+    }
+    // score(w) = the anchors inside window w; via an offset array so the
+    // sweep stays linear
+    let last_start = content_lines.len() - window;
+    let mut scores = vec![0.0f64; last_start + 2];
+    for (line, score) in &anchors {
+        let lo = line.saturating_sub(window - 1).min(last_start);
+        let hi = (*line).min(last_start);
+        scores[lo] += score;
+        scores[hi + 1] -= score;
+    }
+    let mut best = (0usize, f64::MIN);
+    let mut running = 0.0f64;
+    for (w, add) in scores.iter().enumerate().take(last_start + 1) {
+        running += add;
+        if running > best.1 {
+            best = (w, running);
+        }
+    }
+    if best.1 / (old_lines.len() as f64) < MIN_MEAN_SCORE {
+        return None;
+    }
+    let start = best.0;
+    let end = start + window;
+    let shown: Vec<String> = content_lines[start..end]
+        .iter()
+        .take(6)
+        .map(|l| {
+            let clipped: String = l.chars().take(200).collect();
+            clipped
+        })
+        .collect();
+    let more = usize::from(end - start > 6);
+    Some(format!(
+        "The closest matching region is line{} {}–{} of {}:\n{}{}",
+        if window == 1 { "" } else { "s" },
+        start + 1,
+        end,
+        content_lines.len(),
+        shown.join("\n"),
+        if more == 1 { "\n…" } else { "" }
+    ))
+}
+
+/// Sorted character-bigram hashes of a line, for the dice similarity below.
+fn line_bigrams(line: &str) -> Vec<u64> {
+    let mut out: Vec<u64> = line
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c as u64)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|pair| pair[0] * 0x1_0000_0000 + pair[1])
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// Sørensen–Dice over two sorted bigram lists: shared bigrams over mean
+/// length. Single-char lines have no bigrams; an exact equal pair scores 1,
+/// disjoint pairs 0.
+fn dice(a: &[u64], b: &[u64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::from(a.len() == b.len());
+    }
+    let mut shared = 0usize;
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    (2.0 * shared as f64 / (a.len() + b.len()) as f64).min(1.0)
 }
 
 /// Normalize text for fuzzy matching, strip
@@ -481,8 +630,13 @@ fn preserve_unchanged_lines(
     Ok(out)
 }
 
-fn not_found_error(path: &Path, edit_index: usize, total_edits: usize) -> String {
-    if total_edits == 1 {
+fn not_found_error(
+    path: &Path,
+    edit_index: usize,
+    total_edits: usize,
+    hint: Option<&str>,
+) -> String {
+    let mut out = if total_edits == 1 {
         format!(
             "Could not find the exact text in {}. The old text must match exactly including all \
              whitespace and newlines.",
@@ -494,7 +648,12 @@ fn not_found_error(path: &Path, edit_index: usize, total_edits: usize) -> String
              all whitespace and newlines.",
             path.display()
         )
+    };
+    if let Some(hint) = hint {
+        out.push_str("\n\n");
+        out.push_str(hint);
     }
+    out
 }
 
 fn duplicate_error(
@@ -502,18 +661,33 @@ fn duplicate_error(
     edit_index: usize,
     total_edits: usize,
     occurrences: usize,
+    lines: &[usize],
 ) -> String {
+    let where_at = if lines.is_empty() {
+        String::new()
+    } else {
+        let numbered: Vec<String> = lines.iter().take(12).map(|l| l.to_string()).collect();
+        let more = usize::from(lines.len() > 12);
+        format!(
+            " (at line{} {}{})",
+            if lines.len() == 1 { "" } else { "s" },
+            numbered.join(", "),
+            if more == 1 { "…" } else { "" }
+        )
+    };
     if total_edits == 1 {
         format!(
-            "Found {occurrences} occurrences of the text in {}. The text must be unique. Please \
+            "Found {occurrences} occurrences of the text in {}{}. The text must be unique. Please \
              provide more context to make it unique.",
-            path.display()
+            path.display(),
+            where_at
         )
     } else {
         format!(
-            "Found {occurrences} occurrences of edits[{edit_index}] in {}. Each oldText must be \
+            "Found {occurrences} occurrences of edits[{edit_index}] in {}{}. Each oldText must be \
              unique. Please provide more context to make it unique.",
-            path.display()
+            path.display(),
+            where_at
         )
     }
 }
