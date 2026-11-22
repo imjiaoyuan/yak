@@ -320,7 +320,7 @@ fn repl_help(session: &Session) -> String {
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
     h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /reload /exit · !cmd runs shell · /help lists all");
-    h.push_str(&info_rows(session, "    "));
+    h.push_str(&info_rows(session, "    ", true));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", model_label(session)),
         None => model_label(session),
@@ -330,13 +330,17 @@ fn repl_help(session: &Session) -> String {
     h
 }
 
-/// How many names a banner row lists before it says `+N more`: the rows
-/// stay one line wide on a normal terminal.
-const NAME_CAP: usize = 6;
+/// Names a compact banner row lists inline before it collapses to a count
+/// (failures stay named at any size): a small install keeps its names, a
+/// large one reads as a number, and the full lists live one ctrl+o away.
+const INLINE_CAP: usize = 4;
 
 /// The context/session rows shared by the banner and the ctrl+o page.
-/// `pad` widens the label to match the surrounding layout.
-fn info_rows(session: &Session, pad: &str) -> String {
+/// `full` lists every plugin and skill name — the ctrl+o page, where width
+/// is free. The compact banner form counts the surfaces instead and names
+/// only what failed to load, so a broken extension is visible at a glance
+/// without two long name rows. `pad` widens labels to the layout column.
+fn info_rows(session: &Session, pad: &str, full: bool) -> String {
     let mut rows = String::new();
     // project instructions directly in the working directory, file name only
     let context = ["CLAUDE.md", "AGENTS.md"]
@@ -361,8 +365,21 @@ fn info_rows(session: &Session, pad: &str) -> String {
         .into_iter()
         .map(|s| s.name.clone())
         .collect();
-    rows.push_str(&name_row("plugins:", pad, &plugins));
-    rows.push_str(&name_row("skills:", pad, &skills));
+    if full {
+        rows.push_str(&full_row("plugins:", pad, &plugins));
+        rows.push_str(&full_row("skills:", pad, &skills));
+    } else {
+        let mut halves = Vec::new();
+        if !plugins.is_empty() {
+            halves.push(format!("plugins: {}", compact_surface(&plugins)));
+        }
+        if !skills.is_empty() {
+            halves.push(format!("skills: {}", compact_surface(&skills)));
+        }
+        if !halves.is_empty() {
+            rows.push_str(&format!("{}\n", halves.join(" · ")));
+        }
+    }
     // sticky persistence failure: the run continues in memory only, and a
     // healthy-looking banner would hide lost work until /resume
     if let Some(e) = &session.persist_error {
@@ -380,22 +397,27 @@ fn model_label(session: &Session) -> String {
     }
 }
 
-/// One `names` row, or nothing at all when the list is empty (a bare banner
-/// stays bare for someone who mounts neither).
-fn name_row(label: &str, pad: &str, names: &[String]) -> String {
+/// Every name, no cap: the ctrl+o page's row, where wrapping is free.
+fn full_row(label: &str, pad: &str, names: &[String]) -> String {
     if names.is_empty() {
         return String::new();
     }
-    let mut list = names
-        .iter()
-        .take(NAME_CAP)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    if names.len() > NAME_CAP {
-        list.push_str(&format!(" +{} more", names.len() - NAME_CAP));
+    format!("{label}{pad}{}\n", names.join(", "))
+}
+
+/// One banner half-row's content: the names while the list is small, else
+/// a count that still names what failed to load (the `(failed)` marker
+/// rides `plugin_names`), never hiding a broken extension behind a number.
+fn compact_surface(names: &[String]) -> String {
+    if names.len() <= INLINE_CAP {
+        return names.join(", ");
     }
-    format!("{label}{pad}{list}\n")
+    let failed: Vec<&String> = names.iter().filter(|n| n.contains("(failed)")).collect();
+    let mut out = names.len().to_string();
+    for f in failed {
+        out.push_str(&format!(" · {f}"));
+    }
+    out
 }
 
 const SLASH_COMMANDS: &[&str] = &[
@@ -618,7 +640,7 @@ fn print_banner(session: &Session) {
         m = model_label(session),
         t = thinking,
     );
-    eprint!("{}{}{}", p.dim, info_rows(session, " "), p.reset);
+    eprint!("{}{}{}", p.dim, info_rows(session, " ", false), p.reset);
 }
 
 /// Replay the stored conversation through the same static chrome as live turns.
@@ -1199,23 +1221,27 @@ mod tests {
     }
 
     #[test]
-    fn name_row_lists_the_plugin_surface_and_caps_it() {
-        // neither surface mounted: no row at all
-        assert_eq!(name_row("skills:", " ", &[]), "");
-        // the labels stay 7 cells wide, so the banner is one column
+    fn banner_rows_collapse_to_counts_and_full_rows_list_everything() {
+        // the compact surface: small installs keep names, large ones read
+        // as a count with failures named, never a number hiding a break
         assert_eq!(
-            name_row("skills:", " ", &["demo".into(), "probe".into()]),
-            "skills: demo, probe\n"
+            compact_surface(&["demo".into(), "probe".into()]),
+            "demo, probe"
         );
+        let many: Vec<String> = (0..7).map(|i| format!("s{i}")).collect();
+        assert_eq!(compact_surface(&many), "7");
+        let mut broken = many.clone();
+        broken.push("indexer (failed)".into());
+        assert_eq!(compact_surface(&broken), "8 · indexer (failed)");
+        // the ctrl+o page's row: every name, no cap
+        assert_eq!(full_row("skills:", " ", &[]), "");
         assert_eq!(
-            name_row("plugins:", "    ", &[("tool (failed)").into()]),
+            full_row("plugins:", "    ", &[("tool (failed)").into()]),
             "plugins:    tool (failed)\n"
         );
-        // more than the cap: the extra count, never a second line
-        let many: Vec<String> = (0..NAME_CAP + 3).map(|i| format!("s{i}")).collect();
         assert_eq!(
-            name_row("skills:", " ", &many),
-            "skills: s0, s1, s2, s3, s4, s5 +3 more\n"
+            full_row("skills:", " ", &many),
+            "skills: s0, s1, s2, s3, s4, s5, s6\n"
         );
     }
 
