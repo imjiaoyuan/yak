@@ -261,6 +261,24 @@ pub(crate) fn split_glued_reasoning(previous: &str, delta: &str) -> bool {
         .is_some_and(|last| !last.is_whitespace())
 }
 
+/// The openai-compat usage object as a [`Usage`]: `prompt_tokens`/`
+/// completion_tokens` with the cache split. Reads arrive in three shapes
+/// (DeepSeek `prompt_cache_hit_tokens`, OpenAI
+/// `prompt_tokens_details.cached_tokens`, Kimi top-level `cached_tokens`);
+/// writes ride `prompt_tokens_details.cache_write_tokens` on
+/// OpenRouter-compatible gateways (OpenAI never sends it). `None` when the
+/// object carries no complete usage — a delta chunk.
+pub(crate) fn wire_usage(u: &Value) -> Option<Usage> {
+    Some(Usage {
+        input: u["prompt_tokens"].as_u64()?,
+        output: u["completion_tokens"].as_u64()?,
+        cached: super::cache_hit_tokens(u),
+        cached_write: u["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+    })
+}
+
 /// Feed one streaming data-chunk (already parsed) through the request state.
 pub(crate) fn feed_chunk(
     chunk: &Value,
@@ -268,18 +286,19 @@ pub(crate) fn feed_chunk(
     stop: &mut StopReason,
     on_event: &mut dyn FnMut(Event),
 ) {
-    if let (Some(p), Some(c)) = (
-        chunk["usage"]["prompt_tokens"].as_u64(),
-        chunk["usage"]["completion_tokens"].as_u64(),
-    ) {
-        *usage = Some(Usage {
-            input: p,
-            output: c,
-            cached: super::cache_hit_tokens(&chunk["usage"]),
-            cached_write: 0,
-        });
+    // usage rides chunk.usage (OpenAI, DeepSeek) or, on some gateways
+    // (Moonshot), the choice itself; the latest complete usage wins either
+    // way, so a gateway repeating it chunk after chunk stays cumulative
+    let choice = chunk["choices"].get(0);
+    let usage_object = if chunk["usage"].is_object() {
+        Some(&chunk["usage"])
+    } else {
+        choice.map(|c| &c["usage"]).filter(|u| u.is_object())
+    };
+    if let Some(u) = usage_object.and_then(wire_usage) {
+        *usage = Some(u);
     }
-    let Some(choice) = chunk["choices"].get(0) else {
+    let Some(choice) = choice else {
         return;
     };
     if let Some(reason) = choice["finish_reason"].as_str() {
@@ -320,18 +339,7 @@ pub(crate) fn feed_chunk(
 
 /// Emit events for a complete (non-streaming) response. Returns usage.
 pub(crate) fn feed_complete(value: &Value, on_event: &mut dyn FnMut(Event)) -> Option<Usage> {
-    let usage = match (
-        value["usage"]["prompt_tokens"].as_u64(),
-        value["usage"]["completion_tokens"].as_u64(),
-    ) {
-        (Some(p), Some(c)) => Some(Usage {
-            input: p,
-            output: c,
-            cached: super::cache_hit_tokens(&value["usage"]),
-            cached_write: 0,
-        }),
-        _ => None,
-    };
+    let usage = wire_usage(&value["usage"]);
     let message = value["choices"].get(0).cloned().unwrap_or(Value::Null);
     if let Some(text) = message["message"]["content"].as_str() {
         on_event(Event::Delta(text.to_string()));
@@ -1104,6 +1112,71 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(usage.unwrap().cached, 60);
+    }
+
+    #[test]
+    fn cache_write_tokens_surface_from_openrouter_gateways() {
+        // prompt_tokens_details.cache_write_tokens is the OpenRouter-compatible
+        // write count; it stays apart from the read count, both subsets of input
+        let mut usage = None;
+        feed_chunk(
+            &json!({"usage": {"prompt_tokens": 200, "completion_tokens": 10,
+                              "prompt_tokens_details": {"cached_tokens": 40,
+                                                        "cache_write_tokens": 60}}}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            usage.unwrap(),
+            Usage {
+                input: 200,
+                output: 10,
+                cached: 40,
+                cached_write: 60
+            }
+        );
+        // the non-streaming path reads the same field
+        let usage = feed_complete(
+            &json!({"choices": [{"message": {"content": "hi"}}],
+                    "usage": {"prompt_tokens": 200, "completion_tokens": 10,
+                              "prompt_tokens_details": {"cached_tokens": 40,
+                                                        "cache_write_tokens": 60}}}),
+            &mut |_| {},
+        );
+        assert_eq!(usage.map(|u| (u.cached, u.cached_write)), Some((40, 60)));
+    }
+
+    #[test]
+    fn usage_on_the_choice_falls_back_when_chunk_usage_is_absent() {
+        // some gateways (Moonshot) attach usage to choices[0] instead of the
+        // chunk; the round must not lose its counts to the placement
+        let mut usage = None;
+        feed_chunk(
+            &json!({"choices": [{"index": 0, "delta": {},
+                                 "usage": {"prompt_tokens": 80, "completion_tokens": 20,
+                                           "prompt_cache_hit_tokens": 70}}]}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(
+            usage.unwrap(),
+            Usage {
+                input: 80,
+                output: 20,
+                cached: 70,
+                cached_write: 0
+            }
+        );
+        // a chunk carrying no usage at all leaves the previous counts alone
+        feed_chunk(
+            &json!({"choices": [{"index": 0, "delta": {"content": "x"}}]}),
+            &mut usage,
+            &mut StopReason::default(),
+            &mut |_| {},
+        );
+        assert_eq!(usage.unwrap().input, 80);
     }
 
     #[test]

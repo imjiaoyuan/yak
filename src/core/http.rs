@@ -64,8 +64,9 @@ pub struct Usage {
     pub cached: u64,
     /// input tokens written into the provider's prompt cache, when the two
     /// halves are reported separately (Anthropic
-    /// `cache_creation_input_tokens`). Also a subset of `input`; kept apart
-    /// from `cached` because it is what a later event carrying only
+    /// `cache_creation_input_tokens`, OpenRouter-compatible
+    /// `prompt_tokens_details.cache_write_tokens`). Also a subset of `input`;
+    /// kept apart from `cached` because it is what a later event carrying only
     /// `input_tokens` has to fold back in, and because a write is not a read.
     pub cached_write: u64,
 }

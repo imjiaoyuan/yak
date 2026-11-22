@@ -140,8 +140,9 @@ pub fn humanize_tokens(n: u64) -> String {
 /// `cache 96% read · 3% write` — what a usage total's prompt tokens cost. Every
 /// one of them counts toward `input`, cached reads included, so the absolute
 /// figure is never the bill; these shares are. The write share rides along only
-/// when the wire reported writes (Anthropic bills them, the OpenAI-compatible
-/// ones cache server-side and report none), and the rest of the input is the
+/// when the wire reported writes (Anthropic bills them; on the
+/// OpenAI-compatible wires usually nobody reports a count, OpenRouter-style
+/// gateways being the exception), and the rest of the input is the
 /// uncached share, billed at full price. None when nothing cached at all.
 pub fn cache_label(u: Usage) -> Option<String> {
     (u.cached > 0 || u.cached_write > 0).then(|| {
