@@ -57,6 +57,14 @@ Honest limits, by design:
     MCP-side name). A tool the filter dropped errors at call time like any
     unknown tool; schemas cost tokens every round, so the cut belongs at
     the mount.
+  - `defer: true` in an entry replaces the server's mounted tools with two:
+    `<server>__search` (ranked name+description match over the cached
+    tools/list) and `<server>__call` (forwards to the named MCP tool), so
+    a server shipping forty tools costs two schemas instead of forty. The
+    call validates against the filtered listing and forwards exactly like
+    a mounted tool; the search runs off the warm cache and starts no
+    child. The tool list still refreshes on drift whenever a call does
+    start the server.
   - `tool_timeout` is not per tool: the bridge asks for none, so the
     config `extensions.tool_timeout` (120s default) bounds every call.
 
@@ -514,17 +522,90 @@ def tool_filter(spec, name):
     return admit if (only or except_) else (lambda _: True)
 
 
+def search_rank(tool, query):
+    """Score one listed tool against the query tokens: name hits outweigh
+    description hits, an exact name match tops everything. Zero means the
+    tool does not match at all."""
+    tokens = [t for t in re.split(r"[^\w-]+", query.lower()) if t]
+    if not tokens:
+        return 1
+    tname = (tool.get("name") or "").lower()
+    tdesc = (tool.get("description") or "").lower()
+    score = 0
+    for t in tokens:
+        if t == tname:
+            score += 8
+        elif t in tname:
+            score += 4
+        elif t in tdesc:
+            score += 1
+    return score
+
+
+def deferred_tools(server):
+    """The two schemas a deferred server mounts instead of its real list."""
+    return [
+        {
+            "name": f"{server}__search",
+            "description": (
+                f"search the {server} MCP server's tools by name or purpose; "
+                "run this first, then call what it lists"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "words to match against tool names and descriptions; empty lists everything",
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "max results (default 8, max 25)",
+                    },
+                },
+            },
+            "tier": "exec",
+            "server": server,
+            "deferred": "search",
+        },
+        {
+            "name": f"{server}__call",
+            "description": (
+                f"run one {server} MCP tool by name — pass a name from "
+                f"{server}__search results and its arguments"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "the MCP-side tool name"},
+                    "arguments": {
+                        "type": "object",
+                        "description": "the tool's input schema fields",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["name"],
+            },
+            "tier": "exec",
+            "server": server,
+            "deferred": "call",
+        },
+    ]
+
+
 def main():
     cfg = load_config()
     cache = load_cache()
     servers = {}
     tools = []
     dirty = False
+    cfg_admits = {}
     for name, spec in cfg.items():
         if not isinstance(spec, dict):
             log(f"server '{name}': entry must be an object, skipped")
             continue
         admit = tool_filter(spec, name)
+        cfg_admits[name] = admit
         srv = Server(name, spec)
         key = spec_key(spec)
         entry = cache.get(name)
@@ -540,6 +621,10 @@ def main():
                 continue
             cache[name] = {"key": key, "tools": listing}
             dirty = True
+        if spec.get("defer") is True:
+            tools.extend(deferred_tools(name))
+            servers[name] = srv
+            continue
         for t in listing or []:
             tname = t.get("name")
             if not isinstance(tname, str) or not tname:
@@ -565,6 +650,17 @@ def main():
         save_cache(cache)
 
     by_tool = {t["name"]: t for t in tools}
+
+    def listed_tools(sname):
+        """A deferred server's filtered listing: the live refresh when the
+        server happens to be up, else the warm cache. Empty when neither
+        has the server at all."""
+        admit = cfg_admits.get(sname, lambda _: True)
+        srv = servers.get(sname)
+        live = srv.listing if srv is not None else None
+        entry = cache.get(sname)
+        cached = entry.get("tools") if isinstance(entry, dict) else None
+        return [t for t in (live or cached or []) if admit(t.get("name"))]
 
     def reply(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
@@ -606,13 +702,60 @@ def main():
             if not spec:
                 reply({"id": mid, "error": f"unknown tool {msg.get('name')}"})
                 continue
-            srv = servers.get(spec["server"])
+            sname = spec["server"]
+            deferred = spec.get("deferred")
+            if deferred == "search":
+                args = msg.get("args") or {}
+                query = args.get("query") if isinstance(args.get("query"), str) else ""
+                limit = args.get("limit") if isinstance(args.get("limit"), (int, float)) else 8
+                limit = max(1, min(int(limit), 25))
+                listing = listed_tools(sname)
+                if query:
+                    ranked = sorted(
+                        (t for t in listing if search_rank(t, query) > 0),
+                        key=lambda t: search_rank(t, query),
+                        reverse=True,
+                    )
+                else:
+                    ranked = listing
+                shown = ranked[:limit]
+                if not shown:
+                    reply({"id": mid, "result": (
+                        f"no {sname} tool matches {query!r} — search a different word, "
+                        "or an empty query lists everything" if query else
+                        f"the {sname} server exposes no tools")})
+                    continue
+                lines = [f"{t.get('name')} — {(t.get('description') or '').splitlines()[0][:160]}"
+                         for t in shown]
+                more = len(ranked) - len(shown)
+                reply({"id": mid, "result": "\n".join(lines) + (
+                    f"\n…+{more} more (raise limit or narrow the query)" if more > 0 else "")})
+                continue
+            if deferred == "call":
+                args = msg.get("args") or {}
+                tname = args.get("name")
+                if not isinstance(tname, str) or not tname:
+                    reply({"id": mid, "error": "call needs the tool's name (from search results)"})
+                    continue
+                prefix = f"{sname}__"
+                if tname.startswith(prefix):
+                    tname = tname[len(prefix):]
+                known = {t.get("name") for t in listed_tools(sname)}
+                if tname not in known:
+                    reply({"id": mid, "error": (
+                        f"unknown {sname} tool {tname!r} — run {prefix}search first; "
+                        "the list drifts with the server")})
+                    continue
+                call_args = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+            else:
+                tname, call_args = spec["tool"], msg.get("args") or {}
+            srv = servers.get(sname)
             if not srv:
-                reply({"id": mid, "error": f"server '{spec['server']}' is down"})
+                reply({"id": mid, "error": f"server '{sname}' is down"})
                 continue
             if not srv.ensure():
                 reply({"id": mid,
-                       "error": f"mcp server '{spec['server']}' failed to start"})
+                       "error": f"mcp server '{sname}' failed to start"})
                 continue
             if srv.listing is not None:
                 entry = cache.get(srv.name)
@@ -622,11 +765,11 @@ def main():
                 srv.listing = None
             result = srv.request(
                 "tools/call",
-                {"name": spec["tool"], "arguments": msg.get("args") or {}},
+                {"name": tname, "arguments": call_args},
                 CALL_TIMEOUT)
             if result is None:
                 reply({"id": mid,
-                       "error": f"mcp server '{spec['server']}' did not answer"})
+                       "error": f"mcp server '{sname}' did not answer"})
                 continue
             text, err = text_of(result)
             if err is not None:
