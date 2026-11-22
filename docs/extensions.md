@@ -30,7 +30,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `websearch` | resident | a `/web` command plus `web_search` tool; DeepSeek's Search API (model-facing summaries, query operators like `site:`/`lang:`/`after:` pass through) when the session's model is a deepseek one — key from `DEEPSEEK_API_KEY` or the deepseek provider in config.json — then Brave's Search API when `BRAVE_API_KEY` is set, else a keyless DuckDuckGo→Wikipedia chain |
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 | `workflow.py` | resident | resumable graph orchestration: JSON graphs of agent/tool/router/parallel/human/subgraph nodes, each agent node its own model and tool subset run as a `yak --json` child; append-only event logs under `~/.yak/workflows/`, replay-based resume, `/workflow` commands and a `workflow_run` tool; graphs and their format live in `examples/workflows/` (see its README) |
-| `autolint` | resident | runs the file's formatter after every `write`/`edit` and appends its diagnostics to the tool result the model reads (check-only by default, `AUTO_FIX = True` formats in place) |
+| `stop_guard` | resident | `/goal <text>` records a success condition per directory and `/go` submits it back as a continuation task carrying the previous answer — an explicit continue loop for long objectives |
 
 ## Discovery
 
