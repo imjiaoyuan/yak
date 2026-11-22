@@ -97,6 +97,28 @@ pub(super) fn sidecar_manifest(path: &Path) -> Result<Option<ExtManifest>, Strin
     ExtManifest::parse(&text, &sidecar).map(Some)
 }
 
+/// A file's identity for incremental reload: (mtime secs, byte length) of
+/// the source and of its sidecar (zeros when absent). Equal fingerprints
+/// mean `/reload` keeps the running resident instead of respawning it.
+pub(super) fn file_fingerprint(path: &Path) -> (u64, u64, u64, u64) {
+    fn stat(p: &Path) -> (u64, u64) {
+        match std::fs::metadata(p) {
+            Ok(m) => (
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                m.len(),
+            ),
+            Err(_) => (0, 0),
+        }
+    }
+    let source = stat(path);
+    let sidecar = sidecar_path(path).map(|p| stat(&p)).unwrap_or((0, 0));
+    (source.0, source.1, sidecar.0, sidecar.1)
+}
+
 /// Environment variables every extension sees even under a whitelist: a
 /// child that cannot find `PATH` or learn the terminal shape is broken,
 /// not contained.

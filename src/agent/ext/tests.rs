@@ -1388,3 +1388,83 @@ fn environment_patterns_match_names_with_wildcards() {
     assert!(!env_pattern_matches("AWS_*", "AZURE_TOKEN"));
 }
 
+/// Incremental reload: a resident whose file (and sidecar) did not change
+/// keeps running — the same live `Ext`, not a respawn — while a changed
+/// file is spawned fresh and a removed one is dropped.
+#[cfg(unix)]
+#[test]
+fn reload_keeps_unchanged_residents_and_respawns_changed_ones() {
+    let steady = write_stub_extension("steady", r#"{"tools":[],"commands":[],"events":[]}"#);
+    let changing = write_stub_extension("changing", r#"{"tools":[],"commands":[],"events":[]}"#);
+    let mut host = Extensions {
+        exts: vec![connect_stub(&steady), connect_stub(&changing)],
+        script_tools: Vec::new(),
+    };
+    let steady_before = Arc::clone(host.exts.iter().find(|e| e.name == "steady").unwrap());
+    let found = || {
+        discover_in(
+            &[
+                steady.parent().unwrap().to_path_buf(),
+                changing.parent().unwrap().to_path_buf(),
+            ],
+            &[],
+            120,
+        )
+        .unwrap()
+    };
+
+    // unchanged files: the same Arcs come back, no respawn happened
+    host.reload_found(found());
+    assert_eq!(host.exts.len(), 2);
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &steady_before,
+            host.exts.iter().find(|e| e.name == "steady").unwrap()
+        ),
+        "an unchanged resident keeps running across the reload"
+    );
+
+    // changed file: a fresh Ext replaces the old one
+    std::fs::write(&changing, r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '{"id":%s,"result":{"tools":[]}}\n' "$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+done
+"#)
+    .unwrap();
+    let changed_before = Arc::clone(host.exts.iter().find(|e| e.name == "changing").unwrap());
+    host.reload_found(found());
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            &changed_before,
+            host.exts.iter().find(|e| e.name == "changing").unwrap()
+        ),
+        "a changed file respawns"
+    );
+
+    // a sidecar change respawns too: the fingerprint covers it
+    let sidecar = steady.with_file_name(format!(
+        "{}.yak.json",
+        steady.file_stem().unwrap().to_str().unwrap()
+    ));
+    std::fs::write(&sidecar, r#"{"version": "2.0"}"#).unwrap();
+    let steady_before = Arc::clone(host.exts.iter().find(|e| e.name == "steady").unwrap());
+    host.reload_found(found());
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            &steady_before,
+            host.exts.iter().find(|e| e.name == "steady").unwrap()
+        ),
+        "a sidecar change respawns the resident"
+    );
+    assert_eq!(
+        host.exts
+            .iter()
+            .find(|e| e.name == "steady")
+            .unwrap()
+            .version
+            .as_deref(),
+        Some("2.0"),
+        "the reloaded resident carries the sidecar's version"
+    );
+    let _ = std::fs::remove_dir_all(&sidecar);
+}

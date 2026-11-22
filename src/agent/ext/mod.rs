@@ -184,6 +184,9 @@ pub struct Ext {
     /// the sidecar's environment whitelist; `Some` narrows every spawn of
     /// this extension to the baseline plus the declared variables
     env: Option<Vec<String>>,
+    /// (mtime, len) of the source and its sidecar: `/reload` compares this
+    /// to keep an unchanged resident running instead of respawning it
+    fingerprint: (u64, u64, u64, u64),
     state: Mutex<Result<ExtState, String>>,
     tail: Arc<Mutex<VecDeque<String>>>,
     conn: Mutex<Option<Conn>>,
@@ -784,6 +787,56 @@ impl Extensions {
         }
     }
 
+    /// Incremental reload: residents whose file (and sidecar) still carry
+    /// the same fingerprint keep running untouched — their tool state,
+    /// live progress and child processes survive the reload — while new
+    /// and changed files are spawned fresh and removed ones are dropped
+    /// (their `Conn` sends the shutdown frame on the way out). Script
+    /// tools are stateless per-call spawns, so they swap wholesale. Only
+    /// the discovery error path leaves the host untouched.
+    pub fn reload(&mut self, cwd: &Path) -> Result<(), String> {
+        let found = discover(cwd)?;
+        self.reload_found(found);
+        Ok(())
+    }
+
+    /// The reload itself over an already-discovered set: the seam the
+    /// hermetic test points `discover_in` at, so a test never scans the
+    /// real user homes.
+    pub(crate) fn reload_found(&mut self, found: Discovered) {
+        let mut kept: Vec<Arc<Ext>> = Vec::new();
+        let mut fresh: Vec<&ResidentFile> = Vec::new();
+        for entry in &found.resident {
+            let fp = file_fingerprint(&entry.path);
+            match self
+                .exts
+                .iter()
+                .find(|e| e.path.as_deref() == Some(entry.path.as_path()) && e.fingerprint == fp)
+            {
+                Some(existing) => kept.push(Arc::clone(existing)),
+                None => fresh.push(entry),
+            }
+        }
+        // the handshakes run concurrently, like startup's
+        let spawned: Vec<Arc<Ext>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = fresh
+                .iter()
+                .map(|entry| scope.spawn(|| connect_one(entry)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        failed("extension", "connect thread panicked".to_string())
+                    })
+                })
+                .collect()
+        });
+        kept.extend(spawned);
+        self.exts = kept;
+        self.script_tools = found.script_tools;
+    }
+
     /// Append one `ExtTool` per tool of every ready extension, plus one
     /// `ScriptTool` per manifest-carrying script. Names are flat across the
     /// whole registry (builtins included), so a collision — the obvious
@@ -1103,6 +1156,7 @@ fn failed(name: &str, reason: String) -> Arc<Ext> {
         path: None,
         version: None,
         env: None,
+        fingerprint: (0, 0, 0, 0),
         state: Mutex::new(Err(reason)),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
@@ -1123,6 +1177,7 @@ fn connect_one(entry: &ResidentFile) -> Arc<Ext> {
         path: Some(path.to_path_buf()),
         version: entry.manifest.as_ref().and_then(|m| m.version.clone()),
         env: entry.manifest.as_ref().and_then(|m| m.env.clone()),
+        fingerprint: file_fingerprint(path),
         state: Mutex::new(Err("connecting".to_string())),
         tail: Arc::new(Mutex::new(VecDeque::new())),
         conn: Mutex::new(None),
@@ -1435,7 +1490,7 @@ mod proto;
 mod roots;
 mod script;
 
-use manifest::{Discovered, apply_env_filter};
+use manifest::{Discovered, apply_env_filter, file_fingerprint};
 pub use manifest::{ExecToolSpec, ResidentFile, discover};
 pub use roots::discover_dirs;
 

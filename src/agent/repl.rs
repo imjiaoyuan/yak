@@ -1138,19 +1138,23 @@ fn repl_command(
                 crate::theme::err().reset
             ),
         },
-        "/reload" => match crate::agent::ext::Extensions::connect_async(&session.cwd) {
-            Ok(connecting) => {
-                *settings = crate::agent::settings::load();
-                session.extensions = connecting.join();
-                session.rebuild_tools();
-                eprintln!(
-                    "{}reloaded plugin tools and settings{}",
-                    crate::theme::err().dim,
-                    crate::theme::err().reset
-                );
+        "/reload" => {
+            // incremental: residents whose files did not change keep running
+            // (state, live progress and children survive), only new, changed
+            // and removed plugins are spawned and dropped
+            match session.extensions.reload(&session.cwd) {
+                Ok(()) => {
+                    *settings = crate::agent::settings::load();
+                    session.rebuild_tools();
+                    eprintln!(
+                        "{}reloaded plugin tools and settings{}",
+                        crate::theme::err().dim,
+                        crate::theme::err().reset
+                    );
+                }
+                Err(e) => eprintln!("plugin reload failed: {e}"),
             }
-            Err(e) => eprintln!("plugin reload failed: {e}"),
-        },
+        }
         "/exit" => return true,
         other => {
             let name = other.strip_prefix('/').unwrap_or(other);
