@@ -31,6 +31,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `ssh.py` | resident | remote access over plain `ssh` subprocesses with hardened arguments (BatchMode, no forwarding, host keys pinned in the extension's own known_hosts); `ssh_exec`/`ssh_read`/`ssh_write` and a `/ssh` status command; hosts in `ssh.json` |
 | `workflow.py` | resident | resumable graph orchestration: JSON graphs of agent/tool/router/parallel/human/subgraph nodes, each agent node its own model and tool subset run as a `yak --json` child; append-only event logs under `~/.yak/workflows/`, replay-based resume, `/workflow` commands and a `workflow_run` tool; graphs and their format live in `examples/workflows/` (see its README) |
 | `compact_summary` | resident | a `compact` subscriber that distills the dropped tool results into a `preserved` digest block (tools ran, first line of each result) appended to the built-in summary |
+| `todo_board` | resident | `todo_read`/`todo_write` tools keep a persisted {step, status} board per working directory (at most one `in_progress`), rendered live as a lane row while a write runs; `/todos` shows what was left open |
 
 ## Discovery
 
