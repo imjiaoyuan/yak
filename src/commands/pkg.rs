@@ -5,6 +5,7 @@
 //! `install` refreshes (pinned `@ref` clones are skipped by the refresh).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::core::args::{OptSpec, ParsedArgs, render_help};
 use crate::flag_spec;
@@ -504,6 +505,41 @@ pub fn extension_dirs(local: bool) -> Result<Vec<PathBuf>, String> {
     }
     dirs.sort();
     Ok(dirs)
+}
+
+/// A package may ship `bin/<name>`: `yak <name> args…` execs it with the
+/// arguments passed through and the exit code out. The lookup walks the
+/// project and user pkg roots; nothing here interprets the arguments —
+/// the package's own script owns them all.
+pub fn cli_path(name: &str) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(project) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::core::paths::nearest_dir_up(&cwd, ".yak/pkg", true))
+    {
+        roots.push(project);
+    }
+    roots.push(crate::core::config::user_dir().join("pkg"));
+    roots
+        .iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .find_map(|entry| {
+            let bin = entry.path().join("bin").join(name);
+            bin.is_file().then_some(bin)
+        })
+}
+
+pub fn exec_cli(bin: &Path, args: &[String]) -> i32 {
+    match Command::new(bin).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("cannot run {}: {e}", bin.display());
+            1
+        }
+    }
 }
 
 #[cfg(test)]

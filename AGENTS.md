@@ -103,7 +103,7 @@ Module map:
 | `term/` | line editor, picker, render/TaskView, ticker |
 | `agent/` | the loop, tools, approval/blacklist, session, compact, ext host, names, settings, system_prompt |
 | `read/` | streaming text-file reading behind the read tool |
-| `commands/` | CLI entries: agent, pkg, export, threads, rpc (plus library-only login/models and the shared session startup) |
+| `commands/` | CLI entries: agent, pkg, export, threads, rpc, im (plus library-only login/models and the shared session startup) |
 
 Deep detail on any of these (request flow, loop discipline, tool/approval rules, the extension host and the rendering contract) is in `docs/architecture.md`.
 
@@ -121,7 +121,7 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
   asks to note something durable; injected into the agent system prompt by the
   `examples/extensions/memory` extension).
 - `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt-template directories (skills and prompt templates are mounted by the `examples/extensions/skills` and `examples/extensions/commands` plugins — the core only knows the extension protocol).
-- `pkg/`: packages installed with `yak install`.
+- `pkg/`: packages installed with `yak install`; a package may ship `bin/<name>`, which registers `yak <name> args…` as a pass-through external command (dispatch execs it from any directory, exit code through — the im package registers `yak im`).
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers) and the rustc compile cache for `.rs` script tools (`tmp/rs-cache/`), swept of anything older than a week at every agent start (`core/tmp.rs`).
 
 ## Workflow

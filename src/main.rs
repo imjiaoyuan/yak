@@ -78,8 +78,19 @@ fn dispatch(argv: &[String]) -> i32 {
         Some("install") | Some("remove") | Some("uninstall") | Some("list") => {
             commands::pkg::run(argv)
         }
-        // anything else (flags or plain text) is the agent: bare `yak` on a
-        // terminal is the interactive REPL, text and pipes are one-shot tasks
+        // an installed package may claim the word: `yak <name> args…` execs
+        // the package's own `bin/<name>` (the im package registers `yak im`)
+        Some(sub) if !sub.starts_with('-') => {
+            match commands::pkg::cli_path(sub) {
+                Some(bin) => commands::pkg::exec_cli(&bin, &argv[1..]),
+                // anything else (flags or plain text) is the agent: bare
+                // `yak` on a terminal is the interactive REPL, text and
+                // pipes are one-shot tasks
+                None => commands::agent::run(argv),
+            }
+        }
+        // bare `yak` on a pipe: no prompt and no session flag — same as the
+        // interactive route, which the agent path itself decides
         _ => commands::agent::run(argv),
     }
 }
