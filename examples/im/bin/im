@@ -1,0 +1,4 @@
+#!/bin/sh
+# the im package's CLI: `yak im login|start|stop|status|log`
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)
+exec python3 "$SCRIPT_DIR/../im_bridge.py" "$@"
