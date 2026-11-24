@@ -20,10 +20,6 @@ State a fact once, in its home. A `docs/` fact restated here is one that will dr
 
 
 
-- `the behavioral spec`: agent loop, tools, streaming REPL, extension/packages shape.
-- `the approval reference`: the approval model.
-- `~/work/references/yak/`: historical: only the JSONL thread-store shape and ULIDs survive from it.
-
 ## Commands
 
 ```bash
@@ -60,7 +56,7 @@ Remote is `github.com/imjiaoyuan/yak` (branch `main`); tagged `v*` cuts releases
 
 ## Hard constraint: minimal dependencies
 
-Three crates total: `ureq` (sync HTTP+TLS), `serde`/`serde_json` (with the `preserve_order` feature (insertion order matters for JSON output parity), and `unicode-width` (real terminal cell widths; ) it hard-wraps the chrome: `$` action lines, tool summaries and the logs transcript replay, so those rows match the terminal; the live answer stream hard-wraps too so wrapped rows keep the left margin). No async runtime; the CLI is synchronous throughout: keep new code sync.
+Three crates total: `ureq` (sync HTTP+TLS), `serde`/`serde_json` (with the `preserve_order` feature (insertion order matters for JSON output parity), and `unicode-width` (real terminal cell widths; it hard-wraps the chrome: `$` action lines, tool summaries and the logs transcript replay, so those rows match the terminal; the live answer stream hard-wraps too so wrapped rows keep the left margin). No async runtime; the CLI is synchronous throughout: keep new code sync.
 
 Everything else is handwritten in-tree:
 
@@ -84,7 +80,7 @@ Extend these instead of adding crates. When a new crate is genuinely justified (
 
 ## Constraints a change must not break
 
-- **Sync throughout.** No async runtime, no `block_on`; blocking work goes on a worker thread that polls `platform::interrupt` (the pattern `core/http.rs` uses), never on a second executor.
+- **Sync throughout.** No async runtime, no `block_on`; blocking work goes on a worker thread that polls `platform::interrupt` (the pattern `core/http.rs` uses), never on a second executor. Take every mutex through `core::sync::lock`: a panic while holding a guard must not cascade, so locks are recovered, never poisoned.
 - **Never hand-write an escape sequence outside `theme.rs`.** Color, cursor control and the color-off paths all live there; a literal `\x1b[` elsewhere is a bug even when it looks right.
 - **The store is append-only and lossless.** A thread file is the transcript: turns are appended, and anything compaction removes is archived (see `docs/architecture.md`): nothing is silently dropped, and a corrupt file fails loudly rather than being repaired by guesswork.
 - **Fail loudly.** Prefer an error over a default-on-failure: an unresolvable model, a corrupt file or a refused action surfaces; fallbacks that hide a real problem are the thing to avoid.
@@ -99,11 +95,11 @@ Module map:
 | `main.rs` | entry: console init, the broken-pipe hook, `dispatch(argv)` |
 | `providers/` | wire adapters (openai-compat, anthropic, responses, gemini, codex + the ChatGPT OAuth login), the unified `Msg`/`ToolDef`/`ToolCall` model, the provider catalog |
 | `core/http.rs` | sync POST + SSE, the retry/error taxonomy |
-| `core/` | config, threads store, attachments, text, render_md, paths, fsx, tmp, export |
+| `core/` | config, threads store, attachments (the clipboard paste's BMP→PNG re-encode is `bmp.rs`/`pngenc.rs`), text, render_md, paths, fsx, tmp, export |
 | `term/` | line editor, picker, render/TaskView, ticker |
-| `agent/` | the loop, tools, approval/blacklist, session, compact, ext host, names, settings, system_prompt |
+| `agent/` | the loop, repl, tools, approval/blacklist, session, compact, ext host, names, settings, system_prompt |
 | `read/` | streaming text-file reading behind the read tool |
-| `commands/` | CLI entries: agent, pkg, export, threads, rpc, im (plus library-only login/models and the shared session startup) |
+| `commands/` | CLI entries: agent, pkg, export, threads, rpc (plus library-only login/models and the shared session startup); any other non-flag first word falls through to an installed package's `bin/<name>` before landing on the agent |
 
 Deep detail on any of these (request flow, loop discipline, tool/approval rules, the extension host and the rendering contract) is in `docs/architecture.md`.
 
@@ -117,6 +113,7 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
 - `history.jsonl`: the REPL input history: one `{"ts", "text"}` object per line, single-write appends (concurrent processes never interleave), 0600, adjacent submissions deduped at record time, rewritten down to a 1600-entry soft cap once past 2000; the in-memory window is the last 200.
 - `blacklist`: the command blacklist file (plus a project `.yak/blacklist`).
 - `threads/thread-names.json`: the session-title table (`/name`), thread id → display name, shown by `yak threads` and the `/resume` picker (`agent/names.rs`; the transcript files are untouched).
+- `model-pins.json`: the per-path model pin table (`{"<dir>": "provider/model"}`, absolute paths as keys, longest cwd prefix wins), written only by the `model_pin` extension — the core reads it during model resolution (the chain is `docs/architecture.md`'s) and drops a pin whose model no longer resolves.
 - `YAK.md`: global user memory, hand-edited or appended by the `memory` tool when the user
   asks to note something durable; injected into the agent system prompt by the
   `examples/extensions/memory` extension).
