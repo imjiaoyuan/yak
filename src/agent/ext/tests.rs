@@ -176,6 +176,179 @@ fn discovery_skips_missing_homes_but_reports_unreadable_entries() {
 }
 
 #[test]
+fn directory_extensions_use_directory_names_and_entry_sidecars() {
+    let dir = crate::core::testutil::scratch_dir("ext-directory");
+    let plugin = dir.join("helper.v2");
+    std::fs::create_dir(&plugin).unwrap();
+    std::fs::write(plugin.join("main.py"), "import sys\n").unwrap();
+    std::fs::write(plugin.join("support.py"), "not an entry\n").unwrap();
+    std::fs::write(
+        plugin.join("main.yak.json"),
+        r#"{"version":"2.0","env":[]}"#,
+    )
+    .unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &["main".into()], 120).unwrap();
+    assert_eq!(found.resident.len(), 1);
+    let entry = &found.resident[0];
+    assert_eq!(entry.name, "helper.v2");
+    assert_eq!(entry.path, plugin.join("main.py"));
+    assert!(entry.python);
+    let manifest = entry.manifest.as_ref().unwrap();
+    assert_eq!(manifest.version.as_deref(), Some("2.0"));
+    assert_eq!(manifest.env, Some(vec![]));
+    let before = file_fingerprint(&entry.path);
+    std::fs::write(
+        plugin.join("main.yak.json"),
+        r#"{"version":"2.0.1","env":[]}"#,
+    )
+    .unwrap();
+    assert_ne!(before, file_fingerprint(&entry.path));
+    assert!(
+        discover_in(std::slice::from_ref(&dir), &["helper.v2".into()], 120)
+            .unwrap()
+            .resident
+            .is_empty()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn directory_extensions_share_shadowing_with_single_file_extensions() {
+    let project = crate::core::testutil::scratch_dir("ext-directory-project");
+    let user = crate::core::testutil::scratch_dir("ext-directory-user");
+    std::fs::create_dir(project.join("helper")).unwrap();
+    std::fs::write(project.join("helper/main.py"), "import sys\n").unwrap();
+    std::fs::write(user.join("helper.py"), "# --- yak-tool: lower\n").unwrap();
+    let found = discover_in(&[project.clone(), user.clone()], &[], 120).unwrap();
+    assert_eq!(found.resident.len(), 1);
+    assert!(found.script_tools.is_empty());
+    std::fs::remove_file(project.join("helper/main.py")).unwrap();
+    let found = discover_in(&[project.clone(), user.clone()], &[], 120).unwrap();
+    assert!(found.resident.is_empty());
+    assert_eq!(found.script_tools[0].name, "lower");
+    std::fs::write(project.join("helper.py"), "# --- yak-tool: upper\n").unwrap();
+    std::fs::create_dir(user.join("helper")).unwrap();
+    std::fs::write(user.join("helper/main.py"), "import sys\n").unwrap();
+    let found = discover_in(&[project.clone(), user.clone()], &[], 120).unwrap();
+    assert!(found.resident.is_empty());
+    assert_eq!(found.script_tools.len(), 1);
+    assert_eq!(found.script_tools[0].name, "upper");
+    std::fs::remove_dir_all(project).unwrap();
+    std::fs::remove_dir_all(user).unwrap();
+}
+
+#[test]
+fn directory_extensions_win_over_same_home_single_files() {
+    let dir = crate::core::testutil::scratch_dir("ext-directory-same-home");
+    std::fs::write(dir.join("helper.py"), "# --- yak-tool: legacy\n").unwrap();
+    std::fs::create_dir(dir.join("helper")).unwrap();
+    std::fs::write(dir.join("helper/main.py"), "import sys\n").unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    assert_eq!(found.resident.len(), 1);
+    assert_eq!(found.resident[0].name, "helper");
+    assert!(found.script_tools.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn directory_script_tools_keep_declared_names_and_disable_by_either_name() {
+    let dir = crate::core::testutil::scratch_dir("ext-directory-tool");
+    std::fs::create_dir(dir.join("helper")).unwrap();
+    std::fs::write(dir.join("helper/main.py"), "# --- yak-tool: search\n").unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    assert_eq!(found.script_tools.len(), 1);
+    assert_eq!(found.script_tools[0].name, "search");
+    assert_eq!(
+        found.script_tools[0].interpreter.as_deref(),
+        Some(if cfg!(windows) { "python" } else { "python3" })
+    );
+    for name in ["helper", "search"] {
+        let found = discover_in(std::slice::from_ref(&dir), &[name.into()], 120).unwrap();
+        assert!(found.script_tools.is_empty());
+        assert!(found.resident.is_empty());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn malformed_directory_manifests_fail_discovery() {
+    let dir = crate::core::testutil::scratch_dir("ext-directory-manifest");
+    std::fs::create_dir(dir.join("helper")).unwrap();
+    std::fs::write(dir.join("helper/main.py"), "import sys\n").unwrap();
+    std::fs::write(dir.join("helper/main.yak.json"), r#"{"env":false}"#).unwrap();
+    let error = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap_err();
+    assert!(error.contains("main.yak.json"), "{error}");
+    assert!(error.contains("env"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_executable_main_is_discovered_but_python_takes_precedence() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::core::testutil::scratch_dir("ext-directory-executable");
+    std::fs::create_dir(dir.join("helper")).unwrap();
+    let main = dir.join("helper/main");
+    std::fs::write(&main, "#!/bin/sh\n:").unwrap();
+    std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        discover_in(std::slice::from_ref(&dir), &[], 120)
+            .unwrap()
+            .resident
+            .is_empty()
+    );
+    std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    assert_eq!(found.resident[0].path, main);
+    assert_eq!(found.resident[0].name, "helper");
+    assert!(!found.resident[0].python);
+    std::fs::write(dir.join("helper/main.py"), "import sys\n").unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    assert_eq!(found.resident[0].path, dir.join("helper/main.py"));
+    assert!(found.resident[0].python);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_python_residents_connect_reload_and_respawn_with_stable_identity() {
+    let dir = crate::core::testutil::scratch_dir("ext-directory-python");
+    std::fs::create_dir(dir.join("helper")).unwrap();
+    std::fs::write(dir.join("helper/main.py"), r#"import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"id": request["id"], "result": {"tools": [], "system": "directory resident"}}))
+"#).unwrap();
+    let found = discover_in(std::slice::from_ref(&dir), &[], 120).unwrap();
+    let ext = connect_one(&found.resident[0], test_host_context());
+    assert_eq!(ext.name, "helper");
+    assert!(
+        ext.is_alive(),
+        "{:?}",
+        crate::core::sync::lock(&ext.state).as_ref().err()
+    );
+    *crate::core::sync::lock(&ext.conn) = None;
+    ext.spawn_and_handshake(&found.resident[0].path);
+    assert!(ext.is_alive());
+    let mut host = Extensions {
+        exts: vec![Arc::clone(&ext)],
+        context: test_host_context(),
+        script_tools: Vec::new(),
+    };
+    host.reload_found(found);
+    assert!(Arc::ptr_eq(&host.exts[0], &ext));
+    std::fs::write(dir.join("helper/main.yak.json"), r#"{"version":"3"}"#).unwrap();
+    host.reload_found(discover_in(std::slice::from_ref(&dir), &[], 120).unwrap());
+    assert!(!Arc::ptr_eq(&host.exts[0], &ext));
+    assert_eq!(host.exts[0].name, "helper");
+    assert_eq!(host.exts[0].version.as_deref(), Some("3"));
+    assert!(host.exts[0].is_alive());
+    drop(host);
+    drop(ext);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn plain_scripts_have_no_manifest() {
     assert!(parse_tool_manifest("#!/bin/sh\necho hi\n", Path::new("/x/s"), 120).is_none());
 }
@@ -580,6 +753,8 @@ pub(crate) fn connect_stub(path: &Path) -> Arc<Ext> {
 #[cfg(unix)]
 pub(crate) fn connect_stub_ctx(path: &Path, context: Arc<Mutex<Value>>) -> Arc<Ext> {
     let entry = ResidentFile {
+        name: path.file_stem().unwrap().to_str().unwrap().to_string(),
+        python: false,
         path: path.to_path_buf(),
         manifest: None,
     };

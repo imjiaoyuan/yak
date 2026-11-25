@@ -3,7 +3,8 @@ use super::*;
 /// Discovered extension entries, split by form: resident executables
 /// (spawned once, speaking the protocol) and manifest script tools (one
 /// comment header on any script in any language; the host runs the
-/// protocol around each call). Project wins by stem name across both.
+/// protocol around each call). Project wins by file stem or directory name
+/// across both.
 #[derive(Debug)]
 pub struct Discovered {
     pub resident: Vec<ResidentFile>,
@@ -11,9 +12,14 @@ pub struct Discovered {
 }
 
 /// One resident candidate: its file plus the optional sidecar manifest
-/// (`<stem>.yak.json`) that declares version and an environment whitelist.
+/// (`<stem>.yak.json`, or `main.yak.json` for directory entries) that
+/// declares version and an environment whitelist.
 #[derive(Debug)]
 pub struct ResidentFile {
+    /// File stem for single-file entries; full directory name otherwise.
+    pub name: String,
+    /// Directory `main.py` entries run through Python without an exec bit.
+    pub python: bool,
     pub path: PathBuf,
     pub manifest: Option<ExtManifest>,
 }
@@ -198,11 +204,49 @@ pub(super) fn discover_in(
                 ));
             }
         };
-        for entry in rd {
-            let entry =
-                entry.map_err(|e| format!("cannot read entry in {}: {e}", dir.display()))?;
-            let path = entry.path();
-            if !path.is_file() {
+        let mut entries = rd
+            .map(|entry| {
+                entry
+                    .map(|e| e.path())
+                    .map_err(|e| format!("cannot read entry in {}: {e}", dir.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|path| (!path.is_dir(), path.clone()));
+        for mut path in entries {
+            let directory = path.is_dir();
+            let name = if directory {
+                path.file_name()
+            } else {
+                path.file_stem()
+            }
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+            let Some(name) = name else { continue };
+            if is_disabled(&name) || seen.contains(&name) {
+                continue;
+            }
+            let mut python = false;
+            if directory {
+                let source = path.join("main.py");
+                let executable = path.join("main");
+                if source.is_file() {
+                    path = source;
+                    python = true;
+                } else if executable.is_file() && is_executable(&executable) {
+                    path = executable;
+                } else {
+                    #[cfg(windows)]
+                    {
+                        let executable = path.join("main.exe");
+                        if !executable.is_file() {
+                            continue;
+                        }
+                        path = executable;
+                    }
+                    #[cfg(not(windows))]
+                    continue;
+                }
+            } else if !path.is_file() {
                 continue;
             }
             // the sidecar manifests themselves are not extensions: they
@@ -214,17 +258,11 @@ pub(super) fn discover_in(
             {
                 continue;
             }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if is_disabled(stem) || seen.contains(stem) {
-                continue;
-            }
             // a `--- yak-tool:` manifest header makes any script a tool —
             // no exec bit needed (the host runs it through the declared
             // interpreter), which also makes the form work on Windows
             let spec = exec_tool_manifest(&path, default_timeout)?;
-            if spec.is_none() && !is_executable(&path) {
+            if spec.is_none() && !python && !is_executable(&path) {
                 // neither a manifest script tool nor an executable: not an
                 // extension, so it must not claim the stem and shadow a
                 // real one in a lower-priority home (a sidecar manifest
@@ -232,8 +270,12 @@ pub(super) fn discover_in(
                 continue;
             }
             let manifest = sidecar_manifest(&path)?;
-            seen.insert(stem.to_string());
+            seen.insert(name.clone());
             if let Some(mut spec) = spec {
+                if python && spec.interpreter.is_none() {
+                    spec.interpreter =
+                        Some(if cfg!(windows) { "python" } else { "python3" }.into());
+                }
                 if spec.manifest.is_none() {
                     spec.manifest = manifest;
                 }
@@ -241,7 +283,12 @@ pub(super) fn discover_in(
                     out.script_tools.push(spec);
                 }
             } else {
-                out.resident.push(ResidentFile { path, manifest });
+                out.resident.push(ResidentFile {
+                    name,
+                    python,
+                    path,
+                    manifest,
+                });
             }
         }
     }

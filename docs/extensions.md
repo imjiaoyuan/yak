@@ -44,7 +44,7 @@ Every runnable example in [`examples/extensions/`](../examples/extensions/), one
 | `<user_dir>/pkg/<pkg>/extensions/` (project-local, then user pkgs) | from `yak install` packages |
 | `~/.yak/extensions/` | user-global |
 
-Every file (not directory) in these homes is scanned. Project extensions take precedence over installed packages, then project packages over user packages and user extensions. Package directories at the same level are scanned by name. An absent home is ignored; an unreadable home or invalid manifest fails discovery with its path. A file is either a **script tool** (it carries a manifest header, see below) or a **resident extension** (anything else, but it must be executable: the exec bit on unix, one of `.exe`/`.bat`/`.cmd`/`.ps1` on Windows). Config keys:
+Each home supports single-file extensions and directory extensions. A directory `<name>/` has one entry: `main.py` (run with Python, no executable bit required), executable `main`, or `main.exe` on Windows, in that priority order. Its identity is the complete directory name; directory entries win over same-name files within one home. Discovery never recursively executes helper files. Optional directory manifests live at `<name>/main.yak.json`. Configuration, caches and user content can live alongside the entry without becoming extensions. Project extensions take precedence over installed packages, then project packages over user packages and user extensions. Package directories at the same level are scanned by name. An absent home is ignored; an unreadable home or invalid manifest fails discovery with its path. A file is either a **script tool** (it carries a manifest header, see below) or a **resident extension** (anything else, but it must be executable: the exec bit on unix, one of `.exe`/`.bat`/`.cmd`/`.ps1` on Windows). Config keys:
 
 ```json
 {
@@ -55,7 +55,7 @@ Every file (not directory) in these homes is scanned. Project extensions take pr
 }
 ```
 
-`disabled` matches a file's stem or a script tool's declared manifest name, either spelling disables it.
+`disabled` matches a single file's stem, a directory extension's directory name, or a script tool's declared manifest name. Disabling keeps installed code and data intact so it can be enabled again without reinstalling.
 
 ### The sidecar manifest: `<stem>.yak.json`
 

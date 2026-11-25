@@ -179,6 +179,7 @@ pub struct Ext {
     target: String,
     /// the discovered file; `None` for a placeholder that never connected
     path: Option<PathBuf>,
+    python: bool,
     /// the sidecar manifest's declared version, shown by the listings
     pub version: Option<String>,
     /// the sidecar's environment whitelist; `Some` narrows every spawn of
@@ -1192,6 +1193,7 @@ fn failed(name: &str, reason: String, context: Arc<Mutex<Value>>) -> Arc<Ext> {
         name: name.to_string(),
         target: String::new(),
         path: None,
+        python: false,
         version: None,
         env: None,
         fingerprint: (0, 0, 0, 0),
@@ -1205,15 +1207,11 @@ fn failed(name: &str, reason: String, context: Arc<Mutex<Value>>) -> Arc<Ext> {
 
 fn connect_one(entry: &ResidentFile, context: Arc<Mutex<Value>>) -> Arc<Ext> {
     let path = &entry.path;
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("extension")
-        .to_string();
     let ext = Arc::new(Ext {
-        name,
+        name: entry.name.clone(),
         target: path.display().to_string(),
         path: Some(path.to_path_buf()),
+        python: entry.python,
         version: entry.manifest.as_ref().and_then(|m| m.version.clone()),
         env: entry.manifest.as_ref().and_then(|m| m.env.clone()),
         fingerprint: file_fingerprint(path),
@@ -1304,7 +1302,13 @@ impl Ext {
 
     fn spawn_conn(&self, path: &Path) -> Result<Conn, String> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-        let mut command = Command::new(path);
+        let mut command = if self.python {
+            let mut command = Command::new(if cfg!(windows) { "python" } else { "python3" });
+            command.arg("-u").arg(path);
+            command
+        } else {
+            Command::new(path)
+        };
         // the sidecar's environment declaration, before anything else adds
         // its own variables (YAK_BIN below must survive the narrowing)
         apply_env_filter(&mut command, self.env.as_deref());
