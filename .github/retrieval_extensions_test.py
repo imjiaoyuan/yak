@@ -89,7 +89,7 @@ class SessionTests(unittest.TestCase):
 
     def test_exact_read_is_capped_and_has_provenance(self):
         result = self.plugin.handle({"action": "read", "thread": "thread-a", "turn": "active", "cap": 100})
-        self.assertEqual(result["text"], self.path.read_text().splitlines()[2][:100])
+        self.assertEqual(result["text"], self.path.read_text(encoding="utf-8").splitlines()[2][:100])
         self.assertTrue(result["truncated"])
         self.assertEqual(result["provenance"]["position"], 3)
         self.assertEqual(result["provenance"]["parent"], "root")

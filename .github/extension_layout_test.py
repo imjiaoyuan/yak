@@ -19,7 +19,7 @@ class ExtensionLayoutTests(unittest.TestCase):
             ):
                 directory = root / relative
                 directory.mkdir(parents=True)
-                (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A sample skill.\n---\nBody\n")
+                (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A sample skill.\n---\nBody\n", encoding="utf-8")
             with patch.object(Path, "home", return_value=root):
                 skills = module["discover"](str(root), root, {"figure"})
             self.assertEqual({skill["name"] for skill in skills}, {"custom", "paper"})
@@ -30,7 +30,7 @@ class ExtensionLayoutTests(unittest.TestCase):
             root = Path(scratch)
             directory = root / "extensions/commands/templates"
             directory.mkdir(parents=True)
-            (directory / "sample.md").write_text("Sample prompt")
+            (directory / "sample.md").write_text("Sample prompt", encoding="utf-8")
             self.assertIn("sample", module["names"](str(root), str(root)))
 
     def test_model_pin_uses_plugin_owned_state(self):

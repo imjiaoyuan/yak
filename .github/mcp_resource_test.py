@@ -55,8 +55,8 @@ class McpResourceTests(unittest.TestCase):
 
     def bridge(self, server):
         path = self.root / "fake_mcp.py"
-        path.write_text(server)
-        (self.root / "config.json").write_text(json.dumps({"fake": {"command": sys.executable, "args": [str(path)]}}))
+        path.write_text(server, encoding="utf-8")
+        (self.root / "config.json").write_text(json.dumps({"fake": {"command": sys.executable, "args": [str(path)]}}), encoding="utf-8")
 
     def drive(self, frames):
         proc = subprocess.Popen([sys.executable, str(self.root / "mcp_bridge.py")],
@@ -129,7 +129,7 @@ class McpResourceTests(unittest.TestCase):
         self.bridge(fake_server({"resources": {}}, pages, {}))
         cold = self.drive([{"type": "initialize", "id": 1, "v": 1}])[0]
         self.assertTrue((self.root / "cache.json").exists())
-        entry = json.loads((self.root / "cache.json").read_text())["fake"]
+        entry = json.loads((self.root / "cache.json").read_text(encoding="utf-8"))["fake"]
         self.assertIs(entry["resources"], True)
         (self.root / "fake_mcp.py").unlink()
         warm = self.drive([{"type": "initialize", "id": 1, "v": 1}])[0]
