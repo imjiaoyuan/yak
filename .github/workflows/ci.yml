@@ -19,6 +19,14 @@ jobs:
       - run: cargo test
       - name: Extension content layouts
         run: python .github/extension_layout_test.py
+      - name: Extension behavior
+        shell: bash
+        run: |
+          failed=()
+          for test in retrieval_extensions; do
+            if ! python .github/${test}_test.py; then failed+=("${test}"); fi
+          done
+          if (( ${#failed[@]} )); then echo "failed: ${failed[*]}"; exit 1; fi
       - run: cargo build --release
       - name: End-to-end smoke
         run: python .github/ci_e2e.py target/release/yak${{ matrix.os == 'windows-latest' && '.exe' || '' }}
