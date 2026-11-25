@@ -37,7 +37,7 @@ pub struct Provider {
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
 }
 
@@ -425,26 +425,6 @@ fn models_map_mut(
 
 // model settings — every mode's default
 // per-model option table, all under config.json's "models" object
-
-/// Remember a provider model seen in the wild (e.g. picked from a live
-/// /models list) so it resolves from config.json from now on.
-pub fn add_model(provider: &str, model_id: &str) {
-    let mut cfg = load();
-    if let Some(p) = cfg.providers.get_mut(provider) {
-        if p.models.iter().any(|m| m == model_id) {
-            return;
-        }
-        p.models.push(model_id.to_string());
-    } else {
-        return;
-    }
-    if let Err(e) = save(&cfg) {
-        eprintln!(
-            "Warning: failed to remember model in {}: {e}",
-            config_path().display()
-        );
-    }
-}
 
 impl Config {
     /// Resolve a model id (either `provider/model` or a bare name/alias)

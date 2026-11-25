@@ -53,11 +53,9 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
         let (pname, provider) = cfg.providers.iter().nth(i).expect("picked in range");
         (pname.clone(), provider)
     };
-    // step 2: the provider's configured models merged with its live list.
-    // The codex channel serves no /models endpoint (and needs the OAuth
-    // header set, not an api key): its configured list is the catalog.
-    let (live, live_error) = if provider.kind == "codex" {
-        (Vec::new(), None)
+    // Fetch the selected provider's current catalog.
+    let result = if provider.kind == "codex" {
+        crate::providers::codex::fetch_models(&pname, &provider.base_url)
     } else {
         eprintln!(
             "{}fetching models from {pname} …{}",
@@ -65,44 +63,17 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
             crate::theme::err().reset
         );
         let key = cfg.api_key(provider).unwrap_or_default();
-        // a failed fetch is worth saying out loud: the configured list may
-        // carry the picker alone, and a rejected key then looks like a
-        // provider that simply has fewer models
-        match crate::providers::catalog::fetch_models(&provider.kind, &provider.base_url, &key) {
-            Ok(ids) => (ids, None),
-            Err(e) => (Vec::new(), Some(e)),
+        crate::providers::catalog::fetch_models(&provider.kind, &provider.base_url, &key)
+    };
+    let ids = match result {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("could not list models from {pname}: {e}");
+            return None;
         }
     };
-    if let Some(e) = &live_error {
-        eprintln!(
-            "{}could not list models from {pname}: {e}{}",
-            crate::theme::err().dim,
-            crate::theme::err().reset
-        );
-    }
-    let mut ids: Vec<String> = provider.models.clone();
-    for mid in live {
-        if !ids.contains(&mid) {
-            ids.push(mid);
-        }
-    }
-    ids.sort();
-    ids.dedup();
     if ids.is_empty() {
-        // name the failure when there is one: with both lists empty, a bad
-        // key and a bad base_url are the whole story
-        match &live_error {
-            Some(e) => eprintln!(
-                "{}no models available for {pname} ({e}) — check the key with /login{}",
-                crate::theme::err().dim,
-                crate::theme::err().reset
-            ),
-            None => eprintln!(
-                "{}no models available (run /login){}",
-                crate::theme::err().dim,
-                crate::theme::err().reset
-            ),
-        }
+        eprintln!("no models available for {pname}");
         return None;
     }
     let current_model = current.split_once('/').map(|(_, m)| m);
@@ -121,10 +92,6 @@ pub fn cascade_model_picker(current: &str, current_thinking: Option<&str>) -> Op
         .collect();
     let i = crate::term::lineedit::pick("models:", &items, false)?;
     let mid = ids[i].clone();
-    // a live-list model may not be configured yet: remember it
-    if !provider.models.contains(&mid) {
-        config::add_model(&pname, &mid);
-    }
     // step 3: reasoning depth; a cancel keeps the current level
     let thinking = thinking_picker(current_thinking);
     Some(ModelChoice {

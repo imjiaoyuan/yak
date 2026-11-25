@@ -372,7 +372,7 @@ pub(crate) fn wizard(preset_arg: Option<&str>) -> Result<(), String> {
             kind,
             base_url,
             api_key,
-            models: vec![default_model_id.clone()],
+            models: Vec::new(),
         },
     );
     config::save(&cfg).map_err(|e| e.to_string())?;
@@ -456,7 +456,6 @@ fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
         return cancelled();
     };
     let token = crate::providers::chatgpt_oauth::manual_complete(flow, &url)?;
-    let models = crate::providers::codex::CHANNEL_MODELS;
     crate::providers::chatgpt_oauth::write_token(name, &token)?;
     let mut cfg = config::load();
     cfg.providers.insert(
@@ -465,16 +464,21 @@ fn chatgpt_login(name: &str, base_url: &str) -> Result<(), String> {
             kind: "codex".into(),
             base_url: base_url.to_string(),
             api_key: None,
-            models: models.iter().map(|s| s.to_string()).collect(),
+            models: Vec::new(),
         },
     );
     config::save(&cfg).map_err(|e| e.to_string())?;
-    config::try_set_default_model(&format!("{name}/{}", models[0]))
+    let models = crate::providers::codex::fetch_models(name, base_url)
+        .map_err(|e| format!("login saved, but could not discover models: {e} — retry /model"))?;
+    let first = models
+        .first()
+        .ok_or("login saved, but no visible models returned — retry /model")?;
+    config::try_set_default_model(&format!("{name}/{first}"))
         .map_err(|e| format!("provider saved but the default model was not: {e}"))?;
     eprintln!(
         "{}default model: {name}/{}{}",
         crate::theme::err().dim,
-        models[0],
+        first,
         crate::theme::err().reset
     );
     println!(
