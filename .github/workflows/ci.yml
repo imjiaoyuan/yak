@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           failed=()
-          for test in retrieval_extensions; do
+          for test in retrieval_extensions mcp_resource; do
             if ! python .github/${test}_test.py; then failed+=("${test}"); fi
           done
           if (( ${#failed[@]} )); then echo "failed: ${failed[*]}"; exit 1; fi

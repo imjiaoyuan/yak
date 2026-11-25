@@ -47,8 +47,15 @@ Honest limits, by design:
     listen on a separate GET stream is not bridged, nor is the older
     two-endpoint SSE transport. Auth is a static header, so an OAuth-only
     server needs a token obtained out of band (no browser flow here).
-  - MCP resources, prompts and sampling are not translated — tools are the
-    one MCP surface with a clean host-side counterpart.
+  - MCP prompts and sampling are not translated — tools are the one MCP
+    surface with a clean host-side counterpart, resources aside (above).
+  - MCP resources are bridged per server as two more tools, mounted only
+    when the server declares the `resources` capability at its handshake:
+    `<server>__resources` (the paginated `resources/list` plus the
+    `resources/templates/list` uris, so a template is visible before it is
+    read) and `<server>__resource` (one `resources/read`; text is passed
+    through, a blob is rendered as its type and size with the bytes left on
+    the server). Prompts and sampling stay untranslated.
   - Tool schemas pass through as-is (inputSchema → parameters); a server
     shipping a non-object schema is exposed as a no-argument tool rather
     than dropping the server.
@@ -89,6 +96,7 @@ INIT_TIMEOUT = 10.0     # seconds: a server's initialize handshake
 CALL_TIMEOUT = 30.0     # seconds: one tools/call round
 CONFIG_NAME = "config.json"
 CACHE_NAME = "cache.json"
+RESOURCE_BYTES = 48000   # one rendered resource read: text cut to this size
 PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
 # CDN firewalls (Cloudflare's own, error 1010) drop the python-urllib
@@ -358,6 +366,7 @@ class Server:
         self.transport = None
         self.slock = threading.Lock()
         self.listing = None      # fresh tools/list of the latest lazy start
+        self.has_resources = False   # set by the handshake, or by the cache entry
 
     def ensure(self):
         """Spawn and handshake a lazily mounted server on its first call.
@@ -402,6 +411,8 @@ class Server:
         result = self.transport.request("initialize", params, INIT_TIMEOUT)
         if result is None:
             raise RuntimeError("initialize handshake timed out")
+        caps = result.get("capabilities") if isinstance(result, dict) else None
+        self.has_resources = isinstance(caps, dict) and isinstance(caps.get("resources"), dict)
         self.transport.notify("notifications/initialized", {})
         return self.list_tools()
 
@@ -422,6 +433,41 @@ class Server:
             if not cursor:
                 return tools
         raise RuntimeError(f"{self.name}: tools/list pagination did not end")
+
+    def list_resources(self):
+        """resources/list and resources/templates/list, each following its
+        pagination cursor. A server that declares no resources capability at
+        the handshake answers neither; the caller is told that instead of
+        receiving an empty list that reads as "nothing here"."""
+        if not getattr(self, "has_resources", False):
+            raise RuntimeError(f"{self.name} declares no resources capability")
+        found, templates = [], []
+        for method, key, into in (("resources/list", "resources", found),
+                                  ("resources/templates/list", "resourceTemplates", templates)):
+            cursor = None
+            for _ in range(1000):
+                params = {} if cursor is None else {"cursor": cursor}
+                page = self.transport.request(method, params, INIT_TIMEOUT)
+                if not isinstance(page, dict) or not isinstance(page.get(key), list):
+                    raise RuntimeError(f"{self.name}: {method} returned a malformed page")
+                into.extend(page[key])
+                cursor = page.get("nextCursor")
+                if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                    raise RuntimeError(f"{self.name}: {method} returned a malformed nextCursor")
+                if not cursor:
+                    break
+            else:
+                raise RuntimeError(f"{self.name}: {method} pagination did not end")
+        return found, templates
+
+    def read_resource(self, uri):
+        """resources/read for one URI; the page shape is validated by the
+        caller that renders it."""
+        if not getattr(self, "has_resources", False):
+            raise RuntimeError(f"{self.name} declares no resources capability")
+        if not isinstance(uri, str) or not uri:
+            raise RuntimeError("resource uri must be a nonempty string")
+        return self.transport.request("resources/read", {"uri": uri}, CALL_TIMEOUT)
 
     def request(self, method, params, timeout):
         if self.transport is None:
@@ -593,6 +639,63 @@ def deferred_tools(server):
     ]
 
 
+def resource_tools(server):
+    """The two schemas a resource-capable server mounts beside its tools."""
+    return [
+        {
+            "name": f"{server}__resources",
+            "description": (
+                f"list the {server} MCP server's resources and resource templates"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+            "tier": "exec",
+            "server": server,
+            "deferred": "resources",
+        },
+        {
+            "name": f"{server}__resource",
+            "description": (
+                f"read one {server} MCP resource by uri — pass a uri from "
+                f"{server}__resources (a template uri filled in)"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"uri": {"type": "string", "description": "the resource uri"}},
+                "required": ["uri"],
+            },
+            "tier": "exec",
+            "server": server,
+            "deferred": "resource",
+        },
+    ]
+
+
+def render_resource(result):
+    """One resources/read page as text. Each content block is rendered in
+    order: text verbatim, a blob by type and size with its data left behind
+    (base64 bytes in the context help no one). The whole read is cut to
+    RESOURCE_BYTES with the cut marked."""
+    if not isinstance(result, dict) or not isinstance(result.get("contents"), list):
+        return None, "resources/read returned a malformed page"
+    out = []
+    for block in result["contents"]:
+        if not isinstance(block, dict):
+            continue
+        head = f"[uri {block.get('uri', '?')}]"
+        if isinstance(block.get("mimeType"), str):
+            head += f" [type {block['mimeType']}]"
+        if isinstance(block.get("text"), str):
+            out.append(head + "\n" + block["text"])
+        elif isinstance(block.get("blob"), str):
+            out.append(head + f" [blob {len(block['blob'])} base64 chars omitted]")
+        else:
+            out.append(head + " [unreadable content]")
+    text = "\n\n".join(out)
+    if len(text) > RESOURCE_BYTES:
+        text = text[:RESOURCE_BYTES] + "\n[resource truncated to fit the context window]"
+    return text, None
+
+
 def main():
     cfg = load_config()
     cache = load_cache()
@@ -612,6 +715,10 @@ def main():
         listing = (entry.get("tools")
                    if isinstance(entry, dict) and entry.get("key") == key
                    else None)
+        if listing is not None:
+            # a warm cache skips the handshake, so the capability rides the
+            # entry: the mounted tool set is then the same cold or warm
+            srv.has_resources = entry.get("resources") is True
         if listing is None:
             try:
                 listing = srv.start()
@@ -619,11 +726,13 @@ def main():
                 log(f"server '{name}' skipped: {e}")
                 srv.stop()
                 continue
-            cache[name] = {"key": key, "tools": listing}
+            cache[name] = {"key": key, "tools": listing, "resources": srv.has_resources}
             dirty = True
+        servers[name] = srv
+        if getattr(srv, "has_resources", False):
+            tools.extend(resource_tools(name))
         if spec.get("defer") is True:
             tools.extend(deferred_tools(name))
-            servers[name] = srv
             continue
         for t in listing or []:
             tname = t.get("name")
@@ -704,6 +813,40 @@ def main():
                 continue
             sname = spec["server"]
             deferred = spec.get("deferred")
+            if deferred in ("resources", "resource"):
+                srv = servers.get(sname)
+                if not srv or not srv.ensure():
+                    reply({"id": mid, "error": f"mcp server '{sname}' failed to start"})
+                    continue
+                if deferred == "resources":
+                    try:
+                        found, templates = srv.list_resources()
+                    except RuntimeError as e:
+                        reply({"id": mid, "error": str(e)})
+                        continue
+                    lines = [f"{r.get('uri', '?')} — {(r.get('name') or r.get('description') or '').splitlines()[0][:160]}"
+                             for r in found if isinstance(r, dict)]
+                    lines += [f"{t.get('uriTemplate', '?')} — template: {(t.get('name') or t.get('description') or '').splitlines()[0][:160]}"
+                              for t in templates if isinstance(t, dict)]
+                    if not lines:
+                        lines = [f"the {sname} server exposes no resources"]
+                    reply({"id": mid, "result": "\n".join(lines)})
+                    continue
+                uri = (msg.get("args") or {}).get("uri")
+                try:
+                    result = srv.read_resource(uri)
+                except RuntimeError as e:
+                    reply({"id": mid, "error": str(e)})
+                    continue
+                if result is None:
+                    reply({"id": mid, "error": f"mcp server '{sname}' did not answer"})
+                    continue
+                text, err = render_resource(result)
+                if err is not None:
+                    reply({"id": mid, "error": err})
+                else:
+                    reply({"id": mid, "result": text})
+                continue
             if deferred == "search":
                 args = msg.get("args") or {}
                 query = args.get("query") if isinstance(args.get("query"), str) else ""
@@ -762,6 +905,7 @@ def main():
                 if isinstance(entry, dict) and entry.get("tools") != srv.listing:
                     entry["tools"] = srv.listing
                     save_cache(cache)
+                entry["resources"] = srv.has_resources
                 srv.listing = None
             result = srv.request(
                 "tools/call",
