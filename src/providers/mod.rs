@@ -158,7 +158,7 @@ pub fn resolve_model_by_id(query: &str) -> Result<ResolvedModel, String> {
     resolve_model_tail(&cfg, query, |p| cfg.api_key(p))
 }
 
-/// The per-path model pin: `~/.yak/model-pins.json`, `{"<dir>":
+/// The per-path model pin: `~/.yak/extensions/model_pin/pins.json`, `{"<dir>":
 /// "provider/model"}` with absolute paths as keys. The longest matching
 /// prefix of cwd wins (a pin on `~/work/a` covers `~/work/a/sub`); the
 /// model itself must still resolve, and one that does not is dropped with
@@ -171,7 +171,15 @@ pub(crate) fn path_pinned_model(cfg: &crate::core::config::Config) -> Option<Str
 }
 
 fn user_pins_path() -> std::path::PathBuf {
-    crate::core::config::user_dir().join("model-pins.json")
+    let root = crate::core::config::user_dir();
+    let path = root.join("extensions/model_pin/pins.json");
+    if !path.exists() && root.join("model-pins.json").exists() {
+        eprintln!(
+            "Warning: legacy model-pins.json location; migrate it to extensions/model_pin/pins.json with the model_pin extension"
+        );
+        return root.join("model-pins.json");
+    }
+    path
 }
 
 /// The testable body: an explicit pins file and cwd instead of the

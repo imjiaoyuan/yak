@@ -43,7 +43,7 @@ def user_dir():
 
 
 def pins_path():
-    return os.path.join(user_dir(), "model-pins.json")
+    return os.path.join(user_dir(), "extensions", "model_pin", "pins.json")
 
 
 def record(cwd, model):

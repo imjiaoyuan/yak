@@ -699,7 +699,7 @@ def check_plugin_regressions():
         ) % spawns
         with open(fake, "w") as f:
             f.write(fake_src)
-        with open(os.path.join(lazy, "mcp.json"), "w") as f:
+        with open(os.path.join(lazy, "config.json"), "w") as f:
             json.dump({"fake": {"command": sys.executable, "args": [fake]}}, f)
 
         def drive(frames):
@@ -1239,11 +1239,11 @@ def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     skills_ext = os.path.join(here, "examples", "extensions", "skills")
     if os.path.isfile(skills_ext):
-        with open(skills_ext, encoding="utf-8") as f:
-            write_extension(os.path.join(user, "extensions"), "skills", f.read())
+        os.makedirs(os.path.join(user, "extensions", "skills"), exist_ok=True)
+        shutil.copyfile(skills_ext, os.path.join(user, "extensions", "skills", "main.py"))
         if sys.platform == "win32":
             probe = subprocess.run(
-                [sys.executable, os.path.join(user, "extensions", "skills.py")],
+                [sys.executable, os.path.join(user, "extensions", "skills", "main.py")],
                 input=json.dumps({"id": 1, "type": "initialize", "params": {
                     "cwd": work, "user_dir": user}}) + "\n",
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -1255,7 +1255,7 @@ def main():
             for entry in sorted(os.listdir(skills_src)):
                 src = os.path.join(skills_src, entry)
                 if os.path.isdir(src):
-                    shutil.copytree(src, os.path.join(user, "skills", entry))
+                    shutil.copytree(src, os.path.join(user, "extensions", "skills", "local", entry))
         # a project-local skill shadows the user copy by name and a
         # project-local skills plugin shadows the global one (installed
         # first so ordering cannot fake the shadow)
@@ -1286,14 +1286,9 @@ def main():
     # extension too — install it beside the subagent so the child sees it
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sub_dst = os.path.join(user, "extensions", "subagent")
-    if sys.platform == "win32":
-        shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"),
-                        sub_dst + ".py")
-        with open(sub_dst + ".cmd", "w") as f:
-            f.write('@"%s" "%s" %%*\r\n' % (sys.executable, sub_dst + ".py"))
-    else:
-        shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"), sub_dst)
-        os.chmod(sub_dst, 0o755)
+    os.makedirs(sub_dst, exist_ok=True)
+    shutil.copyfile(os.path.join(here, "examples", "extensions", "subagent.py"),
+                    os.path.join(sub_dst, "main.py"))
     # search carries no manifest header, so on unix it must be executable to
     # be discovered as a resident extension; windows has no shebang execution,
     # so it rides behind a .cmd shim like every other python entry there
@@ -1307,8 +1302,8 @@ def main():
         search_dst = os.path.join(user, "extensions", "search")
         shutil.copyfile(search_src, search_dst)
         os.chmod(search_dst, 0o755)
-    os.makedirs(os.path.join(user, "agents"), exist_ok=True)
-    with open(os.path.join(user, "agents", "scout.md"), "w") as f:
+    os.makedirs(os.path.join(sub_dst, "agents"), exist_ok=True)
+    with open(os.path.join(sub_dst, "agents", "scout.md"), "w") as f:
         f.write("---\nname: scout\ndescription: ci scout\ntools: read, grep\n---\n"
                 "You are the CI scout.\n")
     # a legacy codepage is what Windows CI actually runs under; pinning it on
@@ -1350,7 +1345,7 @@ def main():
             f.write("seed\n")
         git("add", "-A")
         git("commit", "-qm", "seed")
-        with open(os.path.join(user, "agents", "writer.md"), "w") as f:
+        with open(os.path.join(sub_dst, "agents", "writer.md"), "w") as f:
             f.write("---\nname: writer\ndescription: ci writer\n"
                     "tools: read, write\nmodel: mock-wtw/m-wtw\n---\n"
                     "You are the CI writer.\n")

@@ -111,33 +111,31 @@ The rewind is transcript-only: files the agent wrote stay written. To take the w
 
 ## Skills
 
-Skills are `SKILL.md` folders. They are mounted by the skills extension ([`examples/extensions/skills`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/skills), the sixth migrated agent surface moved onto the plugin system): install it once — globally into `~/.yak/extensions/` or project-local into `.yak/extensions/` — and it discovers skills from `~/.yak/skills`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name, so a project copy shadows a global one). Installed packages carrying `skills/` or a root `SKILL.md` mount through it too.
+Skills are `SKILL.md` folders. They are mounted by the skills extension ([`examples/extensions/skills`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/skills), the sixth migrated agent surface moved onto the plugin system): install it once — globally into `~/.yak/extensions/` or project-local into `.yak/extensions/` — and it discovers skills from `~/.yak/extensions/skills/local`, repositories in `~/.yak/extensions/skills/repos`, `~/.agents/skills` and the nearest `.yak/skills`/`.agents/skills` walking up from where you are (later wins by name, so a project copy shadows a global one). Installed packages carrying `skills/` or a root `SKILL.md` mount through it too.
 
 A skill needs a `description`: that is what the model matches a task against. The agent lists them via `/help`, you run one with `/skill:<name>`, and it can pick them itself from the system prompt. A run gets the skill's own directory, so the `references/`, `scripts/` and assets a skill points at resolve wherever you started the session. Turn one off with `disable-model-invocation`, or all of them with `"agent": {"disabled_skills": ["name", ...]}`. The prompt index lists each skill's capability sentences (whole sentences up to 300 characters), not the trigger list a pack writes for its own host: the full description stays in the file and the body loads when the skill runs.
 
-A collection written for another host usually assumes its repository root is the skill's parent — several skills sharing one `shared/` and `scripts/`. Keep a stable clone and link each skill folder one level deep, because `~/.yak/skills/<name>` must be the folder that holds `SKILL.md`; repository-root shares go beside the links (they carry no `SKILL.md`, so they mount nothing):
+Keep skill collections intact under the skills extension's `repos/` directory. Each repository contributes skills directly under its root or under its `skills/` directory, plus a root `SKILL.md` when present. Discovery does not recurse into examples or tests. Shared resources remain at their original relative paths:
 
 ```bash
-git clone --depth 1 <repo> ~/.yak/skills-src/<repo>
-ln -s ~/.yak/skills-src/<repo>/<skill> ~/.yak/skills/<skill>   # one per skill
-ln -s ~/.yak/skills-src/<repo>/shared  ~/.yak/skills/shared
-ln -s ~/.yak/skills-src/<repo>/scripts ~/.yak/skills/scripts
+git clone --depth 1 <repo> ~/.yak/extensions/skills/repos/<repo>
 ```
 
-`git pull` in the clone updates every link.
+`git pull` in the clone updates the collection.
 
 Both levels work for everything: the extension in `.yak/extensions/` mounts project skills for that repo only, the one in `~/.yak/extensions/` mounts them everywhere; drop the same extension in both and the project copy wins by name.
 
-Three skills ship in [`examples/skills/`](https://github.com/imjiaoyuan/yak/tree/main/examples/skills) — `release-checklist` (the release gates in order), `commit-hygiene` (pre-commit sweeps, with `references/subjects.md` worked examples) and `pkg-skill-audit` (what an installed package mounts, with a `scripts/audit.sh` walker) — copy the folder into `~/.yak/skills/` and it is discoverable:
+Three skills ship in [`examples/skills/`](https://github.com/imjiaoyuan/yak/tree/main/examples/skills) — `release-checklist` (the release gates in order), `commit-hygiene` (pre-commit sweeps, with `references/subjects.md` worked examples) and `pkg-skill-audit` (what an installed package mounts, with a `scripts/audit.sh` walker) — copy the folder into `~/.yak/extensions/skills/local/` and it is discoverable:
 
 ```bash
-cp examples/extensions/skills ~/.yak/extensions/   # the skills plugin, once
-cp -r examples/skills/commit-hygiene ~/.yak/skills/
+mkdir -p ~/.yak/extensions/skills/local
+cp examples/extensions/skills ~/.yak/extensions/skills/main.py
+cp -r examples/skills/commit-hygiene ~/.yak/extensions/skills/local/
 ```
 
 ## Prompt templates
 
-Prompt templates turn a prompt you keep retyping into a slash command. Install the [`commands`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/commands) extension once into `~/.yak/extensions/` or `.yak/extensions/`. Then drop a `.md` file in `~/.yak/commands/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a task-local `system` prompt, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task. Template names light up and tab-complete in the session like built-ins; restart or `/reload` after adding a new command name. The [`init`](https://github.com/imjiaoyuan/yak/blob/main/examples/commands/init.md) template ships as the worked example: copy it into `~/.yak/commands/` and `/init` explores the current repository and creates or refreshes its `AGENTS.md`.
+Prompt templates turn a prompt you keep retyping into a slash command. Install the [`commands`](https://github.com/imjiaoyuan/yak/blob/main/examples/extensions/commands) extension once into `~/.yak/extensions/` or `.yak/extensions/`. Then drop a `.md` file in `~/.yak/extensions/commands/templates/` (or the nearest `.yak/commands/`: the project copy wins) and `/name` runs it: the body is the prompt, optional frontmatter can add a task-local `system` prompt, and `$input` receives everything after the command name. Both are substituted, so `$input` works in the `system` line too. So `/review src/main.rs` runs your template on `src/main.rs` as one task. Template names light up and tab-complete in the session like built-ins; restart or `/reload` after adding a new command name. The [`init`](https://github.com/imjiaoyuan/yak/blob/main/examples/commands/init.md) template ships as the worked example: copy it into `~/.yak/extensions/commands/templates/` and `/init` explores the current repository and creates or refreshes its `AGENTS.md`.
 
 ## Providers and models
 
@@ -172,7 +170,7 @@ If you prefer to edit config by hand, add a block like this to `config.json`:
 
 A project can carry its own default: `models.default` in `<project>/.yak/config.json` (nearest `.yak` up from cwd, bounded by the git root — the same walk project memory follows) beats the global default for new sessions started inside the project, and an ongoing session still keeps its own model. The [`model_here`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension mounts a `/model-here` slash command that reads and writes that pin (`/model-here zai/glm-5.3`, `/model-here` to show, `/model-here off` to remove). A pinned id that does not resolve is a loud warning, then the global default.
 
-Before the project pin sits a per-directory one: `model-pins.json` in the user dir (`{"/abs/dir": "provider/model"}`), where the nearest pinned ancestor of cwd wins — a pin on `~/work` covers everything under it until a deeper pin shadows it, so cd-ing around picks the right model without editing per-project config. The optional [`model_pin`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension records the model every task runs on (`agent_start`) for its directory, so a directory's default follows whatever last ran there with no command to run. `/model` changes the global default and the current session; it does not write a directory pin. With the extension enabled, the next task records the chosen model for its directory; without it, no directory pin is automatically written. To stop remembering in a project, delete its entry from the file. Pins apply to new sessions; an ongoing session keeps its model (`/model` switches live). The full chain at startup: `-m` > `YAK_MODEL` > the session's own model > the directory pin > the project pin > the global default.
+Before the project pin sits a per-directory one: `extensions/model_pin/pins.json` in the user dir (`{"/abs/dir": "provider/model"}`), where the nearest pinned ancestor of cwd wins — a pin on `~/work` covers everything under it until a deeper pin shadows it, so cd-ing around picks the right model without editing per-project config. The optional [`model_pin`](https://github.com/imjiaoyuan/yak/tree/main/examples/extensions) example extension records the model every task runs on (`agent_start`) for its directory, so a directory's default follows whatever last ran there with no command to run. `/model` changes the global default and the current session; it does not write a directory pin. With the extension enabled, the next task records the chosen model for its directory; without it, no directory pin is automatically written. To stop remembering in a project, delete its entry from the file. Pins apply to new sessions; an ongoing session keeps its model (`/model` switches live). The full chain at startup: `-m` > `YAK_MODEL` > the session's own model > the directory pin > the project pin > the global default.
 
 ## Tuning the agent
 
@@ -307,10 +305,11 @@ for line in sys.stdin:
 [`examples/extensions/subagent.py`](../examples/extensions/subagent.py) mounts a `subagent` tool that runs another `yak` in its own context window and returns only its conclusion:
 
 ```bash
-cp examples/extensions/subagent.py ~/.yak/extensions/subagent && chmod +x ~/.yak/extensions/subagent
+mkdir -p ~/.yak/extensions/subagent/agents
+cp examples/extensions/subagent.py ~/.yak/extensions/subagent/main.py
 ```
 
-Agent definitions are markdown with frontmatter (`~/.yak/agents/scout.md`, or the project's `.yak/agents/scout.md` where the nearest wins), with `tools`, `model` and `thinking` optional; four ship in [`examples/agents/`](../examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks` batch, or a `chain` where each step gets the previous answer — or a single `task` with `fork: true`, which runs the child on a **forked branch of this conversation** (`--session <id> --fork`): the child inherits the discussion so far and appends only its own branch, the parent transcript untouched; the thread is found newest-first among recent threads whose tail records this working directory. The child's tool calls show up in your session as it works (each child owns one rewritten status row while it runs, so a parallel batch reads as N ticking lanes). The child is a plain `yak --json` process: its own tools, its own system prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press ctrl+c and unable to spawn further subagents. Copy the file or don't; nothing in the core knows subagents exist.
+Agent definitions are markdown with frontmatter (`~/.yak/extensions/subagent/agents/scout.md`, or the project's `.yak/agents/scout.md` where the nearest wins), with `tools`, `model` and `thinking` optional; four ship in [`examples/agents/`](../examples/agents/). The tool takes `task` (+ `agent`), a parallel `tasks` batch, or a `chain` where each step gets the previous answer — or a single `task` with `fork: true`, which runs the child on a **forked branch of this conversation** (`--session <id> --fork`): the child inherits the discussion so far and appends only its own branch, the parent transcript untouched; the thread is found newest-first among recent threads whose tail records this working directory. The child's tool calls show up in your session as it works (each child owns one rewritten status row while it runs, so a parallel batch reads as N ticking lanes). The child is a plain `yak --json` process: its own tools, its own system prompt, its own budget (the extension asks the host for a longer deadline), stopped if you press ctrl+c and unable to spawn further subagents. Copy the file or don't; nothing in the core knows subagents exist.
 
 A subagent whose definition names a mutating tool (`write`, `edit`, `bash`) runs in a **git worktree** when your cwd is a git repo: its changes are committed to a `yak/subagent-*` branch and merged back when it finishes. Parallel writers merge one at a time; a conflicting merge is aborted clean and reported with the branch name left for you to resolve — nothing a writer did is dropped. `YAK_SUBAGENT_WORKTREES=0` runs writers in place instead.
 

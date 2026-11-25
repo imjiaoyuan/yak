@@ -196,8 +196,14 @@ def discover(user_dir, cwd, disabled):
                 load_package(pkg, defs)
     home = Path.home()
     load_dir(home / ".agents" / "skills", defs)
-    load_dir(Path(user_dir) / "skills", defs)
-    for rel in (".agents/skills", ".yak/skills", ".llm/skills"):
+    load_dir(Path(user_dir) / "extensions" / "skills" / "local", defs)
+    repos = Path(user_dir) / "extensions" / "skills" / "repos"
+    if repos.exists():
+        for repo in sorted(repos.iterdir()):
+            if repo.is_dir():
+                load_dir(repo, defs)
+                load_package(repo, defs)
+    for rel in (".agents/skills", ".yak/skills", ".llm/skills", ".yak/extensions/skills/local"):
         d = nearest_dir_up(cwd, rel)
         if d:
             load_dir(d, defs)

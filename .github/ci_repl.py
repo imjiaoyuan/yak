@@ -327,18 +327,17 @@ def model_default_lane(binary, env):
                     }},
                     "models": {"default": "mock/m-a"},
                 }, f)
-            pins_path = os.path.join(user, "model-pins.json")
+            pins_path = os.path.join(user, "extensions", "model_pin", "pins.json")
+            os.makedirs(os.path.dirname(pins_path))
             with open(pins_path, "w") as f:
                 json.dump({work: "mock/m-a"}, f)
             with open(pins_path, "rb") as f:
                 original_pins = f.read()
             if enabled:
                 extensions = os.path.join(user, "extensions")
-                os.mkdir(extensions)
                 source = os.path.join(os.path.dirname(__file__), "..", "examples", "extensions", "model_pin")
-                target = os.path.join(extensions, "model_pin")
+                target = os.path.join(extensions, "model_pin", "main.py")
                 shutil.copyfile(source, target)
-                os.chmod(target, 0o755)
             child_env = dict(env, YAK_USER_PATH=user)
             child_env.pop("YAK_MODEL", None)
             OUT.clear()
@@ -510,11 +509,14 @@ def main():
     # the user commands directory and return the task-local system line
     user_ext = os.path.join(user, "extensions")
     os.makedirs(user_ext, exist_ok=True)
-    for extension in ("commands", "status", "export"):
+    for extension in ("status", "export"):
         shutil.copyfile(os.path.join(here, "examples", "extensions", extension),
                         os.path.join(user_ext, extension))
         os.chmod(os.path.join(user_ext, extension), 0o755)
-    cmds = os.path.join(user, "commands")
+    os.makedirs(os.path.join(user_ext, "commands"))
+    shutil.copyfile(os.path.join(here, "examples", "extensions", "commands"),
+                    os.path.join(user_ext, "commands", "main.py"))
+    cmds = os.path.join(user_ext, "commands", "templates")
     os.makedirs(cmds)
     with open(os.path.join(cmds, "review.md"), "w") as f:
         f.write("---\nsystem: SYSTEM-MARKER about $input\n---\nReview $input\n")

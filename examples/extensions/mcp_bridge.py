@@ -87,8 +87,8 @@ import urllib.request
 
 INIT_TIMEOUT = 10.0     # seconds: a server's initialize handshake
 CALL_TIMEOUT = 30.0     # seconds: one tools/call round
-CONFIG_NAME = "mcp.json"
-CACHE_NAME = "mcp_cache.json"
+CONFIG_NAME = "config.json"
+CACHE_NAME = "cache.json"
 PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
 # CDN firewalls (Cloudflare's own, error 1010) drop the python-urllib

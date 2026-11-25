@@ -38,11 +38,11 @@ def search_dirs(cwd, user_dir):
     for directory in ancestors(cwd):
         dirs.extend(
             os.path.join(directory, name)
-            for name in (".yak/commands", ".llm/commands")
+            for name in (".yak/extensions/commands/templates", ".yak/commands", ".llm/commands")
         )
         if os.path.exists(os.path.join(directory, ".git")):
             break
-    dirs.append(os.path.join(user_dir, "commands"))
+    dirs.append(os.path.join(user_dir, "extensions", "commands", "templates"))
     return dirs
 
 

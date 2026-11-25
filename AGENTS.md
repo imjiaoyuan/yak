@@ -113,11 +113,11 @@ All under `user_dir()`, overridable via `YAK_USER_PATH`; `~/.yak` on every platf
 - `history.jsonl`: the REPL input history: one `{"ts", "text"}` object per line, single-write appends (concurrent processes never interleave), 0600, adjacent submissions deduped at record time, rewritten down to a 1600-entry soft cap once past 2000; the in-memory window is the last 200.
 - `blacklist`: the command blacklist file (plus a project `.yak/blacklist`).
 - `threads/thread-names.json`: the session-title table (`/name`), thread id → display name, shown by `yak threads` and the `/resume` picker (`agent/names.rs`; the transcript files are untouched).
-- `model-pins.json`: the per-path model pin table (`{"<dir>": "provider/model"}`, absolute paths as keys, longest cwd prefix wins), written only by the `model_pin` extension — the core reads it during model resolution (the chain is `docs/architecture.md`'s) and drops a pin whose model no longer resolves.
+- `extensions/model_pin/pins.json`: the per-path model pin table (`{"<dir>": "provider/model"}`, absolute paths as keys, longest cwd prefix wins), written by the `model_pin` extension — the core reads it during model resolution (the chain is `docs/architecture.md`'s) and drops a pin whose model no longer resolves.
 - `YAK.md`: global user memory, hand-edited or appended by the `memory` tool when the user
   asks to note something durable; injected into the agent system prompt by the
   `examples/extensions/memory` extension).
-- `extensions/`, `skills/`, `commands/`: user-side plugin, skill and prompt-template directories (skills and prompt templates are mounted by the `examples/extensions/skills` and `examples/extensions/commands` plugins — the core only knows the extension protocol).
+- `extensions/`: user-side plugins, either single files or directories with `main.py`/`main` entries. Plugin-owned content lives with its plugin: `skills/local/` and `skills/repos/` for skills and collection clones, `commands/templates/` for prompt templates, `subagent/agents/` for agent definitions, and `model_pin/pins.json` for directory pins. The core only knows the extension protocol, except for reading the pin table (legacy root `model-pins.json` remains readable with a migration warning).
 - `pkg/`: packages installed with `yak install`; a package may ship `bin/<name>`, which registers `yak <name> args…` as a pass-through external command (dispatch execs it from any directory, exit code through — the im package registers `yak im`).
 - `tmp/`: the editor's scratch dir (pasted clipboard images, ctrl+g buffers) and the rustc compile cache for `.rs` script tools (`tmp/rs-cache/`), swept of anything older than a week at every agent start (`core/tmp.rs`).
 

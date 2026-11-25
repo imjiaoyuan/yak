@@ -332,6 +332,7 @@ def project_agent_dirs(start):
     last, and a later definition replaces an earlier one by name."""
     dirs, path = [], os.path.abspath(start)
     while True:
+        dirs.append(os.path.join(path, ".yak", "extensions", "subagent", "agents"))
         dirs.append(os.path.join(path, ".yak", "agents"))
         parent = os.path.dirname(path)
         if parent == path:
@@ -378,7 +379,7 @@ def load_agents():
     agents = {}
     for name, spec in BUILTIN_AGENTS.items():
         agents[name] = dict(spec, name=name, model="", thinking="", source="built-in")
-    homes = [os.path.join(user_dir(), "agents")]
+    homes = [os.path.join(user_dir(), "extensions", "subagent", "agents")]
     homes += project_agent_dirs(os.getcwd())
     for home in homes:
         if not os.path.isdir(home):

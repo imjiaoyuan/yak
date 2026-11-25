@@ -326,9 +326,7 @@ class Chat:
 
 class Bridge:
     def __init__(self):
-        ud = user_dir()
-        os.makedirs(ud, exist_ok=True)
-        self.cfg_path = os.path.join(ud, "im.json")
+        self.cfg_path = _cfg_path()
         self.cfg = load_json(self.cfg_path)
         if not isinstance(self.cfg, dict):
             self.cfg = {}
@@ -512,10 +510,10 @@ def weixin_login(state_path):
     return None
 
 
-PID_DIR_NAME = "im"
+PID_DIR_NAME = "run"
 
 def _state_dir():
-    path = os.path.join(user_dir(), PID_DIR_NAME)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), PID_DIR_NAME)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -529,11 +527,11 @@ def _log_path():
 
 
 def _weixin_state_path():
-    return os.path.join(user_dir(), "weixin.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "weixin.json")
 
 
 def _cfg_path():
-    return os.path.join(user_dir(), "im.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 
 def _pid_alive(pid):

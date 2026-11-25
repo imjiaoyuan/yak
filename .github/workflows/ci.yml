@@ -17,6 +17,8 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo test
+      - name: Extension content layouts
+        run: python .github/extension_layout_test.py
       - run: cargo build --release
       - name: End-to-end smoke
         run: python .github/ci_e2e.py target/release/yak${{ matrix.os == 'windows-latest' && '.exe' || '' }}
