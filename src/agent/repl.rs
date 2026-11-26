@@ -314,20 +314,40 @@ fn abbrev_home(path: &str) -> String {
 /// Full help page shown on ctrl+o.
 fn repl_help(session: &Session) -> String {
     let p = crate::theme::err();
-    let mut h = format!(
-        "{}keys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
-        p.dim
+    let mut h = String::from(
+        "keys      enter submit · ctrl+j, alt+enter or \\ at end = newline · tab complete · ctrl+g editor",
     );
     h.push_str("\n           ↑/↓ history (or move between lines) · ctrl+o this help · esc/ctrl+c interrupt · ctrl+c×2 exit · ctrl+d exit");
-    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /reload /exit · !cmd runs shell · /help lists all");
+    h.push_str("\ncommands   /model /thinking /login /logout /resume /tree /clear /reload /exit · !cmd runs shell · /help lists all\n");
     h.push_str(&info_rows(session, "    ", true));
     let model = match &session.thinking {
         Some(level) => format!("{} {level}", model_label(session)),
         None => model_label(session),
     };
     h.push_str(&format!("model      {model}\n"));
-    h.push_str(p.reset.as_str());
-    h
+    format!(
+        "{}{}{}",
+        p.dim,
+        wrap_help_rows(&h, crate::term::columns().saturating_sub(1)),
+        p.reset
+    )
+}
+
+/// Align help values and hard-wrap them without relying on terminal autowrap.
+fn wrap_help_rows(text: &str, width: usize) -> String {
+    let margin = 11.min(width.saturating_sub(1));
+    let mut out = String::new();
+    for line in text.lines() {
+        let (label, value) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let wrapped = crate::core::render_md::wrap_block(value.trim_start(), width, margin);
+        out.push_str(label);
+        if !wrapped.is_empty() {
+            out.push_str(&" ".repeat(margin.saturating_sub(label.len())));
+            out.push_str(&wrapped[margin..]);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Names a compact banner row lists inline before it collapses to a count
@@ -336,8 +356,8 @@ fn repl_help(session: &Session) -> String {
 const INLINE_CAP: usize = 4;
 
 /// The context/session rows shared by the banner and the ctrl+o page.
-/// `full` lists every plugin and skill name — the ctrl+o page, where width
-/// is free. The compact banner form counts the surfaces instead and names
+/// `full` lists every plugin and skill name — the ctrl+o page wraps these
+/// rows at display time. The compact banner form counts the surfaces instead and names
 /// only what failed to load, so a broken extension is visible at a glance
 /// without two long name rows. `pad` widens labels to the layout column.
 fn info_rows(session: &Session, pad: &str, full: bool) -> String {
@@ -397,7 +417,7 @@ fn model_label(session: &Session) -> String {
     }
 }
 
-/// Every name, no cap: the ctrl+o page's row, where wrapping is free.
+/// Every name, no cap: the ctrl+o page wraps the resulting row.
 fn full_row(label: &str, pad: &str, names: &[String]) -> String {
     if names.is_empty() {
         return String::new();
@@ -1242,6 +1262,43 @@ mod tests {
         assert_eq!(
             full_row("skills:", " ", &many),
             "skills: s0, s1, s2, s3, s4, s5, s6\n"
+        );
+    }
+
+    #[test]
+    fn help_rows_align_values_and_keep_row_boundaries() {
+        assert_eq!(
+            wrap_help_rows(
+                "commands   /help lists all\nwork:    ~/projects/yak\nplugins:    demo\nskills:    review\nmodel      provider/model\n",
+                100
+            ),
+            "commands   /help lists all\nwork:      ~/projects/yak\nplugins:   demo\nskills:    review\nmodel      provider/model\n"
+        );
+    }
+
+    #[test]
+    fn help_rows_wrap_wide_text_with_hanging_indent_without_losing_names() {
+        let value = "academic-paper, nature-reader, 中文技能, final-skill";
+        let wrapped = wrap_help_rows(&format!("skills:    {value}\n"), 32);
+        let lines: Vec<_> = wrapped.lines().collect();
+        assert!(lines.len() > 1);
+        assert!(
+            lines
+                .iter()
+                .all(|line| crate::core::render_md::cell_width(line) <= 32)
+        );
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.starts_with("           "))
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| &line[11..])
+                .collect::<String>()
+                .replace(' ', ""),
+            value.replace(' ', "")
         );
     }
 
